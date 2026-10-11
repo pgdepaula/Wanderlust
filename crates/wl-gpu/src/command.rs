@@ -34,6 +34,9 @@ pub enum Command<'a> {
     },
     /// Sample one resident mip through the texture pipeline. Texture existence is
     /// checked by the backend; buffer-only preflight enforces queue-write ordering.
+    /// Fullscreen fragment validation harness. Resources must be synchronized from
+    /// B197 state; this is not a hardware draw-method implementation.
+    DrawFragment,
     DrawTexture {
         id: TextureId,
         mip: u32,
@@ -120,7 +123,7 @@ pub fn validate(
                     .remove(id)
                     .ok_or_else(|| invalid("destroy unknown buffer"))?;
             }
-            Command::DrawTexture { .. } => {
+            Command::DrawFragment | Command::DrawTexture { .. } => {
                 drew = true;
             }
         }

@@ -13,6 +13,7 @@ pub enum MethodError {
     UnsupportedMethod(u16),
     UnsupportedValue { method: u16, value: u32 },
     EpochOverflow,
+    IncompleteConstantBuffer,
 }
 impl std::fmt::Display for MethodError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -54,6 +55,36 @@ impl Pool {
         Ok(GpuAddress(address))
     }
 }
+/// A stage/slot binding snapshots the selector at BIND_GROUP_CONSTANT_BUFFER.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConstantBuffer {
+    pub address: GpuAddress,
+    pub size: u32,
+}
+impl ConstantBuffer {
+    pub fn read_word(
+        &self,
+        offset: u32,
+        map: &AddressMap,
+        memory: &impl GuestMemory,
+    ) -> Result<u32> {
+        if offset % 4 != 0 || offset.checked_add(4).is_none_or(|end| end > self.size) {
+            return Err(invalid("unaligned/out-of-bounds constant buffer word"));
+        }
+        let address = self
+            .address
+            .0
+            .checked_add(u64::from(offset))
+            .ok_or_else(|| invalid("constant address overflow"))?;
+        let bytes = map.read(memory, GpuAddress(address), 4)?;
+        if bytes.len() != 4 {
+            return Err(invalid("short constant buffer read"));
+        }
+        Ok(u32::from_le_bytes(
+            bytes.try_into().expect("checked constant word"),
+        ))
+    }
+}
 /// One channel's single MAXWELL_B instance. Subchannels route to the same state;
 /// rebinding the same class does not manufacture an independent register bank.
 #[derive(Debug, Default)]
@@ -61,6 +92,10 @@ pub struct Maxwell3d {
     bound: [bool; 8],
     modern_headers: bool,
     images: Pool,
+    cb_size: Option<u32>,
+    cb_upper: Option<u32>,
+    cb_lower: Option<u32>,
+    constants: [[Option<ConstantBuffer>; 32]; 5],
     samplers: Pool,
     pub texture_header_epoch: u64,
     pub sampler_epoch: u64,
@@ -92,6 +127,52 @@ impl Maxwell3d {
             return Err(MethodError::UnboundSubchannel(subchannel));
         }
         match method {
+            0x2380 => {
+                if value == 0 || value > 65536 || value % 4 != 0 {
+                    return Err(bad());
+                }
+                self.cb_size = Some(value);
+            }
+            0x2384 => {
+                if value > 0xff {
+                    return Err(bad());
+                }
+                self.cb_upper = Some(value);
+            }
+            0x2388 => {
+                if value % 4 != 0 {
+                    return Err(bad());
+                }
+                self.cb_lower = Some(value);
+            }
+            m if (0x2410..=0x2490).contains(&m) && (m - 0x2410) % 32 == 0 => {
+                if value & !0x1f1 != 0 {
+                    return Err(bad());
+                }
+                let group = ((m - 0x2410) / 32) as usize;
+                let slot = ((value >> 4) & 31) as usize;
+                let binding = if value & 1 == 0 {
+                    None
+                } else {
+                    let (Some(size), Some(hi), Some(lo)) =
+                        (self.cb_size, self.cb_upper, self.cb_lower)
+                    else {
+                        return Err(MethodError::IncompleteConstantBuffer);
+                    };
+                    let address = (u64::from(hi) << 32) | u64::from(lo);
+                    if address
+                        .checked_add(u64::from(size))
+                        .is_none_or(|end| end > 1 << 40)
+                    {
+                        return Err(bad());
+                    }
+                    Some(ConstantBuffer {
+                        address: GpuAddress(address),
+                        size,
+                    })
+                };
+                self.constants[group][slot] = binding;
+            }
             0x0100 => {} // documented NO_OPERATION
             0x0f10 => {
                 if value != 1 {
@@ -143,6 +224,14 @@ impl Maxwell3d {
             _ => return Err(MethodError::UnsupportedMethod(method)),
         }
         Ok(MethodEffect::State)
+    }
+    pub fn constant_buffer(&self, group: u8, slot: u8) -> Result<ConstantBuffer> {
+        self.constants
+            .get(group as usize)
+            .and_then(|g| g.get(slot as usize))
+            .copied()
+            .flatten()
+            .ok_or_else(|| invalid("unbound constant buffer group/slot"))
     }
     /// Descriptor indices are supplied by a caller, not a fabricated bind method.
     /// Original shader handle/constant-buffer decoding is not implemented.

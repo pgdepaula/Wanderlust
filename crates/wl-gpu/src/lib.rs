@@ -11,6 +11,9 @@ pub mod layout;
 pub mod maxwell;
 pub mod memory;
 pub mod shader;
+#[cfg(feature = "wgpu-backend")]
+mod shader_backend;
+pub mod shader_program;
 pub mod texture;
 #[cfg(feature = "wgpu-backend")]
 mod texture_backend;
@@ -59,4 +62,13 @@ pub struct Counters {
     pub pipeline_allocations: u64,
     pub shader_module_allocations: u64,
     pub shader_cache_hits: u64,
+    pub constant_upload_bytes: u64,
+    pub constant_guest_bytes: u64,
+    pub bind_group_allocations: u64,
+    pub bind_group_reuses: u64,
+    pub shader_decodes: u64,
+    pub shader_binary_bytes: u64,
+    pub descriptor_reads: u64,
+    pub method_writes: u64,
+    pub draw_commands: u64,
 }

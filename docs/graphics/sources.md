@@ -175,3 +175,14 @@ slice was selected after assessing the mature compiler's license/API obstacles;
 it does not replace a full decoder. The next shader integration needs constant
 buffer loads, TEX descriptor handles, stage interfaces and explicit capability
 lowering rather than extending the constant-only experiment into unsupported claims.
+
+
+The guest-backed LDC path cross-checks B197 selector/binding fields against the
+pinned NVIDIA header and instruction width/addressing against MIT Mesa/UAM
+`nv50_ir_emit_gm107.cpp` (`emitLDC`, `emitLDSTs`, `emitMOV`). B32 is size encoding
+four in bits 50:48 (`0xef94...`); RZ-based immediate LDC uses signed byte offsets.
+The independently assembled `ldc.asm`/`ldc.bin` fixture is produced with the same
+pinned envytools tools as the constant fragments and disassembled before decoding.
+Write/read/wait field placement is independently specified by envytools' gm107
+scheduler table and the Mesa scheduler. No external compiler runs at application
+runtime and no GPL implementation was copied.

@@ -41,3 +41,11 @@ Encoding references: NVIDIA's public Shader Program Header specification;
 (MIT); devkitPro UAM revision `5a5afc2bae8b55409ab36ba45be63fcb73f68993`,
 `source/nv_shader_header.h` and `source/compiler_iface.cpp` (zlib), and its Mesa
 `nv50_ir_emit_gm107.cpp` instruction emitter (MIT). No compiler source is bundled.
+
+
+`ldc.asm` uses four scalar B32 constant reads at c0 byte offsets 0x10..0x1c,
+followed by MOV R3,R4 and EXIT. Use the same envyas command and 80-byte header
+above. Each LDC assigns write barrier zero; the next load or consumer explicitly
+waits for it. Values are supplied by guest memory at runtime, not in the binary.
+
+LDC fixture SHA-256: `6ce81713fa666f853432524c02a2c524e2ef0cfdf67b99b3cc9bbd6ab79b9e48`.

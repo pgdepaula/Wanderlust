@@ -270,3 +270,31 @@ formatting, strict Clippy and 119 Rust tests, with five GPU tests explicitly ign
 in that separate CPU run. The known newer NPDM warnings are not counted as graphics
 successes. Reassembling the documented `.asm` files independently reproduced both
 144-byte fixture binaries exactly, including their recorded SHA-256 hashes.
+
+## Guest-backed LDC fragment validation
+
+The redistributable `ldc.bin` is 144 bytes, independently assembled/disassembled
+with pinned envytools. Four B32 c0 reads at byte offsets 0x10..0x1c and a register
+MOV produce exact RGBA pixels [255,0,0,255], [0,0,255,255] and [64,128,191,255]
+when only guest constant data changes. Output is drawn by translated WGSL, not
+copied into the target. Tests exercise B06F selector/binding packets, selector
+snapshot semantics, aliases, rebinding, short/unmapped/out-of-range reads,
+invalid instructions/predicates/widths/offsets, missing waits and uninitialized data.
+
+Executed checks: both `cargo check -p wl-gpu` feature configurations with `--locked`;
+`cargo test -p wl-gpu --no-default-features --locked` (26 CPU tests);
+`cargo test -p wl-gpu --locked` (26 passed, six GPU tests explicitly ignored);
+strict package all-target Clippy; all six GPU executables explicitly run on WSL
+OpenGL llvmpipe and native Windows Intel UHD D3D12 and Vulkan (18 passes, zero
+GPU skips). A Windows Vulkan launch failed in WSL `UtilAcceptVsock` before test
+startup; retrying the same resource executable passed. This is distinct from a
+shader/GPU test failure. Linux Vulkan remains unavailable (`libvulkan.so.1`).
+
+The four-draw LDC test reads 68 guest bytes and uploads 60 constant bytes across
+its changes/rebinds; one isolated word change uploads four bytes. It creates one
+additional shader module, pipeline, uniform buffer and bind group. Thirty-two
+unchanged synchronizations read/upload no bytes and allocate/reallocate no Rust
+heap storage. A debug native D3D12 run measured 191.7 microseconds for those 32
+CPU synchronizations; this excludes rendering and is not game-frame performance.
+Readback totals are 17,984 padded GPU bytes and 10,204 packed CPU bytes. Queue
+writes use owned wgpu staging; these results do not establish zero-copy transfers.

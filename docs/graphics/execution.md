@@ -217,7 +217,7 @@ state from the reduced filter field alone.
 descriptor backing updates cannot leave stale decoded records. It accepts explicit
 image/sampler indices supplied by its caller. They are **not** obtained from
 `SET_BINDLESS_TEXTURE`: that register selects a constant-buffer slot, not a texture.
-Original shader handles and constant buffers are still unimplemented; the separate
+The independent pool test still supplies descriptor indices; the separate
 constant-fragment experiment does not execute shader program registers. The tested
 bridge runs literal FIFO pool methods, descriptor resolution, guest texture reads,
 conversion and real sampled draw/readback. The last draw is the existing synthetic
@@ -247,7 +247,48 @@ and `shader_cache_hits` count these API operations, excluding driver internals.
 
 This is a real binary-input translation experiment with independently assembled
 synthetic code, not a general Maxwell shader compiler. It does not consume a
-0x30-byte NVN wrapper, read shader registers or constant buffers, translate TEX,
+0x30-byte NVN wrapper, read shader registers or constant buffers itself, translate TEX,
 accept vertex programs, fetch varyings, execute arithmetic/branches, or connect
 source shader-program state to a guest draw. Texture sampling still uses its fixed
 WGSL path. Both experiments share the actual wgpu execution and resource backend.
+
+
+## Guest-backed straight-line fragment resources
+
+`shader_program::FragmentProgram` preserves raw-register dataflow separately from
+`ConstantFragment`. It accepts full-mask unpredicated MOV32I and register MOV,
+scalar B32 LDC with RZ base and nonnegative aligned signed-16-bit byte offsets,
+and unconditional EXIT under the existing strict resource-free PS header. At most
+64 distinct constant word references are packed into one 256-byte uniform buffer;
+WGSL depends on code and reference locations, never on mutable constant values.
+The program is bounded to 4 KiB of code. It does not implement indirect LDC,
+subword/vector access, predicate execution or branches.
+
+The supported scoreboard subset uses only write barrier zero, no read barriers,
+no reuse, stall six and wait masks zero/one. A load requires an unused barrier;
+wait-one releases pending destinations before another producer or consumer. Pending
+register overwrites and unready MOV/export reads fail. This is intentionally more
+restrictive than valid Maxwell scheduling. Source byte offsets identify faults.
+
+B197 selector methods 0x2380/84/88 establish size and 40-bit GPU address.
+`BIND_GROUP_CONSTANT_BUFFER(j)` at 0x2410+j*32 snapshots the selector into group
+j (0..4) and slot (0..31); bit zero controls validity and bits 8:4 select the slot.
+Fragment group four differs from pixel pipeline index five. Selector sizes accepted
+here are nonzero, four-byte aligned and at most 64 KiB: an implementation subset,
+not the limit of the hardware's 17-bit size field. Constant access validates the
+bound size and checked AddressMap/GuestMemory read. Inline constant upload methods
+are unsupported. Updating selectors alone does not mutate existing bindings.
+
+`set_resource_fragment` caches the latest translated pipeline; the separate
+`sync_fragment_resources` packs referenced guest words into persistent owned GPU
+storage. Canonical guest ranges and the existing write-journal epoch/version skip
+unchanged reads even across GPU aliases. Backing replacement requires a new epoch;
+CPU/runtime writes must be reported before synchronization. A failed preflight
+makes the harness unready and prevents fallback to stale successful values.
+Only the enclosing changed word interval is uploaded, without a GPU wait. Queue
+acceptance is not completion; wgpu owns staging and submitted resource references.
+
+`Command::DrawFragment` is explicitly a fullscreen-triangle fragment test harness.
+It executes the translated program and synchronized resources but does not represent
+a B197 hardware draw or vertex shader. Existing renderer and texture paths remain
+available. No runtime memory owner or runtime ABI has been changed.

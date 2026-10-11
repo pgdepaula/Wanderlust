@@ -73,6 +73,7 @@ pub struct Renderer {
     default_pipeline: wgpu::RenderPipeline,
     indexed_shader: wgpu::ShaderModule,
     indexed_layout: wgpu::PipelineLayout,
+    pub(crate) resource_fragment: Option<crate::shader_backend::ResidentFragment>,
     constant_pipeline: Option<(crate::shader::ConstantFragment, wgpu::RenderPipeline)>,
     buffers: HashMap<BufferId, Buffer>,
     state: ResourceState,
@@ -174,6 +175,7 @@ impl Renderer {
             indexed_shader: shader,
             indexed_layout: layout,
             constant_pipeline: None,
+            resource_fragment: None,
             buffers: HashMap::new(),
             state: ResourceState::new(),
             target: None,
@@ -248,6 +250,11 @@ impl Renderer {
             return Err(invalid("renderer unavailable after backend failure"));
         }
         for command in commands {
+            if matches!(command, Command::DrawFragment)
+                && self.resource_fragment.as_ref().is_none_or(|f| !f.ready)
+            {
+                return Err(invalid("fragment resources not synchronized"));
+            }
             if let Command::DrawTexture { id, mip } = command {
                 if self
                     .textures
@@ -305,7 +312,14 @@ impl Renderer {
         let mut first = true;
         let mut draws_remaining = commands
             .iter()
-            .filter(|c| matches!(c, Command::DrawIndexed { .. } | Command::DrawTexture { .. }))
+            .filter(|c| {
+                matches!(
+                    c,
+                    Command::DrawIndexed { .. }
+                        | Command::DrawTexture { .. }
+                        | Command::DrawFragment
+                )
+            })
             .count();
         for cmd in commands {
             match cmd {
@@ -382,6 +396,40 @@ impl Renderer {
                     draws_remaining -= 1;
                     first = false;
                     self.counters.cache_hits += 2;
+                }
+                Command::DrawFragment => {
+                    let fragment = self.resource_fragment.as_ref().expect("validated fragment");
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("translated Maxwell resource fragment"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &target.view,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: if first {
+                                    wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                                } else {
+                                    wgpu::LoadOp::Load
+                                },
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: self.timestamps.as_ref().map(|(q, _)| {
+                            wgpu::RenderPassTimestampWrites {
+                                query_set: q,
+                                beginning_of_pass_write_index: first.then_some(0),
+                                end_of_pass_write_index: (draws_remaining == 1).then_some(1),
+                            }
+                        }),
+                        occlusion_query_set: None,
+                    });
+                    pass.set_pipeline(&fragment.pipeline);
+                    pass.set_bind_group(0, &fragment.binding, &[]);
+                    pass.draw(0..3, 0..1);
+                    draws_remaining -= 1;
+                    first = false;
+                    self.counters.draw_commands += 1;
                 }
                 Command::DrawTexture { id, mip } => {
                     let timestamps =
