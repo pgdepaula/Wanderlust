@@ -244,8 +244,93 @@ fn libnx_sm_client_exchanges_cmif_messages() {
     check_ipc(&run(&root().join("tests/horizon/ipc"), &t));
 }
 
+/// Agy's NRO fixtures (crates/wl-nro/tests/fixtures), started with the homebrew ABI: X0 =
+/// loader configuration, X1 = -1, X30 = loader return. probe.nro is the probe program as an
+/// NRO without NPDM, so the handle comes from a 1024-entry table (index 1023): 0x83ff; libnx
+/// returns to the loader with result 0 instead of calling svcExitProcess.
 #[test]
-fn horizon_mode_requires_an_exefs_directory() {
+fn libnx_nro_starts_with_the_homebrew_abi() {
+    let t = Temp::new();
+    let state = run_nro(&root().join("crates/wl-nro/tests/fixtures/probe.nro"), &t);
+    assert_eq!(state["status"], "returned", "{state}");
+    assert_eq!(state["x0"], 0);
+    assert_eq!(state["config_source"], "defaults (no main.npdm)");
+    let lines: Vec<&str> = state["debug_output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        lines,
+        [
+            "probe tid=0x72 pid=0x51 handle=0x83ff tls=0x5cbc getinfo_bad_subtype=0xe801 out=0",
+            "text state=3 perm=5 size=0x10000; stack state=11 perm=3 size=0x100000 in_stack_region=1",
+            "heap_ok=1 sum=952e8000 ratio=0.001953 used_below_total=1",
+        ]
+    );
+}
+
+/// ipc_probe.nro asks sm for "time:u", which nothing in the process registers: sm defers the
+/// request, so the only thread waits forever, which the scheduler reports.
+#[test]
+fn nro_waiting_for_an_absent_service_is_reported() {
+    let t = Temp::new();
+    let out =
+        t.0.join(format!("ipc_probe{}", std::env::consts::EXE_SUFFIX));
+    let build = cli()
+        .arg("recompile")
+        .arg(root().join("crates/wl-nro/tests/fixtures/ipc_probe.nro"))
+        .args(["--horizon", "--allow-unsupported", "--out"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let run = Command::new(&out).output().unwrap();
+    assert_eq!(run.status.code(), Some(1));
+    let state: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
+    assert_eq!(
+        state["debug_output"],
+        serde_json::json!(["ipc_probe sm_init rc=0"])
+    );
+    assert_eq!(state["fault"]["category"], "deadlock");
+    assert!(
+        state["fault"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("sm:GetServiceHandle(\"time:u\")")
+    );
+    assert_eq!(state["ipc"]["deferred"], 1);
+}
+fn run_nro(input: &Path, t: &Temp) -> serde_json::Value {
+    let out = t.0.join(format!("nro{}", std::env::consts::EXE_SUFFIX));
+    let build = cli()
+        .arg("recompile")
+        .arg(input)
+        .args(["--horizon", "--allow-unsupported", "--out"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let run = Command::new(&out).output().unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    serde_json::from_slice(&run.stdout).unwrap()
+}
+
+#[test]
+fn horizon_mode_requires_an_exefs_directory_or_nro() {
     let t = Temp::new();
     let o = cli()
         .arg("recompile")

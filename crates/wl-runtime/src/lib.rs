@@ -666,7 +666,7 @@ pub struct Program {
 }
 /// Coarse fault category derived from the runtime's error vocabulary.
 pub fn fault_category(message: &str) -> &'static str {
-    const CATEGORIES: [(&str, &str); 11] = [
+    const CATEGORIES: [(&str, &str); 12] = [
         ("unsupported instruction", "unsupported-instruction"),
         ("unresolved native branch", "unresolved-control-flow"),
         ("unsupported Horizon SVC", "unsupported-service"),
@@ -681,6 +681,7 @@ pub fn fault_category(message: &str) -> &'static str {
             "not permitted by the process capabilities",
             "svc-not-permitted",
         ),
+        ("guest deadlock", "deadlock"),
     ];
     CATEGORIES
         .iter()
@@ -813,6 +814,9 @@ pub struct ProcessImage {
     pub config: horizon::ProcessConfig,
     /// Where each configuration value came from (for the report), e.g. "main.npdm".
     pub config_source: &'static str,
+    /// Homebrew (NRO) entry convention: X0 = loader configuration, X1 = -1, X30 = return to
+    /// the loader. Otherwise the NSO convention.
+    pub homebrew: bool,
 }
 fn json_string(text: &str) -> String {
     let mut out = String::from("\"");
@@ -870,6 +874,13 @@ pub fn launch_horizon(program: &Program, memory: Memory, image: &ProcessImage) -
             return 2;
         }
     };
+    let mut cpu = cpu;
+    if image.homebrew {
+        if let Err(e) = process.homebrew_entry(&mut cpu) {
+            eprintln!("process creation: {e}");
+            return 2;
+        }
+    }
     if let Some(k) = process.kernel.as_mut() {
         k.threads[0].context = Some(Box::new(cpu));
     }

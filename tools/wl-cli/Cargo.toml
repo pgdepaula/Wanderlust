@@ -14,6 +14,7 @@ wl-nso.workspace = true
 wl-loader.workspace = true
 wl-package.workspace = true
 wl-npdm = { path = "../../crates/wl-npdm" }
+wl-nro = { path = "../../crates/wl-nro" }
 serde.workspace = true
 wl-analysis.workspace = true
 wl-codegen-rust.workspace = true

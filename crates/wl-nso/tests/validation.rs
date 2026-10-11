@@ -173,3 +173,40 @@ fn rejects_unmapped_dynamic_table() {
     put(&mut b, offset + 4, 0x100000);
     assert!(Module::parse(&b).is_err());
 }
+#[test]
+fn modules_from_segments_check_their_layout() {
+    use wl_common::{FileOffset, ModuleOffset};
+    let segment = |name, offset: u64, size: u32| wl_nso::Segment {
+        name,
+        file_offset: FileOffset(0),
+        guest_offset: ModuleOffset(offset),
+        file_size: size,
+        memory_size: size,
+        compressed: false,
+        hash_verified: false,
+        readable: true,
+        writable: false,
+        executable: false,
+        bytes: vec![0; size as usize],
+    };
+    let ok = vec![
+        segment("text", 0, 0x1000),
+        segment("ro", 0x1000, 0x1000),
+        segment("data", 0x2000, 0x1000),
+    ];
+    let m = Module::from_segments("NRO0", String::new(), String::new(), ok, 0x800).unwrap();
+    assert_eq!((m.bss_offset.0, m.bss_size), (0x3000, 0x800));
+    assert!(m.mod0.is_none(), "no MOD0 offset in an all-zero text");
+    let overlapping = vec![
+        segment("text", 0, 0x2000),
+        segment("ro", 0x1000, 0x1000),
+        segment("data", 0x3000, 0x1000),
+    ];
+    assert!(Module::from_segments("NRO0", String::new(), String::new(), overlapping, 0).is_err());
+    let unaligned = vec![
+        segment("text", 0, 0x1000),
+        segment("ro", 0x1800, 0x1000),
+        segment("data", 0x3000, 0x1000),
+    ];
+    assert!(Module::from_segments("NRO0", String::new(), String::new(), unaligned, 0).is_err());
+}

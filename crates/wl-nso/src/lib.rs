@@ -64,6 +64,10 @@ pub struct DynamicEntry {
     pub value: u64,
 }
 
+/// Lowercase hexadecimal SHA-256 of `bytes`.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex(&Sha256::digest(bytes))
+}
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -260,6 +264,46 @@ impl Module {
             ro_metadata,
             mod0: None,
             constraints: "Offsets are module-relative, not process virtual addresses. NSO has no entry-point field. MOD0 dynamic metadata is parsed here; placement and relocation are performed by wl-loader. No Horizon process initialization.",
+        };
+        module.mod0 = module.find_mod0()?;
+        Ok(module)
+    }
+    /// A module from already-loaded text, rodata and data segments (for example an NRO's),
+    /// with the same MOD0 and dynamic-table discovery as `parse`. Segments must be ordered,
+    /// page-aligned and disjoint, with BSS directly after data.
+    pub fn from_segments(
+        format: &'static str,
+        sha256: String,
+        module_id: String,
+        segments: Vec<Segment>,
+        bss_size: u32,
+    ) -> Result<Self> {
+        if segments.len() != 3 {
+            return Err("a module needs text, rodata and data segments".into());
+        }
+        let mut end = 0u64;
+        for s in &segments {
+            if s.guest_offset.0 % 0x1000 != 0
+                || s.guest_offset.0 < end
+                || s.bytes.len() as u64 != u64::from(s.memory_size)
+            {
+                return Err(format!("{}: segment layout is invalid", s.name));
+            }
+            end = s.guest_offset.0 + u64::from(s.memory_size);
+        }
+        let mut module = Self {
+            format,
+            sha256,
+            module_id,
+            flags: 0,
+            module_name_offset: FileOffset(0),
+            module_name_size: 0,
+            bss_offset: ModuleOffset(end),
+            bss_size,
+            segments,
+            ro_metadata: Vec::new(),
+            mod0: None,
+            constraints: "Built from loaded segments; MOD0 dynamic metadata parsed as for NSO.",
         };
         module.mod0 = module.find_mod0()?;
         Ok(module)

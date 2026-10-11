@@ -73,6 +73,27 @@ pub enum Wait {
         deadline: Option<u64>,
     },
 }
+impl std::fmt::Display for Wait {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Wait::Objects { objects, .. } => write!(f, "svcWaitSynchronization on {objects:?}"),
+            Wait::Sleep { .. } => write!(f, "svcSleepThread"),
+            Wait::Lock { address, .. } => write!(f, "a user lock at {address:#x}"),
+            Wait::CondVar { key, .. } => write!(f, "a condition variable at {key:#x}"),
+            Wait::Service { name, .. } => {
+                let text: String = name
+                    .iter()
+                    .take_while(|&&b| b != 0)
+                    .map(|&b| char::from(b))
+                    .collect();
+                write!(
+                    f,
+                    "sm:GetServiceHandle({text:?}), deferred until the service is registered"
+                )
+            }
+        }
+    }
+}
 impl Wait {
     fn deadline(&self) -> Option<u64> {
         match *self {
@@ -846,7 +867,13 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
                         .threads
                         .iter()
                         .filter(|th| th.state == ThreadState::Waiting)
-                        .map(|th| format!("thread {:#x} in {:?}", th.id, th.wait))
+                        .map(|th| {
+                            let wait = th
+                                .wait
+                                .as_ref()
+                                .map_or("nothing".to_string(), |w| w.to_string());
+                            format!("thread {:#x} waits for {wait}", th.id)
+                        })
                         .collect();
                     return RunResult {
                         result: Err(format!(

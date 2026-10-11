@@ -18,7 +18,7 @@ Loader tests ([linking](../../crates/wl-loader/tests/linking.rs), [dynamic table
 
 Floating-point unit tests pin values derived from IEEE 754 and the Arm pseudocode (see [SIMD and FP](../platform/aarch64-simd-fp.md)). Build tests check that rebuilding an unchanged program hits the cache for every unit and that changing one guest instruction recompiles exactly one unit, and that a program whose loop, direct callee and indirect callee lie in three translation units gives the same registers and instruction count as a single-unit build. The LLVM kernel test compiles [`tests/programs/guest.rs`](../../tests/programs/guest.rs) for AArch64 and [`host.rs`](../../tests/programs/host.rs) for the host and requires identical results.
 
-The complete workspace suite passed on Linux x86-64 with rustc 1.98.1: 217 tests, including Horizon runtime 12, threads 13, IPC 5, CFG/survey 11, linking 16 and CLI Horizon 5, with 5 tests that require a GPU adapter ignored. Counts should be taken from actual test output rather than from this document.
+The complete workspace suite passed on Linux x86-64 with rustc 1.98.1: 221 tests, including Horizon runtime 13, threads 13, IPC 5, CFG/survey 11, linking 16 and CLI Horizon 7, with 5 tests that require a GPU adapter ignored. Counts should be taken from actual test output rather than from this document.
 
 ## Independent differential execution
 

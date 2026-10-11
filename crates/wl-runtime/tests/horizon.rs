@@ -498,3 +498,28 @@ fn unsupported_and_break_svcs_fail_explicitly() {
     let k = p.kernel.as_ref().unwrap();
     assert_eq!(k.svc_counts.get(&0x22), Some(&1));
 }
+
+#[test]
+fn homebrew_entry_passes_a_loader_configuration() {
+    let (mut p, mut c) = process();
+    let config = p.homebrew_entry(&mut c).unwrap();
+    assert_eq!(
+        (c.x[0], c.x[1], c.x[30]),
+        (config, u64::MAX, wl_runtime::RETURN_PC)
+    );
+    let handle = p.kernel.as_ref().unwrap().threads[0].handle;
+    let entry = |i: u64, field: u64, size: u8| p.load(config + i * 24 + field, size).unwrap();
+    // MainThreadHandle (mandatory), syscall hints from the SVC access flags, EndOfList.
+    assert_eq!(
+        (entry(0, 0, 4), entry(0, 4, 4), entry(0, 8, 8)),
+        (1, 1, u64::from(handle))
+    );
+    assert_eq!(
+        (entry(1, 0, 4), entry(1, 8, 8), entry(1, 16, 8)),
+        (6, u64::MAX, u64::MAX)
+    );
+    assert_eq!((entry(2, 0, 4), entry(2, 8, 8)), (17, u64::MAX));
+    assert_eq!((entry(3, 0, 4), entry(3, 8, 8), entry(3, 16, 8)), (0, 0, 0));
+    let block = query(&p, 1 << 39, config);
+    assert_eq!((block.state, block.permission), (state::NORMAL, 3));
+}

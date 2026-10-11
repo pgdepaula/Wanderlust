@@ -48,11 +48,13 @@ WL_JOBS or min(CPUs, 4)) and cached in DIR (default WL_CACHE_DIR or .wanderlust-
 EXECUTABLE), keyed by source, toolchain, target and flags. --target uses rustc's installed
 target and linker.
 
---horizon (directory input) builds a Horizon process launcher instead of the register-level
-test harness: the main thread starts at the first module with X0 = 0, X1 = its handle, an
-NPDM-sized stack and TLS, and Horizon SVCs are served by the runtime. Process parameters come
-from main.npdm when present; --memory-limit sets the process memory size (default 512 MiB).
-Output is experimental; no TOTK boot, Horizon services or GPU support is claimed.";
+--horizon (ExeFS directory or NRO input) builds a Horizon process launcher instead of the
+register-level test harness: the main thread starts at the first module with X0 = 0, X1 = its
+handle (NRO: X0 = loader configuration, X1 = -1, X30 = loader return), an NPDM-sized stack
+and TLS; Horizon SVCs, guest threads and the sm: service are served by the runtime. Process
+parameters come from main.npdm when present; --memory-limit sets the process memory size
+(default 512 MiB). The executable accepts --steps and --quantum. Output is experimental; no
+TOTK boot, other Horizon services or GPU support is claimed.";
 
 fn number(v: &str) -> Result<u64> {
     if let Some(v) = v.strip_prefix("0x") {
@@ -261,6 +263,60 @@ fn exefs_modules(dir: &Path) -> Result<Vec<(String, Module)>> {
     }
     Ok(modules)
 }
+/// Whether `bytes` is an NRO (magic `NRO0` at 0x10).
+fn is_nro(bytes: &[u8]) -> bool {
+    bytes.get(0x10..0x14) == Some(b"NRO0")
+}
+/// An NRO as a one-module process: segments from wl-nro's execution plan, MOD0/dynamic
+/// discovery as for NSO, guest linking (libnx's crt0 relocates itself).
+fn load_nro(o: &Options, bytes: &[u8]) -> Result<Process> {
+    let nro = wl_nro::Nro::parse(bytes).map_err(|e| format!("NRO: {e}"))?;
+    let plan = nro.plan().map_err(|e| format!("NRO: {e}"))?;
+    if let wl_nro::plan::RelocationRequirement::HostRequired { .. } = plan.relocation {
+        return Err("NRO requires host relocation; only self-relocating NROs are supported".into());
+    }
+    if plan.entry_offset != 0 || !plan.unsupported_features.is_empty() {
+        return Err(format!(
+            "NRO entry at {:#x} or unsupported features {:?}",
+            plan.entry_offset, plan.unsupported_features
+        ));
+    }
+    let image = &plan.image;
+    let segment = |s: &wl_nro::image::NroSegment| {
+        let mut data = s.bytes.to_vec();
+        data.resize(s.memory_size as usize, 0);
+        wl_nso::Segment {
+            name: s.name,
+            file_offset: wl_common::FileOffset(s.file_offset.0),
+            guest_offset: s.memory_offset,
+            file_size: s.file_size,
+            memory_size: s.memory_size,
+            compressed: false,
+            hash_verified: false,
+            readable: s.readable,
+            writable: s.writable,
+            executable: s.executable,
+            bytes: data,
+        }
+    };
+    let digest = wl_nso::sha256_hex(bytes);
+    let module = Module::from_segments(
+        "NRO0",
+        digest,
+        image.module_id_hex.clone(),
+        vec![
+            segment(&image.text),
+            segment(&image.rodata),
+            segment(&image.data),
+        ],
+        u32::try_from(image.bss_size).map_err(|_| "NRO BSS too large")?,
+    )?;
+    Process::build(
+        &[("main".to_string(), module)],
+        o.base.unwrap_or(GuestAddr(DEFAULT_CODE_BASE)),
+        o.link.unwrap_or(LinkMode::Guest),
+    )
+}
 fn load_process(o: &Options) -> Result<Process> {
     let modules = exefs_modules(&o.input)?;
     // A Horizon process links itself (rtld or a self-relocating crt0).
@@ -276,7 +332,11 @@ fn load_process(o: &Options) -> Result<Process> {
     )
 }
 /// Process parameters: from `main.npdm` when the ExeFS has one, otherwise documented defaults.
-fn horizon_options(o: &Options, p: &Process) -> Result<wl_codegen_rust::HorizonOptions> {
+fn horizon_options(
+    o: &Options,
+    p: &Process,
+    homebrew: bool,
+) -> Result<wl_codegen_rust::HorizonOptions> {
     let npdm_path = o.input.join("main.npdm");
     let mut options = wl_codegen_rust::HorizonOptions {
         code_start: p.base.0,
@@ -293,6 +353,7 @@ fn horizon_options(o: &Options, p: &Process) -> Result<wl_codegen_rust::HorizonO
         service_access: vec![(false, "*".into()), (true, "*".into())],
         memory_limit: o.memory_limit,
         source: "defaults (no main.npdm)",
+        homebrew,
     };
     if !npdm_path.is_file() {
         return Ok(options);
@@ -451,8 +512,15 @@ fn run(args: &[OsString]) -> Result<()> {
         }
         return inspect(&Module::parse(&read_input(&o.input)?)?, o.json);
     }
+    let nro = if directory {
+        None
+    } else {
+        Some(read_input(&o.input)?).filter(|b| is_nro(b))
+    };
     let process = if directory {
         Some(load_process(&o)?)
+    } else if let Some(bytes) = &nro {
+        Some(load_nro(&o, bytes)?)
     } else {
         None
     };
@@ -561,8 +629,10 @@ fn run(args: &[OsString]) -> Result<()> {
         wl_codegen_rust::EmitOptions {
             unit_shift: o.unit_shift,
             horizon: match (&process, o.horizon) {
-                (Some(p), true) => Some(horizon_options(&o, p)?),
-                (None, true) => return Err("--horizon requires an ExeFS directory input".into()),
+                (Some(p), true) => Some(horizon_options(&o, p, nro.is_some())?),
+                (None, true) => {
+                    return Err("--horizon requires an ExeFS directory or NRO input".into());
+                }
                 _ => None,
             },
         },

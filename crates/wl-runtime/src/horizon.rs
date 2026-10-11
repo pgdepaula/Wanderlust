@@ -506,6 +506,64 @@ impl Process {
     }
 }
 
+/// Homebrew ABI configuration keys (libnx `runtime/env.c`).
+pub mod homebrew {
+    pub const END_OF_LIST: u32 = 0;
+    pub const MAIN_THREAD_HANDLE: u32 = 1;
+    pub const SYSCALL_AVAILABLE_HINT: u32 = 6;
+    pub const SYSCALL_AVAILABLE_HINT2: u32 = 17;
+    /// `EntryFlag_IsMandatory`.
+    pub const MANDATORY: u32 = 1;
+    /// Size of one ConfigEntry (u32 key, u32 flags, u64 values[2]).
+    pub const ENTRY_SIZE: usize = 24;
+}
+
+impl Process {
+    /// Switches the main thread to the homebrew (NRO) entry convention: X0 = a ConfigEntry
+    /// list (MainThreadHandle, mandatory; syscall-available hints from the SVC access flags;
+    /// EndOfList with no loader information), X1 = -1, X30 = the loader return address, which
+    /// is `RETURN_PC`: `__nx_exit` branches there with the result in X0 and the run ends with
+    /// `status=returned`. The list lives in one Normal RW page of the KernelMap region that
+    /// this runtime maps for the purpose (a homebrew loader keeps it in its own memory).
+    pub fn homebrew_entry(&mut self, cpu: &mut Cpu) -> RuntimeResult<u64> {
+        let Process { memory, kernel } = self;
+        let k = kernel.as_mut().ok_or("not a Horizon process")?;
+        let page = find_free(memory, k.layout.kernel_map, PAGE)?;
+        memory.map_state(
+            page,
+            vec![0; PAGE as usize],
+            true,
+            true,
+            false,
+            state::NORMAL,
+        )?;
+        let p = k.config.svc_permissions;
+        let entries: [(u32, u32, u64, u64); 4] = [
+            (
+                homebrew::MAIN_THREAD_HANDLE,
+                homebrew::MANDATORY,
+                u64::from(k.threads[0].handle),
+                0,
+            ),
+            (homebrew::SYSCALL_AVAILABLE_HINT, 0, p[0], p[1]),
+            (homebrew::SYSCALL_AVAILABLE_HINT2, 0, p[2], 0),
+            (homebrew::END_OF_LIST, 0, 0, 0),
+        ];
+        for (i, (key, flags, v0, v1)) in entries.into_iter().enumerate() {
+            let mut e = [0u8; homebrew::ENTRY_SIZE];
+            e[0..4].copy_from_slice(&key.to_le_bytes());
+            e[4..8].copy_from_slice(&flags.to_le_bytes());
+            e[8..16].copy_from_slice(&v0.to_le_bytes());
+            e[16..24].copy_from_slice(&v1.to_le_bytes());
+            memory.write_bytes(page + (i * homebrew::ENTRY_SIZE) as u64, &e)?;
+        }
+        cpu.x[0] = page;
+        cpu.x[1] = u64::MAX;
+        cpu.x[30] = crate::RETURN_PC;
+        Ok(page)
+    }
+}
+
 /// One `svc::MemoryInfo` block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemoryInfo {

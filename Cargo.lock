@@ -1214,6 +1214,7 @@ dependencies = [
  "wl-common",
  "wl-loader",
  "wl-npdm",
+ "wl-nro",
  "wl-nso",
  "wl-package",
 ]
