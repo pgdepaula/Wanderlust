@@ -387,38 +387,49 @@ An authentic guest executable testing the initialization sequence for display ac
 
 - **Source:** [`crates/wl-nro/tests/fixtures/display_probe.c`](../../crates/wl-nro/tests/fixtures/display_probe.c)
 - **Binary:** `crates/wl-nro/tests/fixtures/display_probe.nro`
-- **Size:** 94,208 bytes (0x17000)
-- **SHA-256:** `fa055f9f15ee72e0b2d5b1aeeb84f73777c0805bbf11066f9a0b4021550fcaa8`
+- **Size:** 98,304 bytes (0x18000)
+- **SHA-256:** `fbbaefd334c8d8e57636ac1ee90db17bcce38a908355e025371906e3e6a8c686`
 
 ### Operation Sequence & Call Chain
 
-1. `viInitialize(ViServiceType_Application)`:
+1. `smInitialize()`:
+   - Connects to named port `"sm:"` via `svcConnectToNamedPort` (**SVC 0x1F**).
+   - Issues CMIF command 0 (`Initialize`) registering client.
+2. `viInitialize(ViServiceType_Application)`:
    - Invocations: `smGetServiceWrapper(&s_viAppDisplayService, "vi:u")`.
-   - Triggers `smInitialize()` -> `svcConnectToNamedPort("sm:")` (**SVC 0x1F**).
-   - Triggers SM Command 0 (`Initialize`).
-   - Triggers SM Command 1 (`GetService`, name `"vi:u"`).
+   - Issues SM Command 1 (`GetService`, name `"vi:u"`).
    - On `"vi:u"` session: issues CMIF Command 0 (`GetRelayService`) via `svcSendSyncRequest` (**SVC 0x21**) to acquire `IHOSBinderDriverRelay`.
-2. `viOpenDefaultDisplay(&display)`:
+3. `viOpenDefaultDisplay(&display)`:
    - Issues `IApplicationDisplayService::OpenDisplay` (command 1020) with name `"Default"`.
    - Returns 64-bit `display_id`.
-3. `viGetDisplayResolution(&display, &width, &height)`:
+4. `viGetDisplayResolution(&display, &width, &height)`:
    - Issues `IApplicationDisplayService::GetDisplayResolution` (command 1010) passing `display_id`.
    - Returns resolution (e.g. 1920x1080 or 1280x720).
-4. `viCloseDisplay(&display)`:
+5. `viCloseDisplay(&display)`:
    - Issues `IApplicationDisplayService::CloseDisplay` (command 1030).
-5. `viExit()`:
+6. `viExit()`:
    - Closes all active VI session and relay handles.
+7. `smExit()`:
+   - Closes active SM session handle.
+
+### Current Wanderlust Status & Execution Blocker Analysis
+
+When executed under Wanderlust (`recompile crates/wl-nro/tests/fixtures/display_probe.nro --horizon`):
+- `smInitialize()` successfully connects to `"sm:"` and registers client session (3 synchronization requests, 6,667 guest instructions executed).
+- `smGetServiceWrapper` requests `"vi:u"`.
+- Since `"vi:u"` is not yet registered by any service host in the runtime, `sm:` defers the request.
+- The deterministic scheduler reports a clean fault: `fault category: deadlock` with message `deferred request for service vi:u cannot make progress`.
 
 ### Missing Horizon Runtime Requirements for Display Support
 
 To advance from binary execution to guest-driven display initialization, `wl-runtime::horizon` requires:
 
-| Step | Horizon Interface | SVC / Command | Category | Purpose |
-|---|---|---|---|---|
-| 1 | Named port `"sm:"` | SVC 0x1F (`ConnectToNamedPort`) | Kernel SVC | Obtain handle to Service Manager |
-| 2 | SM protocol | CMIF Cmd 0 (`Initialize`) | SM IPC | Register client process |
-| 3 | SM service lookup | CMIF Cmd 1 (`GetService("vi:u")`) | SM IPC | Obtain `vi:u` session handle |
-| 4 | VI service dispatch | SVC 0x21 (`SendSyncRequest`) | Kernel SVC | IPC message exchange |
-| 5 | `IApplicationDisplayService` | Cmd 0 (`GetRelayService`) | VI IPC | Obtain binder relay handle |
-| 6 | Display management | Cmd 1020 (`OpenDisplay`) | VI IPC | Open `"Default"` display |
-| 7 | Display query | Cmd 1010 (`GetDisplayResolution`) | VI IPC | Query framebuffer dimensions |
+| Step | Horizon Interface | SVC / Command | Category | Status in Wanderlust | Purpose |
+|---|---|---|---|---|---|
+| 1 | Named port `"sm:"` | SVC 0x1F (`ConnectToNamedPort`) | Kernel SVC | Implemented (commit `3347fca`) | Obtain handle to Service Manager |
+| 2 | SM protocol | CMIF Cmd 0 (`Initialize`) | SM IPC | Implemented (commit `3347fca`) | Register client process |
+| 3 | SM service lookup | CMIF Cmd 1 (`GetService("vi:u")`) | SM IPC | Implemented (defers unregistered) | Obtain `vi:u` session handle |
+| 4 | VI service dispatch | SVC 0x21 (`SendSyncRequest`) | Kernel SVC | Active Blocker | IPC message exchange |
+| 5 | `IApplicationDisplayService` | Cmd 0 (`GetRelayService`) | VI IPC | Pending (`vi:u` registration) | Obtain binder relay handle |
+| 6 | Display management | Cmd 1020 (`OpenDisplay`) | VI IPC | Pending (`vi:u` registration) | Open `"Default"` display |
+| 7 | Display query | Cmd 1010 (`GetDisplayResolution`) | VI IPC | Pending (`vi:u` registration) | Query framebuffer dimensions |

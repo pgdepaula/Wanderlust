@@ -10,7 +10,14 @@ struct FixtureMeta {
     size: usize,
     sha256: &'static str,
     mod0_offset: u32,
+    text_size: u32,
+    ro_offset: u32,
+    ro_size: u32,
+    data_offset: u32,
+    data_size: u32,
+    bss_offset: u32,
     bss_size: u32,
+    image_end: u64,
 }
 
 const FIXTURES: &[FixtureMeta] = &[
@@ -19,21 +26,42 @@ const FIXTURES: &[FixtureMeta] = &[
         size: 94208,
         sha256: "d205f4e9279880373f3df5beaa76fe7d07a68fb2a51ef1864706c6a6f6b5618f",
         mod0_offset: 0xF0,
+        text_size: 0x10000,
+        ro_offset: 0x10000,
+        ro_size: 0x3000,
+        data_offset: 0x13000,
+        data_size: 0x4000,
+        bss_offset: 0x17000,
         bss_size: 0x1000,
+        image_end: 0x18000,
     },
     FixtureMeta {
         filename: "ipc_probe.nro",
         size: 94208,
         sha256: "77ce3acb0385f5886b08763d3bd66f22d0192a663b7105bb5005bac7a3c39c7e",
         mod0_offset: 0xF0,
+        text_size: 0x10000,
+        ro_offset: 0x10000,
+        ro_size: 0x3000,
+        data_offset: 0x13000,
+        data_size: 0x4000,
+        bss_offset: 0x17000,
         bss_size: 0x1000,
+        image_end: 0x18000,
     },
     FixtureMeta {
         filename: "display_probe.nro",
-        size: 94208,
-        sha256: "fa055f9f15ee72e0b2d5b1aeeb84f73777c0805bbf11066f9a0b4021550fcaa8",
+        size: 98304,
+        sha256: "fbbaefd334c8d8e57636ac1ee90db17bcce38a908355e025371906e3e6a8c686",
         mod0_offset: 0xF0,
+        text_size: 0x11000,
+        ro_offset: 0x11000,
+        ro_size: 0x3000,
+        data_offset: 0x14000,
+        data_size: 0x4000,
+        bss_offset: 0x18000,
         bss_size: 0x1000,
+        image_end: 0x19000,
     },
 ];
 
@@ -71,11 +99,11 @@ fn test_stage1_parsing_conformance_matrix() {
 
         // Standard 64-bit libnx segment sizes
         assert_eq!(nro.header.text.file_offset.0, 0);
-        assert_eq!(nro.header.text.size, 0x10000);
-        assert_eq!(nro.header.ro.file_offset.0, 0x10000);
-        assert_eq!(nro.header.ro.size, 0x3000);
-        assert_eq!(nro.header.data.file_offset.0, 0x13000);
-        assert_eq!(nro.header.data.size, 0x4000);
+        assert_eq!(nro.header.text.size, fix.text_size);
+        assert_eq!(nro.header.ro.file_offset.0, fix.ro_offset);
+        assert_eq!(nro.header.ro.size, fix.ro_size);
+        assert_eq!(nro.header.data.file_offset.0, fix.data_offset);
+        assert_eq!(nro.header.data.size, fix.data_size);
     }
 }
 
@@ -90,40 +118,40 @@ fn test_stage2_mapping_and_zero_fill_invariants() {
 
         assert_eq!(plan.entry_offset, 0, "entrypoint PC must be base + 0");
         assert_eq!(plan.page_alignment, 0x1000, "page alignment must be 4 KiB");
-        assert_eq!(plan.image_end, 0x18000, "mapped image end must be 0x18000");
+        assert_eq!(plan.image_end, fix.image_end, "mapped image end mismatch");
 
         // Validate mappable ranges
         assert_eq!(plan.mappable_ranges.len(), 3);
         let text = &plan.mappable_ranges[0];
         assert_eq!(text.name, "text");
         assert_eq!(text.file_offset.0, 0);
-        assert_eq!(text.file_size, 0x10000);
+        assert_eq!(text.file_size, fix.text_size);
         assert_eq!(text.memory_offset, ModuleOffset(0));
-        assert_eq!(text.memory_size, 0x10000);
+        assert_eq!(text.memory_size, fix.text_size);
         assert!(text.read && !text.write && text.execute);
 
         let rodata = &plan.mappable_ranges[1];
         assert_eq!(rodata.name, "rodata");
-        assert_eq!(rodata.file_offset.0, 0x10000);
-        assert_eq!(rodata.file_size, 0x3000);
-        assert_eq!(rodata.memory_offset, ModuleOffset(0x10000));
-        assert_eq!(rodata.memory_size, 0x3000);
+        assert_eq!(rodata.file_offset.0, fix.ro_offset);
+        assert_eq!(rodata.file_size, fix.ro_size);
+        assert_eq!(rodata.memory_offset, ModuleOffset(fix.ro_offset as u64));
+        assert_eq!(rodata.memory_size, fix.ro_size);
         assert!(rodata.read && !rodata.write && !rodata.execute);
 
         let data = &plan.mappable_ranges[2];
         assert_eq!(data.name, "data");
-        assert_eq!(data.file_offset.0, 0x13000);
-        assert_eq!(data.file_size, 0x4000);
-        assert_eq!(data.memory_offset, ModuleOffset(0x13000));
-        assert_eq!(data.memory_size, 0x4000);
+        assert_eq!(data.file_offset.0, fix.data_offset);
+        assert_eq!(data.file_size, fix.data_size);
+        assert_eq!(data.memory_offset, ModuleOffset(fix.data_offset as u64));
+        assert_eq!(data.memory_size, fix.data_size);
         assert!(data.read && data.write && !data.execute);
 
         // Validate zero-fill BSS range
         assert_eq!(plan.zero_fill_ranges.len(), 1);
         let bss = &plan.zero_fill_ranges[0];
         assert_eq!(bss.name, "bss");
-        assert_eq!(bss.memory_offset, ModuleOffset(0x17000));
-        assert_eq!(bss.size, 0x1000);
+        assert_eq!(bss.memory_offset, ModuleOffset(fix.bss_offset as u64));
+        assert_eq!(bss.size, fix.bss_size as u64);
 
         // Image mapping projection
         let image = nro.to_image().unwrap();
@@ -132,32 +160,40 @@ fn test_stage2_mapping_and_zero_fill_invariants() {
 
         // Text mapping
         assert_eq!(mappings[0].base, guest_base);
-        assert_eq!(mappings[0].bytes.len(), 0x10000);
+        assert_eq!(mappings[0].bytes.len(), fix.text_size as usize);
         assert!(mappings[0].execute && !mappings[0].write);
 
         // RoData mapping
-        assert_eq!(mappings[1].base, GuestAddr(guest_base.0 + 0x10000));
-        assert_eq!(mappings[1].bytes.len(), 0x3000);
+        assert_eq!(
+            mappings[1].base,
+            GuestAddr(guest_base.0 + fix.ro_offset as u64)
+        );
+        assert_eq!(mappings[1].bytes.len(), fix.ro_size as usize);
         assert!(mappings[1].read && !mappings[1].write && !mappings[1].execute);
 
         // Data + BSS mapping
-        assert_eq!(mappings[2].base, GuestAddr(guest_base.0 + 0x13000));
+        assert_eq!(
+            mappings[2].base,
+            GuestAddr(guest_base.0 + fix.data_offset as u64)
+        );
         assert_eq!(
             mappings[2].bytes.len(),
-            0x4000 + 0x1000,
+            (fix.data_size + fix.bss_size) as usize,
             "data mapping must include zero-filled BSS"
         );
         assert!(mappings[2].read && mappings[2].write && !mappings[2].execute);
 
         // Ensure BSS bytes are all zero
-        let bss_bytes = &mappings[2].bytes[0x4000..];
+        let bss_bytes = &mappings[2].bytes[fix.data_size as usize..];
         assert!(
             bss_bytes.iter().all(|&b| b == 0),
             "all BSS bytes must be zeroed"
         );
         // Ensure initialized data before BSS contains nonzero content
         assert!(
-            mappings[2].bytes[..0x4000].iter().any(|&b| b != 0),
+            mappings[2].bytes[..fix.data_size as usize]
+                .iter()
+                .any(|&b| b != 0),
             "data section must have content"
         );
     }
