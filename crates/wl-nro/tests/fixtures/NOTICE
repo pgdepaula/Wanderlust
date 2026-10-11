@@ -1,5 +1,7 @@
-crates/wl-nro/tests/fixtures/probe.nro is built from crates/wl-nro/tests/fixtures/probe.c with devkitA64 (GCC 16.1.0,
-newlib 4.6.0.20260123), elf2nro, and libnx 4.12.0, and contains code from the following libraries.
+The test fixtures in crates/wl-nro/tests/fixtures/ (probe.nro, ipc_probe.nro, display_probe.nro)
+are built from their respective C sources (probe.c, ipc_probe.c, display_probe.c) with
+devkitA64 (GCC 16.1.0, newlib 4.6.0.20260123), elf2nro, and libnx 4.12.0, and contain
+code from the following libraries:
 
 libnx (https://github.com/switchbrew/libnx)
 

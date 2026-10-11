@@ -339,3 +339,86 @@ heap_ok=1 sum=952e8000 ratio=0.001953 used_below_total=1
 ```
 
 *(Note: In retail NSO mode with a 1023-entry NPDM table, the main thread handle is `0x83fe`; in homebrew NRO mode with the default 1024-entry table, the handle is `0x83ff`).*
+
+---
+
+## 12. Genuine Service Manager IPC Probe (`ipc_probe.nro`)
+
+An authentic, independently compiled guest executable exercising the Service Manager (`sm:`) interface:
+
+- **Source:** [`crates/wl-nro/tests/fixtures/ipc_probe.c`](../../crates/wl-nro/tests/fixtures/ipc_probe.c)
+- **Binary:** `crates/wl-nro/tests/fixtures/ipc_probe.nro`
+- **Size:** 94,208 bytes (0x17000)
+- **SHA-256:** `77ce3acb0385f5886b08763d3bd66f22d0192a663b7105bb5005bac7a3c39c7e`
+
+### Operation Sequence
+
+1. `smInitialize()`:
+   - Connects to named port `"sm:"` via `svcConnectToNamedPort` (SVC 0x1F).
+   - Issues CMIF request 0 (`Initialize`) with current process ID.
+2. `smGetServiceOriginal(&handle, "time:u")`:
+   - Issues CMIF request 1 (`GetService`) querying `"time:u"`.
+   - Expects valid IPC session handle on success.
+3. `svcCloseHandle(handle)`:
+   - Releases the acquired service session handle via SVC 0x16.
+4. `smExit()`:
+   - Closes the active SM session handle cleanly.
+
+### Expected Output Sequence (Implemented SM IPC)
+
+```text
+ipc_probe sm_init rc=0x0
+ipc_probe lookup srv=time:u rc=0x0 handle=0x...
+ipc_probe close srv=time:u rc=0x0
+ipc_probe sm_exit ok
+```
+
+### Current Wanderlust Status & Earliest Failure Point
+
+- **Earliest failure point:** `svcConnectToNamedPort(&g_smSession, "sm:")`.
+- **SVC number:** 0x1F.
+- **Observed behavior:** Halts with category `unsupported-service` (SVC 0x1F) under `wl-runtime::horizon`.
+
+---
+
+## 13. Genuine VI Display Service Probe (`display_probe.nro`) & Blocker Analysis
+
+An authentic guest executable testing the initialization sequence for display acquisition:
+
+- **Source:** [`crates/wl-nro/tests/fixtures/display_probe.c`](../../crates/wl-nro/tests/fixtures/display_probe.c)
+- **Binary:** `crates/wl-nro/tests/fixtures/display_probe.nro`
+- **Size:** 94,208 bytes (0x17000)
+- **SHA-256:** `fa055f9f15ee72e0b2d5b1aeeb84f73777c0805bbf11066f9a0b4021550fcaa8`
+
+### Operation Sequence & Call Chain
+
+1. `viInitialize(ViServiceType_Application)`:
+   - Invocations: `smGetServiceWrapper(&s_viAppDisplayService, "vi:u")`.
+   - Triggers `smInitialize()` -> `svcConnectToNamedPort("sm:")` (**SVC 0x1F**).
+   - Triggers SM Command 0 (`Initialize`).
+   - Triggers SM Command 1 (`GetService`, name `"vi:u"`).
+   - On `"vi:u"` session: issues CMIF Command 0 (`GetRelayService`) via `svcSendSyncRequest` (**SVC 0x21**) to acquire `IHOSBinderDriverRelay`.
+2. `viOpenDefaultDisplay(&display)`:
+   - Issues `IApplicationDisplayService::OpenDisplay` (command 1020) with name `"Default"`.
+   - Returns 64-bit `display_id`.
+3. `viGetDisplayResolution(&display, &width, &height)`:
+   - Issues `IApplicationDisplayService::GetDisplayResolution` (command 1010) passing `display_id`.
+   - Returns resolution (e.g. 1920x1080 or 1280x720).
+4. `viCloseDisplay(&display)`:
+   - Issues `IApplicationDisplayService::CloseDisplay` (command 1030).
+5. `viExit()`:
+   - Closes all active VI session and relay handles.
+
+### Missing Horizon Runtime Requirements for Display Support
+
+To advance from binary execution to guest-driven display initialization, `wl-runtime::horizon` requires:
+
+| Step | Horizon Interface | SVC / Command | Category | Purpose |
+|---|---|---|---|---|
+| 1 | Named port `"sm:"` | SVC 0x1F (`ConnectToNamedPort`) | Kernel SVC | Obtain handle to Service Manager |
+| 2 | SM protocol | CMIF Cmd 0 (`Initialize`) | SM IPC | Register client process |
+| 3 | SM service lookup | CMIF Cmd 1 (`GetService("vi:u")`) | SM IPC | Obtain `vi:u` session handle |
+| 4 | VI service dispatch | SVC 0x21 (`SendSyncRequest`) | Kernel SVC | IPC message exchange |
+| 5 | `IApplicationDisplayService` | Cmd 0 (`GetRelayService`) | VI IPC | Obtain binder relay handle |
+| 6 | Display management | Cmd 1020 (`OpenDisplay`) | VI IPC | Open `"Default"` display |
+| 7 | Display query | Cmd 1010 (`GetDisplayResolution`) | VI IPC | Query framebuffer dimensions |
