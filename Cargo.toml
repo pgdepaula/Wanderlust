@@ -1,6 +1,23 @@
-[package]
-name = "Wanderlust"
+[workspace]
+members = ["crates/*", "tools/wl-cli"]
+default-members = ["tools/wl-cli"]
+resolver = "3"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 
-[dependencies]
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+lz4_flex = { version = "0.13", default-features = false, features = ["std", "safe-encode", "safe-decode"] }
+wl-common = { path = "crates/wl-common" }
+wl-nso = { path = "crates/wl-nso" }
+wl-loader = { path = "crates/wl-loader" }
+wl-package = { path = "crates/wl-package" }
+wl-aarch64 = { path = "crates/wl-aarch64" }
+wl-analysis = { path = "crates/wl-analysis" }
+wl-runtime = { path = "crates/wl-runtime" }
+wl-codegen-rust = { path = "crates/wl-codegen-rust" }

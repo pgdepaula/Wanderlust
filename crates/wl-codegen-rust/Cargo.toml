@@ -1,0 +1,13 @@
+[package]
+name = "wl-codegen-rust"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+wl-common.workspace = true
+wl-analysis.workspace = true
+wl-aarch64.workspace = true
+wl-runtime.workspace = true
+sha2.workspace = true
+serde.workspace = true

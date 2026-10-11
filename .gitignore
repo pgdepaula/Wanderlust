@@ -1,1 +1,9 @@
-/target
+/target/
+/local-inputs/
+/generated/
+/cache/
+/.venv/
+__pycache__/
+*.pyc
+/.dumps/
+.wanderlust-cache/

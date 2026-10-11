@@ -1,0 +1,11 @@
+[package]
+name = "wl-nso"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+sha2.workspace = true
+lz4_flex.workspace = true
+wl-common.workspace = true

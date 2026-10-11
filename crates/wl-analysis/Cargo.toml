@@ -1,0 +1,12 @@
+[package]
+name = "wl-analysis"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+wl-common.workspace = true
+wl-nso.workspace = true
+wl-loader.workspace = true
+wl-aarch64.workspace = true

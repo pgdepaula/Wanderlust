@@ -1,0 +1,22 @@
+[package]
+name = "wl-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "wanderlust"
+path = "src/main.rs"
+
+[dependencies]
+wl-common.workspace = true
+wl-nso.workspace = true
+wl-loader.workspace = true
+wl-package.workspace = true
+serde.workspace = true
+wl-analysis.workspace = true
+wl-codegen-rust.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+lz4_flex.workspace = true
