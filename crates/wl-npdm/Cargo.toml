@@ -1,0 +1,9 @@
+[package]
+name = "wl-npdm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+wl-common = { workspace = true }

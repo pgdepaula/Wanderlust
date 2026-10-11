@@ -1260,6 +1260,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wl-npdm"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "wl-common",
+]
+
+[[package]]
 name = "wl-nso"
 version = "0.1.0"
 dependencies = [
