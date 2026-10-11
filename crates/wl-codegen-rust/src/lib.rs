@@ -928,7 +928,7 @@ fn lower(op: Op, next: u64) -> String {
             out.push_str(stack_check(base));
             writeln!(out,"let base = {}; let adjusted = base.wrapping_add_signed({offset}i64); let address = {};",read(base),if mode==1 {"base"} else {"adjusted"}).unwrap();
             if load {
-                writeln!(out,"let data = m.read_bytes(address, {})?; let mut a = [0u8;8]; let mut b = [0u8;8]; a[..{bytes}].copy_from_slice(&data[..{bytes}]); b[..{bytes}].copy_from_slice(&data[{bytes}..]);",bytes*2).unwrap();
+                writeln!(out,"let mut data = [0u8; {}]; m.read_into(address, &mut data)?; let mut a = [0u8;8]; let mut b = [0u8;8]; a[..{bytes}].copy_from_slice(&data[..{bytes}]); b[..{bytes}].copy_from_slice(&data[{bytes}..]);",bytes*2).unwrap();
                 let (a, b, width) = if signed {
                     (
                         "sign_extend(u64::from_le_bytes(a), 32) as u64",
@@ -1256,7 +1256,7 @@ fn lower(op: Op, next: u64) -> String {
         Op::Svc { id } => {
             writeln!(
                 out,
-                "if service(c, {id})? {{ return Ok(Some(\"exit_process\")); }} c.pc = {next};"
+                "if let Some(status) = service(c, m, {id})? {{ return Ok(Some(status)); }} c.pc = {next};"
             )
             .unwrap();
         }
@@ -1315,10 +1315,28 @@ pub struct Unit {
 pub struct EmitOptions {
     /// Blocks starting in the same aligned `1 << unit_shift`-byte guest window form a unit.
     pub unit_shift: u32,
+    /// Launch as a Horizon process instead of the register-level test harness.
+    pub horizon: Option<HorizonOptions>,
+}
+/// Process parameters for a Horizon launch, emitted into the executable crate.
+#[derive(Clone, Copy, Debug)]
+pub struct HorizonOptions {
+    pub code_start: u64,
+    pub code_end: u64,
+    pub program_id: u64,
+    pub main_thread_stack_size: u64,
+    pub main_thread_priority: u8,
+    pub ideal_core: u8,
+    pub memory_limit: u64,
+    /// Origin of the values, reported by the launcher (e.g. "main.npdm").
+    pub source: &'static str,
 }
 impl Default for EmitOptions {
     fn default() -> Self {
-        Self { unit_shift: 14 }
+        Self {
+            unit_shift: 12,
+            horizon: None,
+        }
     }
 }
 const ALLOWS: &str = "#![allow(unused_variables, unused_parens, unreachable_code, unused_mut)]\n";
@@ -1326,7 +1344,7 @@ const ALLOWS: &str = "#![allow(unused_variables, unused_parens, unreachable_code
 fn block_source(out: &mut String, block: &wl_analysis::Block) -> Result<()> {
     writeln!(
         out,
-        "pub fn b{:x}(c: &mut Cpu, m: &mut Memory) -> RuntimeResult<Option<&'static str>> {{",
+        "pub fn b{:x}(c: &mut Cpu, m: &mut Process) -> RuntimeResult<Option<&'static str>> {{",
         block.start.0
     )
     .unwrap();
@@ -1464,7 +1482,10 @@ pub fn emit(
         program.entry.0
     )
     .unwrap();
-    out.push_str("fn setup() -> RuntimeResult<Memory> { let mut m = Memory::default();\nm.map(SCRATCH_BASE, vec![0; SCRATCH_SIZE], true, true, false)?;\n");
+    out.push_str("fn setup() -> RuntimeResult<Memory> { let mut m = Memory::default();\n");
+    if options.horizon.is_none() {
+        out.push_str("m.map(SCRATCH_BASE, vec![0; SCRATCH_SIZE], true, true, false)?;\n");
+    }
     let mut blobs = Vec::new();
     for mapping in &image.mappings {
         if mapping.bytes.is_empty() {
@@ -1485,16 +1506,46 @@ pub fn emit(
         };
         writeln!(
             out,
-            "{{ let mut b = {initial}; b.resize({}, 0); m.map({}, b, {}, {}, {})?; }}",
+            "{{ let mut b = {initial}; b.resize({}, 0); m.map_state({}, b, {}, {}, {}, {})?; }}",
             mapping.bytes.len(),
             mapping.base.0,
             mapping.read,
             mapping.write,
-            mapping.execute
+            mapping.execute,
+            // Module segments: text and rodata are Code, data and BSS are CodeData.
+            if mapping.write {
+                "horizon::state::CODE_DATA"
+            } else {
+                "horizon::state::CODE"
+            }
         )
         .unwrap();
     }
-    out.push_str("Ok(m) }\nfn main() { let m = match setup() { Ok(m) => m, Err(e) => { eprintln!(\"mapping: {e}\"); std::process::exit(2); } }; std::process::exit(launch(&PROGRAM, m)); }\n");
+    let launcher = match options.horizon {
+        None => "launch(&PROGRAM, m)".to_string(),
+        Some(h) => {
+            writeln!(
+                out,
+                "Ok(m) }}\nstatic IMAGE: ProcessImage = ProcessImage {{ code_start: {:#x}, code_end: {:#x}, config_source: {:?}, config: horizon::ProcessConfig {{ program_id: {:#x}, process_id: 0x51, main_thread_id: 0x72, main_thread_stack_size: {:#x}, main_thread_priority: {}, ideal_core: {}, core_mask: {:#x}, priority_mask: {:#x}, memory_limit: {:#x}, handle_table_size: 1024, thread_limit: 32, is_application: true }} }};",
+                h.code_start,
+                h.code_end,
+                h.source,
+                h.program_id,
+                h.main_thread_stack_size,
+                h.main_thread_priority,
+                h.ideal_core,
+                1u64 << h.ideal_core,
+                u64::MAX,
+                h.memory_limit
+            )
+            .unwrap();
+            "launch_horizon(&PROGRAM, m, &IMAGE)".to_string()
+        }
+    };
+    if options.horizon.is_none() {
+        out.push_str("Ok(m) }\n");
+    }
+    writeln!(out, "fn main() {{ let m = match setup() {{ Ok(m) => m, Err(e) => {{ eprintln!(\"mapping: {{e}}\"); std::process::exit(2); }} }}; std::process::exit({launcher}); }}").unwrap();
     Ok(Emitted {
         units,
         main: out,

@@ -1,6 +1,7 @@
 //! Dependency-free guest runtime linked into AOT executables as an rlib.
 //! No guest address is converted into a host pointer; no unsafe code is used.
 pub mod fp;
+pub mod horizon;
 pub mod simd;
 use std::io::Write;
 
@@ -9,7 +10,8 @@ pub const SCRATCH_SIZE: usize = 0x10000;
 pub const RETURN_PC: u64 = 0xffff_ffff_ffff_fffc;
 pub type RuntimeResult<T> = std::result::Result<T, String>;
 /// A translated guest basic block: runs to its end, then returns `Some(status)` to stop.
-pub type BlockFn = fn(&mut Cpu, &mut Memory) -> RuntimeResult<Option<&'static str>>;
+pub type BlockFn = fn(&mut Cpu, &mut horizon::Process) -> RuntimeResult<Option<&'static str>>;
+pub use horizon::Process;
 /// One translation unit's blocks, sorted by guest address.
 pub type BlockTable = &'static [(u64, BlockFn)];
 /// FPCR bits writable on the modelled CPU (AHP, DN, FZ, RMode, Stride, Len; no trap enables).
@@ -23,6 +25,16 @@ pub struct Region {
     pub read: bool,
     pub write: bool,
     pub execute: bool,
+    /// `svc::MemoryState` reported by memory queries.
+    pub state: u32,
+    /// `svc::MemoryAttribute` bits (Uncached, PermissionLocked) set through
+    /// `svcSetMemoryAttribute`.
+    pub attribute: u32,
+}
+impl Region {
+    pub fn end(&self) -> u64 {
+        self.base + self.bytes.len() as u64
+    }
 }
 #[derive(Debug, Default)]
 pub struct Memory {
@@ -36,6 +48,18 @@ impl Memory {
         read: bool,
         write: bool,
         execute: bool,
+    ) -> RuntimeResult<()> {
+        self.map_state(base, bytes, read, write, execute, horizon::state::STATIC)
+    }
+    /// Maps a region with an explicit Horizon memory state; overlap is an error.
+    pub fn map_state(
+        &mut self,
+        base: u64,
+        bytes: Vec<u8>,
+        read: bool,
+        write: bool,
+        execute: bool,
+        state: u32,
     ) -> RuntimeResult<()> {
         let end = base
             .checked_add(bytes.len() as u64)
@@ -56,39 +80,135 @@ impl Memory {
             read,
             write,
             execute,
+            state,
+            attribute: 0,
         });
         Ok(())
     }
+    /// Splits the region that strictly contains `address` in two at `address`; both halves
+    /// keep its permissions, state and attribute. Returns whether a split happened.
+    pub fn split_at(&mut self, address: u64) -> bool {
+        let Some(i) = self
+            .regions
+            .iter()
+            .position(|r| r.base < address && address < r.end())
+        else {
+            return false;
+        };
+        let r = &mut self.regions[i];
+        let tail = Region {
+            base: address,
+            bytes: r.bytes.split_off((address - r.base) as usize),
+            read: r.read,
+            write: r.write,
+            execute: r.execute,
+            state: r.state,
+            attribute: r.attribute,
+        };
+        self.regions.insert(i + 1, tail);
+        true
+    }
+    /// Fast path: the access lies inside one region that grants it.
     #[inline]
-    fn locate(&self, address: u64, size: usize, write: bool) -> RuntimeResult<(usize, usize)> {
-        let end = address
-            .checked_add(size as u64)
-            .ok_or_else(|| format!("guest memory address overflow at {address:#x}"))?;
+    fn locate(&self, address: u64, size: usize, write: bool) -> Option<(usize, usize)> {
+        let end = address.checked_add(size as u64)?;
         for (i, r) in self.regions.iter().enumerate() {
             if address >= r.base && end <= r.base + r.bytes.len() as u64 {
                 if (write && !r.write) || (!write && !r.read) {
-                    return Err(format!(
-                        "guest memory permission fault: {} {size} bytes at {address:#x}",
-                        if write { "write" } else { "read" }
-                    ));
+                    return None;
                 }
-                return Ok((i, (address - r.base) as usize));
+                return Some((i, (address - r.base) as usize));
             }
         }
+        None
+    }
+    /// Slow path: an access spanning adjacent regions (as on hardware, where neighbouring
+    /// pages with the same permission are contiguous) is split into per-region pieces
+    /// `(region, offset, length)`; every byte must be mapped and grant the access, otherwise
+    /// the access faults as a whole before any byte is transferred.
+    #[cold]
+    fn pieces(
+        &self,
+        address: u64,
+        size: usize,
+        write: bool,
+    ) -> RuntimeResult<Vec<(usize, usize, usize)>> {
+        let access = if write { "write" } else { "read" };
+        address
+            .checked_add(size as u64)
+            .ok_or_else(|| format!("guest memory address overflow at {address:#x}"))?;
+        let mut pieces = Vec::new();
+        let (mut cursor, mut left) = (address, size);
+        while left > 0 {
+            let Some(i) = self
+                .regions
+                .iter()
+                .position(|r| r.base <= cursor && cursor < r.end())
+            else {
+                return Err(format!(
+                    "unmapped guest memory: {access} {size} bytes at {address:#x}"
+                ));
+            };
+            let r = &self.regions[i];
+            if (write && !r.write) || (!write && !r.read) {
+                return Err(format!(
+                    "guest memory permission fault: {access} {size} bytes at {address:#x}"
+                ));
+            }
+            let n = left.min((r.end() - cursor) as usize);
+            pieces.push((i, (cursor - r.base) as usize, n));
+            cursor += n as u64;
+            left -= n;
+        }
+        Ok(pieces)
+    }
+    /// Borrows `size` bytes that lie in one region; spanning reads must use [`Self::read_into`].
+    #[inline]
+    pub fn read_bytes(&self, address: u64, size: usize) -> RuntimeResult<&[u8]> {
+        if let Some((i, at)) = self.locate(address, size, false) {
+            return Ok(&self.regions[i].bytes[at..at + size]);
+        }
+        let pieces = self.pieces(address, size, false)?;
+        let (i, at, n) = pieces[0];
+        if n == size {
+            return Ok(&self.regions[i].bytes[at..at + size]);
+        }
         Err(format!(
-            "unmapped guest memory: {} {size} bytes at {address:#x}",
-            if write { "write" } else { "read" }
+            "guest read of {size} bytes at {address:#x} spans regions"
         ))
     }
     #[inline]
-    pub fn read_bytes(&self, address: u64, size: usize) -> RuntimeResult<&[u8]> {
-        let (i, at) = self.locate(address, size, false)?;
-        Ok(&self.regions[i].bytes[at..at + size])
+    pub fn read_into(&self, address: u64, out: &mut [u8]) -> RuntimeResult<()> {
+        if let Some((i, at)) = self.locate(address, out.len(), false) {
+            out.copy_from_slice(&self.regions[i].bytes[at..at + out.len()]);
+            return Ok(());
+        }
+        self.read_spanning(address, out)
+    }
+    #[cold]
+    fn read_spanning(&self, address: u64, out: &mut [u8]) -> RuntimeResult<()> {
+        let mut done = 0;
+        for (i, at, n) in self.pieces(address, out.len(), false)? {
+            out[done..done + n].copy_from_slice(&self.regions[i].bytes[at..at + n]);
+            done += n;
+        }
+        Ok(())
     }
     #[inline]
     pub fn write_bytes(&mut self, address: u64, bytes: &[u8]) -> RuntimeResult<()> {
-        let (i, at) = self.locate(address, bytes.len(), true)?;
-        self.regions[i].bytes[at..at + bytes.len()].copy_from_slice(bytes);
+        if let Some((i, at)) = self.locate(address, bytes.len(), true) {
+            self.regions[i].bytes[at..at + bytes.len()].copy_from_slice(bytes);
+            return Ok(());
+        }
+        self.write_spanning(address, bytes)
+    }
+    #[cold]
+    fn write_spanning(&mut self, address: u64, bytes: &[u8]) -> RuntimeResult<()> {
+        let mut done = 0;
+        for (i, at, n) in self.pieces(address, bytes.len(), true)? {
+            self.regions[i].bytes[at..at + n].copy_from_slice(&bytes[done..done + n]);
+            done += n;
+        }
         Ok(())
     }
     #[inline]
@@ -97,21 +217,20 @@ impl Memory {
             return Err("invalid guest access width".into());
         }
         let mut value = [0u8; 8];
-        value[..bytes as usize].copy_from_slice(self.read_bytes(address, bytes as usize)?);
+        self.read_into(address, &mut value[..bytes as usize])?;
         Ok(u64::from_le_bytes(value))
     }
     #[inline]
     pub fn load128(&self, address: u64) -> RuntimeResult<u128> {
-        let b = self.read_bytes(address, 16)?;
-        Ok(u128::from_le_bytes(
-            b.try_into().map_err(|_| "128-bit load")?,
-        ))
+        let mut value = [0u8; 16];
+        self.read_into(address, &mut value)?;
+        Ok(u128::from_le_bytes(value))
     }
     /// Little-endian load of 1..=16 bytes, zero-extended.
     #[inline]
     pub fn load_vector(&self, address: u64, bytes: u8) -> RuntimeResult<u128> {
         let mut value = [0u8; 16];
-        value[..bytes as usize].copy_from_slice(self.read_bytes(address, bytes as usize)?);
+        self.read_into(address, &mut value[..bytes as usize])?;
         Ok(u128::from_le_bytes(value))
     }
     /// Little-endian store of the low 1..=16 bytes of `value`.
@@ -423,10 +542,21 @@ pub fn check_alignment(address: u64, size: u64) -> RuntimeResult<()> {
     }
     Ok(())
 }
-/// Only ExitProcess is implemented. Other Horizon calls fail without mutating guest state.
-pub fn service(cpu: &mut Cpu, id: u16) -> RuntimeResult<bool> {
+/// SVC entry from translated code. In a Horizon process the kernel dispatches the call; in
+/// harness mode only ExitProcess (0x07) is defined. Returns the stop status, if any.
+pub fn service(
+    cpu: &mut Cpu,
+    process: &mut Process,
+    id: u16,
+) -> RuntimeResult<Option<&'static str>> {
+    if process.kernel.is_some() {
+        return Ok(horizon::dispatch(cpu, process, id)?.map(|exit| match exit {
+            horizon::Exit::Process => "exit_process",
+            horizon::Exit::Thread => "exit_thread",
+        }));
+    }
     if id == 7 {
-        return Ok(true);
+        return Ok(Some("exit_process"));
     }
     Err(format!(
         "unsupported Horizon SVC {id:#x}; guest_pc={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x}",
@@ -459,7 +589,7 @@ pub fn find_block(units: &[(u64, BlockTable)], pc: u64) -> Option<BlockFn> {
 /// translated block tables. Unknown targets fault; nothing is interpreted.
 pub fn execute(
     c: &mut Cpu,
-    m: &mut Memory,
+    m: &mut Process,
     units: &[(u64, BlockTable)],
 ) -> RuntimeResult<&'static str> {
     loop {
@@ -497,7 +627,7 @@ pub struct Program {
 }
 /// Coarse fault category derived from the runtime's error vocabulary.
 pub fn fault_category(message: &str) -> &'static str {
-    const CATEGORIES: [(&str, &str); 9] = [
+    const CATEGORIES: [(&str, &str); 10] = [
         ("unsupported instruction", "unsupported-instruction"),
         ("unresolved native branch", "unresolved-control-flow"),
         ("unsupported Horizon SVC", "unsupported-service"),
@@ -507,6 +637,7 @@ pub fn fault_category(message: &str) -> &'static str {
         ("unmapped guest memory", "memory-unmapped"),
         ("guest BRK", "trap"),
         ("unsupported FPCR", "unsupported-fp-configuration"),
+        ("guest svcBreak", "guest-break"),
     ];
     CATEGORIES
         .iter()
@@ -514,8 +645,12 @@ pub fn fault_category(message: &str) -> &'static str {
         .map_or("fault", |c| c.1)
 }
 /// Shared launch protocol for independent reference testing; dumps scratch even after a guest fault.
-pub fn launch(program: &Program, mut memory: Memory) -> i32 {
+pub fn launch(program: &Program, memory: Memory) -> i32 {
     let mut cpu = Cpu::new(program.entry);
+    let mut memory = Process {
+        memory,
+        kernel: None,
+    };
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut dump = None;
     let configure = (|| -> RuntimeResult<()> {
@@ -625,4 +760,124 @@ pub fn launch(program: &Program, mut memory: Memory) -> i32 {
             1
         }
     }
+}
+
+/// Description of a translated program launched as a Horizon process.
+pub struct ProcessImage {
+    /// Guest range covered by the loaded modules (the process code).
+    pub code_start: u64,
+    pub code_end: u64,
+    pub config: horizon::ProcessConfig,
+    /// Where each configuration value came from (for the report), e.g. "main.npdm".
+    pub config_source: &'static str,
+}
+fn json_string(text: &str) -> String {
+    let mut out = String::from("\"");
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+/// Starts the program as a Horizon process (`horizon::Process::horizon`) and runs its main
+/// thread until it exits or faults. Prints one JSON report on stdout. Options: `--steps N`.
+pub fn launch_horizon(program: &Program, memory: Memory, image: &ProcessImage) -> i32 {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut limit = 10_000_000_000u64;
+    let mut i = 0;
+    while i < args.len() {
+        match (args[i].as_str(), args.get(i + 1)) {
+            ("--steps", Some(v)) => match number(v) {
+                Ok(n) => limit = n,
+                Err(e) => {
+                    eprintln!("runtime configuration: {e}");
+                    return 2;
+                }
+            },
+            ("--help", _) => {
+                println!("Horizon process: [--steps COUNT]");
+                return 0;
+            }
+            (option, _) => {
+                eprintln!("runtime configuration: unknown option {option}");
+                return 2;
+            }
+        }
+        i += 2;
+    }
+    let code = horizon::Range {
+        start: image.code_start,
+        end: image.code_end,
+    };
+    let (mut process, mut cpu) = match Process::horizon(memory, program.entry, code, image.config) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("process creation: {e}");
+            return 2;
+        }
+    };
+    cpu.limit = limit;
+    let result = execute(&mut cpu, &mut process, program.units);
+    let k = process.kernel.as_ref().expect("Horizon process");
+    let thread = &k.threads[0];
+    let svcs = k
+        .svc_counts
+        .iter()
+        .map(|(id, n)| format!("\"{id:#04x}\":{n}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let last_svc = k.last_svc.map_or("null".to_string(), |(pc, id, r)| {
+        format!(
+            "{{\"pc\":{pc},\"id\":{id},\"result\":{}}}",
+            r.map_or("null".to_string(), |r| r.to_string())
+        )
+    });
+    let output = k
+        .debug_output
+        .iter()
+        .map(|s| json_string(s))
+        .collect::<Vec<_>>()
+        .join(",");
+    let (status, fault) = match &result {
+        Ok(status) => (status.to_string(), "null".to_string()),
+        Err(e) => (
+            "fault".to_string(),
+            format!(
+                "{{\"category\":\"{}\",\"message\":{}}}",
+                fault_category(e),
+                json_string(e)
+            ),
+        ),
+    };
+    println!(
+        "{{\"mode\":\"horizon\",\"status\":\"{status}\",\"entry\":{},\"pc\":{},\"steps\":{},\"x0\":{},\"thread\":{{\"id\":{},\"handle\":{},\"tls\":{},\"stack\":[{},{}]}},\"heap\":[{},{}],\"process_local_region\":{},\"config_source\":\"{}\",\"svc_counts\":{{{svcs}}},\"last_svc\":{last_svc},\"debug_output\":[{output}],\"fault\":{fault}}}",
+        program.entry,
+        cpu.pc,
+        cpu.steps,
+        cpu.x[0],
+        thread.id,
+        thread.handle,
+        thread.tls,
+        thread.stack.start,
+        thread.stack.end,
+        k.layout.heap.start,
+        k.heap_size,
+        k.process_local_region,
+        image.config_source,
+    );
+    if let Err(e) = result {
+        eprintln!(
+            "guest fault: {e}; category={} guest_pc={:#x} steps={}",
+            fault_category(&e),
+            cpu.pc,
+            cpu.steps
+        );
+        return 1;
+    }
+    0
 }

@@ -1,4 +1,7 @@
 //! Recursive traversal from explicit and metadata-derived roots; no heuristic function-boundary claims.
+//! Indirect control flow is resolved only where constant propagation proves the targets
+//! (jump tables, code pointers formed in code; see [`flow`]).
+pub mod flow;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use wl_aarch64::{Instruction, Op, decode};
@@ -118,6 +121,25 @@ impl Image {
             },
         }
     }
+    /// A little-endian value of 1, 2, 4 or 8 bytes from any readable mapping.
+    pub fn read_data(&self, address: u64, bytes: u8) -> Option<u64> {
+        let m = self
+            .mappings
+            .iter()
+            .find(|m| m.read && address >= m.base.0 && address - m.base.0 < m.bytes.len() as u64)?;
+        let at = usize::try_from(address - m.base.0).ok()?;
+        let slice = m.bytes.get(at..at.checked_add(usize::from(bytes))?)?;
+        let mut value = [0u8; 8];
+        value[..slice.len()].copy_from_slice(slice);
+        Some(u64::from_le_bytes(value))
+    }
+    /// Whether `address` is an instruction-aligned address inside an executable mapping.
+    pub fn is_code(&self, address: u64) -> bool {
+        address % 4 == 0
+            && self.mappings.iter().any(|m| {
+                m.execute && address >= m.base.0 && address - m.base.0 < m.bytes.len() as u64
+            })
+    }
     fn word(&self, pc: GuestAddr) -> Result<u32> {
         if pc.0 % 4 != 0 {
             return Err(format!("unaligned control-flow target {:#x}", pc.0));
@@ -174,6 +196,10 @@ pub struct Program {
     pub unsupported_count: usize,
     pub blocks: Vec<Block>,
     pub indirect_sites: Vec<GuestAddr>,
+    /// Indirect branches resolved as jump tables, with their entry count.
+    pub jump_tables: BTreeMap<GuestAddr, usize>,
+    /// Roots added from jump-table entries and constant code pointers.
+    pub flow_roots: usize,
 }
 #[derive(Clone, Debug, Default)]
 pub struct Roots {
@@ -278,50 +304,28 @@ pub fn discover(image: &Image, entry: GuestAddr, seeds: &[GuestAddr]) -> Result<
     )
 }
 
-pub fn discover_roots(image: &Image, roots: &Roots) -> Result<Program> {
-    let entry = *roots.required.first().ok_or("analysis requires an entry")?;
-    let mut decoded = BTreeMap::new();
-    for &root in &roots.required {
-        let mut found = BTreeMap::new();
-        walk(image, root, &decoded, &mut found, roots.allow_unsupported)?;
-        decoded.append(&mut found);
-    }
-    let mut accepted = Vec::new();
-    let mut rejected_roots = Vec::new();
-    for &root in &roots.speculative {
-        let mut found = BTreeMap::new();
-        match walk(image, root, &decoded, &mut found, roots.allow_unsupported) {
-            Ok(()) => {
-                decoded.append(&mut found);
-                accepted.push(root);
-            }
-            Err(reason) => rejected_roots.push(RejectedRoot {
-                address: root,
-                reason,
-            }),
-        }
-    }
-    let mut leaders: BTreeSet<GuestAddr> = roots.required.iter().copied().collect();
-    leaders.extend(accepted.iter().copied());
-    let mut indirect_sites = Vec::new();
-    let mut instruction_count = 0;
-    let mut unsupported_count = 0;
+fn leaders(
+    decoded: &BTreeMap<GuestAddr, Site>,
+    entries: &BTreeSet<GuestAddr>,
+    tables: &BTreeMap<GuestAddr, Vec<GuestAddr>>,
+) -> Result<BTreeSet<GuestAddr>> {
+    let mut leaders = entries.clone();
     for site in decoded.values() {
-        match site {
-            Site::Instruction(i) => {
-                instruction_count += 1;
-                if matches!(i.op, Op::Indirect { .. }) {
-                    indirect_sites.push(i.pc);
-                }
-                if is_end(i.op) {
-                    leaders.extend(successors(i)?);
-                }
+        if let Site::Instruction(i) = site {
+            if is_end(i.op) {
+                leaders.extend(successors(i)?);
             }
-            Site::Unsupported(_) => unsupported_count += 1,
         }
     }
+    leaders.extend(tables.values().flatten().copied());
+    Ok(leaders)
+}
+fn build_blocks(
+    decoded: &BTreeMap<GuestAddr, Site>,
+    leaders: &BTreeSet<GuestAddr>,
+) -> Result<Vec<Block>> {
     let mut blocks: Vec<Block> = Vec::new();
-    for (pc, site) in decoded {
+    for (&pc, site) in decoded {
         let extend = blocks.last().is_some_and(|b| {
             b.unsupported.is_none()
                 && b.instructions
@@ -337,13 +341,102 @@ pub fn discover_roots(image: &Image, roots: &Roots) -> Result<Program> {
         }
         let block = blocks.last_mut().ok_or("missing block")?;
         match site {
-            Site::Instruction(i) => block.instructions.push(i),
-            Site::Unsupported(u) => block.unsupported = Some(u),
+            Site::Instruction(i) => block.instructions.push(i.clone()),
+            Site::Unsupported(u) => block.unsupported = Some(u.clone()),
+        }
+    }
+    Ok(blocks)
+}
+
+pub fn discover_roots(image: &Image, roots: &Roots) -> Result<Program> {
+    let entry = *roots.required.first().ok_or("analysis requires an entry")?;
+    let mut decoded = BTreeMap::new();
+    for &root in &roots.required {
+        let mut found = BTreeMap::new();
+        walk(image, root, &decoded, &mut found, roots.allow_unsupported)?;
+        decoded.append(&mut found);
+    }
+    let mut accepted = Vec::new();
+    let mut rejected_roots = Vec::new();
+    let mut try_root = |root: GuestAddr, decoded: &mut BTreeMap<GuestAddr, Site>| {
+        let mut found = BTreeMap::new();
+        match walk(image, root, decoded, &mut found, roots.allow_unsupported) {
+            Ok(()) => {
+                decoded.append(&mut found);
+                true
+            }
+            Err(reason) => {
+                rejected_roots.push(RejectedRoot {
+                    address: root,
+                    reason,
+                });
+                false
+            }
+        }
+    };
+    for &root in &roots.speculative {
+        if try_root(root, &mut decoded) {
+            accepted.push(root);
         }
     }
     let speculative_roots_accepted = accepted.len();
+    // Resolve jump tables and constant code pointers until no new code appears.
+    let mut entries: BTreeSet<GuestAddr> = roots.required.iter().copied().collect();
+    entries.extend(accepted.iter().copied());
+    let mut tables = BTreeMap::new();
+    let mut tried = BTreeSet::new();
+    let mut flow_roots = 0;
+    loop {
+        let blocks = build_blocks(&decoded, &leaders(&decoded, &entries, &tables)?)?;
+        let found = flow::propagate(image, &blocks, &entries, &tables);
+        let mut changed = false;
+        // Constant code pointers are function entries; jump-table targets are only block
+        // leaders inside the function that owns the table.
+        let mut candidates: Vec<(GuestAddr, bool)> =
+            found.pointers.into_iter().map(|p| (p, true)).collect();
+        for (branch, targets) in found.tables {
+            if tables.get(&branch) != Some(&targets) {
+                candidates.extend(targets.iter().map(|&t| (t, false)));
+                tables.insert(branch, targets);
+                changed = true;
+            }
+        }
+        for (root, function) in candidates {
+            if tried.insert(root) && try_root(root, &mut decoded) {
+                flow_roots += 1;
+                if function {
+                    entries.insert(root);
+                }
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let mut indirect_sites = Vec::new();
+    let mut instruction_count = 0;
+    let mut unsupported_count = 0;
+    for site in decoded.values() {
+        match site {
+            Site::Instruction(i) => {
+                instruction_count += 1;
+                if matches!(i.op, Op::Indirect { .. }) {
+                    indirect_sites.push(i.pc);
+                }
+            }
+            Site::Unsupported(_) => unsupported_count += 1,
+        }
+    }
+    let blocks = build_blocks(&decoded, &leaders(&decoded, &entries, &tables)?)?;
     let mut all_roots = roots.required.clone();
-    all_roots.extend(accepted);
+    all_roots.extend(accepted.iter().copied());
+    let found: Vec<GuestAddr> = tried
+        .iter()
+        .filter(|r| decoded.contains_key(r) && !all_roots.contains(r))
+        .copied()
+        .collect();
+    all_roots.extend(found);
     Ok(Program {
         entry,
         roots: all_roots,
@@ -353,6 +446,8 @@ pub fn discover_roots(image: &Image, roots: &Roots) -> Result<Program> {
         unsupported_count,
         blocks,
         indirect_sites,
+        jump_tables: tables.iter().map(|(b, t)| (*b, t.len())).collect(),
+        flow_roots,
     })
 }
 

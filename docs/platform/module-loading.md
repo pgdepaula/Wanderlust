@@ -58,7 +58,7 @@ NSO modules are linked at address 0, so every `d_ptr`, symbol value and relocati
 | `DT_RELA`/`RELASZ`/`RELAENT`, `DT_REL`/`RELSZ`/`RELENT` | address and size paired; `RELAENT == 24`, `RELENT == 16`; size a multiple of the entry size |
 | `DT_JMPREL`/`DT_PLTRELSZ`/`DT_PLTREL` | `PLTREL` ∈ {`DT_REL`, `DT_RELA`} and required with `JMPREL` |
 | `DT_RELACOUNT`, `DT_RELCOUNT` | not larger than the table |
-| `DT_RELR`/`RELRSZ`/`RELRENT` | parsed and bounded; never applied (rtld does not process it) |
+| `DT_RELR`/`RELRSZ`/`RELRENT` | parsed and bounded; applied by host linking (`*P += B` for each address and bitmap entry), recorded as `DT_RELR (relative)`, diagnostic note `relr-extension`. rtld does not process it; libnx's crt0 applies it itself in guest mode |
 | `DT_INIT`, `DT_FINI`, `DT_INIT_ARRAY(SZ)`, `DT_FINI_ARRAY(SZ)` | arrays sized in multiples of 8 |
 | `DT_NEEDED`, `DT_SONAME` | string offsets inside `DT_STRTAB` |
 
@@ -139,7 +139,9 @@ Each condition is a structured `Diagnostic { severity, module, kind, detail, add
 | `unsupported-relocation` (TLS, IRELATIVE, unknown) | error | not applied |
 | `relocation-target-unmapped`, `relocation-target-not-writable` | error | not applied |
 | `relocation-overflow` (ABS32) | error | not applied |
-| `unsupported-dynamic-tag` (`DT_RELR`) | error | not applied |
+| `relr-extension` | note | DT_RELR applied by host linking (not an rtld feature) |
+| `relr-malformed` | error | a bitmap entry precedes any address entry; nothing further applied |
+| `relr-unmapped` | error | the DT_RELR table is outside mapped memory |
 | `rtld-state-not-published` | warning | host mode does not provide rtld's globals |
 | `guest-linker-required` | note | guest mode without rtld |
 

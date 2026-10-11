@@ -23,6 +23,7 @@ USAGE:
                      [--roots-file FILE] [--summary]
   wanderlust recompile INPUT [analyze options] --out EXECUTABLE [--target TRIPLE] [--emit-only]
                        [--jobs N] [--cache-dir DIR] [--unit-shift BITS]
+                       [--horizon [--memory-limit BYTES]]
 
 intake identifies NSP/PFS0 packages, NCA headers, tickets, CNMT XML, extracted ExeFS
 directories and NSO files without modifying them; --verify-content streams SHA-256 over
@@ -46,6 +47,11 @@ EXECUTABLE.rs.<address>.bin. Translated blocks form one crate per 2^BITS-byte gu
 WL_JOBS or min(CPUs, 4)) and cached in DIR (default WL_CACHE_DIR or .wanderlust-cache beside
 EXECUTABLE), keyed by source, toolchain, target and flags. --target uses rustc's installed
 target and linker.
+
+--horizon (directory input) builds a Horizon process launcher instead of the register-level
+test harness: the main thread starts at the first module with X0 = 0, X1 = its handle, an
+NPDM-sized stack and TLS, and Horizon SVCs are served by the runtime. Process parameters come
+from main.npdm when present; --memory-limit sets the process memory size (default 512 MiB).
 Output is experimental; no TOTK boot, Horizon services or GPU support is claimed.";
 
 fn number(v: &str) -> Result<u64> {
@@ -77,6 +83,8 @@ struct Options {
     jobs: Option<usize>,
     cache_dir: Option<PathBuf>,
     unit_shift: u32,
+    horizon: bool,
+    memory_limit: u64,
 }
 fn utf8(value: &OsString) -> Result<&str> {
     value
@@ -118,6 +126,8 @@ fn options(args: &[OsString]) -> Result<Options> {
         jobs: None,
         cache_dir: None,
         unit_shift: wl_codegen_rust::EmitOptions::default().unit_shift,
+        horizon: false,
+        memory_limit: 0x2000_0000,
     };
     let mut used = Vec::new();
     let mut i = 2;
@@ -132,8 +142,9 @@ fn options(args: &[OsString]) -> Result<Options> {
             "--allow-unsupported" => o.allow_unsupported = true,
             "--summary" => o.summary = true,
             "--verify-content" => o.verify_content = true,
+            "--horizon" => o.horizon = true,
             "--base" | "--entry" | "--seed" | "--out" | "--target" | "--link" | "--roots-file"
-            | "--examples" | "--jobs" | "--cache-dir" | "--unit-shift" => {
+            | "--examples" | "--jobs" | "--cache-dir" | "--unit-shift" | "--memory-limit" => {
                 i += 1;
                 let value = args
                     .get(i)
@@ -148,6 +159,7 @@ fn options(args: &[OsString]) -> Result<Options> {
                     "--jobs" => o.jobs = Some(number(utf8(value)?)? as usize),
                     "--cache-dir" => o.cache_dir = Some(value.into()),
                     "--unit-shift" => o.unit_shift = number(utf8(value)?)? as u32,
+                    "--memory-limit" => o.memory_limit = number(utf8(value)?)?,
                     "--link" => {
                         o.link = Some(match utf8(value)? {
                             "host" => LinkMode::Host,
@@ -195,6 +207,8 @@ fn options(args: &[OsString]) -> Result<Options> {
             "--jobs",
             "--cache-dir",
             "--unit-shift",
+            "--horizon",
+            "--memory-limit",
         ],
     };
     if let Some(bad) = used.iter().find(|k| !allowed.contains(&k.as_str())) {
@@ -249,7 +263,8 @@ fn exefs_modules(dir: &Path) -> Result<Vec<(String, Module)>> {
 }
 fn load_process(o: &Options) -> Result<Process> {
     let modules = exefs_modules(&o.input)?;
-    let mode = o.link.unwrap_or(if modules[0].0 == "rtld" {
+    // A Horizon process links itself (rtld or a self-relocating crt0).
+    let mode = o.link.unwrap_or(if modules[0].0 == "rtld" || o.horizon {
         LinkMode::Guest
     } else {
         LinkMode::Host
@@ -259,6 +274,46 @@ fn load_process(o: &Options) -> Result<Process> {
         o.base.unwrap_or(GuestAddr(DEFAULT_CODE_BASE)),
         mode,
     )
+}
+/// Process parameters: from `main.npdm` when the ExeFS has one, otherwise documented defaults.
+fn horizon_options(o: &Options, p: &Process) -> Result<wl_codegen_rust::HorizonOptions> {
+    let npdm_path = o.input.join("main.npdm");
+    let (stack, priority, core, program_id, source) = if npdm_path.is_file() {
+        let npdm = wl_package::parse_npdm(&fs::read(&npdm_path).map_err(|e| e.to_string())?)?;
+        if !npdm.is_64_bit || npdm.address_space != "64-bit-39" {
+            return Err(format!(
+                "main.npdm requests a {} {} process; only 64-bit processes with a 39-bit address space are supported",
+                if npdm.is_64_bit { "64-bit" } else { "32-bit" },
+                npdm.address_space
+            ));
+        }
+        let program_id = npdm
+            .program_id
+            .as_deref()
+            .map(|id| u64::from_str_radix(id, 16))
+            .transpose()
+            .map_err(|e| e.to_string())?
+            .unwrap_or(0);
+        (
+            u64::from(npdm.main_thread_stack_size),
+            npdm.main_thread_priority,
+            npdm.main_thread_core,
+            program_id,
+            "main.npdm",
+        )
+    } else {
+        (0x10_0000, 44, 0, 0, "defaults (no main.npdm)")
+    };
+    Ok(wl_codegen_rust::HorizonOptions {
+        code_start: p.base.0,
+        code_end: p.base.0 + p.size,
+        program_id,
+        main_thread_stack_size: stack,
+        main_thread_priority: priority,
+        ideal_core: core,
+        memory_limit: o.memory_limit,
+        source,
+    })
 }
 fn analysis_summary(program: &Program) -> serde_json::Value {
     let largest = program
@@ -275,7 +330,10 @@ fn analysis_summary(program: &Program) -> serde_json::Value {
         .collect();
     serde_json::json!({
         "entry": program.entry,
-        "required_roots": program.roots.len() - program.speculative_roots_accepted,
+        "required_roots": program.roots.len() - program.speculative_roots_accepted - program.flow_roots,
+        "flow_roots": program.flow_roots,
+        "jump_tables": program.jump_tables.len(),
+        "jump_table_entries": program.jump_tables.values().sum::<usize>(),
         "speculative_roots_accepted": program.speculative_roots_accepted,
         "speculative_roots_rejected": program.rejected_roots.len(),
         "rejected_root_examples": program.rejected_roots.iter().take(16).collect::<Vec<_>>(),
@@ -435,7 +493,7 @@ fn run(args: &[OsString]) -> Result<()> {
     if let Some(blocker) = process.as_ref().and_then(|p| p.execution_blocker.as_ref()) {
         return Err(format!("process image is not executable: {blocker}"));
     }
-    let output = o.out.ok_or("recompile requires --out EXECUTABLE")?;
+    let output = o.out.clone().ok_or("recompile requires --out EXECUTABLE")?;
     let source = source_path(&output);
     let input = fs::canonicalize(&o.input).map_err(|e| e.to_string())?;
     for path in [&output, &source] {
@@ -478,6 +536,11 @@ fn run(args: &[OsString]) -> Result<()> {
         &modules,
         wl_codegen_rust::EmitOptions {
             unit_shift: o.unit_shift,
+            horizon: match (&process, o.horizon) {
+                (Some(p), true) => Some(horizon_options(&o, p)?),
+                (None, true) => return Err("--horizon requires an ExeFS directory input".into()),
+                _ => None,
+            },
         },
     )?;
     let emit_seconds = started.elapsed().as_secs_f64();
@@ -549,6 +612,8 @@ fn run(args: &[OsString]) -> Result<()> {
         "blocks": program.blocks.len(),
         "speculative_roots_accepted": program.speculative_roots_accepted,
         "speculative_roots_rejected": program.rejected_roots.len(),
+        "flow_roots": program.flow_roots,
+        "jump_tables": program.jump_tables.len(),
         "relocation": image.relocation,
         "generated_source_bytes": generated.main.len() + unit_source_bytes,
         "units": generated.units.len(),

@@ -105,7 +105,16 @@ fn budget_and_services() {
     c.tick(4).unwrap();
     assert!(c.tick(8).unwrap_err().contains("budget"));
     let old = c.x;
-    assert!(service(&mut c, 1).unwrap_err().contains("guest_pc=0x8"));
+    // Harness mode (no Horizon kernel): only ExitProcess is defined.
+    let mut p = Process {
+        memory: Memory::default(),
+        kernel: None,
+    };
+    assert!(
+        service(&mut c, &mut p, 1)
+            .unwrap_err()
+            .contains("guest_pc=0x8")
+    );
     assert_eq!(c.x, old);
-    assert!(service(&mut c, 7).unwrap());
+    assert_eq!(service(&mut c, &mut p, 7).unwrap(), Some("exit_process"));
 }

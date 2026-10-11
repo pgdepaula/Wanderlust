@@ -342,3 +342,46 @@ fn initializers_run_in_reverse_load_order() {
     assert_eq!(order, ["sdk", "main", "rtld"]);
     assert_eq!(p.link.init_order[0].address.0, p.modules[2].base.0 + 0x8);
 }
+#[test]
+fn relr_adds_the_base_to_address_and_bitmap_entries() {
+    // RELR table (inside the data words): address entry DATA_WORDS, then bitmap 0b1011
+    // selecting DATA_WORDS + 8 and DATA_WORDS + 24 (bit 0 marks a bitmap).
+    let relr = DATA_WORDS + 32;
+    let spec = Spec {
+        data: vec![0x100, 0x200, 7, 0x300, DATA_WORDS, 0b1011],
+        extra_dynamic: vec![(36, relr), (35, 16), (37, 8)],
+        ..Spec::default()
+    };
+    let p = build(vec![("main", spec.clone())], BASE, LinkMode::Host);
+    let words: Vec<u64> = (0..6)
+        .map(|i| word(&p, "main", DATA_WORDS + 8 * i))
+        .collect();
+    assert_eq!(
+        words,
+        [
+            BASE + 0x100,
+            BASE + 0x200,
+            7,
+            BASE + 0x300,
+            DATA_WORDS,
+            0b1011
+        ]
+    );
+    assert_eq!(p.link.applied["DT_RELR (relative)"], 3);
+    assert!(p.execution_blocker.is_none(), "{:?}", kinds(&p));
+    // Guest linking leaves the words for the guest's own crt0 to relocate.
+    let g = build(vec![("main", spec)], BASE, LinkMode::Guest);
+    assert_eq!(word(&g, "main", DATA_WORDS), 0x100);
+}
+#[test]
+fn relr_bitmap_before_an_address_is_malformed() {
+    let spec = Spec {
+        data: vec![0, 0b11],
+        extra_dynamic: vec![(36, DATA_WORDS + 8), (35, 8), (37, 8)],
+        ..Spec::default()
+    };
+    let p = build(vec![("main", spec)], BASE, LinkMode::Host);
+    assert!(kinds(&p).contains(&"relr-malformed"), "{:?}", kinds(&p));
+    assert!(p.execution_blocker.is_some());
+    assert_eq!(word(&p, "main", DATA_WORDS), 0);
+}

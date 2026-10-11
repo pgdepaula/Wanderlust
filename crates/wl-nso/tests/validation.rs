@@ -119,11 +119,26 @@ fn metadata_ranges_are_checked() {
 }
 #[test]
 fn checks_module_name_and_instruction_alignment() {
-    for (at, value) in [(0x2c, 1), (0x14, 1), (0x18, 3)] {
+    for (at, value) in [(0x14, 1), (0x18, 3)] {
         let mut b = fixture(false);
         put(&mut b, at, value);
         assert!(Module::parse(&b).is_err());
     }
+    // A module name extending past the end of the file is rejected.
+    let mut b = fixture(false);
+    let end = b.len() as u32;
+    put(&mut b, 0x1c, end);
+    put(&mut b, 0x2c, 1);
+    assert!(Module::parse(&b).unwrap_err().contains("module name"));
+}
+#[test]
+fn module_name_inside_the_header_means_absent() {
+    // elf2nso writes 1 into both module-name words; a range inside the header is no name.
+    let mut b = fixture(false);
+    put(&mut b, 0x1c, 1);
+    put(&mut b, 0x2c, 1);
+    let m = Module::parse(&b).unwrap();
+    assert_eq!(m.module_name_size, 0);
 }
 fn mod_fixture() -> Vec<u8> {
     let mut b = fixture(false);

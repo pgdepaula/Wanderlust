@@ -66,6 +66,30 @@ rustc --edition 2024 -C opt-level=3 tests/programs/host.rs -o generated/kernel-b
 ./generated/kernel-bin/host 0x123456789abcdef      # same hash as the guest's X0
 ```
 
+### libnx applications
+
+[`homebrew.py`](../../tools/python/homebrew.py) builds a libnx C program into an ExeFS directory (`main` NSO and `main.npdm`) with the flags of libnx's `switch_rules` (`-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE`, `switch.specs`, `elf2nso`, `npdmtool`). It locates devkitPro through `DEVKITPRO`, else `target/toolchains/devkitpro/root/opt/devkitpro`.
+
+The verified local toolchain was extracted there without administrator rights from the devkitPro pacman repositories (`https://pkg.devkitpro.org/packages/linux/x86_64/` for host tools, `https://pkg.devkitpro.org/packages/` for target libraries). Each archive was checked against the SHA-256 in the repository databases `dkp-linux.db` and `dkp-libs.db`:
+
+| Package | SHA-256 |
+|---|---|
+| devkita64-binutils-2.46.0-1-x86_64 | `0d61ad4946eb1080c6e645c41f0cfaac0a2eba5fec88426fef8f03363e933b5a` |
+| devkita64-gcc-16.1.0-1-x86_64 | `8192b899f0a5fcfe10d11fa63a631b45310c0c8f0b98d88c7c283c16e9d6b0fa` |
+| devkita64-newlib-4.6.0.20260123-4-any | `fc97ba1009a94b68f8714c3cc548ef697ca82687b72fe0c05a7ca3df81beb53e` |
+| devkita64-rules-1.1.1-1-any | `2649cf7827243447070073acc2aa2fee152a0592fc30e827ceed803c565a1ede` |
+| general-tools-1.4.4-1-x86_64 | `b6b59bd3d22d4f83a7f0668f749df7cf97b1f05083031e629d43ca4f4377c7b5` |
+| libnx-4.12.0-1-any | `c6950bdf8e4b872ece492225368c03e633776329548a7494f91aa1e8f239cd8a` |
+| switch-tools-1.13.1-1-x86_64 | `de0a9473764d3c5205a7cc9b640e9e913c371b5684d526133384eb7e545c7dab` |
+
+```sh
+python3 tools/python/homebrew.py tests/horizon/probe.c --out-dir generated/probe
+target/debug/wanderlust recompile generated/probe --horizon --allow-unsupported --out generated/probe-bin/probe
+./generated/probe-bin/probe
+```
+
+The built probe is committed as a test fixture ([`tests/horizon/probe`](../../tests/horizon/probe)), so tests need devkitPro only to rebuild it.
+
 SIMD/FP differential programs are assembled once with Keystone (`keystone-engine` 0.9.2, installed only to regenerate `tools/python/simd_encoding.json` with `tools/python/encode_simd.py`); the harness itself needs only Unicorn and Capstone.
 
 ## Native build cache

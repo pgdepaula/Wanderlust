@@ -257,6 +257,66 @@ impl Linker<'_> {
             (found.bind != 0).then(|| p.base.wrapping_add(found.value))
         })
     }
+    /// `DT_RELR` packed relative relocations (ELF gABI): an even entry is the module offset
+    /// of a word to relocate and starts a run; an odd entry is a bitmap whose bit i (i >= 1)
+    /// relocates word i-1 after the previous run position, which then advances by 63 words.
+    /// Each relocated word receives `*P += B`. Nintendo's rtld does not process RELR; libnx's
+    /// self-relocation does, so this is applied as a documented extension.
+    fn relr(&mut self, m: usize, range: wl_nso::dynamic::Range) {
+        let base = self.modules[m].base;
+        let module = self.modules[m].module;
+        let Ok(bytes) = module.read(range.offset, range.size) else {
+            self.diag(
+                "error",
+                m,
+                "relr-unmapped",
+                "DT_RELR table is not mapped".into(),
+                None,
+            );
+            return;
+        };
+        let mut next: Option<u64> = None;
+        let mut count = 0u64;
+        for entry in bytes.chunks_exact(8) {
+            let word = u64::from_le_bytes(entry.try_into().unwrap_or([0; 8]));
+            let targets: Vec<u64> = if word & 1 == 0 {
+                next = Some(word + 8);
+                vec![word]
+            } else {
+                let Some(start) = next else {
+                    self.diag(
+                        "error",
+                        m,
+                        "relr-malformed",
+                        "DT_RELR bitmap precedes any address entry".into(),
+                        None,
+                    );
+                    return;
+                };
+                next = Some(start + 63 * 8);
+                (1..64)
+                    .filter(|i| (word >> i) & 1 == 1)
+                    .map(|i| start + (i - 1) * 8)
+                    .collect()
+            };
+            for offset in targets {
+                let address = base.wrapping_add(offset);
+                match self.locate(address, 8) {
+                    Some((i, at)) if self.mappings[i].write => {
+                        let value = base.wrapping_add(self.read64(i, at));
+                        self.write(i, at, &value.to_le_bytes());
+                        self.pointer(value, m);
+                        count += 1;
+                    }
+                    _ => {
+                        self.diag("error", m, "relocation-target-unmapped", format!("DT_RELR target at module offset {offset:#x} is not writable mapped memory"), Some(address));
+                    }
+                }
+            }
+        }
+        *self.applied.entry("DT_RELR (relative)").or_default() += count;
+        self.diag("note", m, "relr-extension", format!("{count} DT_RELR relocations applied; Horizon's rtld does not process DT_RELR (libnx's self-relocation does)"), None);
+    }
     fn relative_prefix(&mut self, m: usize) {
         let Some(d) = self.modules[m].dynamic else {
             return;
@@ -515,14 +575,8 @@ impl Process {
         };
         for (m, p) in placed.iter().enumerate() {
             if let Some(d) = p.dynamic {
-                if d.relr.is_some() {
-                    linker.diag(
-                        "error",
-                        m,
-                        "unsupported-dynamic-tag",
-                        "DT_RELR packed relocations are not processed by rtld; not applied".into(),
-                        None,
-                    );
+                if let Some(range) = d.relr {
+                    linker.relr(m, range);
                 }
                 for name in RTLD_PUBLISHED {
                     if d.lookup(name).is_some() && mode == LinkMode::Host {

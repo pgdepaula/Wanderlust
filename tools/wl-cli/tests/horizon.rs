@@ -1,0 +1,142 @@
+//! A real libnx application (tests/horizon/probe.c, built with devkitA64 and libnx into the
+//! NSO and NPDM in tests/horizon/probe/) runs through the complete pipeline: parse, load,
+//! analysis, AOT compilation, native execution against the Horizon process environment, and
+//! exit through svcExitProcess.
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::atomic::{AtomicU64, Ordering},
+};
+static ID: AtomicU64 = AtomicU64::new(0);
+struct Temp(PathBuf);
+impl Temp {
+    fn new() -> Self {
+        let p = std::env::temp_dir().join(format!(
+            "wanderlust-horizon-{}-{}",
+            std::process::id(),
+            ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&p).unwrap();
+        Self(p)
+    }
+}
+impl Drop for Temp {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+fn root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+fn cli() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_wanderlust"))
+}
+/// Lines the probe reports through svcOutputDebugString, derived independently:
+/// handle = index 1023 (top-down) | linear id 1 << 15; TLS value 0x5a5a + fib(15) = 0x5cbc;
+/// a GetInfo with subtype 1 fails with InvalidCombination (0xe801) and zero output; the
+/// checksum of 4096 values i * 2654435761 is 0x952e8000; ratio = 1 MiB stack / 512 MiB.
+const EXPECTED: [&str; 3] = [
+    "probe tid=0x72 pid=0x51 handle=0x83ff tls=0x5cbc getinfo_bad_subtype=0xe801 out=0",
+    "text state=3 perm=5 size=0x10000; stack state=11 perm=3 size=0x100000 in_stack_region=1",
+    "heap_ok=1 sum=952e8000 ratio=0.001953 used_below_total=1",
+];
+fn run(input: &Path, t: &Temp) -> serde_json::Value {
+    let out = t.0.join(format!("native{}", std::env::consts::EXE_SUFFIX));
+    let build = cli()
+        .arg("recompile")
+        .arg(input)
+        .args(["--horizon", "--allow-unsupported", "--out"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&build.stdout).unwrap();
+    assert!(report["jump_tables"].as_u64().unwrap() > 0, "{report}");
+    let run = Command::new(&out).output().unwrap();
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        run.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    serde_json::from_str(stdout.trim()).unwrap()
+}
+fn check(state: &serde_json::Value) {
+    assert_eq!(state["mode"], "horizon");
+    assert_eq!(state["status"], "exit_process", "{state}");
+    assert_eq!(state["fault"], serde_json::Value::Null);
+    assert_eq!(state["config_source"], "main.npdm");
+    let lines: Vec<&str> = state["debug_output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l.as_str().unwrap())
+        .collect();
+    assert_eq!(lines, EXPECTED);
+    let svc = &state["svc_counts"];
+    // Startup: RELRO reprotect + lock, GetInfo, heap, stack query; then the probe's own calls.
+    for (id, count) in [
+        ("0x01", 1),
+        ("0x02", 1),
+        ("0x03", 1),
+        ("0x07", 1),
+        ("0x24", 1),
+        ("0x25", 1),
+        ("0x27", 3),
+    ] {
+        assert_eq!(svc[id], count, "svc {id}: {svc}");
+    }
+    assert_eq!(state["thread"]["id"], 0x72);
+    assert_eq!(state["heap"][1], 0x1fc0_0000);
+}
+
+#[test]
+fn libnx_application_runs_natively_under_horizon() {
+    let t = Temp::new();
+    check(&run(&root().join("tests/horizon/probe"), &t));
+}
+
+/// Rebuilds the fixture from source when devkitA64 and libnx are available
+/// (`DEVKITPRO` or target/toolchains/devkitpro); otherwise reports the skip.
+#[test]
+fn rebuilt_probe_matches_the_committed_fixture_behaviour() {
+    let local = root().join("target/toolchains/devkitpro/root/opt/devkitpro");
+    let dkp = std::env::var_os("DEVKITPRO")
+        .map(PathBuf::from)
+        .unwrap_or(local);
+    if !dkp.join("devkitA64/bin/aarch64-none-elf-gcc").is_file() {
+        eprintln!("skipped: devkitA64 not found at {}", dkp.display());
+        return;
+    }
+    let t = Temp::new();
+    let dir = t.0.join("probe");
+    let python = std::env::var("WL_PYTHON").unwrap_or_else(|_| "python3".into());
+    let o = Command::new(python)
+        .arg(root().join("tools/python/homebrew.py"))
+        .arg(root().join("tests/horizon/probe.c"))
+        .arg("--out-dir")
+        .arg(&dir)
+        .env("DEVKITPRO", &dkp)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    check(&run(&dir, &t));
+}
+
+#[test]
+fn horizon_mode_requires_an_exefs_directory() {
+    let t = Temp::new();
+    let o = cli()
+        .arg("recompile")
+        .arg(root().join("tests/horizon/probe/main"))
+        .args(["--horizon", "--out"])
+        .arg(t.0.join("x"))
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+}

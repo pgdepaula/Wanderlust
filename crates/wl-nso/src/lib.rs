@@ -121,11 +121,16 @@ impl Module {
             ));
         }
         let bss_size = u32_at(bytes, 0x3c)?;
-        let module_name_offset = FileOffset(u32_at(bytes, 0x1c)?);
-        let module_name_size = u32_at(bytes, 0x2c)?;
+        let mut module_name_offset = FileOffset(u32_at(bytes, 0x1c)?);
+        let mut module_name_size = u32_at(bytes, 0x2c)?;
+        // A name "inside" the 0x100-byte header is not a name: elf2nso stores 1 in both words
+        // (alignment values in its segment-header view). Such a module has no name.
+        if module_name_offset.0 < 0x100 {
+            module_name_offset = FileOffset(0);
+            module_name_size = 0;
+        }
         let name_end = u64::from(module_name_offset.0) + u64::from(module_name_size);
-        if module_name_size != 0 && (module_name_offset.0 < 0x100 || name_end > bytes.len() as u64)
-        {
+        if module_name_size != 0 && name_end > bytes.len() as u64 {
             return Err("module name file range is invalid".into());
         }
         let mut segments = Vec::new();
