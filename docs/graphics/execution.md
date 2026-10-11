@@ -134,8 +134,8 @@ increment-once, immediate and exact-zero NOP packets, preserves packet state acr
 input chunks, rejects unsupported opcodes and method-address overflow, and detects
 truncation at a logical stream end. It retains no source borrows or heap storage.
 The caller supplies little-endian decoded words and stops the channel on a fault.
-This decoder does not execute engine registers or translate method writes into
-the host command stream. Legacy/tertiary packets and end-segment control are rejected.
+The packet decoder itself does not execute engine registers. The separate bounded
+B197 texture state interpreter is described below. Legacy/tertiary packets and end-segment control are rejected.
 
 Authentic game rendering additionally requires NV service/channel setup, GPFIFO
 entry fetching and engine state, resource descriptors, synchronization semantics
@@ -172,3 +172,51 @@ metadata and driver storage. The texture benchmark additionally measures global
 Rust allocator traffic around synchronization. CPU stage durations measure source
 access, deswizzle, decompression, and host upload preparation separately. Readback
 waits remain explicit. These counters do not imply zero-copy driver transfers.
+
+## Maxwell texture state boundary
+
+`maxwell::Maxwell3d` consumes `fifo::MethodWrite` with byte offsets, for one B197
+engine instance shared by its bound subchannels. It implements only:
+
+| Byte method | Implemented interpretation |
+|---|---|
+| `0x0000` | Bind class B197, engine instance zero |
+| `0x0100` | Documented no-operation |
+| `0x0f10` | Select modern Maxwell texture headers, value one |
+| `0x155c`, `0x1560`, `0x1564` | Sampler pool upper/lower address and inclusive maximum index |
+| `0x1574`, `0x1578`, `0x157c` | Image header pool upper/lower address and inclusive maximum index |
+| `0x1424`, `0x1428` | NO_WFI sampler/header cache invalidation events, all or tagged line |
+
+Method writes and faults allocate no heap storage. Unsupported classes, unbound
+subchannels, invalid field bits and unimplemented methods fail explicitly; the
+caller must stop a channel on fault. WFI invalidations, semaphores, render targets,
+draw registers, MME macros and shader program state are not executed. NO_WFI cache
+events advance descriptor epochs without asserting completion or guest memory writes.
+
+Pool addressing is 40-bit, descriptors are 32 bytes, limits are inclusive and
+index arithmetic is checked before mapped memory reads. Pool bases must be 32-byte
+aligned in this implementation; the public method header does not establish a
+hardware alignment fault rule. Modern block-linear TICs preserve the separate
+48-bit image address, 16-bit width/height-minus-one, GOB block height, allocated and
+view mip range, UNORM channel types, identity swizzle and sRGB flag. Supported
+formats are A8B8G8R8 (`0x08`), DXT1 (`0x24`) and ASTC 4×4 (`0x40`). Accepted textures
+are normalized, single-layer 2D, without sparse modes, depth, multisampling or mip
+subviews. Unsupported fields retain word/bit diagnostics instead of being masked
+into a plausible descriptor.
+
+The TSC subset accepts clamp-to-edge in all axes, matching nearest or linear
+minification/magnification, and minimum/maximum LOD zero. MIP_NONE and MIP_POINT
+are equivalent under that clamp and the fixed LOD-zero shader. Comparison,
+anisotropy, reduction, LOD bias, border values and normalization overrides fail.
+The synthetic explicit-mip draw API remains separate from these guest sampler
+semantics. Future general shader execution cannot infer the original sampler
+state from the reduced filter field alone.
+
+`resolve_texture` reads mapped TIC/TSC memory every call, so pool changes and
+descriptor backing updates cannot leave stale decoded records. It accepts explicit
+image/sampler indices supplied by its caller. They are **not** obtained from
+`SET_BINDLESS_TEXTURE`: that register selects a constant-buffer slot, not a texture.
+Original shader handles and constant buffers are still unimplemented. The tested
+bridge runs literal FIFO pool methods, descriptor resolution, guest texture reads,
+conversion and real sampled draw/readback. The last draw is the existing synthetic
+execution command with fixed WGSL, not a decoded Maxwell draw or shader.

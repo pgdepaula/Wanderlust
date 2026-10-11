@@ -1,0 +1,305 @@
+//! MAXWELL_B (B197) texture pool state and modern block-linear TIC/TSC subset.
+//! Register offsets are bytes; FIFO packet addresses are separately word-based.
+use crate::{Error, Result, fifo::MethodWrite, format::Format, invalid, memory::*, texture::*};
+
+pub const CLASS: u32 = 0xb197;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MethodError {
+    InvalidSubchannel(u8),
+    InvalidMethod(u16),
+    UnboundSubchannel(u8),
+    UnsupportedClass(u32),
+    UnsupportedMethod(u16),
+    UnsupportedValue { method: u16, value: u32 },
+    EpochOverflow,
+}
+impl std::fmt::Display for MethodError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Maxwell method fault: {self:?}")
+    }
+}
+impl std::error::Error for MethodError {}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MethodEffect {
+    State,
+    TextureHeadersInvalidated(Option<u32>),
+    SamplersInvalidated(Option<u32>),
+}
+#[derive(Debug, Clone, Copy, Default)]
+struct Pool {
+    upper: Option<u32>,
+    lower: Option<u32>,
+    maximum: Option<u32>,
+}
+impl Pool {
+    fn descriptor(&self, index: u32) -> Result<GpuAddress> {
+        let (Some(high), Some(low), Some(maximum)) = (self.upper, self.lower, self.maximum) else {
+            return Err(invalid("incomplete Maxwell descriptor pool"));
+        };
+        if index > maximum {
+            return Err(invalid("descriptor index exceeds inclusive pool limit"));
+        }
+        let base = (u64::from(high) << 32) | u64::from(low);
+        // Accepted implementation subset, not an inferred hardware fault rule.
+        if base % 32 != 0 {
+            return Err(invalid("descriptor pool base must be 32-byte aligned"));
+        }
+        let address = base
+            .checked_add(u64::from(index) * 32)
+            .ok_or_else(|| invalid("descriptor address overflow"))?;
+        if address.checked_add(32).is_none_or(|end| end > 1 << 40) {
+            return Err(invalid("descriptor exceeds 40-bit pool address space"));
+        }
+        Ok(GpuAddress(address))
+    }
+}
+/// One channel's single MAXWELL_B instance. Subchannels route to the same state;
+/// rebinding the same class does not manufacture an independent register bank.
+#[derive(Debug, Default)]
+pub struct Maxwell3d {
+    bound: [bool; 8],
+    modern_headers: bool,
+    images: Pool,
+    samplers: Pool,
+    pub texture_header_epoch: u64,
+    pub sampler_epoch: u64,
+}
+impl Maxwell3d {
+    /// Allocation-free even on errors. Caller must stop the channel on a fault.
+    pub fn apply(&mut self, write: MethodWrite) -> std::result::Result<MethodEffect, MethodError> {
+        let MethodWrite {
+            subchannel,
+            method,
+            value,
+        } = write;
+        if subchannel >= 8 {
+            return Err(MethodError::InvalidSubchannel(subchannel));
+        }
+        if method % 4 != 0 || method > 0x3ffc {
+            return Err(MethodError::InvalidMethod(method));
+        }
+        let bad = || MethodError::UnsupportedValue { method, value };
+        if method == 0 {
+            // Engine instance zero only; SET_OBJECT carries a class, not texture ID.
+            if value != CLASS {
+                return Err(MethodError::UnsupportedClass(value));
+            }
+            self.bound[subchannel as usize] = true;
+            return Ok(MethodEffect::State);
+        }
+        if !self.bound[subchannel as usize] {
+            return Err(MethodError::UnboundSubchannel(subchannel));
+        }
+        match method {
+            0x0100 => {} // documented NO_OPERATION
+            0x0f10 => {
+                if value != 1 {
+                    return Err(bad());
+                }
+                self.modern_headers = true;
+            }
+            0x155c | 0x1574 => {
+                if value & !0xff != 0 {
+                    return Err(bad());
+                }
+                if method == 0x155c {
+                    self.samplers.upper = Some(value);
+                } else {
+                    self.images.upper = Some(value);
+                }
+            }
+            0x1560 => self.samplers.lower = Some(value),
+            0x1578 => self.images.lower = Some(value),
+            0x1564 => {
+                if value & !0xfffff != 0 {
+                    return Err(bad());
+                }
+                self.samplers.maximum = Some(value);
+            }
+            0x157c => {
+                if value & !0x3fffff != 0 {
+                    return Err(bad());
+                }
+                self.images.maximum = Some(value);
+            }
+            0x1424 | 0x1428 => {
+                if value & !0x03fffff1 != 0 {
+                    return Err(bad());
+                }
+                let index = (value & 1 != 0).then_some((value >> 4) & 0x3fffff);
+                let epoch = if method == 0x1424 {
+                    &mut self.sampler_epoch
+                } else {
+                    &mut self.texture_header_epoch
+                };
+                *epoch = epoch.checked_add(1).ok_or(MethodError::EpochOverflow)?;
+                return Ok(if method == 0x1424 {
+                    MethodEffect::SamplersInvalidated(index)
+                } else {
+                    MethodEffect::TextureHeadersInvalidated(index)
+                });
+            }
+            _ => return Err(MethodError::UnsupportedMethod(method)),
+        }
+        Ok(MethodEffect::State)
+    }
+    /// Descriptor indices are supplied by a caller, not a fabricated bind method.
+    /// Original shader handle/constant-buffer decoding is not implemented.
+    pub fn resolve_texture(
+        &self,
+        subchannel: u8,
+        image_index: u32,
+        sampler_index: u32,
+        map: &AddressMap,
+        memory: &impl GuestMemory,
+    ) -> Result<TextureDesc> {
+        if !self
+            .bound
+            .get(subchannel as usize)
+            .copied()
+            .unwrap_or(false)
+            || !self.modern_headers
+        {
+            return Err(invalid(
+                "unbound engine or modern texture headers not selected",
+            ));
+        }
+        let image = TextureImage::decode(read_descriptor(
+            self.images.descriptor(image_index)?,
+            map,
+            memory,
+        )?)?;
+        let sampler = TextureSampler::decode(read_descriptor(
+            self.samplers.descriptor(sampler_index)?,
+            map,
+            memory,
+        )?)?;
+        let desc = image.with_sampler(sampler);
+        Ok(desc)
+    }
+}
+fn read_descriptor(
+    address: GpuAddress,
+    map: &AddressMap,
+    memory: &impl GuestMemory,
+) -> Result<[u32; 8]> {
+    let guest = map.resolve(address, 32)?;
+    let bytes = memory.read(guest, 32)?;
+    if bytes.len() != 32 {
+        return Err(invalid("short descriptor read"));
+    }
+    Ok(std::array::from_fn(|n| {
+        u32::from_le_bytes(
+            bytes[n * 4..n * 4 + 4]
+                .try_into()
+                .expect("checked descriptor"),
+        )
+    }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextureImage {
+    pub address: GpuAddress,
+    pub width: u32,
+    pub height: u32,
+    pub mip_count: u32,
+    pub format: Format,
+    pub layout: TextureLayout,
+}
+impl TextureImage {
+    pub fn decode(words: [u32; 8]) -> Result<Self> {
+        // These masks select implemented fields, not merely reserved bits. Fields
+        // such as depth, sparse modes and multisampling are rejected explicitly.
+        let masks = [
+            u32::MAX,
+            0xfffffe00,
+            0x00e0ffff,
+            0xf0000038,
+            0x07c0ffff,
+            0x8000ffff,
+            0,
+            0xff,
+        ];
+        for (n, (&word, &mask)) in words.iter().zip(&masks).enumerate() {
+            if word & !mask != 0 {
+                return Err(Error(format!(
+                    "unsupported TIC word {n} bits {:#x}",
+                    word & !mask
+                )));
+            }
+        }
+        if words[0] & !0x7f != 0x58d24900 {
+            return Err(invalid("unsupported TIC channel types or swizzle"));
+        }
+        if words[2] >> 21 & 7 != 3 || words[4] >> 23 & 15 != 1 || words[5] >> 31 != 1 {
+            return Err(invalid("requires normalized block-linear 2D TIC"));
+        }
+        let srgb = words[4] & (1 << 22) != 0;
+        let format = match (words[0] & 0x7f, srgb) {
+            (0x08, false) => Format::Rgba8Unorm,
+            (0x08, true) => Format::Rgba8Srgb,
+            (0x24, false) => Format::Bc1Rgba,
+            (0x24, true) => Format::Bc1RgbaSrgb,
+            (0x40, false) => Format::Astc4x4,
+            (0x40, true) => Format::Astc4x4Srgb,
+            _ => return Err(invalid("unsupported TIC format")),
+        };
+        let max_mip = words[3] >> 28;
+        if words[7] & 15 != 0 || words[7] >> 4 & 15 != max_mip {
+            return Err(invalid("TIC mip subviews unsupported"));
+        }
+        let image = Self {
+            address: GpuAddress(u64::from(words[1]) | (u64::from(words[2] & 0xffff) << 32)),
+            width: (words[4] & 0xffff) + 1,
+            height: (words[5] & 0xffff) + 1,
+            mip_count: max_mip + 1,
+            format,
+            layout: TextureLayout::BlockLinear {
+                block_height_log2: ((words[3] >> 3) & 7) as u8,
+            },
+        };
+        image
+            .with_sampler(TextureSampler {
+                filter: Filter::Nearest,
+            })
+            .validate()?;
+        Ok(image)
+    }
+    pub fn with_sampler(self, sampler: TextureSampler) -> TextureDesc {
+        TextureDesc {
+            address: self.address,
+            width: self.width,
+            height: self.height,
+            mip_count: self.mip_count,
+            format: self.format,
+            layout: self.layout,
+            filter: sampler.filter,
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextureSampler {
+    pub filter: Filter,
+}
+impl TextureSampler {
+    pub fn decode(words: [u32; 8]) -> Result<Self> {
+        if words[0] != 0x92 || words[1] & !0xf7 != 0 || words[2..].iter().any(|&v| v != 0) {
+            return Err(invalid(
+                "unsupported TSC wrap, compare, LOD, bias, anisotropy or border fields",
+            ));
+        }
+        let mag = words[1] & 7;
+        let min = (words[1] >> 4) & 3;
+        let mip = (words[1] >> 6) & 3;
+        if mag != min || !matches!(mip, 1 | 2) {
+            return Err(invalid("unsupported TSC filter combination"));
+        }
+        let filter = match mag {
+            1 => Filter::Nearest,
+            2 => Filter::Linear,
+            _ => return Err(invalid("unsupported TSC filter")),
+        };
+        Ok(Self { filter })
+    }
+}

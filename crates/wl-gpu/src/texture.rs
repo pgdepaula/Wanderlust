@@ -40,6 +40,14 @@ impl TextureDesc {
     /// One layer, depth one. Matches tegra_swizzle's sequential mip packing.
     /// Layer alignment/3D and pitch-linear hardware descriptors are not represented.
     pub fn levels(&self) -> Result<Vec<MipLayout>> {
+        let mut levels = Vec::with_capacity(self.mip_count.min(32) as usize);
+        self.visit_levels(|level| levels.push(level))?;
+        Ok(levels)
+    }
+    pub(crate) fn validate(&self) -> Result<()> {
+        self.visit_levels(|_| {})
+    }
+    fn visit_levels(&self, mut visit: impl FnMut(MipLayout)) -> Result<()> {
         if self.width == 0
             || self.height == 0
             || self.mip_count == 0
@@ -47,7 +55,6 @@ impl TextureDesc {
         {
             return Err(invalid("invalid 2D texture dimensions or mip count"));
         }
-        let mut levels = Vec::with_capacity(self.mip_count as usize);
         let mut offset = 0_usize;
         for mip in 0..self.mip_count {
             let width = (self.width >> mip).max(1);
@@ -71,7 +78,7 @@ impl TextureDesc {
                 usize::try_from(self.format.layout(width, height, 1)?.size)
                     .map_err(|_| invalid("texture host size overflow"))?
             };
-            levels.push(MipLayout {
+            visit(MipLayout {
                 width,
                 height,
                 offset,
@@ -89,7 +96,7 @@ impl TextureDesc {
             .0
             .checked_add(offset as u64)
             .ok_or_else(|| invalid("surface address overflow"))?;
-        Ok(levels)
+        Ok(())
     }
     pub fn source_size(&self) -> Result<usize> {
         let levels = self.levels()?;

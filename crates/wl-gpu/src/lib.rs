@@ -8,6 +8,7 @@ pub mod compression;
 pub mod fifo;
 pub mod format;
 pub mod layout;
+pub mod maxwell;
 pub mod memory;
 pub mod texture;
 #[cfg(feature = "wgpu-backend")]

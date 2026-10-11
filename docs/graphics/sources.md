@@ -121,3 +121,34 @@ establishes portable behavior on D3D12 without claiming that native hardware
 acceptance validates LDR input. BC1 native selection depends on the negotiated BC
 feature and a block-aligned base extent; other extents preserve their exact sampling
 domain through RGBA fallback. BC3 remains geometry-only.
+
+## Maxwell texture fields and shader compiler assessment
+
+NVIDIA [clb197.h](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/3d/clb197.h)
+and [clb197tex.h](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/3d/clb197tex.h),
+MIT, define the implemented B197 method offsets, modern BL texture header and
+sampler fields. Literal test words are specification-derived; no descriptor
+encoder generates the validation reference. The archived Ryujinx `TextureDescriptor`,
+`SamplerDescriptor`, `FormatTable` and texture pool sources at the revision above
+were inspected as a second interpretation reference. Legacy TEXHEAD and TEXHEADV2
+layouts are distinct and are not decoded as the modern BL format.
+
+[`shader-compiler-rs` f9f0fbc](https://github.com/DCNick3/shader-compiler-rs/tree/f9f0fbc998279a663d0bc98937a0bde880efc8db)
+was assessed at source level. The library takes a 0x50-byte shader program header
+plus Maxwell instruction data; its CLI additionally strips a 0x30-byte NVN header.
+The C++ bridge emits SPIR-V 1.4; GLSL output involves an additional SPIRV-Cross step.
+Graphics stage mapping excludes VertexA and compute in the wrapper. The inspected
+environment returns zero for constant-buffer values, assumes 2D textures and throws
+for unimplemented pixel-format queries. A raw header cast and missing structured
+exception boundary require a bounded input/error adapter. Hardcoded capabilities
+and combined image/sampler bindings require adapter negotiation and Naga/wgpu
+binding adaptation, not direct unchecked shader import.
+
+Although the README declares MPL-2.0, vendored files such as
+[`program_header.h`](https://github.com/DCNick3/shader-compiler-rs/blob/f9f0fbc998279a663d0bc98937a0bde880efc8db/vendor/shader_compiler/program_header.h)
+retain GPL-2.0-or-later SPDX identifiers. This discrepancy prevents treating the
+entire distribution as an established permissive dependency. No source was imported
+or linked. A viable mature-compiler integration requires resolving the actual file
+licenses, then implementing bounded SPH input, constant-buffer/descriptor callbacks,
+capability control and separate texture/sampler bindings before Naga validation.
+Naga remains a host IR/compiler component, never a Maxwell machine-code decoder.

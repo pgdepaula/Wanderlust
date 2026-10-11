@@ -210,3 +210,33 @@ respectively, excluding upload/readback. ASTC's six-mip CPU decode stage took
 6,776 bytes on both. Backend order, cold caches, debug compilation and system noise
 prevent a comparative speed claim. Transfer-volume savings do not imply matching
 frame-time savings.
+
+## Maxwell pool and descriptor execution
+
+`maxwell` tests validate literal NVIDIA TIC/TSC words, 48-bit image addresses versus
+40-bit pool addresses, mip/view restrictions, format/channel/swizzle fields,
+unsupported methods/classes, incomplete state, mapping/truncation, inclusive limits,
+shared engine state across subchannels and NO_WFI invalidation without invented
+completion. Every chunk size of the literal FIFO pool stream is tested.
+`maxwell_allocations` processes 6,000 FIFO-to-engine writes and 1,000 descriptor
+resolutions with zero measured Rust allocations/reallocations; malformed method
+faults also remain compact. Geometry validation and layout construction share one
+checked traversal, so descriptor validation does not allocate a mip vector.
+
+`maxwell_gpu` executes literal pool packets, resolves literal RGBA8/BC1/ASTC TICs
+and TSCs through guest memory, samples 37×19 images, repoints descriptor pools to
+aliased texture backing, and verifies every framebuffer pixel. The descriptor
+indices are explicit test inputs; original shader handles and draw methods remain
+outside this test. Six actual draws transfer 16,872 upload bytes, 29,280 padded
+readback bytes, and pack 16,872 bytes. Three unchanged synchronizations upload
+nothing. Cache invalidation methods introduce no CPU waits; six readbacks do.
+
+Executed 21 CPU-only graphics tests with `--no-default-features --locked`. All four
+GPU executables (`headless`, `texture_gpu`, `compressed_gpu`, `maxwell_gpu`) passed
+explicit execution on WSL GL and native Windows D3D12/Vulkan. Crate Clippy and
+formatting passed. A source snapshot of graphics baseline `40531b1` plus this
+deliverable, using its exact committed dependency lock, passed workspace formatting,
+Clippy and 117 Rust tests; four GPU tests are ignored in that CPU run. A separate
+newer workspace snapshot encountered NPDM Clippy warnings (`question_mark` and
+`needless_range_loop`), independently of the graphics validation. No runtime or
+NPDM source was changed by the graphics implementation.

@@ -86,3 +86,4 @@ pub fn assert_pixels(actual: &[u8], expected: &[u8], tolerance: u8) {
 }
 
 pub mod compressed;
+pub mod maxwell;
