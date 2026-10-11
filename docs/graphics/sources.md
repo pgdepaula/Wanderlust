@@ -186,3 +186,19 @@ pinned envytools tools as the constant fragments and disassembled before decodin
 Write/read/wait field placement is independently specified by envytools' gm107
 scheduler table and the Mesa scheduler. No external compiler runs at application
 runtime and no GPL implementation was copied.
+
+For TEX.B/IPA, the same MIT Mesa emitter independently establishes indirect TEX
+opcode `0xdeb80000`, LZ mode one in bits 38:37, 2D dimension one in 30:29,
+RGBA mask 15 in 34:31, coordinate base in 15:8 and handle GPR in 27:20.
+`emitIPA`, `TargetGM107::isBarrierRequired` and UAM `SetPsImap` establish
+screen-linear generic input fields and the required variable-latency write barriers.
+Mesa's MIT `nvc0_tex.c` uses combined TIC-low20/TSC-high12 handles; these are not
+invented descriptor IDs. The pinned NVIDIA pool/TIC/TSC definitions remain the
+source of descriptor semantics.
+
+The TEX fixture uses envytools with one development-only grammar repair: in
+`envydis/gm107.c`, the TEX.B dummy token `N("0x0")` is named `N("zero")` so envyas
+can parse it as a keyword rather than a numeric expression. No encoding fields
+change. The original unmodified envydis disassembles the resulting bytes as
+`tex b lz ... 0x0 t2d 0xf`; Mesa independently confirms those fields. Neither
+assembler nor patched source is linked or needed at runtime.

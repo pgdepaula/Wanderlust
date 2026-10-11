@@ -9,25 +9,46 @@ pub struct ConstantRef {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
-    Immediate { dst: u8, bits: u32 },
-    Move { dst: u8, src: u8 },
-    Constant { dst: u8, input: u8 },
+    Immediate {
+        dst: u8,
+        bits: u32,
+    },
+    Move {
+        dst: u8,
+        src: u8,
+    },
+    Constant {
+        dst: u8,
+        input: u8,
+    },
+    Interpolate {
+        dst: u8,
+        component: u8,
+    },
+    Sample2d {
+        dst: u8,
+        coordinates: u8,
+        handle: u8,
+    },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FragmentProgram {
     operations: Vec<Operation>,
     constants: Vec<ConstantRef>,
+    texture_input: Option<u8>,
 }
 impl FragmentProgram {
     pub fn decode(input: &[u8]) -> Result<Self> {
         if input.len() < 112 || input.len() > 0x50 + 4096 || (input.len() - 0x50) % 32 != 0 {
             return Err(invalid("invalid Maxwell fragment length"));
         }
+        let interpolated = u32::from_le_bytes(input[24..28].try_into().unwrap()) == 15;
         for (n, b) in input[..0x50].chunks_exact(4).enumerate() {
             let expected = match n {
                 0 => 0x61462,
                 4 => 0xff000,
                 18 => 15,
+                6 if interpolated => 15,
                 _ => 0,
             };
             if u32::from_le_bytes(b.try_into().unwrap()) != expected {
@@ -37,10 +58,12 @@ impl FragmentProgram {
         let mut out = Self {
             operations: Vec::new(),
             constants: Vec::new(),
+            texture_input: None,
         };
         let mut initialized = [false; 256];
         initialized[255] = true; // RZ
         let mut pending = [false; 256];
+        let mut provenance = [None; 256];
         let mut exited = false;
         for (bundle_index, bundle) in input[0x50..].chunks_exact(32).enumerate() {
             let control = u64::from_le_bytes(bundle[..8].try_into().unwrap());
@@ -126,12 +149,67 @@ impl FragmentProgram {
                         dst,
                         input: index as u8,
                     }
+                } else if word & !(255 | (0x3ffu64 << 28)) == 0xe003ff800ff7ff00 {
+                    let attribute = ((word >> 28) & 0x3ff) as u32;
+                    if !interpolated
+                        || !matches!(attribute, 0x80 | 0x84)
+                        || write_barrier != 0
+                        || pending.iter().any(|v| *v)
+                    {
+                        return Err(fail("unsupported IPA input or scoreboard"));
+                    }
+                    pending[dst as usize] = true;
+                    Operation::Interpolate {
+                        dst,
+                        component: ((attribute - 0x80) / 4) as u8,
+                    }
+                } else if word & !(255 | (255u64 << 8) | (255u64 << 20)) == 0xdeb80027a0070000 {
+                    let coordinates = ((word >> 8) & 255) as u8;
+                    let handle = ((word >> 20) & 255) as u8;
+                    if dst > 251
+                        || coordinates > 253
+                        || write_barrier != 0
+                        || pending.iter().any(|v| *v)
+                        || !initialized[coordinates as usize]
+                        || !initialized[coordinates as usize + 1]
+                        || !initialized[handle as usize]
+                    {
+                        return Err(fail("unsupported TEX register group or scoreboard"));
+                    }
+                    let input = provenance[handle as usize]
+                        .ok_or_else(|| fail("TEX handle must originate in scalar LDC"))?;
+                    if out.texture_input.is_some() {
+                        return Err(fail("only one TEX operation supported"));
+                    }
+                    out.texture_input = Some(input);
+                    for r in dst..dst + 4 {
+                        initialized[r as usize] = true;
+                        pending[r as usize] = true;
+                        provenance[r as usize] = None;
+                    }
+                    Operation::Sample2d {
+                        dst,
+                        coordinates,
+                        handle,
+                    }
                 } else {
                     return Err(fail("unsupported instruction/modifier/predicate"));
                 };
-                if pending[dst as usize] && !matches!(op, Operation::Constant { .. }) {
+                if pending[dst as usize]
+                    && !matches!(
+                        op,
+                        Operation::Constant { .. }
+                            | Operation::Interpolate { .. }
+                            | Operation::Sample2d { .. }
+                    )
+                {
                     return Err(fail("write to pending register"));
                 }
+                provenance[dst as usize] = match op {
+                    Operation::Constant { input, .. } => Some(input),
+                    Operation::Move { src, .. } => provenance[src as usize],
+                    _ => None,
+                };
                 initialized[dst as usize] = true;
                 out.operations.push(op);
             }
@@ -140,6 +218,9 @@ impl FragmentProgram {
             return Err(invalid("fragment missing EXIT"));
         }
         Ok(out)
+    }
+    pub fn texture_input(&self) -> Option<u8> {
+        self.texture_input
     }
     pub fn constants(&self) -> &[ConstantRef] {
         &self.constants
@@ -150,10 +231,26 @@ impl FragmentProgram {
     pub fn wgsl(&self) -> String {
         use std::fmt::Write;
         let mut s = String::from(
-            "struct Constants { words: array<vec4<u32>,16> };\n@group(0) @binding(0) var<uniform> cb: Constants;\n@vertex fn vs_main(@builtin(vertex_index) i:u32)->@builtin(position) vec4<f32>{ let p=array<vec2<f32>,3>(vec2(-1.,-1.),vec2(3.,-1.),vec2(-1.,3.));return vec4(p[i],0.,1.);}\n@fragment fn fs_main()->@location(0) vec4<f32>{var r:array<u32,256>;\n",
+            "struct Constants { words: array<vec4<u32>,16> };\n@group(0) @binding(0) var<uniform> cb: Constants;\n",
         );
+        if self.texture_input.is_some() {
+            s.push_str("@group(1) @binding(0) var image:texture_2d<f32>; @group(1) @binding(1) var image_sampler:sampler;\n");
+        }
+        s.push_str("struct Vertex { @builtin(position) position:vec4<f32>, @location(0) @interpolate(linear) uv:vec2<f32> };\n@vertex fn vs_main(@builtin(vertex_index) i:u32)->Vertex { let ps=array<vec2<f32>,3>(vec2(-1.,-1.),vec2(3.,-1.),vec2(-1.,3.));let p=ps[i];var v:Vertex;v.position=vec4(p,0.,1.);v.uv=vec2((p.x+1.)*.5,(1.-p.y)*.5);return v;}\n@fragment fn fs_main(v:Vertex)->@location(0) vec4<f32>{var r:array<u32,256>;\n");
         for op in &self.operations {
             match *op {
+                Operation::Interpolate { dst, component } => {
+                    writeln!(s, "r[{dst}]=bitcast<u32>(v.uv[{component}]);").unwrap()
+                }
+                Operation::Sample2d {
+                    dst, coordinates, ..
+                } => {
+                    writeln!(s,"let sampled=textureSampleLevel(image,image_sampler,vec2(bitcast<f32>(r[{coordinates}]),bitcast<f32>(r[{}])),0.);",coordinates+1).unwrap();
+                    for c in 0..4 {
+                        writeln!(s, "r[{}]=bitcast<u32>(sampled[{c}]);", dst + c).unwrap();
+                    }
+                }
+
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
                 Operation::Constant { dst, input } => {

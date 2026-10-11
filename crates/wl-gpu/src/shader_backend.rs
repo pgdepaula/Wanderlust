@@ -14,6 +14,9 @@ pub(crate) struct ResidentFragment {
     pub pipeline: wgpu::RenderPipeline,
     pub binding: wgpu::BindGroup,
     pub ready: bool,
+    pub texture_binding: Option<wgpu::BindGroup>,
+    texture_id: Option<crate::texture::TextureId>,
+    descriptor: Option<(crate::maxwell::DescriptorStamp, crate::texture::TextureDesc)>,
     buffer: wgpu::Buffer,
     data: [u8; 256],
     stamps: [Option<Stamp>; 64],
@@ -67,7 +70,11 @@ impl Renderer {
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("translated resource layout"),
-                bind_group_layouts: &[&layout],
+                bind_group_layouts: &if program.texture_input().is_some() {
+                    vec![&layout, &self.texture_layout]
+                } else {
+                    vec![&layout]
+                },
                 push_constant_ranges: &[],
             });
         let shader = self
@@ -109,11 +116,17 @@ impl Renderer {
             self.poisoned = true;
             return Err(Error(e.to_string()));
         }
+        if let Some(old) = self.resource_fragment.as_ref().and_then(|f| f.texture_id) {
+            self.textures.remove(&old);
+        }
         self.resource_fragment = Some(ResidentFragment {
             program: program.clone(),
             pipeline,
             binding,
             ready: false,
+            texture_binding: None,
+            texture_id: None,
+            descriptor: None,
             buffer,
             data: [0; 256],
             stamps: [None; 64],
@@ -172,6 +185,22 @@ impl Renderer {
                 self.counters.guest_to_host_bytes += 4;
             }
         }
+        // Resolve the uniform handle through actual descriptor pools before uploads.
+        let texture = if let Some(input) = f.program.texture_input() {
+            let n = input as usize * 4;
+            let handle = u32::from_le_bytes(data[n..n + 4].try_into().unwrap());
+            let subchannel = engine.texture_subchannel()?;
+            let stamp = engine.descriptor_stamp(subchannel, handle, map, changes)?;
+            let desc = if let Some((_, desc)) = f.descriptor.filter(|(old, _)| *old == stamp) {
+                desc
+            } else {
+                self.counters.descriptor_reads += 2;
+                engine.resolve_handle(subchannel, handle, map, memory)?
+            };
+            Some((stamp, desc))
+        } else {
+            None
+        };
         // Small fixed staging image; upload only the enclosing changed word interval.
         let first = data
             .chunks_exact(4)
@@ -193,7 +222,34 @@ impl Renderer {
         }
         f.data = data;
         f.stamps = stamps;
-        f.ready = true;
+        if let Some((stamp, desc)) = texture {
+            let id = match f.texture_id {
+                Some(id) => id,
+                None => {
+                    let mut candidate = u64::MAX;
+                    while self
+                        .textures
+                        .contains_key(&crate::texture::TextureId(candidate))
+                    {
+                        candidate = candidate
+                            .checked_sub(1)
+                            .ok_or_else(|| invalid("texture IDs exhausted"))?;
+                    }
+                    crate::texture::TextureId(candidate)
+                }
+            };
+            // Release the resident-fragment borrow before using the shared texture cache.
+            self.sync_texture(id, desc, map, memory, changes)?;
+            let binding = self.textures[&id].bindings[0].clone();
+            let f = self.resource_fragment.as_mut().expect("resident fragment");
+            f.texture_id = Some(id);
+            f.descriptor = Some((stamp, desc));
+            f.texture_binding = Some(binding);
+            f.ready = true;
+        } else {
+            f.ready = true;
+        }
+
         self.counters.bind_group_reuses += 1;
         Ok(())
     }

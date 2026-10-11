@@ -130,3 +130,38 @@ fn fifo_constant_binding_snapshot_and_checked_access() {
     };
     assert!(bad.read_word(4, &map, &memory).is_err());
 }
+#[test]
+fn independently_assembled_tex_ipa_and_resource_provenance() {
+    let binary = include_bytes!("fixtures/maxwell/tex.bin");
+    let program = FragmentProgram::decode(binary).unwrap();
+    assert_eq!(program.texture_input(), Some(0));
+    assert_eq!(program.constants(), &[ConstantRef { slot: 0, offset: 0 }]);
+    let m = naga::front::wgsl::parse_str(&program.wgsl()).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::empty(),
+    )
+    .validate(&m)
+    .unwrap();
+    for (offset, bit) in [
+        (24, 1u64),
+        (96, 1u64 << 54),
+        (96, 1u64 << 51),
+        (96, 1u64 << 28),
+        (120, 1u64 << 37),
+        (120, 1u64 << 31),
+        (120, 1u64 << 28),
+        (120, 1u64 << 50),
+        (120, 1u64 << 16),
+        (120, 1u64 << 20),
+        (112, 1u64 << 11),
+    ] {
+        let mut b = binary.to_vec();
+        let w = u64::from_le_bytes(b[offset..offset + 8].try_into().unwrap()) ^ bit;
+        b[offset..offset + 8].copy_from_slice(&w.to_le_bytes());
+        assert!(
+            FragmentProgram::decode(&b).is_err(),
+            "offset {offset} bit {bit:#x}"
+        );
+    }
+}

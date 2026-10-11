@@ -291,6 +291,7 @@ impl Renderer {
                 },
             );
             self.counters.texture_allocations += 1;
+            self.counters.bind_group_allocations += u64::from(desc.mip_count);
             self.counters.texture_cache_misses += 1;
         }
         let resident = self.textures.get_mut(&id).expect("texture allocated");

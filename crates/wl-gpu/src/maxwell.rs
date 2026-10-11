@@ -85,6 +85,15 @@ impl ConstantBuffer {
         ))
     }
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DescriptorStamp {
+    image: GuestAddress,
+    sampler: GuestAddress,
+    image_version: (u64, u64),
+    sampler_version: (u64, u64),
+    image_epoch: u64,
+    sampler_epoch: u64,
+}
 /// One channel's single MAXWELL_B instance. Subchannels route to the same state;
 /// rebinding the same class does not manufacture an independent register bank.
 #[derive(Debug, Default)]
@@ -232,6 +241,52 @@ impl Maxwell3d {
             .copied()
             .flatten()
             .ok_or_else(|| invalid("unbound constant buffer group/slot"))
+    }
+    /// Maxwell's 32-bit combined handle: low 20 bits TIC, high 12 bits TSC.
+    /// TEX.B supplies this handle from a register; SET_BINDLESS_TEXTURE instead
+    /// selects a CB slot for the distinct bound-TEX instruction form.
+    pub fn resolve_handle(
+        &self,
+        subchannel: u8,
+        handle: u32,
+        map: &AddressMap,
+        memory: &impl GuestMemory,
+    ) -> Result<TextureDesc> {
+        self.resolve_texture(subchannel, handle & 0xfffff, handle >> 20, map, memory)
+    }
+    pub(crate) fn texture_subchannel(&self) -> Result<u8> {
+        self.bound
+            .iter()
+            .position(|b| *b)
+            .map(|n| n as u8)
+            .ok_or_else(|| invalid("no bound B197 subchannel"))
+    }
+    pub(crate) fn descriptor_stamp(
+        &self,
+        subchannel: u8,
+        handle: u32,
+        map: &AddressMap,
+        changes: &TextureChanges,
+    ) -> Result<DescriptorStamp> {
+        if !self
+            .bound
+            .get(subchannel as usize)
+            .copied()
+            .unwrap_or(false)
+            || !self.modern_headers
+        {
+            return Err(invalid("texture engine not configured"));
+        }
+        let image = map.resolve(self.images.descriptor(handle & 0xfffff)?, 32)?;
+        let sampler = map.resolve(self.samplers.descriptor(handle >> 20)?, 32)?;
+        Ok(DescriptorStamp {
+            image,
+            sampler,
+            image_version: changes.stamp(image.0..image.0 + 32),
+            sampler_version: changes.stamp(sampler.0..sampler.0 + 32),
+            image_epoch: self.texture_header_epoch,
+            sampler_epoch: self.sampler_epoch,
+        })
     }
     /// Descriptor indices are supplied by a caller, not a fabricated bind method.
     /// Original shader handle/constant-buffer decoding is not implemented.

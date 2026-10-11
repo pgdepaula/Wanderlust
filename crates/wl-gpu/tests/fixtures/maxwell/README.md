@@ -49,3 +49,14 @@ above. Each LDC assigns write barrier zero; the next load or consumer explicitly
 waits for it. Values are supplied by guest memory at runtime, not in the binary.
 
 LDC fixture SHA-256: `6ce81713fa666f853432524c02a2c524e2ef0cfdf67b99b3cc9bbd6ab79b9e48`.
+
+`tex.asm`/`tex.bin` load the combined handle from c0[0], interpolate generic-zero
+x/y through IPA pass and sample TEX.B.LZ 2D RGBA. All three variable-latency
+instruction families assign write barrier zero and consumers/reusers wait-one.
+Prepend the same header with word six additionally set to 0xf (screen-linear xy).
+The test harness supplies the varying; no game code is included.
+
+Assembly uses the development grammar alias described in `docs/graphics/sources.md`:
+rename the TEX.B dummy `N("0x0")` to `N("zero")` in the pinned gm107 table.
+The original envydis confirms the resulting TEX.B opcode/operands. SHA-256 of the
+144-byte fixture: `7297c6d6a48aaa36e12372e3a228e3fdbe9c6141caedab5e1d4f30bb08cf2f70`.

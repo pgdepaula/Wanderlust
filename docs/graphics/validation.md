@@ -298,3 +298,33 @@ heap storage. A debug native D3D12 run measured 191.7 microseconds for those 32
 CPU synchronizations; this excludes rendering and is not game-frame performance.
 Readback totals are 17,984 padded GPU bytes and 10,204 packed CPU bytes. Queue
 writes use owned wgpu staging; these results do not establish zero-copy transfers.
+
+## Binary TEX.B / IPA validation
+
+`tex.bin` independently encodes LDC c0[0], two screen-linear IPA pass inputs and
+TEX.B.LZ 2D RGBA with explicit scoreboard waits. Its unchanged binary samples
+TIC1/TSC0 first, then TIC1/TSC1 after a guest handle update. Invalid TIC/TSC limits
+and the intentionally invalid TIC0 fail rather than selecting a default texture.
+The 37x19 asymmetric image and 74x38 bilinear output validate orientation, channels,
+clamped edge footprints, sampler selection, GPU aliases, descriptor invalidation
+and guest texel changes. RGBA8 UNORM/sRGB, ASTC LDR fallback and BC1 fallback run
+through the translated instruction. Independent scalar GOB placement and a double
+precision bilinear/sRGB oracle define expected pixels with maximum one output-byte
+tolerance. Alpha remains linear. A test-oracle mismatch initially compared encoded
+sRGB bytes after aliasing; correcting it to decoded linear values restored validation.
+
+The new GPU executable passed explicitly on WSL OpenGL, Windows Intel UHD D3D12
+and Windows Vulkan. Initial Windows startup again encountered WSL vsock timeout;
+the rebuilt final executable passed both native APIs. CPU instruction/provenance
+negative tests and strict package Clippy pass. Thirty-two unchanged synchronizations
+per format allocate/reallocate zero Rust heap storage and perform no constant reads,
+descriptor reads or uploads. Across four formats and 13 readback draws the WSL run
+recorded 84 constant guest bytes, 32 constant upload bytes, 34 descriptor reads,
+13 texture uploads and 128 texture-cache hits. Exactly one additional module and
+pipeline serve all these data/descriptor changes. This is a fragment harness,
+not original vertex-program or guest hardware-draw execution.
+
+The complete LDC delivery's committed-baseline workspace snapshot additionally
+passed formatting, strict workspace Clippy and 224 tests (six GPU tests explicitly
+ignored there and separately executed as documented above). This does not assert
+that unrelated concurrent live-worktree edits passed those checks.

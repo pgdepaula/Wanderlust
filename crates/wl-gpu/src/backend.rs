@@ -426,6 +426,9 @@ impl Renderer {
                     });
                     pass.set_pipeline(&fragment.pipeline);
                     pass.set_bind_group(0, &fragment.binding, &[]);
+                    if let Some(binding) = &fragment.texture_binding {
+                        pass.set_bind_group(1, binding, &[]);
+                    }
                     pass.draw(0..3, 0..1);
                     draws_remaining -= 1;
                     first = false;

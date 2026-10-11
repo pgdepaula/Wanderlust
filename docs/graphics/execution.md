@@ -292,3 +292,35 @@ acceptance is not completion; wgpu owns staging and submitted resource reference
 It executes the translated program and synchronized resources but does not represent
 a B197 hardware draw or vertex shader. Existing renderer and texture paths remain
 available. No runtime memory owner or runtime ABI has been changed.
+
+## Binary texture-resource semantics
+
+The straight-line program additionally accepts one unpredicated TEX.B.LZ 2D,
+RGBA destination mask, float results, normalized coordinates, no offsets, shadow,
+array, sparse or derivative modifiers. Two consecutive coordinate registers feed
+`textureSampleLevel(...,0)`. The handle register must have scalar LDC provenance
+(possibly through MOV); arithmetic/dynamic handle selection is unsupported. Raw
+register bits remain integers until coordinate/output float bitcasts.
+
+A 32-bit combined handle resolves TIC from bits 19:0 and TSC from bits 31:20.
+The runtime resolves both pools independently, validates limits and descriptors,
+and binds the resulting texture/sampler to a stable host group-one interface.
+No GPU address or changing handle value enters WGSL. TEX.B does not use
+SET_BINDLESS_TEXTURE: that method selects a constant-buffer slot for the distinct
+bound-TEX encoding, which remains unsupported.
+
+IPA pass/default-sample for generic attribute zero x/y (byte offsets 0x80/0x84)
+provides screen-linear coordinates. The accepted SPH variant declares exactly
+those two screen-linear components (word six 0xf); other interpolation/header
+variants fail. IPA and TEX use the same conservative barrier-zero dependency
+subset as LDC. The harness vertex shader provides genuine interpolated UV values;
+no original vertex binary is executed. Hardware geometry/draw state remains absent.
+
+Descriptor cache identity includes canonical TIC/TSC backing ranges, journal
+versions, mapping epoch and engine invalidation epochs. Changed descriptor handles,
+sampler fields, pools or mappings cannot retain stale bindings. Existing texture
+conversion, format fallback and dirty-mip caching are reused. Internal texture IDs
+are allocated from unused entries; dropping/replacing a resident program releases
+its cached texture entry, while wgpu retains submitted/bound resource references.
+No explicit resource destruction occurs before completion. Every harness draw
+requires a successful synchronization; an invalid handle disables the draw.
