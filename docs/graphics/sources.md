@@ -77,7 +77,7 @@ synthetic host commands establish no NVN or game ABI compatibility.
 [`wwylele/astc-decode`](https://github.com/wwylele/astc-decode) provides an
 Apache-2.0 Rust software LDR ASTC decoder. Its repository last push observed through
 the GitHub API was June 2021. It is a candidate for a separately validated fallback,
-not an adopted codec; HDR behavior and performance were not established. ASTC
+now adopted with the explicit subset and validation described below. ASTC
 availability is probed per adapter. Native D3D12 and Vulkan must not be assumed to
 expose identical compression support. Decoding to RGBA adds CPU conversion and
 upload bandwidth; BCn transcoding introduces a separate quality/cost decision.
@@ -86,3 +86,38 @@ Only permissively licensed dependencies were introduced. No GPL emulator depende
 proprietary shader, asset, game dump or decryption material is included. The root
 repository currently contains no license file; this assessment does not assign a
 new license to the project's own code or replace dependency notice obligations.
+
+## Compressed texture implementation
+
+[`astc-decode` 0.3.1](https://github.com/wwylele/astc-decode/tree/4c1a13de8c63693f52ab0593b062f8bb6c83c7af)
+(Apache-2.0) now supplies the block decoder. Its RGBA callback and boolean validity
+result fit bounded block-at-a-time conversion. The wrapper additionally rejects
+HDR endpoint modes, multipartition blocks, and bounded void extents: the upstream
+routine can otherwise emit an error color for unsupported endpoint modes while
+returning success. Invalid blocks fail the upload; magenta is not accepted as a
+successful fallback. Assertions in malformed dependency input are caught at the
+conversion boundary under the default unwind profile, publishing no partial image.
+This is deliberately a subset of ASTC LDR 4×4, not general ASTC support.
+
+[`texture2ddecoder` 0.1.2](https://github.com/K0lb3/texture2ddecoder-rs/tree/2b1f1f2f45595058f9523578c8924c2cb14d2127)
+provides BC1 RGBA decoding via `decode_bc1a_block`. Its MIT/Apache-2.0 distribution
+and MIT BC implementation permit reuse with retained notices. Packed `u32` pixels
+are BGRA in little-endian bytes; the wrapper explicitly writes RGBA. The non-alpha
+BC1 routine has different selector-three behavior and is unsuitable for BC1 RGBA.
+The published crate fails to compile with all features disabled; its `alloc`
+feature is enabled. No Crunch entrypoint or upstream ASTC decoder is invoked.
+The latter lacks the validity distinction needed at this boundary.
+
+The independent nonuniform ASTC reference block and expected bitmap pixels come
+from [Google astc-codec](https://github.com/google/astc-codec/tree/9757befb64db6662aad45de09ca87cd6f599ac02/src/decoder/testdata),
+Apache-2.0; revision, original-file hashes and license are retained in the test
+fixtures. Void extent and LDR endpoint restrictions follow the
+[Khronos Data Format Specification 1.3.1](https://registry.khronos.org/DataFormat/specs/1.3/dataformat.1.3.html).
+No ASTC encoder was substituted for a decoder.
+
+Native BC upload follows the wgpu 26 utility implementation's physical mip extent
+rounding. Native ASTC is intentionally not enabled yet: one validated software path
+establishes portable behavior on D3D12 without claiming that native hardware
+acceptance validates LDR input. BC1 native selection depends on the negotiated BC
+feature and a block-aligned base extent; other extents preserve their exact sampling
+domain through RGBA fallback. BC3 remains geometry-only.

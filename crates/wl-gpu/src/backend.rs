@@ -104,7 +104,8 @@ impl Renderer {
         }))
         .map_err(|e| Error(format!("no headless adapter: {e}")))?;
         let supported = adapter.features();
-        let enabled = supported & wgpu::Features::TIMESTAMP_QUERY;
+        let enabled =
+            supported & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TEXTURE_COMPRESSION_BC);
         let adapter_limits = adapter.limits();
         let required_limits =
             wgpu::Limits::downlevel_defaults().using_resolution(adapter_limits.clone());

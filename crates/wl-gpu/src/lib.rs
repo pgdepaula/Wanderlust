@@ -4,6 +4,7 @@
 #[cfg(feature = "wgpu-backend")]
 pub mod backend;
 pub mod command;
+pub mod compression;
 pub mod fifo;
 pub mod format;
 pub mod layout;
@@ -11,6 +12,8 @@ pub mod memory;
 pub mod texture;
 #[cfg(feature = "wgpu-backend")]
 mod texture_backend;
+#[cfg(feature = "wgpu-backend")]
+pub use texture_backend::TextureUploadPolicy;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub String);

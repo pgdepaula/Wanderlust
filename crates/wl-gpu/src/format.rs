@@ -6,15 +6,17 @@ pub enum Format {
     Rgba8Unorm,
     Rgba8Srgb,
     Bc1Rgba,
+    Bc1RgbaSrgb,
     Bc3Rgba,
     Astc4x4,
+    Astc4x4Srgb,
 }
 impl Format {
     pub fn block(self) -> (u32, u32, u32) {
         match self {
             Self::Rgba8Unorm | Self::Rgba8Srgb => (1, 1, 4),
-            Self::Bc1Rgba => (4, 4, 8),
-            Self::Bc3Rgba | Self::Astc4x4 => (4, 4, 16),
+            Self::Bc1Rgba | Self::Bc1RgbaSrgb => (4, 4, 8),
+            Self::Bc3Rgba | Self::Astc4x4 | Self::Astc4x4Srgb => (4, 4, 16),
         }
     }
     pub fn layout(self, width: u32, height: u32, alignment: u32) -> Result<LinearLayout> {

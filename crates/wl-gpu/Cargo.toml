@@ -10,6 +10,8 @@ wgpu-backend = ["dep:wgpu", "dep:pollster"]
 
 [dependencies]
 tegra_swizzle = "0.4.0"
+astc-decode = "0.3.1"
+texture2ddecoder = { version = "0.1.2", default-features = false, features = ["alloc"] }
 wgpu = { version = "26.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "dx12", "gles", "wgsl"], optional = true }
 pollster = { version = "0.4", optional = true }
 
@@ -19,4 +21,8 @@ naga = { version = "26.0.0", features = ["wgsl-in"] }
 
 [[example]]
 name = "headless"
+required-features = ["wgpu-backend"]
+
+[[example]]
+name = "textures"
 required-features = ["wgpu-backend"]

@@ -86,13 +86,13 @@ of potentially inconsistent executor state. Ordinary preflight errors permit ret
 ## Formats and capabilities
 
 Rendering/readback targets implement `Rgba8Unorm`. Guest texture sampling implements
-RGBA8 UNORM and sRGB, nearest/bilinear clamp-to-edge, and explicitly selected 2D mips.
+RGBA8, BC1 RGBA and a validated ASTC LDR 4×4 subset, in UNORM and sRGB interpretations, with nearest/bilinear clamp-to-edge and explicitly selected 2D mips.
 `Format` describes block geometry
 for RGBA8 linear/sRGB, BC1 RGBA, BC3 RGBA and ASTC 4×4; geometry is not codec or
 backend sampling support. `BlockLinear2d` uses `tegra_swizzle` for one 2D mip with
 GOB height 1, 2, 4, 8, 16 or 32, and a 64 MiB conversion budget. Compressed input
 uses block coordinates. It preserves encoded block bytes and does not decompress
-ASTC or BCn. `TextureDesc` assembles 2D mip chains using the library's per-mip GOB
+ASTC or BCn itself. A separate compressed block decoder follows deswizzling. `TextureDesc` assembles 2D mip chains using the library's per-mip GOB
 height reduction and successive padded mip sizes. Arrays, depth/stencil and
 multisampling are unsupported.
 
@@ -123,8 +123,8 @@ staging acceptance; it does not assert GPU completion. Uploads do not insert wai
 Texture removal drops CPU handles, leaving submitted references owned by wgpu.
 
 Adapter information, all supported features, enabled features, adapter limits and
-requested device limits are exposed. Only timestamp queries are optionally enabled;
-compression features are reported, not implicitly required. Device limits use
+requested device limits are exposed. Timestamp queries and native BC compression are optionally enabled;
+ASTC features are reported but not required or enabled. Device limits use
 conservative downlevel defaults with the adapter's resolution limits. The baseline
 does not require descriptor indexing, push constants or pipeline-cache extensions.
 
@@ -142,3 +142,33 @@ entry fetching and engine state, resource descriptors, synchronization semantics
 and a Maxwell shader decoder/lowering path. Naga validates the controlled WGSL
 shader; it cannot decode Maxwell machine instructions. See [sources](sources.md)
 and [executed validation](validation.md).
+
+
+## Compressed sampling and transfer policy
+
+`TextureUploadPolicy::Auto` selects native BC1 on negotiated-capable adapters when
+base dimensions are multiples of four. Each encoded mip upload rounds its copy
+extent to physical block dimensions, including 1×1 final mips. Other BC1 extents
+and `Software` use BC1-alpha decoding into RGBA8. ASTC always uses software RGBA8:
+unbounded LDR void extents and single-partition LDR endpoint modes are supported;
+HDR, multipartition, bounded void extent and illegal encodings return errors.
+Footprints other than 4×4 are not represented. Edge pixels crop to the declared
+extent. Encoded sRGB values remain encoded until the host sRGB texture view samples
+them; alpha is never transferred through the sRGB curve.
+
+Host format participates in resident identity, so switching native/fallback policy
+cannot reuse an incompatible resource. All changed mips are validated/converted
+before any host mutation. A bad compressed block preserves prior resident data
+and content stamps. Both encoded source and decoded image allocations are bounded;
+a decoded surface may not exceed 64 MiB. Unchanged compressed resources do not
+repeat decompression or uploads. Dirty compressed writes conservatively invalidate
+whole mips, not an imagined linear byte rectangle. Partial block uploads and
+reusable staging pools are not implemented.
+
+`decompress_bytes` counts produced RGBA bytes; `deswizzle_bytes` counts linearized
+encoded bytes; `guest_texture_bytes` counts borrowed guest source reads, including
+padding. `temporary_allocations` counts owned image conversion buffers, excluding
+metadata and driver storage. The texture benchmark additionally measures global
+Rust allocator traffic around synchronization. CPU stage durations measure source
+access, deswizzle, decompression, and host upload preparation separately. Readback
+waits remain explicit. These counters do not imply zero-copy driver transfers.

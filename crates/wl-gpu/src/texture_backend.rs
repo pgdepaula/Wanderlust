@@ -7,6 +7,7 @@ use std::{
 
 pub(crate) struct ResidentTexture {
     pub desc: TextureDesc,
+    pub host_format: wgpu::TextureFormat,
     pub texture: wgpu::Texture,
     pub bindings: Vec<wgpu::BindGroup>,
     levels: Vec<MipLayout>,
@@ -78,7 +79,22 @@ pub(crate) fn pipeline(device: &wgpu::Device) -> (wgpu::BindGroupLayout, wgpu::R
     (bindings, pipeline)
 }
 
+/// Auto uses native BC1 for block-aligned base extents on a capable adapter.
+/// ASTC currently always uses the validated LDR software subset.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextureUploadPolicy {
+    Auto,
+    Software,
+}
+
 impl Renderer {
+    pub fn texture_host_format(&self, id: TextureId) -> Result<wgpu::TextureFormat> {
+        self.textures
+            .get(&id)
+            .map(|t| t.host_format)
+            .ok_or_else(|| invalid("unknown texture"))
+    }
+
     /// Synchronize changed whole mips. Guest writes are canonical addresses, so
     /// aliases invalidate together. No wait is inserted: queue writes precede draws.
     pub fn sync_texture(
@@ -89,24 +105,62 @@ impl Renderer {
         memory: &impl GuestMemory,
         changes: &TextureChanges,
     ) -> Result<()> {
+        self.sync_texture_with_policy(id, desc, map, memory, changes, TextureUploadPolicy::Auto)
+    }
+
+    pub fn sync_texture_with_policy(
+        &mut self,
+        id: TextureId,
+        desc: TextureDesc,
+        map: &AddressMap,
+        memory: &impl GuestMemory,
+        changes: &TextureChanges,
+        policy: TextureUploadPolicy,
+    ) -> Result<()> {
         if self.poisoned {
             return Err(invalid("renderer unavailable after backend failure"));
         }
+        let native_bc = policy == TextureUploadPolicy::Auto
+            && self
+                .capabilities
+                .enabled
+                .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
+            && desc.width % 4 == 0
+            && desc.height % 4 == 0;
         let host_format = match desc.format {
             Format::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
             Format::Rgba8Srgb => wgpu::TextureFormat::Rgba8UnormSrgb,
-            _ => return Err(invalid("compressed texture sampling not implemented")),
+            Format::Bc1Rgba if native_bc => wgpu::TextureFormat::Bc1RgbaUnorm,
+            Format::Bc1RgbaSrgb if native_bc => wgpu::TextureFormat::Bc1RgbaUnormSrgb,
+            Format::Bc1Rgba | Format::Astc4x4 => wgpu::TextureFormat::Rgba8Unorm,
+            Format::Bc1RgbaSrgb | Format::Astc4x4Srgb => wgpu::TextureFormat::Rgba8UnormSrgb,
+            _ => return Err(invalid("compressed format sampling not implemented")),
         };
+        let fallback = desc.format.block().0 > 1 && !host_format.is_compressed();
         if desc.width > self.capabilities.device_limits.max_texture_dimension_2d
             || desc.height > self.capabilities.device_limits.max_texture_dimension_2d
         {
             return Err(invalid("texture exceeds device limits"));
         }
-        let existing = self.textures.get(&id).filter(|t| t.desc == desc);
+        let existing = self
+            .textures
+            .get(&id)
+            .filter(|t| t.desc == desc && t.host_format == host_format);
         let levels = match existing {
             Some(t) => Cow::Borrowed(t.levels.as_slice()),
             None => Cow::Owned(desc.levels()?),
         };
+        if fallback {
+            let mut total = 0u64;
+            for m in levels.iter() {
+                total = total
+                    .checked_add(Format::Rgba8Unorm.layout(m.width, m.height, 1)?.size)
+                    .ok_or_else(|| invalid("decoded surface size overflow"))?;
+            }
+            if total > 64 * 1024 * 1024 {
+                return Err(invalid("decoded surface exceeds 64 MiB budget"));
+            }
+        }
         let fingerprint = |m: &MipLayout| -> Result<(Range<u64>, (u64, u64))> {
             let gpu = GpuAddress(
                 desc.address
@@ -154,6 +208,17 @@ impl Renderer {
                     Cow::Owned(data)
                 } else {
                     Cow::Borrowed(raw)
+                };
+                let data = if fallback {
+                    let start = Instant::now();
+                    let rgba =
+                        crate::compression::decode_rgba8(desc.format, m.width, m.height, &data)?;
+                    self.texture_timings.decompress += start.elapsed();
+                    self.counters.decompress_bytes += rgba.len() as u64;
+                    self.counters.temporary_allocations += 1;
+                    Cow::Owned(rgba)
+                } else {
+                    data
                 };
                 uploads.push((n as u32, data));
             }
@@ -218,6 +283,7 @@ impl Renderer {
                 id,
                 ResidentTexture {
                     desc,
+                    host_format,
                     texture,
                     bindings,
                     levels: new_levels,
@@ -230,7 +296,12 @@ impl Renderer {
         let resident = self.textures.get_mut(&id).expect("texture allocated");
         for (mip, data) in uploads {
             let level = resident.levels[mip as usize];
-            let layout = desc.format.layout(level.width, level.height, 1)?;
+            let layout = if fallback {
+                Format::Rgba8Unorm
+            } else {
+                desc.format
+            }
+            .layout(level.width, level.height, 1)?;
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &resident.texture,
@@ -248,7 +319,8 @@ impl Renderer {
                     width: level.width,
                     height: level.height,
                     depth_or_array_layers: 1,
-                },
+                }
+                .physical_size(host_format),
             );
             self.counters.upload_bytes += data.len() as u64;
             self.counters.texture_uploads += 1;

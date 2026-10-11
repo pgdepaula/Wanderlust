@@ -1,0 +1,10 @@
+ASTC_REFERENCE and ASTC_PIXELS in tests/common/compressed.rs derive from Google
+astc-codec, Copyright 2018 Google LLC, Apache License 2.0 (LICENSE-APACHE).
+Revision: 9757befb64db6662aad45de09ca87cd6f599ac02
+Source: https://github.com/google/astc-codec/tree/9757befb64db6662aad45de09ca87cd6f599ac02/src/decoder/testdata
+Block 63 (x=28,y=28) of footprint_4x4.astc, byte offset 1024, and corresponding
+RGBA pixels extracted independently from footprint_4x4.bmp.
+Whole-file SHA256:
+ASTC a50bf8146c466b5941b2b21f969d49b9b7d770b4de810e1791e8ed33a0016f94
+BMP  9a16fbf67b4bb9a0ec3f3e3b78006f39610f7869e0cdb4bd945d660957d1090e
+Other constant ASTC and BC1 blocks are synthetic specification-derived test data.

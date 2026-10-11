@@ -147,3 +147,66 @@ The exact delivery snapshot passed workspace formatting, Clippy and 111 tests;
 both adapter-dependent tests were explicitly ignored in that CPU-only snapshot.
 One Windows Vulkan launch failed before entering the test with WSL
 `UtilAcceptVsock: accept4 failed 110`; repeating the same executable passed.
+
+## Compressed guest texture sampling
+
+Executed `cargo test -p wl-gpu --no-default-features --locked`: 17 CPU tests passed,
+including independent ASTC/BC1 pixels, channel order, odd edge blocks, invalid
+lengths/modes/HDR and unsupported formats. `cargo clippy -p wl-gpu --all-targets
+--locked -- -D warnings` and crate formatting passed. The committed-baseline source
+snapshot with the exact candidate lockfile passed workspace formatting, Clippy and
+113 Rust tests; three GPU tests are explicitly ignored in that CPU run.
+
+Explicit GPU runs of `compressed_gpu`, `texture_gpu` and `headless` passed on WSL
+OpenGL llvmpipe, native Windows D3D12 and native Windows Vulkan. The Windows adapter
+was Intel UHD Graphics. Compressed tests exercise 36×36 six-mip surfaces down to
+1×1, 37×35 edge cropping, multiple independent blocks, BC1 native and software
+paths, ASTC software fallback, sRGB, exact alpha, overlapping dirty writes, cache
+reuse, invalid compressed data preserving resident contents and destruction/recreation.
+Native ASTC was not exercised; native BC1 was exercised on all three adapters.
+The corrected comparison policy permits a one-step BC interpolation difference
+before applying sRGB, plus one output quantization step. Alpha remains exact.
+The first GL run's fixed one-byte sRGB tolerance failed on a legitimate two-byte
+linearized difference; the interval policy now expresses that specific bound.
+
+Commands for reproducibility:
+
+```sh
+WGPU_BACKEND=gl cargo test -p wl-gpu --locked --test compressed_gpu --test texture_gpu --test headless -- --ignored --nocapture
+WGPU_BACKEND=gl cargo run -p wl-gpu --locked --example textures
+```
+
+The same GNU Windows test binaries and `textures.exe` executed with `WGPU_BACKEND`
+propagated to the Windows process for `dx12` and `vulkan`; cross-compilation alone
+is not counted as execution. The texture benchmark validates baseline, dirty pixel
+and decoded ASTC output through actual GPU readback.
+
+The 37×35 six-mip synthetic benchmark transferred:
+
+| Synchronization workload | Guest bytes read | Deswizzle bytes | RGBA decode bytes | Upload bytes | Image temporaries |
+|---|---:|---:|---:|---:|---:|
+| Initial RGBA8 | 15,360 | 6,776 | 0 | 6,776 | 6 |
+| Unchanged, 32 frames | 0 | 0 | 0 | 0 | 0 |
+| Four-byte dirty write | 9,216 | 5,180 | 0 | 5,180 | 1 |
+| Two overlapping writes | 9,216 | 5,180 | 0 | 5,180 | 1 |
+| Mip-one write | 4,096 | 1,224 | 0 | 1,224 | 1 |
+| Destroy/recreate | 15,360 | 6,776 | 0 | 6,776 | 6 |
+| ASTC fallback | 6,144 | 1,984 | 6,776 | 6,776 | 12 |
+
+Unchanged synchronization observed zero Rust allocations on GL, D3D12 and Vulkan;
+initial creation includes metadata/driver-facing allocations and is not allocation
+free. The combined benchmark submitted and waited 41 times for deterministic
+readback, transferring 368,016 padded GPU readback bytes and packing 212,380 bytes
+on the CPU. Its dirty uploads are deliberately whole-mip conservative, not four-byte
+GPU transfers. The benchmark prints source, deswizzle, decode, upload preparation,
+Rust allocation traffic, draw/readback times and optional GPU timestamp samples.
+Cold debug runs are diagnostic measurements, not frame-time or game speed claims.
+
+One cold debug run on Intel UHD recorded 32 unchanged synchronization calls at
+147 µs total on D3D12 and 230 µs on Vulkan; the corresponding 32 draw/readbacks took
+36.24 ms and 52.10 ms. Mean render-pass timestamp samples were 38.86 µs and 25.69 µs,
+respectively, excluding upload/readback. ASTC's six-mip CPU decode stage took
+2.96 ms on D3D12 and 4.48 ms on Vulkan in that run, while its upload volume remained
+6,776 bytes on both. Backend order, cold caches, debug compilation and system noise
+prevent a comparative speed claim. Transfer-volume savings do not imply matching
+frame-time savings.
