@@ -222,3 +222,53 @@ A standalone CLI tool is provided at `crates/wl-npdm/examples/preflight.rs`:
 cargo run --example preflight <path/to/main.npdm>
 ```
 The preflight tool provides human-readable formatted output or raw structured diagnostics for inspectable ExeFS verification prior to Horizon runtime process instantiation.
+
+## Strict ExeFS Readiness Audit Gate
+
+Wanderlust enforces a strict, read-only ExeFS readiness audit for decrypted retail Switch executable inputs through `wl_npdm::audit_exefs(dir: &Path) -> Result<ExeFsReadinessReport, AuditError>`.
+
+This gate reuses `wl-nso` for NSO0 segment and MOD0 dynamic parsing, `wl-loader` for `ldr`-compliant process mapping and initial relocation analysis, and `wl-npdm` for process metadata validation. It inspects retail packages (e.g. `rtld`, `main`, `subsdk0`–`subsdk9`, `sdk`, and `main.npdm`) to determine ahead-of-time binary recompilation readiness without executing guest instructions.
+
+### Readiness Report Structure
+
+```rust
+pub struct ExeFsReadinessReport {
+    pub directory: String,
+    pub present_modules: Vec<String>,
+    pub missing_required_inputs: Vec<String>,
+    pub modules: Vec<ModuleAudit>,
+    pub npdm_present: bool,
+    pub program_metadata: Option<ProcessMetadata>,
+    pub program_name: Option<String>,
+    pub product_code: Option<String>,
+    pub unsupported_metadata: Vec<String>,
+    pub link_mode: String,
+    pub unresolved_dynamic_symbols: Vec<String>,
+    pub init_order: Vec<String>,
+    pub execution_blocker: Option<String>,
+    pub candidate_code_pointers_count: usize,
+    pub aot_analysis_ready: bool,
+    pub runtime_execution_occurred: bool,
+    pub missing_runtime_services: Vec<String>,
+}
+```
+
+### Invariants Guaranteed by the Audit Gate
+
+1. **Deterministic Static Analysis**: `runtime_execution_occurred` is strictly guaranteed to remain `false`. No guest instructions are executed, no guest threads are spawned, and no guest memory is mutated.
+2. **Mandatory Module Constraints**: Retail Switch executables require at minimum `main` and `main.npdm`. Absence of either immediately sets `aot_analysis_ready = false` and records the missing component in `missing_required_inputs`.
+3. **MOD0 and Symbol Discovery**: Each present module is inspected for its MOD0 header, dynamic symbol table, and relocation tables. Symbols and relocation counts are reported per module.
+4. **Relocation & Init Order Compatibility**: Loader image layout is verified in `LinkMode::Guest` order. Dynamic initializers (`DT_INIT`) are ordered and candidate code pointers are identified for ahead-of-time CFG analysis.
+5. **Runtime Service Gap Analysis**: Service Access Control (SAC) permissions in `main.npdm` are matched against modeled Horizon runtime services (`SUPPORTED_RUNTIME_SERVICES`). Any unmodeled required service is surfaced in `missing_runtime_services`.
+
+### Standalone ExeFS Inspection Tool
+
+A standalone inspection CLI is provided in `crates/wl-npdm/examples/exefs_readiness.rs`:
+
+```bash
+# Human-readable diagnostic output
+cargo run -p wl-npdm --example exefs_readiness tests/horizon/probe
+
+# Deterministic JSON serialization
+cargo run -p wl-npdm --example exefs_readiness tests/horizon/probe --json
+```

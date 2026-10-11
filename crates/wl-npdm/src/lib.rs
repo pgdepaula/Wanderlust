@@ -6,11 +6,16 @@
 //! `libstratosphere` implementation (`ldr_meta`, `ldr_capabilities`).
 
 pub mod access_control;
+pub mod audit;
 pub mod capability;
 pub mod error;
 pub mod meta;
 
 pub use access_control::{FsAccessControl, SacEntry, SacIterator};
+pub use audit::{
+    AuditError, ExeFsReadinessReport, ModuleAudit, STANDARD_EXEFS_MODULES,
+    SUPPORTED_RUNTIME_SERVICES, audit_exefs,
+};
 pub use capability::{Capabilities, Capability, CapabilityId, SyscallBitmap};
 pub use error::NpdmError;
 pub use meta::{
