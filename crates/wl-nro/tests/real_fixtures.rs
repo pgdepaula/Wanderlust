@@ -270,3 +270,92 @@ fn test_real_independently_compiled_nro_with_aset() {
     assert!(report.has_aset);
     assert_eq!(report.nacp_size, 16384);
 }
+
+#[test]
+fn test_authoritative_probe_nro_fixture() {
+    use sha2::{Digest, Sha256};
+
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let fixture_path = manifest_dir.join("tests/fixtures/probe.nro");
+    let nro_bytes = std::fs::read(&fixture_path).expect("authoritative probe.nro must exist");
+
+    assert_eq!(nro_bytes.len(), 94208);
+    let digest = Sha256::digest(&nro_bytes);
+    let hex = digest
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    assert_eq!(
+        hex,
+        "d205f4e9279880373f3df5beaa76fe7d07a68fb2a51ef1864706c6a6f6b5618f"
+    );
+
+    let nro = Nro::parse(&nro_bytes).expect("authoritative probe.nro must parse cleanly");
+    assert_eq!(nro.header.magic, MAGIC_NRO);
+    assert_eq!(nro.header.version, 0);
+    assert_eq!(nro.header.size, 94208);
+    assert_eq!(nro.header.text.file_offset.0, 0);
+    assert_eq!(nro.header.text.size, 0x10000);
+    assert_eq!(nro.header.ro.file_offset.0, 0x10000);
+    assert_eq!(nro.header.ro.size, 0x3000);
+    assert_eq!(nro.header.data.file_offset.0, 0x13000);
+    assert_eq!(nro.header.data.size, 0x4000);
+    assert_eq!(nro.header.bss_size, 0x1000);
+
+    let report = nro.inspect();
+    assert_eq!(report.nro_size, 94208);
+    assert_eq!(report.file_size, 94208);
+    assert_eq!(report.total_memory_size, 0x18000);
+    assert!(report.has_mod0);
+    assert_eq!(report.mod0_offset, 0xF0);
+    assert!(!report.has_aset);
+
+    let plan = nro.plan().expect("plan generation");
+    assert_eq!(plan.entry_offset, 0);
+    assert_eq!(plan.page_alignment, 0x1000);
+    assert_eq!(plan.image_end, 0x18000);
+    assert_eq!(plan.mappable_ranges.len(), 3);
+    assert_eq!(plan.mappable_ranges[0].name, "text");
+    assert_eq!(plan.mappable_ranges[0].file_offset.0, 0);
+    assert_eq!(plan.mappable_ranges[0].file_size, 0x10000);
+    assert_eq!(plan.mappable_ranges[0].memory_offset, ModuleOffset(0));
+    assert_eq!(plan.mappable_ranges[0].memory_size, 0x10000);
+    assert!(plan.mappable_ranges[0].read);
+    assert!(!plan.mappable_ranges[0].write);
+    assert!(plan.mappable_ranges[0].execute);
+
+    assert_eq!(plan.mappable_ranges[1].name, "rodata");
+    assert_eq!(plan.mappable_ranges[1].file_offset.0, 0x10000);
+    assert_eq!(plan.mappable_ranges[1].file_size, 0x3000);
+    assert_eq!(plan.mappable_ranges[1].memory_offset, ModuleOffset(0x10000));
+    assert_eq!(plan.mappable_ranges[1].memory_size, 0x3000);
+    assert!(plan.mappable_ranges[1].read);
+    assert!(!plan.mappable_ranges[1].write);
+    assert!(!plan.mappable_ranges[1].execute);
+
+    assert_eq!(plan.mappable_ranges[2].name, "data");
+    assert_eq!(plan.mappable_ranges[2].file_offset.0, 0x13000);
+    assert_eq!(plan.mappable_ranges[2].file_size, 0x4000);
+    assert_eq!(plan.mappable_ranges[2].memory_offset, ModuleOffset(0x13000));
+    assert_eq!(plan.mappable_ranges[2].memory_size, 0x4000);
+    assert!(plan.mappable_ranges[2].read);
+    assert!(plan.mappable_ranges[2].write);
+    assert!(!plan.mappable_ranges[2].execute);
+
+    assert_eq!(plan.zero_fill_ranges.len(), 1);
+    assert_eq!(plan.zero_fill_ranges[0].name, "bss");
+    assert_eq!(
+        plan.zero_fill_ranges[0].memory_offset,
+        ModuleOffset(0x17000)
+    );
+    assert_eq!(plan.zero_fill_ranges[0].size, 0x1000);
+
+    assert!(matches!(
+        plan.relocation,
+        wl_nro::RelocationRequirement::GuestSelfRelocating { .. }
+    ));
+    assert!(plan.startup.requires_loader_config);
+    assert_eq!(plan.startup.x1_sentinel, 0xFFFF_FFFF_FFFF_FFFF);
+    assert!(plan.startup.returnable_lr);
+    assert_eq!(plan.startup.recommended_stack_size, 0x10_0000);
+}

@@ -291,3 +291,51 @@ Analysis of devkitA64 / libnx compiled binaries (`switch.specs`) reveals the fol
    - Uncontended `mutexLock` and `mutexUnlock` execute entirely in userspace using atomic operations (`ldaxr`/`stlxr`) without issuing SVCs. Contended locks require `svcArbitrateLock` (SVC 0x1A) and `svcArbitrateUnlock` (SVC 0x1B).
    - `__libnx_initheap` calls `svcSetHeapSize` (SVC 0x01) and requires `memory_limit` to accommodate the requested heap.
    - Address space probing in `virtmemSetup` falls back to `svcUnmapMemory` (SVC 0x05) if `svcGetInfo` region queries fail.
+
+---
+
+## 11. Authoritative Probe Fixture & Loader Integration Contract
+
+### Field Semantics of `HomebrewImagePlan`
+
+For integration into `wl_loader::Process::from_nro(plan: &HomebrewImagePlan, base: GuestAddr)`:
+
+1. **`MappableRange`**:
+   - `name`: Static ASCII segment identifier (`"text"`, `"rodata"`, `"data"`).
+   - `file_offset`: Zero-based byte offset into raw NRO container buffer (`NroFileOffset(u32)`).
+   - `file_size`: Byte count to copy from file container (`u32`).
+   - `memory_offset`: Segment start offset relative to guest base address `base` (`ModuleOffset(u64)`).
+   - `memory_size`: Mapped memory extent (page-aligned to 4096 bytes).
+   - `read`, `write`, `execute`: Horizon memory permissions (`R-X` for text, `R--` for rodata, `RW-` for data).
+
+2. **`ZeroFillRange`**:
+   - `name`: `"bss"`.
+   - `memory_offset`: Offset relative to guest base address where zero-initialization begins (`ModuleOffset(u64)`), located immediately at `image.bss_offset`.
+   - `size`: Page-aligned byte count to allocate and zero-fill (`u64`). BSS is appended to the data segment mapping in `wl-loader`, maintaining single `CodeData` region continuity as on hardware.
+
+3. **Relocation & Link Mode**:
+   - `relocation`: Evaluates to `RelocationRequirement::GuestSelfRelocating { mod0_offset: 0xF0, dynamic_offset: ... }`.
+   - Loader must assign `LinkMode::Guest` / `RelocationState::GuestLinker` and refuse host-mode linking. The guest's crt0 `__nx_dynamic` possesses exclusive ownership of relative relocation application.
+
+### Authoritative Fixture Provenance & Invariants
+
+An authoritative, reproducible guest binary is checked in under [`crates/wl-nro/tests/fixtures/`](../../crates/wl-nro/tests/fixtures/):
+
+- **Binary:** `crates/wl-nro/tests/fixtures/probe.nro`
+- **Source:** `crates/wl-nro/tests/fixtures/probe.c` (derived from [`tests/horizon/probe.c`](../../tests/horizon/probe.c))
+- **Licence notice:** `crates/wl-nro/tests/fixtures/NOTICE` (libnx ISC, newlib, libgcc)
+- **Toolchain:** devkitA64 GCC 16.1.0, elf2nro, libnx 4.12.0
+- **Size:** 94,208 bytes (0x17000)
+- **SHA-256:** `d205f4e9279880373f3df5beaa76fe7d07a68fb2a51ef1864706c6a6f6b5618f`
+
+### Independently Derived Expected Output
+
+When launched by Wanderlust's Horizon runtime with default process parameters (1024-entry handle table, 1 MiB stack, 512 MiB memory limit), the guest application prints three lines to `svcOutputDebugString`:
+
+```text
+probe tid=0x72 pid=0x51 handle=0x83ff tls=0x5cbc getinfo_bad_subtype=0xe801 out=0
+text state=3 perm=5 size=0x10000; stack state=11 perm=3 size=0x100000 in_stack_region=1
+heap_ok=1 sum=952e8000 ratio=0.001953 used_below_total=1
+```
+
+*(Note: In retail NSO mode with a 1023-entry NPDM table, the main thread handle is `0x83fe`; in homebrew NRO mode with the default 1024-entry table, the handle is `0x83ff`).*
