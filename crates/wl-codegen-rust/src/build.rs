@@ -21,13 +21,14 @@ use wl_common::Result;
 use crate::Emitted;
 
 /// Runtime sources compiled into the `wl_guest_runtime` rlib.
-pub const RUNTIME_SOURCES: [(&str, &str); 5] = [
+pub const RUNTIME_SOURCES: [(&str, &str); 6] = [
     ("lib.rs", include_str!("../../wl-runtime/src/lib.rs")),
     ("fp.rs", include_str!("../../wl-runtime/src/fp.rs")),
     (
         "horizon.rs",
         include_str!("../../wl-runtime/src/horizon.rs"),
     ),
+    ("ipc.rs", include_str!("../../wl-runtime/src/ipc.rs")),
     ("simd.rs", include_str!("../../wl-runtime/src/simd.rs")),
     (
         "threads.rs",

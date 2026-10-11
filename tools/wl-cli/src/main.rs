@@ -290,6 +290,7 @@ fn horizon_options(o: &Options, p: &Process) -> Result<wl_codegen_rust::HorizonO
         handle_table_size: 0,
         is_application: true,
         svc_permissions: [u64::MAX; 3],
+        service_access: vec![(false, "*".into()), (true, "*".into())],
         memory_limit: o.memory_limit,
         source: "defaults (no main.npdm)",
     };
@@ -330,6 +331,11 @@ fn horizon_options(o: &Options, p: &Process) -> Result<wl_codegen_rust::HorizonO
     options.handle_table_size = md.handle_table_size;
     options.is_application = md.is_application;
     options.svc_permissions = svc_permissions;
+    options.service_access = npdm
+        .aci0_services()
+        .map(|e| e.map(|e| (e.is_server, e.name.to_string())))
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|e| format!("main.npdm service access control: {e}"))?;
     options.source = "main.npdm";
     Ok(options)
 }

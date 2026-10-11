@@ -22,6 +22,7 @@ fn config() -> ProcessConfig {
         thread_limit: 8,
         is_application: true,
         svc_permissions: [u64::MAX; 3],
+        service_access: &[(false, "*"), (true, "*")],
     }
 }
 fn process() -> (Process, Cpu) {

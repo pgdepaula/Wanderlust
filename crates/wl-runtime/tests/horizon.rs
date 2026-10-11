@@ -20,6 +20,7 @@ fn config() -> ProcessConfig {
         thread_limit: 32,
         is_application: true,
         svc_permissions: [u64::MAX; 3],
+        service_access: &[(false, "*"), (true, "*")],
     }
 }
 /// A process with RX code at CODE (one page), RW data after it and the main thread.
@@ -489,11 +490,11 @@ fn capabilities_gate_svcs_and_size_the_handle_table() {
 fn unsupported_and_break_svcs_fail_explicitly() {
     let (mut p, mut c) = process();
     let before = c.x;
-    let e = dispatch(&mut c, &mut p, 0x21).unwrap_err();
-    assert!(e.contains("unsupported Horizon SVC 0x21"), "{e}");
+    let e = dispatch(&mut c, &mut p, 0x22).unwrap_err();
+    assert!(e.contains("unsupported Horizon SVC 0x22"), "{e}");
     assert_eq!(c.x, before);
     let e = dispatch(&mut c, &mut p, 0x26).unwrap_err();
     assert!(e.contains("guest svcBreak"), "{e}");
     let k = p.kernel.as_ref().unwrap();
-    assert_eq!(k.svc_counts.get(&0x21), Some(&1));
+    assert_eq!(k.svc_counts.get(&0x22), Some(&1));
 }

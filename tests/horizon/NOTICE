@@ -1,5 +1,5 @@
-tests/horizon/probe/main and tests/horizon/threads/main are built from tests/horizon/probe.c
-and tests/horizon/threads.c with devkitA64 (GCC 16.1.0, newlib 4.6.0.20260123) and libnx
+tests/horizon/probe/main, tests/horizon/threads/main and tests/horizon/ipc/main are built from
+tests/horizon/probe.c, tests/horizon/threads.c and tests/horizon/ipc.c with devkitA64 (GCC 16.1.0, newlib 4.6.0.20260123) and libnx
 4.12.0 (tools/python/homebrew.py), and contain code from the following libraries.
 
 libnx (https://github.com/switchbrew/libnx)

@@ -2,6 +2,7 @@
 //! No guest address is converted into a host pointer; no unsafe code is used.
 pub mod fp;
 pub mod horizon;
+pub mod ipc;
 pub mod simd;
 pub mod threads;
 use std::io::Write;
@@ -924,6 +925,19 @@ pub fn launch_horizon(program: &Program, memory: Memory, image: &ProcessImage) -
         k.time_ns,
         st.idle_ns
     );
+    let ipc = format!(
+        "{{\"requests\":{},\"replies\":{},\"sessions\":{},\"sessions_closed_by_server\":{},\"deferred\":{},\"services\":[{}]}}",
+        k.ipc.requests,
+        k.ipc.replies,
+        k.sessions.len(),
+        k.ipc.sessions_closed_by_server,
+        k.ipc.deferred,
+        k.services
+            .iter()
+            .map(|s| json_string(String::from_utf8_lossy(&s.name).trim_end_matches('\0')))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
     let (status, fault) = match &run.result {
         Ok(status) => (status.as_str().to_string(), "null".to_string()),
         Err(e) => (
@@ -937,7 +951,7 @@ pub fn launch_horizon(program: &Program, memory: Memory, image: &ProcessImage) -
         ),
     };
     println!(
-        "{{\"mode\":\"horizon\",\"status\":\"{status}\",\"entry\":{},\"pc\":{pc},\"steps\":{},\"x0\":{x0},\"thread\":{{\"id\":{},\"handle\":{},\"tls\":{},\"stack\":[{},{}]}},\"threads\":[{thread_list}],\"scheduler\":{scheduler},\"heap\":[{},{}],\"process_local_region\":{},\"config_source\":\"{}\",\"svc_counts\":{{{svcs}}},\"last_svc\":{last_svc},\"debug_output\":[{output}],\"fault\":{fault}}}",
+        "{{\"mode\":\"horizon\",\"status\":\"{status}\",\"entry\":{},\"pc\":{pc},\"steps\":{},\"x0\":{x0},\"thread\":{{\"id\":{},\"handle\":{},\"tls\":{},\"stack\":[{},{}]}},\"threads\":[{thread_list}],\"scheduler\":{scheduler},\"ipc\":{ipc},\"heap\":[{},{}],\"process_local_region\":{},\"config_source\":\"{}\",\"svc_counts\":{{{svcs}}},\"last_svc\":{last_svc},\"debug_output\":[{output}],\"fault\":{fault}}}",
         program.entry,
         k.total_steps,
         main.id,

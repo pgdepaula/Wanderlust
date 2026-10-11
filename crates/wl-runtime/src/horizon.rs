@@ -4,6 +4,7 @@
 //! (`libmesosphere`, commit 0e9cd964) and the user-mode contract used by libnx (commit
 //! feebd026). Every SVC either produces its architectural effect (registers, guest memory,
 //! kernel state) or fails explicitly; none returns success without performing its work.
+use crate::ipc;
 use crate::threads::{self, SchedulerStats, ThreadState, Wait};
 use crate::{Cpu, Memory, RuntimeResult, Stop};
 use std::collections::BTreeMap;
@@ -89,6 +90,10 @@ pub mod result {
     pub const OUT_OF_RANGE: u32 = kernel(119);
     pub const INVALID_STATE: u32 = kernel(125);
     pub const LIMIT_REACHED: u32 = kernel(132);
+    pub const NOT_FOUND: u32 = kernel(121);
+    pub const SESSION_CLOSED: u32 = kernel(123);
+    pub const PORT_CLOSED: u32 = kernel(131);
+    pub const MESSAGE_TOO_LARGE: u32 = kernel(260);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,6 +208,8 @@ pub struct ProcessConfig {
     pub is_application: bool,
     /// SVC access flags from the kernel capabilities: bit `id` permits SVC `id` (0..0xC0).
     pub svc_permissions: [u64; 3],
+    /// ACI0 service access control: (may host, service name or prefix ending in `*`).
+    pub service_access: &'static [(bool, &'static str)],
 }
 impl ProcessConfig {
     pub fn permits(&self, id: u16) -> bool {
@@ -213,6 +220,10 @@ impl ProcessConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Object {
     Thread(usize),
+    /// Client session (`ipc::Session`).
+    Session(usize),
+    /// Server port of a service registered with sm (`ipc::Port`).
+    Port(usize),
 }
 /// Handle table with the Mesosphere encoding: `index | linear_id << 15`; linear ids start at
 /// 1 and free indices are handed out from the top of the table down.
@@ -342,6 +353,12 @@ pub struct Kernel {
     pub next_rotation_ns: u64,
     pub order: u64,
     pub stats: SchedulerStats,
+    pub sessions: Vec<ipc::Session>,
+    pub ports: Vec<ipc::Port>,
+    pub services: Vec<ipc::Service>,
+    /// IPC replies to write into other threads' message buffers.
+    pub pending_replies: Vec<(u64, Vec<u8>)>,
+    pub ipc: ipc::IpcStats,
     /// Process-local region (TLS slot 0 of the first ThreadLocal page).
     pub process_local_region: u64,
     pub heap_size: u64,
@@ -441,6 +458,11 @@ impl Process {
             next_rotation_ns: threads::PREEMPTION_INTERVAL_NS,
             order: 0,
             stats: SchedulerStats::default(),
+            sessions: Vec::new(),
+            ports: Vec::new(),
+            services: Vec::new(),
+            pending_replies: Vec::new(),
+            ipc: ipc::IpcStats::default(),
             process_local_region: 0,
             heap_size: 0,
             svc_counts: BTreeMap::new(),
@@ -745,7 +767,7 @@ pub fn used_memory(memory: &Memory) -> u64 {
 /// X1 upward.
 fn outputs(id: u16) -> (bool, usize) {
     match id {
-        0x01 | 0x06 | 0x08 | 0x0C | 0x18 | 0x24 | 0x25 | 0x29 => (true, 1),
+        0x01 | 0x06 | 0x08 | 0x0C | 0x18 | 0x1F | 0x24 | 0x25 | 0x29 => (true, 1),
         0x0B | 0x1D => (false, 0),
         _ => (true, 0),
     }
@@ -895,7 +917,7 @@ pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<S
             );
             None
         }
-        0x18 => match threads::wait_synchronization(memory, k, c) {
+        0x18 => match threads::wait_synchronization(memory, k, c)? {
             Ok((index, None)) => {
                 set_result(c, result::SUCCESS);
                 c.x[1] = u64::from(index);
@@ -943,6 +965,17 @@ pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<S
             threads::signal_condition(memory, k, c.x[0], c.x[1] as u32 as i32);
             None
         }
+        0x1F => {
+            match ipc::connect_to_named_port(memory, k, c.x[1]) {
+                Ok(handle) => {
+                    set_result(c, result::SUCCESS);
+                    c.x[1] = u64::from(handle);
+                }
+                Err(code) => set_result(c, code),
+            }
+            None
+        }
+        0x21 => ipc::send_sync_request(memory, k, c, c.x[0] as u32)?,
         0x1E => {
             // CNTPCT_EL0 (19.2 MHz) of the deterministic virtual clock.
             c.x[0] = threads::ticks(threads::now_ns(k, c));

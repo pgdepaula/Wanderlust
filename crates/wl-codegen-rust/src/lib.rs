@@ -1311,7 +1311,7 @@ pub struct Unit {
     pub blocks: usize,
     pub instructions: usize,
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct EmitOptions {
     /// Blocks starting in the same aligned `1 << unit_shift`-byte guest window form a unit.
     pub unit_shift: u32,
@@ -1319,7 +1319,7 @@ pub struct EmitOptions {
     pub horizon: Option<HorizonOptions>,
 }
 /// Process parameters for a Horizon launch, emitted into the executable crate.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct HorizonOptions {
     pub code_start: u64,
     pub code_end: u64,
@@ -1334,6 +1334,8 @@ pub struct HorizonOptions {
     pub is_application: bool,
     /// Bit `id` permits SVC `id` (0..0xC0).
     pub svc_permissions: [u64; 3],
+    /// ACI0 service access control: (may host, name or prefix ending in `*`).
+    pub service_access: Vec<(bool, String)>,
     pub memory_limit: u64,
     /// Origin of the values, reported by the launcher (e.g. "main.npdm").
     pub source: &'static str,
@@ -1528,12 +1530,12 @@ pub fn emit(
         )
         .unwrap();
     }
-    let launcher = match options.horizon {
+    let launcher = match &options.horizon {
         None => "launch(&PROGRAM, m)".to_string(),
         Some(h) => {
             writeln!(
                 out,
-                "Ok(m) }}\nstatic IMAGE: ProcessImage = ProcessImage {{ code_start: {:#x}, code_end: {:#x}, config_source: {:?}, config: horizon::ProcessConfig {{ program_id: {:#x}, process_id: 0x51, main_thread_id: 0x72, main_thread_stack_size: {:#x}, main_thread_priority: {}, ideal_core: {}, core_mask: {:#x}, priority_mask: {:#x}, memory_limit: {:#x}, handle_table_size: {}, thread_limit: 32, is_application: {}, svc_permissions: {:#x?} }} }};",
+                "Ok(m) }}\nstatic IMAGE: ProcessImage = ProcessImage {{ code_start: {:#x}, code_end: {:#x}, config_source: {:?}, config: horizon::ProcessConfig {{ program_id: {:#x}, process_id: 0x51, main_thread_id: 0x72, main_thread_stack_size: {:#x}, main_thread_priority: {}, ideal_core: {}, core_mask: {:#x}, priority_mask: {:#x}, memory_limit: {:#x}, handle_table_size: {}, thread_limit: 32, is_application: {}, svc_permissions: {:#x?}, service_access: &{:?} }} }};",
                 h.code_start,
                 h.code_end,
                 h.source,
@@ -1546,7 +1548,8 @@ pub fn emit(
                 h.memory_limit,
                 h.handle_table_size,
                 h.is_application,
-                h.svc_permissions
+                h.svc_permissions,
+                h.service_access
             )
             .unwrap();
             "launch_horizon(&PROGRAM, m, &IMAGE)".to_string()

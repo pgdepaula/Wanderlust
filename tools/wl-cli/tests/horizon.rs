@@ -138,6 +138,18 @@ fn rebuilt_fixtures_match_the_committed_behaviour() {
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     check_threads(&run(&dir, &t));
+    let dir = t.0.join("ipc");
+    let python = std::env::var("WL_PYTHON").unwrap_or_else(|_| "python3".into());
+    let o = Command::new(python)
+        .arg(root().join("tools/python/homebrew.py"))
+        .arg(root().join("tests/horizon/ipc.c"))
+        .arg("--out-dir")
+        .arg(&dir)
+        .env("DEVKITPRO", &dkp)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    check_ipc(&run(&dir, &t));
 }
 
 /// tests/horizon/threads.c: a worker created with libnx threadCreate on core 1, a contended
@@ -192,6 +204,44 @@ fn libnx_threads_synchronize_natively() {
     check_threads(&state);
     // The scheduler is deterministic: the committed fixture always retires this count.
     assert_eq!(state["steps"], 1_041_282);
+}
+
+/// tests/horizon/ipc.c against the runtime's sm: server. Expected results (kernel results
+/// are 1 | description << 9, sm results 21 | description << 9): InvalidServiceName 0xc15 (libnx
+/// leaves the out-handle untouched on failure), AlreadyRegistered 0x815, OutOfSessions 0x615
+/// (one session allowed), NotRegistered 0xe15, the deferred lookup completing once the service
+/// is registered, NotFound 0xf201, OutOfRange 0xee01 (12 characters, no terminator),
+/// SessionClosed 0xf601 after an unknown command, and InvalidHandle 0xe401 for the session
+/// closed by smExit.
+const IPC_EXPECTED: [&str; 3] = [
+    "sm init=0 bad=0xc15 bad_handle=0x1234 reg=0 port=1 dup=0x815 get=0 client=1 full=0x615",
+    "sm close_client=0 unreg=0 unreg2=0xe15 close_port=0 late_reg=0 late=0 late_handle=1",
+    "port conn=0 notfound=0xf201 toolong=0xee01 unknown=0xf601 again=0xf601 stale=0xe401",
+];
+fn check_ipc(state: &serde_json::Value) {
+    assert_eq!(state["status"], "exit_process", "{state}");
+    let lines: Vec<&str> = state["debug_output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l.as_str().unwrap())
+        .collect();
+    assert_eq!(lines, IPC_EXPECTED);
+    let ipc = &state["ipc"];
+    assert_eq!(ipc["deferred"], 1, "{ipc}");
+    // The unknown command and the three CMIF Close requests (two smExit-style closes and
+    // the worker's serviceClose) closed sessions on the server side.
+    assert!(
+        ipc["sessions_closed_by_server"].as_u64().unwrap() >= 3,
+        "{ipc}"
+    );
+    assert_eq!(ipc["services"], serde_json::json!(["wl:late"]));
+}
+
+#[test]
+fn libnx_sm_client_exchanges_cmif_messages() {
+    let t = Temp::new();
+    check_ipc(&run(&root().join("tests/horizon/ipc"), &t));
 }
 
 #[test]

@@ -84,6 +84,8 @@ Arguments are in X0–X7. Results are in W0 and outputs from X1 upward. After ev
 | 0x1B | ArbitrateUnlock | X0 lock word: the best waiter (priority, then arrival) becomes owner, inheriting the other waiters; the word becomes its tag, with 0x40000000 if others still wait, or 0 | InvalidAddress, InvalidCurrentMemory |
 | 0x1C | WaitProcessWideKeyAtomic | X0 lock word, X1 key, W2 tag, X3 timeout: releases the lock as ArbitrateUnlock, sets the key word to 1 and waits to be signalled and to reacquire the lock | InvalidPointer, InvalidAddress, InvalidCurrentMemory, TimedOut |
 | 0x1D | SignalProcessWideKey | X0 key, W1 count (≤ 0: all): signalled waiters (priority, then arrival) take the lock if its word is 0, else queue on its owner with the wait bit set; the key word becomes 0 when no waiter remains; no return value | — |
+| 0x1F | ConnectToNamedPort | X1 name (at most 11 characters): W1 client session; the only named port is `sm:` | OutOfRange (no terminator within 12 bytes), InvalidCurrentMemory, NotFound (121) |
+| 0x21 | SendSyncRequest | W0 client session: the request in the thread's message buffer, answered in place (see [IPC](#ipc)) | InvalidHandle, SessionClosed (123), MessageTooLarge (260) |
 | 0x1E | GetSystemTick | the deterministic virtual clock at 19.2 MHz | — |
 | 0x24 | GetProcessId | process ID for the current-process pseudo-handle or a thread handle | InvalidHandle |
 | 0x25 | GetThreadId | thread ID for the current-thread pseudo-handle or a thread handle | InvalidHandle |
@@ -109,6 +111,24 @@ Time is virtual: one nanosecond per retired guest instruction, plus the time ski
 
 Every SVC and every context switch clears the exclusive monitor of the thread involved, as an exception on hardware may. A later store-exclusive then fails and the guest retries, which the architecture permits. No reservation survives another thread's write.
 
+## IPC
+
+Implementation: [`ipc.rs`](../../crates/wl-runtime/src/ipc.rs).
+
+A request occupies the first 0x100 bytes of the calling thread's thread-local region: HIPC header words (type, descriptor counts, data-word count, special header), the optional process ID, handles, descriptors, then data words whose CMIF part starts at the next 16-byte boundary (`SFCI`, version, command, token, arguments). The kernel checks that the message fits the buffer (else MessageTooLarge) and writes the sender's process ID where the special header requests one.
+
+The service manager behind `sm:` runs inside the runtime and reproduces the CMIF compatibility layer of Atmosphère's `sm` (0e9cd964), which accepts exactly the header words that libnx sends:
+
+| Header words | Command | Behaviour | Reply |
+|---|---|---|---|
+| `0x4`, `0x8000000A`, `0x1` | 0 RegisterClient / 4 DetachClient | records / forgets the kernel-supplied process ID | `SFCO`, result 0 |
+| `0x4`, `0xA` | 1 GetServiceHandle | validates the name (non-empty, zero after the terminator), the process's ACI0 service access control (exact names, or prefixes ending in `*`), then connects a session to the service's port | one move handle, result |
+| `0x4`, `0xA` | 3 UnregisterService | only the owner may unregister | result |
+| `0x4`, `0xC` | 2 RegisterService | validates name and host access, creates a port of `max_sessions` sessions, moves its server handle to the caller | one move handle, result |
+| control (type 5 or 7) | any | pointer-buffer size 0 | fixed reply |
+
+Commands before RegisterClient answer InvalidClient (`0x415`); other sm results are AlreadyRegistered `0x815`, OutOfSessions `0x615`, InvalidServiceName `0xc15`, NotRegistered `0xe15`, NotAllowed `0x1015`. A GetServiceHandle for a service that is not registered is deferred, as in `sm`: the calling thread stays blocked in svcSendSyncRequest until the service is registered, and then receives the reply. Any other request, including libnx's CMIF Close from serviceClose, is an invalid method: the server closes the session without replying, so this and every later request on it return SessionClosed. The process access control comes from `main.npdm`; without it every service may be used and hosted.
+
 ## Handles
 
 Handles follow Mesosphere's `KHandleTable`: `index | linear_id << 15`, linear IDs from 1, free indices taken from the top of the table down. Closing a handle frees its index; the stale handle stays invalid because its linear ID no longer matches. `0xFFFF8000` and `0xFFFF8001` are the current-thread and current-process pseudo-handles.
@@ -119,7 +139,7 @@ The launcher prints one JSON object: `mode`, `status` (`exit_process`, `exit_thr
 
 ## Limits
 
-Threads run on their ideal core; svcGetThreadCoreMask/svcSetThreadCoreMask, thread activity, thread context access and core migration are not implemented. The only synchronization objects are threads: no events (svcCreateEvent, SignalEvent, ClearEvent, ResetSignal), no WaitForAddress/SignalToAddress. A partial svcUnmapMemory of an alias faults explicitly. No IPC (`ConnectToNamedPort`, `SendSyncRequest`) and therefore no services: applications must not depend on `__appInit` service initialization. No shared or transfer memory, code memory or device address spaces. Memory-mapping, interrupt and debug capabilities are parsed but have no effect. Only NSO entry semantics are implemented (NRO loader entry, with X0 = loader configuration and X1 = −1, is not).
+Threads run on their ideal core; svcGetThreadCoreMask/svcSetThreadCoreMask, thread activity, thread context access and core migration are not implemented. The only synchronization objects are threads: no events (svcCreateEvent, SignalEvent, ClearEvent, ResetSignal), no WaitForAddress/SignalToAddress. A partial svcUnmapMemory of an alias faults explicitly. The only service is `sm:`: libnx's default `__appInit` (applet, hid, time, fs) cannot run. Requests carrying handles or buffer descriptors to `sm:`, requests to services registered by the guest (svcAcceptSession, svcReplyAndReceive), TIPC requests, domains, svcSendSyncRequestWithUserBuffer, light sessions and waits on ports fault explicitly. No shared or transfer memory, code memory or device address spaces. Memory-mapping, interrupt and debug capabilities are parsed but have no effect. Only NSO entry semantics are implemented (NRO loader entry, with X0 = loader configuration and X1 = −1, is not).
 
 ## Validation
 
@@ -146,5 +166,17 @@ wait timed=0xea01 index=-1 joined=0 closed=0
 ```
 
 The total is the sum over both threads of 24 byte windows of a mixing function, computed independently. A lost update from broken mutual exclusion would change it. Each thread's `__thread` counter ends at 7 + 3,000. The run retires 1,041,282 guest instructions in 208 slices with 156 context switches, 50 contended svcArbitrateLock calls, 54 blocking waits and 1.75 ms of idle virtual time. Linux and Windows (`x86_64-pc-windows-gnu`, Windows 10.0.26300) executables produced identical output and identical counters, taking 0.044 s and 0.062 s of host time.
+
+[`tests/ipc.rs`](../../crates/wl-runtime/tests/ipc.rs) checks named-port lookup and name validation, the process ID inserted by the kernel, InvalidClient before RegisterClient, name validation, access control for lookups and registrations, registration and duplicate registration, the session limit, unregistration, a deferred lookup completed by another thread's registration, control requests, MessageTooLarge, the SessionClosed behaviour after an invalid method or a CMIF Close, closed and wrong-type handles, and the explicit faults for descriptors and guest-hosted services.
+
+[`ipc.c`](../../tests/horizon/ipc.c) (NSO SHA-256 `6483eaae9ed654b4f6bb810950bdf1d2af953fc84b6ca15aeba17175aa9a61bf`) uses libnx's own `smInitialize`, `smGetServiceOriginal`, `smRegisterService`, `smUnregisterService` and `smExit`, a second thread that opens its own session with libnx's `Service` API and is deferred until main registers `wl:late`, and raw protocol errors. The CLI test requires:
+
+```text
+sm init=0 bad=0xc15 bad_handle=0x1234 reg=0 port=1 dup=0x815 get=0 client=1 full=0x615
+sm close_client=0 unreg=0 unreg2=0xe15 close_port=0 late_reg=0 late=0 late_handle=1
+port conn=0 notfound=0xf201 toolong=0xee01 unknown=0xf601 again=0xf601 stale=0xe401
+```
+
+It retires 32,151 guest instructions with 17 requests and one deferred lookup, identically on Linux and Windows.
 
 The fixture binaries contain libnx (ISC, notice in [`tests/horizon/NOTICE`](../../tests/horizon/NOTICE)), newlib (licences reproduced in [`tests/horizon/COPYING.NEWLIB`](../../tests/horizon/COPYING.NEWLIB)) and libgcc (GPL with the GCC Runtime Library Exception) from devkitA64.

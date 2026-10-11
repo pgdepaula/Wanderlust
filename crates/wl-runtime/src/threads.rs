@@ -62,6 +62,8 @@ pub enum Wait {
         order: u64,
         deadline: Option<u64>,
     },
+    /// svcSendSyncRequest to sm:GetServiceHandle for a service not registered yet.
+    Service { session: usize, name: [u8; 8] },
     /// svcWaitProcessWideKeyAtomic before being signalled.
     CondVar {
         key: u64,
@@ -78,6 +80,7 @@ impl Wait {
             | Wait::Lock { deadline, .. }
             | Wait::CondVar { deadline, .. } => deadline,
             Wait::Sleep { deadline } => Some(deadline),
+            Wait::Service { .. } => None,
         }
     }
 }
@@ -183,6 +186,7 @@ pub fn thread_of(k: &Kernel, handle: u32, pseudo: bool) -> Option<usize> {
     }
     match k.handles.get(handle)? {
         Object::Thread(t) => Some(t),
+        _ => None,
     }
 }
 /// Adds a handle to a thread object.
@@ -193,12 +197,17 @@ pub fn open_handle(k: &mut Kernel, t: usize) -> Result<u32, u32> {
 }
 /// Closes a handle; an exited thread without handles is destroyed and its TLS released.
 pub fn close_handle(memory: &mut Memory, k: &mut Kernel, handle: u32) -> bool {
-    let Some(Object::Thread(t)) = k.handles.get(handle) else {
+    let Some(object) = k.handles.get(handle) else {
         return false;
     };
     k.handles.close(handle);
-    k.threads[t].references -= 1;
-    destroy_if_unreferenced(memory, k, t);
+    match object {
+        Object::Thread(t) => {
+            k.threads[t].references -= 1;
+            destroy_if_unreferenced(memory, k, t);
+        }
+        other => crate::ipc::close_handle(k, other),
+    }
     true
 }
 fn destroy_if_unreferenced(memory: &mut Memory, k: &mut Kernel, t: usize) {
@@ -300,6 +309,9 @@ pub fn exit_current(memory: &mut Memory, k: &mut Kernel) -> Stop {
 }
 
 /// Puts the running thread to sleep in `wait`; its SVC completes when the wait ends.
+pub fn block_for(k: &mut Kernel, c: &mut Cpu, id: u16, wait: Wait) -> Option<Stop> {
+    block(k, c, id, wait)
+}
 fn block(k: &mut Kernel, c: &mut Cpu, id: u16, wait: Wait) -> Option<Stop> {
     let t = k.current;
     k.threads[t].state = ThreadState::Waiting;
@@ -424,46 +436,60 @@ pub fn set_thread_priority(k: &mut Kernel, handle: u32, priority: i64) -> u32 {
 }
 
 /// svcWaitSynchronization (0x18): X1 handle array, W2 count, X3 timeout (ns) -> W1 index.
+/// The outer `Err` is an unsupported case the runtime reports as a fault.
 pub fn wait_synchronization(
     memory: &Memory,
     k: &mut Kernel,
     c: &mut Cpu,
-) -> Result<(u32, Option<Stop>), u32> {
+) -> RuntimeResult<Result<(u32, Option<Stop>), u32>> {
     let (pointer, count, timeout) = (c.x[1], c.x[2] as u32 as i32 as i64, c.x[3] as i64);
     if !(0..=ARGUMENT_HANDLE_COUNT_MAX as i64).contains(&count) {
-        return Err(result::OUT_OF_RANGE);
+        return Ok(Err(result::OUT_OF_RANGE));
     }
     let mut raw = vec![0u8; count as usize * 4];
     if count > 0 && memory.read_into(pointer, &mut raw).is_err() {
-        return Err(result::INVALID_POINTER);
+        return Ok(Err(result::INVALID_POINTER));
     }
     let mut objects = Vec::with_capacity(count as usize);
     for chunk in raw.chunks_exact(4) {
         let handle = u32::from_le_bytes(chunk.try_into().unwrap_or_default());
-        // GetMultipleObjects does not accept pseudo-handles.
-        let t = thread_of(k, handle, false).ok_or(result::INVALID_HANDLE)?;
-        objects.push(Object::Thread(t));
+        // GetMultipleObjects does not accept pseudo-handles; client sessions are not
+        // synchronization objects.
+        match (handle != CURRENT_THREAD)
+            .then(|| k.handles.get(handle))
+            .flatten()
+        {
+            Some(Object::Thread(t)) => objects.push(Object::Thread(t)),
+            Some(Object::Port(_)) => {
+                return Err(
+                    "unsupported Horizon SVC 0x18 (WaitSynchronization) on a server port".into(),
+                );
+            }
+            _ => return Ok(Err(result::INVALID_HANDLE)),
+        }
     }
-    if let Some(i) = objects
-        .iter()
-        .position(|Object::Thread(t)| k.threads[*t].state == ThreadState::Exited)
-    {
-        return Ok((i as u32, None));
+    let signalled =
+        |o: &Object| matches!(o, Object::Thread(t) if k.threads[*t].state == ThreadState::Exited);
+    if let Some(i) = objects.iter().position(signalled) {
+        return Ok(Ok((i as u32, None)));
     }
     if timeout == 0 {
-        return Err(result::TIMED_OUT);
+        return Ok(Err(result::TIMED_OUT));
     }
     let t = k.current;
     if k.threads[t].wait_cancelled {
         k.threads[t].wait_cancelled = false;
-        return Err(result::CANCELLED);
+        return Ok(Err(result::CANCELLED));
     }
     let deadline = if timeout > 0 {
         deadline_after(ticks(now_ns(k, c)), timeout)
     } else {
         None
     };
-    Ok((0, block(k, c, 0x18, Wait::Objects { objects, deadline })))
+    Ok(Ok((
+        0,
+        block(k, c, 0x18, Wait::Objects { objects, deadline }),
+    )))
 }
 
 /// svcCancelSynchronization (0x19): W0 thread handle.
