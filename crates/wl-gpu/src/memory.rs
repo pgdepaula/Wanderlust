@@ -2,9 +2,9 @@
 use crate::{Result, invalid};
 use std::ops::Range;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GuestAddress(pub u64);
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GpuAddress(pub u64);
 
 /// Read permission and contiguous-borrow policy belong to the runtime adapter.

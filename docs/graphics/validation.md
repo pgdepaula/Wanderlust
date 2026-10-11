@@ -115,3 +115,35 @@ and its dependency lockfile. No unrelated in-progress source was included.
 `cargo test --workspace --locked` all passed in that snapshot, with 108 passing
 tests and no failures. The headless test
 remained explicitly ignored there; actual GPU execution results are recorded above.
+
+## Guest texture sampling
+
+The texture continuation passed 15 CPU tests, including a new independent GOB
+fixture, explicit six-mip offsets and shader validation. `texture_gpu` and the
+previous `headless` test both passed actual WSL GL, Windows D3D12 and Windows
+Vulkan execution. Commands:
+
+```sh
+cargo test -p wl-gpu --no-default-features --locked
+WGPU_BACKEND=gl cargo test -p wl-gpu --locked --test texture_gpu --test headless -- --ignored --nocapture
+```
+
+The fixture is 37×35 RGBA8, two-GOB base block height, six mips ending at 1×1.
+It crosses GOB columns and block-height rows and carries asymmetric RGB and alpha.
+Every mip was sampled and compared byte-for-byte. Additional checks exercise
+bilinear filtering, sRGB conversion (one-byte rounding tolerance), aliased dirty
+writes, overlapping writes, a write spanning two mips, replacement GPU mappings,
+truncated final mip, missing resources, destruction and recreation. No expected
+image is copied into the render attachment by the CPU.
+
+Four unchanged synchronizations performed zero payload reads/conversions/uploads.
+A four-byte tiled update conservatively uploads the affected 5,180-byte mip per
+aliased resident texture, not four bytes. A write spanning a mip boundary refreshes
+both mips. The full test completed 11 draws, 30 texture uploads and 44,976 readback
+bytes. Counters also include attempted conversions before a deliberately truncated
+input fails, so they are not a minimal-transfer benchmark.
+
+The exact delivery snapshot passed workspace formatting, Clippy and 111 tests;
+both adapter-dependent tests were explicitly ignored in that CPU-only snapshot.
+One Windows Vulkan launch failed before entering the test with WSL
+`UtilAcceptVsock: accept4 failed 110`; repeating the same executable passed.

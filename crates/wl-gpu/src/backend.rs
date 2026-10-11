@@ -67,14 +67,19 @@ struct Buffer {
 pub struct Renderer {
     pub capabilities: Capabilities,
     pub counters: Counters,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    pub(crate) device: wgpu::Device,
+    pub(crate) queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
     buffers: HashMap<BufferId, Buffer>,
     state: ResourceState,
     target: Option<Target>,
     timestamps: Option<(wgpu::QuerySet, wgpu::Buffer)>,
-    poisoned: bool,
+    pub(crate) poisoned: bool,
+    pub(crate) textures:
+        HashMap<crate::texture::TextureId, crate::texture_backend::ResidentTexture>,
+    pub(crate) texture_pipeline: wgpu::RenderPipeline,
+    pub(crate) texture_layout: wgpu::BindGroupLayout,
+    pub texture_timings: crate::texture_backend::TextureTimings,
 }
 
 impl Renderer {
@@ -158,6 +163,7 @@ impl Renderer {
             multiview: None,
             cache: None,
         });
+        let (texture_layout, texture_pipeline) = crate::texture_backend::pipeline(&device);
         if let Some(e) = pollster::block_on(device.pop_error_scope()) {
             return Err(Error(e.to_string()));
         }
@@ -191,6 +197,10 @@ impl Renderer {
             target: None,
             timestamps,
             poisoned: false,
+            textures: HashMap::new(),
+            texture_pipeline,
+            texture_layout,
+            texture_timings: Default::default(),
         })
     }
 
@@ -255,6 +265,17 @@ impl Renderer {
         if self.poisoned {
             return Err(invalid("renderer unavailable after backend failure"));
         }
+        for command in commands {
+            if let Command::DrawTexture { id, mip } = command {
+                if self
+                    .textures
+                    .get(id)
+                    .is_none_or(|t| *mip >= t.desc.mip_count)
+                {
+                    return Err(invalid("unknown texture or invalid sampled mip"));
+                }
+            }
+        }
         let next = validate(
             commands,
             &self.state,
@@ -302,7 +323,7 @@ impl Renderer {
         let mut first = true;
         let mut draws_remaining = commands
             .iter()
-            .filter(|c| matches!(c, Command::DrawIndexed { .. }))
+            .filter(|c| matches!(c, Command::DrawIndexed { .. } | Command::DrawTexture { .. }))
             .count();
         for cmd in commands {
             match cmd {
@@ -379,6 +400,41 @@ impl Renderer {
                     draws_remaining -= 1;
                     first = false;
                     self.counters.cache_hits += 2;
+                }
+                Command::DrawTexture { id, mip } => {
+                    let timestamps =
+                        self.timestamps
+                            .as_ref()
+                            .map(|(q, _)| wgpu::RenderPassTimestampWrites {
+                                query_set: q,
+                                beginning_of_pass_write_index: first.then_some(0),
+                                end_of_pass_write_index: (draws_remaining == 1).then_some(1),
+                            });
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("sample guest texture"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &target.view,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: if first {
+                                    wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                                } else {
+                                    wgpu::LoadOp::Load
+                                },
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: timestamps,
+                        occlusion_query_set: None,
+                    });
+                    pass.set_pipeline(&self.texture_pipeline);
+                    pass.set_bind_group(0, &self.textures[id].bindings[*mip as usize], &[]);
+                    pass.draw(0..3, 0..1);
+                    draws_remaining -= 1;
+                    first = false;
+                    self.counters.cache_hits += 1;
                 }
                 Command::DestroyBuffer { id } => {
                     self.buffers.remove(id);

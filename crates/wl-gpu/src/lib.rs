@@ -8,6 +8,9 @@ pub mod fifo;
 pub mod format;
 pub mod layout;
 pub mod memory;
+pub mod texture;
+#[cfg(feature = "wgpu-backend")]
+mod texture_backend;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub String);
@@ -40,4 +43,12 @@ pub struct Counters {
     pub cache_misses: u64,
     pub submissions: u64,
     pub synchronization_points: u64,
+    pub guest_texture_bytes: u64,
+    pub deswizzle_bytes: u64,
+    pub decompress_bytes: u64,
+    pub temporary_allocations: u64,
+    pub texture_uploads: u64,
+    pub texture_cache_hits: u64,
+    pub texture_cache_misses: u64,
+    pub dirty_mip_uploads: u64,
 }

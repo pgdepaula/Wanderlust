@@ -1,4 +1,5 @@
 //! Host-independent execution commands, not Maxwell method packets.
+use crate::texture::TextureId;
 use crate::{Result, invalid, memory::DirtyRanges};
 use std::collections::HashMap;
 
@@ -30,6 +31,12 @@ pub enum Command<'a> {
     },
     DestroyBuffer {
         id: BufferId,
+    },
+    /// Sample one resident mip through the texture pipeline. Texture existence is
+    /// checked by the backend; buffer-only preflight enforces queue-write ordering.
+    DrawTexture {
+        id: TextureId,
+        mip: u32,
     },
 }
 
@@ -112,6 +119,9 @@ pub fn validate(
                 state
                     .remove(id)
                     .ok_or_else(|| invalid("destroy unknown buffer"))?;
+            }
+            Command::DrawTexture { .. } => {
+                drew = true;
             }
         }
     }

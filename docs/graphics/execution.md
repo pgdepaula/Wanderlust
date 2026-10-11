@@ -18,6 +18,8 @@ A complete stream is validated against a cloned resource descriptor/initializati
 table before backend mutation. Validation rejects duplicate or unknown IDs, zero
 and oversized buffers, non-four-byte-aligned sizes/uploads, overflow, wrong usage,
 uninitialized bindings, out-of-bounds uploads/index spans and draws after removal.
+`DrawTexture` samples a separately synchronized resident texture; the executor
+checks its ID and mip bounds before any backend mutation.
 Index *values* are not checked against vertex count; this boundary relies on wgpu's
 robust resource accesses and does not claim guest-equivalent out-of-range behavior.
 Whole-table validation currently allocates and clones intervals each execution.
@@ -73,22 +75,52 @@ mapped bytes, drops the mapped view and unmaps. There are no synchronization sle
 This intentionally synchronous readback path is suitable for correctness tests;
 one wait per frame is unsuitable for a high-throughput presentation loop.
 
-Buffers persist by ID until removed. The target, view and readback allocation persist
+Buffers and sampled textures persist by ID until removed. The target, view and readback allocation persist
 until the extent changes. One pipeline and optional timestamp-query allocation
-persist for the executor lifetime. Descriptor hashing, texture/bind-group caches,
+persist for the executor lifetime. Sampled textures retain a view/bind group per mip.
+Descriptor hashing, cross-resource texture sharing,
 asynchronous eviction and staging reuse are not implemented. GPU validation and
 allocation errors are captured in error scopes; a backend failure prevents reuse
 of potentially inconsistent executor state. Ordinary preflight errors permit retry.
 
 ## Formats and capabilities
 
-Rendering/readback implements `Rgba8Unorm` only. `Format` describes block geometry
+Rendering/readback targets implement `Rgba8Unorm`. Guest texture sampling implements
+RGBA8 UNORM and sRGB, nearest/bilinear clamp-to-edge, and explicitly selected 2D mips.
+`Format` describes block geometry
 for RGBA8 linear/sRGB, BC1 RGBA, BC3 RGBA and ASTC 4×4; geometry is not codec or
 backend sampling support. `BlockLinear2d` uses `tegra_swizzle` for one 2D mip with
 GOB height 1, 2, 4, 8, 16 or 32, and a 64 MiB conversion budget. Compressed input
 uses block coordinates. It preserves encoded block bytes and does not decompress
-ASTC or BCn. Mip chains, arrays, depth/stencil, multisampling and sRGB execution
-are unsupported by the executor.
+ASTC or BCn. `TextureDesc` assembles 2D mip chains using the library's per-mip GOB
+height reduction and successive padded mip sizes. Arrays, depth/stencil and
+multisampling are unsupported.
+
+## Guest texture transfers and coherence
+
+`sync_texture` resolves every mip through `AddressMap`, reads through `GuestMemory`,
+and converts tiled mips before allocating or mutating host textures. Packed linear
+input stays borrowed until `Queue::write_texture` copies it. Texture uploads use
+tight rows; that API does **not** require the 256-byte row pitch used by encoded
+buffer/texture copies. The texture sampling shader executes a fullscreen triangle;
+no CPU code writes the expected image to the render target. One view per mip makes
+the selected source level explicit, including narrow final mips. sRGB texture views
+perform RGB-to-linear sampling; alpha remains linear.
+
+`TextureChanges` is a bounded journal of canonical guest byte writes with an
+explicit memory epoch. All aliases query the same journal. A cached mip records
+its resolved guest interval and content stamp; changed mappings, epochs, layouts,
+formats or contents cannot reuse the old stamp. The runtime adapter must notify
+every backing write and change epoch when the same guest address acquires a new
+backing/process identity. No runtime adapter is installed by this graphics code.
+After 64 journal entries, eviction advances a conservative invalidation floor.
+
+Dirty tiled bytes invalidate whole affected mips, including padding. They are not
+misinterpreted as row-major rectangles. Overlapping writes coalesce into one upload
+per affected mip at synchronization. Unchanged textures perform no payload reads,
+conversion or uploads. Successful synchronization acknowledges wgpu-owned queue
+staging acceptance; it does not assert GPU completion. Uploads do not insert waits.
+Texture removal drops CPU handles, leaving submitted references owned by wgpu.
 
 Adapter information, all supported features, enabled features, adapter limits and
 requested device limits are exposed. Only timestamp queries are optionally enabled;

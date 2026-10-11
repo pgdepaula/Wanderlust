@@ -18,7 +18,9 @@ tegra_swizzle main revision was
 [`d7ed318ce233a4d557d4a2f207ed5dc04ed813c0`](https://github.com/ScanMountGoat/tegra_swizzle/commit/d7ed318ce233a4d557d4a2f207ed5dc04ed813c0),
 with repository activity in July 2026. The release algorithm handles complete GOBs
 and partial edge GOBs, while the surface API additionally handles mip/array layout.
-The current wrapper intentionally exposes only a bounded single 2D mip.
+The layout wrapper exposes a bounded single 2D mip; `TextureDesc` now composes it
+using the inspected surface implementation's successive mip sizes and block-height
+reduction. Layer alignment and depth packing remain unsupported.
 
 The wgpu 26 [`queue implementation and API contract`](https://github.com/gfx-rs/wgpu/blob/0c978d0d46c7eaf68f6d1ecf2ea1bd03a96b7c47/wgpu/src/api/queue.rs)
 establishes that writes copy input into staging before returning, and execute before

@@ -1,7 +1,7 @@
 //! Explicit block geometry and transfer pitch; no implicit format reinterpretation.
 use crate::{Result, invalid};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Format {
     Rgba8Unorm,
     Rgba8Srgb,
