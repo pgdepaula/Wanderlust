@@ -1,0 +1,22 @@
+[package]
+name = "wl-gpu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["wgpu-backend"]
+wgpu-backend = ["dep:wgpu", "dep:pollster"]
+
+[dependencies]
+tegra_swizzle = "0.4.0"
+wgpu = { version = "26.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "dx12", "gles", "wgsl"], optional = true }
+pollster = { version = "0.4", optional = true }
+
+[dev-dependencies]
+stats_alloc = "0.1.10"
+naga = { version = "26.0.0", features = ["wgsl-in"] }
+
+[[example]]
+name = "headless"
+required-features = ["wgpu-backend"]
