@@ -1,5 +1,6 @@
-tests/horizon/probe/main is built from tests/horizon/probe.c with devkitA64 (GCC 16.1.0,
-newlib 4.6.0.20260123) and libnx 4.12.0, and contains code from the following libraries.
+tests/horizon/probe/main and tests/horizon/threads/main are built from tests/horizon/probe.c
+and tests/horizon/threads.c with devkitA64 (GCC 16.1.0, newlib 4.6.0.20260123) and libnx
+4.12.0 (tools/python/homebrew.py), and contain code from the following libraries.
 
 libnx (https://github.com/switchbrew/libnx)
 
@@ -18,9 +19,10 @@ PERFORMANCE OF THIS SOFTWARE.
 
 newlib (https://sourceware.org/newlib/)
 
-The C library is distributed under the licences listed in newlib's COPYING.NEWLIB
-(https://sourceware.org/git/?p=newlib-cygwin.git;a=blob;f=COPYING.NEWLIB), whose notices apply
-to the newlib code in this binary.
+The C library is distributed under the licences reproduced verbatim in COPYING.NEWLIB in this
+directory (newlib-cygwin tag newlib-4.6.0, file COPYING.NEWLIB, SHA-256
+f3afe48e4bc6ed8466a42e9dacb6be1d8f9cbf5aac15cb8e474a5ccde8b40ef6). Their copyright notices,
+conditions and disclaimers apply to the newlib code in these binaries.
 
 libgcc (https://gcc.gnu.org/)
 

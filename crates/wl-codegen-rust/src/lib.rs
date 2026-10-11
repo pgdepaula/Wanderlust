@@ -1351,7 +1351,7 @@ const ALLOWS: &str = "#![allow(unused_variables, unused_parens, unreachable_code
 fn block_source(out: &mut String, block: &wl_analysis::Block) -> Result<()> {
     writeln!(
         out,
-        "pub fn b{:x}(c: &mut Cpu, m: &mut Process) -> RuntimeResult<Option<&'static str>> {{",
+        "pub fn b{:x}(c: &mut Cpu, m: &mut Process) -> RuntimeResult<Option<Stop>> {{",
         block.start.0
     )
     .unwrap();

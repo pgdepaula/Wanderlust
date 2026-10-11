@@ -116,5 +116,5 @@ fn budget_and_services() {
             .contains("guest_pc=0x8")
     );
     assert_eq!(c.x, old);
-    assert_eq!(service(&mut c, &mut p, 7).unwrap(), Some("exit_process"));
+    assert_eq!(service(&mut c, &mut p, 7).unwrap(), Some(Stop::ExitProcess));
 }

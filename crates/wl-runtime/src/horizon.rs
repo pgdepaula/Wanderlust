@@ -4,7 +4,8 @@
 //! (`libmesosphere`, commit 0e9cd964) and the user-mode contract used by libnx (commit
 //! feebd026). Every SVC either produces its architectural effect (registers, guest memory,
 //! kernel state) or fails explicitly; none returns success without performing its work.
-use crate::{Cpu, Memory, RuntimeResult};
+use crate::threads::{self, SchedulerStats, ThreadState, Wait};
+use crate::{Cpu, Memory, RuntimeResult, Stop};
 use std::collections::BTreeMap;
 
 pub const PAGE: u64 = 0x1000;
@@ -32,6 +33,8 @@ pub mod state {
     pub const THREAD_LOCAL: u32 = 0x0C;
     pub const INACCESSIBLE: u32 = 0x10;
 
+    /// `KMemoryState` flag: the memory may be aliased by `svcMapMemory`.
+    pub const FLAG_CAN_ALIAS: u32 = 1 << 15;
     /// `KMemoryState` flag: `svcSetMemoryPermission` may change the permission.
     pub const FLAG_CAN_REPROTECT: u32 = 1 << 8;
     /// `KMemoryState` flag: the Uncached attribute may change.
@@ -54,6 +57,8 @@ pub mod state {
 }
 /// `svc::MemoryAttribute` bits.
 pub mod attribute {
+    /// Source pages of an `svcMapMemory` alias.
+    pub const LOCKED: u32 = 1 << 0;
     pub const DEVICE_SHARED: u32 = 1 << 2;
     pub const UNCACHED: u32 = 1 << 3;
     pub const PERMISSION_LOCKED: u32 = 1 << 4;
@@ -76,6 +81,14 @@ pub mod result {
     pub const INVALID_COMBINATION: u32 = kernel(116);
     pub const INVALID_ENUM_VALUE: u32 = kernel(120);
     pub const OUT_OF_HANDLES: u32 = kernel(105);
+    pub const INVALID_MEMORY_REGION: u32 = kernel(110);
+    pub const INVALID_PRIORITY: u32 = kernel(112);
+    pub const INVALID_CORE_ID: u32 = kernel(113);
+    pub const TIMED_OUT: u32 = kernel(117);
+    pub const CANCELLED: u32 = kernel(118);
+    pub const OUT_OF_RANGE: u32 = kernel(119);
+    pub const INVALID_STATE: u32 = kernel(125);
+    pub const LIMIT_REACHED: u32 = kernel(132);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -247,14 +260,54 @@ impl HandleTable {
     }
 }
 
+/// A kernel thread object. Its index in `Kernel::threads` is its object identity; indices
+/// and thread IDs are never reused, so a stale handle cannot name a new thread.
 #[derive(Clone, Debug)]
 pub struct Thread {
     pub id: u64,
+    /// The handle returned when the thread was created (informational).
     pub handle: u32,
+    /// Thread-local region (TPIDRRO_EL0).
     pub tls: u64,
+    /// Main thread: its stack mapping. Created threads: the stack top they were given.
     pub stack: Range,
+    /// Base priority (0 highest, 63 lowest).
     pub priority: u8,
+    /// Ideal core; threads run on their ideal core.
     pub core: u8,
+    pub state: ThreadState,
+    pub wait: Option<Wait>,
+    /// The SVC to complete when the current wait ends.
+    pub pending_svc: u16,
+    /// Saved architectural state while the thread is not running.
+    pub context: Option<Box<Cpu>>,
+    /// Open handles; an exited thread without handles is destroyed.
+    pub references: u32,
+    /// svcCancelSynchronization arrived while the thread was not in a cancellable wait.
+    pub wait_cancelled: bool,
+    pub destroyed: bool,
+    /// Queue position among runnable threads of equal priority on its core.
+    pub order: u64,
+}
+impl Thread {
+    pub fn new(id: u64, tls: u64, stack: Range, priority: u8, core: u8) -> Self {
+        Self {
+            id,
+            handle: 0,
+            tls,
+            stack,
+            priority,
+            core,
+            state: ThreadState::Initialized,
+            wait: None,
+            pending_svc: 0,
+            context: None,
+            references: 0,
+            wait_cancelled: false,
+            destroyed: false,
+            order: 0,
+        }
+    }
 }
 
 /// Why execution of the process ended.
@@ -271,7 +324,24 @@ pub struct Kernel {
     pub code: Range,
     pub handles: HandleTable,
     pub threads: Vec<Thread>,
+    /// The running thread.
     pub current: usize,
+    pub next_thread_id: u64,
+    /// ThreadLocal pages: (address, bitmap of reserved 0x200-byte regions).
+    pub tls_pages: Vec<(u64, u8)>,
+    /// svcMapMemory stack aliases.
+    pub aliases: Vec<Alias>,
+    /// Deterministic virtual clock in nanoseconds: one per retired guest instruction plus
+    /// time skipped while every thread waits for a timeout.
+    pub time_ns: u64,
+    /// `Cpu::steps` of the running thread when its slice began.
+    pub slice_start: u64,
+    /// Guest instructions retired by all threads.
+    pub total_steps: u64,
+    pub next_core: usize,
+    pub next_rotation_ns: u64,
+    pub order: u64,
+    pub stats: SchedulerStats,
     /// Process-local region (TLS slot 0 of the first ThreadLocal page).
     pub process_local_region: u64,
     pub heap_size: u64,
@@ -279,7 +349,6 @@ pub struct Kernel {
     pub last_svc: Option<(u64, u16, Option<u32>)>,
     pub debug_output: Vec<String>,
     pub exit: Option<Exit>,
-    pub start: std::time::Instant,
 }
 
 /// The guest process: one memory image and its kernel state, shared by every translation
@@ -309,7 +378,7 @@ fn zeroed(size: u64) -> Vec<u8> {
 }
 /// Finds a page-aligned free range of `size` bytes in `region`, leaving `GUARD_PAGES` before
 /// it, searching upward (deterministic first fit; Horizon randomizes with ASLR).
-fn find_free(memory: &Memory, region: Range, size: u64) -> RuntimeResult<u64> {
+pub(crate) fn find_free(memory: &Memory, region: Range, size: u64) -> RuntimeResult<u64> {
     let mut candidate = region.start + GUARD_PAGES * PAGE;
     let mut regions: Vec<(u64, u64)> = memory
         .regions
@@ -345,15 +414,6 @@ impl Process {
         if config.main_thread_stack_size % PAGE != 0 || config.main_thread_stack_size == 0 {
             return Err("main thread stack size must be a non-zero multiple of 0x1000".into());
         }
-        let tls_page = find_free(&memory, layout.kernel_map, PAGE)?;
-        memory.map_state(
-            tls_page,
-            vec![0; PAGE as usize],
-            true,
-            true,
-            false,
-            state::THREAD_LOCAL,
-        )?;
         let stack_size = config.main_thread_stack_size;
         let stack_base = find_free(&memory, layout.stack, stack_size)?;
         memory.map_state(
@@ -364,43 +424,56 @@ impl Process {
             false,
             state::STACK,
         )?;
-        let mut handles = HandleTable::new(config.handle_table_size);
-        let handle = handles
-            .add(Object::Thread(0))
-            .map_err(|_| "handle table full")?;
-        let tls = tls_page + TLS_REGION_SIZE;
-        memory.write_bytes(tls + TLS_THREAD_HANDLE, &handle.to_le_bytes())?;
-        let thread = Thread {
-            id: config.main_thread_id,
-            handle,
-            tls,
-            stack: Range {
-                start: stack_base,
-                end: stack_base + stack_size,
-            },
-            priority: config.main_thread_priority,
-            core: config.ideal_core,
-        };
-        let mut cpu = Cpu::new(entry);
-        cpu.x = [0; 31];
-        cpu.x[1] = u64::from(handle);
-        cpu.sp = thread.stack.end;
-        cpu.tpidrro_el0 = tls;
-        let kernel = Kernel {
+        let mut kernel = Kernel {
             config,
             layout,
             code,
-            handles,
-            threads: vec![thread],
+            handles: HandleTable::new(config.handle_table_size),
+            threads: Vec::new(),
             current: 0,
-            process_local_region: tls_page,
+            next_thread_id: config.main_thread_id + 1,
+            tls_pages: Vec::new(),
+            aliases: Vec::new(),
+            time_ns: 0,
+            slice_start: 0,
+            total_steps: 0,
+            next_core: 0,
+            next_rotation_ns: threads::PREEMPTION_INTERVAL_NS,
+            order: 0,
+            stats: SchedulerStats::default(),
+            process_local_region: 0,
             heap_size: 0,
             svc_counts: BTreeMap::new(),
             last_svc: None,
             debug_output: Vec::new(),
             exit: None,
-            start: std::time::Instant::now(),
         };
+        let k = &mut kernel;
+        // The process-local region takes the first slot of the first ThreadLocal page.
+        k.process_local_region =
+            threads::reserve_tls(&mut memory, k).map_err(|_| "no space for TLS")?;
+        let tls = threads::reserve_tls(&mut memory, k).map_err(|_| "no space for TLS")?;
+        let stack = Range {
+            start: stack_base,
+            end: stack_base + stack_size,
+        };
+        k.threads.push(Thread::new(
+            config.main_thread_id,
+            tls,
+            stack,
+            config.main_thread_priority,
+            config.ideal_core,
+        ));
+        k.threads[0].state = ThreadState::Runnable;
+        let handle = threads::open_handle(k, 0).map_err(|_| "handle table full")?;
+        k.threads[0].handle = handle;
+        memory.write_bytes(tls + TLS_THREAD_HANDLE, &handle.to_le_bytes())?;
+        let mut cpu = Cpu::new(entry);
+        cpu.x = [0; 31];
+        cpu.x[1] = u64::from(handle);
+        cpu.x[18] = threads::cfi_value(config.program_id, config.main_thread_id);
+        cpu.sp = stack.end;
+        cpu.tpidrro_el0 = tls;
         Ok((
             Self {
                 memory,
@@ -650,7 +723,9 @@ fn set_memory_attribute(
     Ok(())
 }
 
-/// Bytes of user memory charged to the process (code, stack, heap and TLS pages).
+/// Bytes of user memory charged to the process (code, stack, heap and TLS pages). The
+/// Locked source of an svcMapMemory alias shares its pages with the alias and is not
+/// counted twice.
 pub fn used_memory(memory: &Memory) -> u64 {
     memory
         .regions
@@ -659,7 +734,7 @@ pub fn used_memory(memory: &Memory) -> u64 {
             matches!(
                 r.state,
                 state::CODE | state::CODE_DATA | state::STACK | state::NORMAL | state::THREAD_LOCAL
-            )
+            ) && r.attribute & attribute::LOCKED == 0
         })
         .map(|r| r.bytes.len() as u64)
         .sum()
@@ -670,21 +745,23 @@ pub fn used_memory(memory: &Memory) -> u64 {
 /// X1 upward.
 fn outputs(id: u16) -> (bool, usize) {
     match id {
-        0x01 | 0x06 | 0x24 | 0x25 | 0x29 => (true, 1),
-        0x0B => (false, 0),
+        0x01 | 0x06 | 0x08 | 0x0C | 0x18 | 0x24 | 0x25 | 0x29 => (true, 1),
+        0x0B | 0x1D => (false, 0),
         _ => (true, 0),
     }
 }
 /// The register contract of Mesosphere's SVC wrappers (`svc_codegen`, 64-bit ABI): outputs
 /// are copied from kernel stack slots after every call, successful or not, and each of
-/// X0-X7 that is not an output is zeroed; X8-X30 are preserved. A failed call never writes
-/// its output slots; this runtime returns 0 in them deterministically.
-fn finish_registers(c: &mut Cpu, id: u16) {
+/// X0-X7 that is not an output is zeroed; X8-X30 are preserved. A failed call normally
+/// never writes its output slots; this runtime returns 0 in them deterministically.
+/// `written` marks the exception: the output was produced despite the failure
+/// (svcWaitSynchronization reports index -1 after a timed-out or cancelled wait).
+pub(crate) fn finish_registers(c: &mut Cpu, id: u16, written: bool) {
     let (value, count) = outputs(id);
     let failed = value && c.x[0] as u32 != result::SUCCESS && !matches!(id, 0x10 | 0x1E);
     for n in 0..8 {
         let output = (n == 0 && value) || (1..=count).contains(&n);
-        if !output || (failed && n != 0) {
+        if !output || (failed && n != 0 && !written) {
             c.x[n] = 0;
         }
     }
@@ -693,14 +770,18 @@ fn set_result(c: &mut Cpu, value: u32) {
     c.x[0] = u64::from(value);
 }
 
-/// Horizon SVC dispatch. Returns `Ok(Some(exit))` when the process or its last thread ends.
-pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<Exit>> {
+/// Horizon SVC dispatch for the running thread `k.current`, whose context is `c`.
+/// `Ok(Some(Stop::Reschedule))` hands the thread to the scheduler: it blocked (its SVC
+/// completes when the wait ends), yielded, exited, or woke another thread. Any SVC is an
+/// exception on hardware and ends the caller's exclusive reservation.
+pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<Stop>> {
     let Process { memory, kernel } = m;
     let k = kernel
         .as_mut()
         .ok_or("Horizon SVC without a Horizon process")?;
     *k.svc_counts.entry(id).or_default() += 1;
     k.last_svc = Some((c.pc, id, None));
+    c.monitor = None;
     if !k.config.permits(id) {
         // The kernel raises an exception instead of dispatching (kern_svc_handlers_asm.s).
         return Err(format!(
@@ -708,11 +789,11 @@ pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<E
             c.pc
         ));
     }
-    let outcome = match id {
+    let wakeups = k.stats.wakeups;
+    // `Some(stop)`: the thread leaves now with its registers already final or deferred.
+    let stop: Option<Stop> = match id {
         0x01 => {
-            let size = c.x[1];
-            let r = set_heap_size(memory, k, size);
-            match r {
+            match set_heap_size(memory, k, c.x[1]) {
                 Ok(address) => {
                     set_result(c, result::SUCCESS);
                     c.x[1] = address;
@@ -731,6 +812,18 @@ pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<E
             set_result(c, r.err().unwrap_or(result::SUCCESS));
             None
         }
+        0x04 | 0x05 => {
+            let r = if id == 0x04 {
+                map_memory(memory, k, c.x[0], c.x[1], c.x[2])
+            } else {
+                unmap_memory(memory, k, c.x[0], c.x[1], c.x[2])
+            };
+            match r {
+                Ok(code) => set_result(c, code),
+                Err(e) => return Err(format!("{e}; guest_pc={:#x}", c.pc)),
+            }
+            None
+        }
         0x06 => {
             let (out, address) = (c.x[0], c.x[2]);
             let info = query(memory, k.layout.address_space_end, address);
@@ -742,17 +835,56 @@ pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<E
             }
             None
         }
-        0x07 => Some(Exit::Process),
-        0x0A => Some(Exit::Thread),
-        0x0B => None,
+        0x07 => {
+            k.exit = Some(Exit::Process);
+            Some(Stop::ExitProcess)
+        }
+        0x08 => {
+            match threads::create_thread(memory, k, c) {
+                Ok(handle) => {
+                    set_result(c, result::SUCCESS);
+                    c.x[1] = u64::from(handle);
+                }
+                Err(code) => set_result(c, code),
+            }
+            None
+        }
+        0x09 => {
+            let code = threads::start_thread(k, c.x[0] as u32);
+            set_result(c, code);
+            None
+        }
+        0x0A => {
+            let stop = threads::exit_current(memory, k);
+            if stop == Stop::ExitThread {
+                k.exit = Some(Exit::Thread);
+            }
+            Some(stop)
+        }
+        0x0B => threads::sleep_thread(k, c, c.x[0] as i64),
+        0x0C => {
+            match threads::get_thread_priority(k, c.x[1] as u32) {
+                Ok(p) => {
+                    set_result(c, result::SUCCESS);
+                    c.x[1] = p;
+                }
+                Err(code) => set_result(c, code),
+            }
+            None
+        }
+        0x0D => {
+            let code =
+                threads::set_thread_priority(k, c.x[0] as u32, i64::from(c.x[1] as u32 as i32));
+            set_result(c, code);
+            None
+        }
         0x10 => {
             c.x[0] = u64::from(k.threads[k.current].core);
             None
         }
         0x16 => {
             let handle = c.x[0] as u32;
-            let closed =
-                handle != CURRENT_THREAD && handle != CURRENT_PROCESS && k.handles.close(handle);
+            let closed = threads::close_handle(memory, k, handle);
             set_result(
                 c,
                 if closed {
@@ -763,18 +895,62 @@ pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<E
             );
             None
         }
+        0x18 => match threads::wait_synchronization(memory, k, c) {
+            Ok((index, None)) => {
+                set_result(c, result::SUCCESS);
+                c.x[1] = u64::from(index);
+                None
+            }
+            Ok((_, blocked)) => blocked,
+            Err(code) => {
+                set_result(c, code);
+                None
+            }
+        },
+        0x19 => {
+            let code = threads::cancel_synchronization(k, c.x[0] as u32);
+            set_result(c, code);
+            None
+        }
+        0x1A => match threads::arbitrate_lock(memory, k, c) {
+            Ok(None) => {
+                set_result(c, result::SUCCESS);
+                None
+            }
+            Ok(blocked) => blocked,
+            Err(code) => {
+                set_result(c, code);
+                None
+            }
+        },
+        0x1B => {
+            let code = threads::arbitrate_unlock(memory, k, c.x[0]);
+            set_result(c, code);
+            None
+        }
+        0x1C => match threads::wait_condition(memory, k, c) {
+            Ok(None) => {
+                set_result(c, result::SUCCESS);
+                None
+            }
+            Ok(blocked) => blocked,
+            Err(code) => {
+                set_result(c, code);
+                None
+            }
+        },
+        0x1D => {
+            threads::signal_condition(memory, k, c.x[0], c.x[1] as u32 as i32);
+            None
+        }
         0x1E => {
-            // CNTPCT_EL0 runs at 19.2 MHz.
-            let nanos = k.start.elapsed().as_nanos();
-            c.x[0] = (nanos * 192 / 10_000) as u64;
+            // CNTPCT_EL0 (19.2 MHz) of the deterministic virtual clock.
+            c.x[0] = threads::ticks(threads::now_ns(k, c));
             None
         }
         0x24 => {
             let handle = c.x[1] as u32;
-            if handle == CURRENT_PROCESS {
-                set_result(c, result::SUCCESS);
-                c.x[1] = k.config.process_id;
-            } else if let Some(Object::Thread(_)) = thread_object(k, handle) {
+            if handle == CURRENT_PROCESS || threads::thread_of(k, handle, true).is_some() {
                 set_result(c, result::SUCCESS);
                 c.x[1] = k.config.process_id;
             } else {
@@ -783,8 +959,8 @@ pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<E
             None
         }
         0x25 => {
-            match thread_object(k, c.x[1] as u32) {
-                Some(Object::Thread(t)) => {
+            match threads::thread_of(k, c.x[1] as u32, true) {
+                Some(t) => {
                     set_result(c, result::SUCCESS);
                     c.x[1] = k.threads[t].id;
                 }
@@ -803,8 +979,11 @@ pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<E
             let text = usize::try_from(length)
                 .ok()
                 .filter(|l| *l <= 0x10000)
-                .and_then(|l| memory.read_bytes(address, l).ok())
-                .map(|b| String::from_utf8_lossy(b).into_owned());
+                .and_then(|l| {
+                    let mut b = vec![0; l];
+                    memory.read_into(address, &mut b).ok().map(|_| b)
+                })
+                .map(|b| String::from_utf8_lossy(&b).into_owned());
             match text {
                 Some(text) => {
                     eprintln!("[guest] {}", text.trim_end_matches('\n'));
@@ -841,22 +1020,173 @@ pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<E
             ));
         }
     };
-    if outcome.is_none() {
-        finish_registers(c, id);
+    if stop.is_none() {
+        finish_registers(c, id, false);
+        if let Some(last) = k.last_svc.as_mut() {
+            last.2 = Some(c.x[0] as u32);
+        }
+        // Another thread became runnable: let the scheduler choose (hardware would preempt
+        // in favour of a better thread, or run it on another core).
+        if k.stats.wakeups != wakeups && k.exit.is_none() {
+            c.pc = c.pc.wrapping_add(4);
+            return Ok(Some(Stop::Reschedule));
+        }
     }
-    if let Some(last) = k.last_svc.as_mut() {
-        last.2 = Some(c.x[0] as u32);
-    }
-    if let Some(exit) = outcome {
-        k.exit = Some(exit);
-    }
-    Ok(outcome)
+    Ok(stop)
 }
-fn thread_object(k: &Kernel, handle: u32) -> Option<Object> {
-    if handle == CURRENT_THREAD {
-        return Some(Object::Thread(k.current));
+
+/// Stack aliases created by svcMapMemory: (stack address, source address, size).
+pub type Alias = (u64, u64, u64);
+
+/// svcMapMemory (0x04): X0 destination in the Stack region, X1 source, X2 size. The source
+/// (aliasable RW memory without attributes) becomes inaccessible and Locked; the destination
+/// becomes Stack RW backed by the same bytes. While the source is inaccessible no access can
+/// observe both views, so the backing bytes move to the destination and move back on unmap.
+fn map_memory(
+    memory: &mut Memory,
+    k: &mut Kernel,
+    dst: u64,
+    src: u64,
+    size: u64,
+) -> RuntimeResult<u32> {
+    if let Err(code) = alias_arguments(k, dst, src, size) {
+        return Ok(code);
     }
-    k.handles.get(handle)
+    if check_memory_state(
+        memory,
+        src,
+        size,
+        state::FLAG_CAN_ALIAS,
+        state::FLAG_CAN_ALIAS,
+        0xFF,
+        0,
+    )
+    .ok()
+    .filter(|r| r.2 == 3)
+    .is_none()
+    {
+        return Ok(result::INVALID_CURRENT_MEMORY);
+    }
+    if memory
+        .regions
+        .iter()
+        .any(|r| r.base < dst + size && dst < r.end())
+    {
+        return Ok(result::INVALID_CURRENT_MEMORY);
+    }
+    let parts = isolate(memory, src, size);
+    let mut bytes = Vec::with_capacity(size as usize);
+    let mut sorted = parts.clone();
+    sorted.sort_by_key(|&i| memory.regions[i].base);
+    for &i in &sorted {
+        let r = &mut memory.regions[i];
+        bytes.extend_from_slice(&r.bytes);
+        r.bytes = zeroed(r.bytes.len() as u64);
+        r.read = false;
+        r.write = false;
+        r.attribute |= attribute::LOCKED;
+    }
+    memory.map_state(dst, bytes, true, true, false, state::STACK)?;
+    k.aliases.push((dst, src, size));
+    Ok(result::SUCCESS)
+}
+/// svcUnmapMemory (0x05): undoes an svcMapMemory of exactly the same ranges.
+fn unmap_memory(
+    memory: &mut Memory,
+    k: &mut Kernel,
+    dst: u64,
+    src: u64,
+    size: u64,
+) -> RuntimeResult<u32> {
+    if let Err(code) = alias_arguments(k, dst, src, size) {
+        return Ok(code);
+    }
+    let src_ok = check_memory_state(
+        memory,
+        src,
+        size,
+        state::FLAG_CAN_ALIAS,
+        state::FLAG_CAN_ALIAS,
+        0,
+        0,
+    )
+    .ok()
+    .filter(|r| r.2 == 0 && r.3 == attribute::LOCKED)
+    .is_some();
+    let dst_ok = check_memory_state(
+        memory,
+        dst,
+        size,
+        0xFFFF_FFFF,
+        state::kernel(state::STACK),
+        0xFF,
+        0,
+    )
+    .is_ok();
+    if !src_ok || !dst_ok {
+        return Ok(result::INVALID_CURRENT_MEMORY);
+    }
+    let Some(i) = k.aliases.iter().position(|a| *a == (dst, src, size)) else {
+        // A consistent sub-range of one alias is valid on the kernel but not modelled; any
+        // other pairing fails the kernel's page-group comparison.
+        let partial = k
+            .aliases
+            .iter()
+            .any(|&(d, sr, n)| dst >= d && dst + size <= d + n && src.wrapping_sub(sr) == dst - d);
+        if partial {
+            return Err("unsupported Horizon SVC 0x5 (UnmapMemory) of part of a mapping".into());
+        }
+        return Ok(result::INVALID_MEMORY_REGION);
+    };
+    k.aliases.remove(i);
+    let stack = isolate(memory, dst, size);
+    let mut bytes = Vec::with_capacity(size as usize);
+    let mut sorted = stack.clone();
+    sorted.sort_by_key(|&i| memory.regions[i].base);
+    for &i in &sorted {
+        bytes.extend_from_slice(&memory.regions[i].bytes);
+    }
+    let mut index = 0;
+    memory.regions.retain(|_| {
+        index += 1;
+        !stack.contains(&(index - 1))
+    });
+    let mut parts = isolate(memory, src, size);
+    parts.sort_by_key(|&i| memory.regions[i].base);
+    let mut at = 0;
+    for &i in &parts {
+        let r = &mut memory.regions[i];
+        let n = r.bytes.len();
+        r.bytes = bytes[at..at + n].to_vec();
+        at += n;
+        r.read = true;
+        r.write = true;
+        r.attribute &= !attribute::LOCKED;
+    }
+    Ok(result::SUCCESS)
+}
+fn alias_arguments(k: &Kernel, dst: u64, src: u64, size: u64) -> Result<(), u32> {
+    if dst % PAGE != 0 || src % PAGE != 0 {
+        return Err(result::INVALID_ADDRESS);
+    }
+    if size == 0 || size % PAGE != 0 {
+        return Err(result::INVALID_SIZE);
+    }
+    let (Some(src_end), Some(dst_end)) = (src.checked_add(size), dst.checked_add(size)) else {
+        return Err(result::INVALID_CURRENT_MEMORY);
+    };
+    if src_end > k.layout.address_space_end {
+        return Err(result::INVALID_CURRENT_MEMORY);
+    }
+    // CanContain(dst, size, Stack): inside the Stack region and clear of the heap region.
+    let stack = k.layout.stack;
+    if dst < stack.start
+        || dst_end > stack.end
+        || (dst < k.layout.heap.end && k.layout.heap.start < dst_end)
+    {
+        return Err(result::INVALID_MEMORY_REGION);
+    }
+    Ok(())
 }
 /// `svcSetHeapSize`: grows or shrinks the Normal-state RW heap at the heap region start.
 /// Growth maps zeroed pages after the current heap; shrinking requires the released range to
@@ -896,17 +1226,16 @@ fn set_heap_size(memory: &mut Memory, k: &mut Kernel, size: u64) -> Result<u64, 
             !released.contains(&(index - 1))
         });
     } else if size > current {
-        // A new block after the current heap; queries coalesce it with its neighbour.
-        memory
-            .map_state(
-                base + current,
-                zeroed(size - current),
-                true,
-                true,
-                false,
-                state::NORMAL,
-            )
-            .map_err(|_| result::OUT_OF_MEMORY)?;
+        // New 2 MiB blocks after the current heap; queries coalesce them. Separate blocks
+        // keep later page-granular splits (permissions, svcMapMemory) from copying the
+        // whole lazily-zeroed heap.
+        let mut at = base + current;
+        while at < base + size {
+            memory
+                .map_state(at, zeroed(HEAP_ALIGNMENT), true, true, false, state::NORMAL)
+                .map_err(|_| result::OUT_OF_MEMORY)?;
+            at += HEAP_ALIGNMENT;
+        }
     }
     k.heap_size = size;
     Ok(base)
@@ -939,7 +1268,7 @@ fn get_info(memory: &Memory, k: &Kernel, kind: u64, handle: u32, subtype: u64) -
             18 => k.config.program_id,
             20 => k.process_local_region,
             23 => u64::from(k.config.is_application),
-            24 => k.config.thread_limit - k.threads.len() as u64,
+            24 => threads::free_thread_count(k),
             28 => 0,
             _ => 1u64 << 39,
         });

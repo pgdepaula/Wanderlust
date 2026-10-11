@@ -104,7 +104,7 @@ fn libnx_application_runs_natively_under_horizon() {
 /// Rebuilds the fixture from source when devkitA64 and libnx are available
 /// (`DEVKITPRO` or target/toolchains/devkitpro); otherwise reports the skip.
 #[test]
-fn rebuilt_probe_matches_the_committed_fixture_behaviour() {
+fn rebuilt_fixtures_match_the_committed_behaviour() {
     let local = root().join("target/toolchains/devkitpro/root/opt/devkitpro");
     let dkp = std::env::var_os("DEVKITPRO")
         .map(PathBuf::from)
@@ -126,6 +126,72 @@ fn rebuilt_probe_matches_the_committed_fixture_behaviour() {
         .unwrap();
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     check(&run(&dir, &t));
+    let dir = t.0.join("threads");
+    let python = std::env::var("WL_PYTHON").unwrap_or_else(|_| "python3".into());
+    let o = Command::new(python)
+        .arg(root().join("tools/python/homebrew.py"))
+        .arg(root().join("tests/horizon/threads.c"))
+        .arg("--out-dir")
+        .arg(&dir)
+        .env("DEVKITPRO", &dkp)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    check_threads(&run(&dir, &t));
+}
+
+/// tests/horizon/threads.c: a worker created with libnx threadCreate on core 1, a contended
+/// libnx Mutex, a CondVar, a timed svcWaitSynchronization and threadWaitForExit. Expected
+/// values: thread IDs 0x72/0x73; TLS slots 1 and 2 of the first ThreadLocal page at
+/// 0x8204000; total = sum over both threads and i < 3000 of the 24 byte windows of
+/// mix(who << 32 | i) = 0x1180eea (computed independently of the runtime); each thread's
+/// __thread counter 7 + 3000; the 100 us wait on the sleeping worker times out (0xea01,
+/// index -1); joining and closing succeed.
+const THREADS_EXPECTED: [&str; 3] = [
+    "threads create=0 start=0 main_tid=0x72 worker_tid=0x73 tls_main=0x8204200 tls_worker=0x8204400",
+    "sync total=0000000001180eea entries=3000,3000 tls_values=3007,3007 ready=1",
+    "wait timed=0xea01 index=-1 joined=0 closed=0",
+];
+fn check_threads(state: &serde_json::Value) {
+    assert_eq!(state["status"], "exit_process", "{state}");
+    let lines: Vec<&str> = state["debug_output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l.as_str().unwrap())
+        .collect();
+    assert_eq!(lines, THREADS_EXPECTED);
+    let svc = &state["svc_counts"];
+    for id in [
+        "0x04", "0x05", "0x08", "0x09", "0x0a", "0x0b", "0x1c", "0x1d",
+    ] {
+        assert!(svc[id].as_u64().unwrap() >= 1, "svc {id}: {svc}");
+    }
+    // Preemption inside the critical section made the mutex contended.
+    assert!(
+        svc["0x1a"].as_u64().unwrap() >= 1 && svc["0x1b"].as_u64().unwrap() >= 1,
+        "{svc}"
+    );
+    let sched = &state["scheduler"];
+    assert_eq!(sched["max_runnable"], 2);
+    assert!(sched["context_switches"].as_u64().unwrap() > 10);
+    assert!(
+        sched["idle_ns"].as_u64().unwrap() > 0,
+        "main blocked while the worker slept"
+    );
+    let threads = state["threads"].as_array().unwrap();
+    assert_eq!(threads.len(), 2);
+    assert_eq!(threads[1]["state"], "Exited");
+    assert_eq!(threads[1]["destroyed"], true, "closed and released");
+}
+
+#[test]
+fn libnx_threads_synchronize_natively() {
+    let t = Temp::new();
+    let state = run(&root().join("tests/horizon/threads"), &t);
+    check_threads(&state);
+    // The scheduler is deterministic: the committed fixture always retires this count.
+    assert_eq!(state["steps"], 1_041_282);
 }
 
 #[test]

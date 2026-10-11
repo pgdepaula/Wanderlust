@@ -110,7 +110,9 @@ fn bootstrap_state_follows_the_nso_entry_contract() {
     assert_eq!(c.x[0], 0);
     assert_eq!(c.x[1], u64::from(t.handle));
     assert_eq!(t.handle, 1022 | 1 << 15); // 1023-entry table
-    assert!(c.x[2..].iter().all(|&x| x == 0));
+    // Every other register is zero except X18, the kernel's (here deterministic) odd CFI value.
+    assert!(c.x[2..18].iter().chain(&c.x[19..]).all(|&x| x == 0));
+    assert_eq!(c.x[18] & 1, 1);
     assert_eq!(c.sp, t.stack.end);
     assert_eq!(c.sp % 16, 0);
     assert_eq!(c.tpidrro_el0, t.tls);
@@ -424,10 +426,17 @@ fn thread_process_and_handle_svcs() {
     );
     assert_eq!(svc(&mut p, &mut c, 0x16, &[handle]), result::SUCCESS);
     assert_eq!(svc(&mut p, &mut c, 0x16, &[handle]), result::INVALID_HANDLE);
-    // SleepThread returns nothing: X0-X7 are cleared, X8 and above preserved.
+    // SleepThread(0) yields: it returns nothing (X0-X7 cleared, X8 and above preserved) and
+    // hands the thread to the scheduler at the next instruction.
     c.x[8] = 0x88;
-    svc(&mut p, &mut c, 0x0B, &[0, 1, 2, 3, 4, 5, 6, 7]);
+    c.x[..8].copy_from_slice(&[0, 1, 2, 3, 4, 5, 6, 7]);
+    let pc = c.pc;
+    assert_eq!(
+        dispatch(&mut c, &mut p, 0x0B).unwrap(),
+        Some(wl_runtime::Stop::Reschedule)
+    );
     assert_eq!(&c.x[..9], &[0, 0, 0, 0, 0, 0, 0, 0, 0x88]);
+    assert_eq!(c.pc, pc + 4);
     let text = b"hello";
     let at = c.sp - 16;
     p.write_bytes(at, text).unwrap();
@@ -435,7 +444,10 @@ fn thread_process_and_handle_svcs() {
     assert_eq!(p.kernel.as_ref().unwrap().debug_output, ["hello"]);
     assert_eq!(svc(&mut p, &mut c, 0x27, &[0, 5]), result::INVALID_POINTER);
     c.x[0] = 0;
-    assert_eq!(dispatch(&mut c, &mut p, 0x07).unwrap(), Some(Exit::Process));
+    assert_eq!(
+        dispatch(&mut c, &mut p, 0x07).unwrap(),
+        Some(wl_runtime::Stop::ExitProcess)
+    );
 }
 
 #[test]

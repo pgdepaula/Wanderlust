@@ -66,13 +66,25 @@ Arguments are in X0–X7. Results are in W0 and outputs from X1 upward. After ev
 | 0x01 | SetHeapSize | size multiple of 2 MiB; grows with zeroed Normal RW pages at the heap region start, shrinks by unmapping; returns the heap address | InvalidSize (101), OutOfMemory (104) above the region or memory limit, InvalidCurrentMemory (106) when shrinking over pages that are no longer plain RW heap |
 | 0x02 | SetMemoryPermission | None, R or RW on memory whose state allows reprotection, with no attribute set | InvalidAddress (102), InvalidSize (101), InvalidCurrentMemory (106), InvalidNewMemoryPermission (108) |
 | 0x03 | SetMemoryAttribute | Uncached / PermissionLocked bits; PermissionLocked can only be set and requires a lockable state | InvalidAddress, InvalidSize, InvalidCombination (116), InvalidCurrentMemory |
+| 0x04 | MapMemory | aliases aliasable RW memory without attributes (heap, CodeData) at a free destination in the Stack region (outside the Heap region); the source becomes inaccessible and Locked, the destination Stack RW over the same bytes | InvalidAddress, InvalidSize, InvalidCurrentMemory, InvalidMemoryRegion (110) |
+| 0x05 | UnmapMemory | undoes a MapMemory of the same ranges; writes through the alias are kept | as MapMemory; InvalidMemoryRegion when the destination is not an alias of the source |
 | 0x06 | QueryMemory | writes the 0x28-byte `MemoryInfo`; PageInfo 0 | InvalidPointer (115) if the output is not writable |
 | 0x07 | ExitProcess | ends execution, `status=exit_process` | — |
-| 0x0A | ExitThread | ends the only thread, `status=exit_thread` | — |
-| 0x0B | SleepThread | returns immediately (one thread, no scheduler); no return value | — |
+| 0x08 | CreateThread | X1 entry, X2 argument, X3 stack top, W4 priority, W5 core (−2: process ideal core); W1 handle. Allocates a thread object, TLS and handle; the thread is not started | InvalidCoreId (113), InvalidPriority (112), LimitReached (132), OutOfMemory, OutOfHandles |
+| 0x09 | StartThread | makes a created thread runnable | InvalidHandle, InvalidState (125) if already started |
+| 0x0A | ExitThread | ends the calling thread; it becomes signalled and its waiters wake; when no thread remains, `status=exit_thread` | — |
+| 0x0B | SleepThread | positive: sleeps for the duration; 0, −1, −2: yields; other values: nothing; no return value | — |
+| 0x0C | GetThreadPriority | W1 handle → W1 current priority (with inheritance) | InvalidHandle |
+| 0x0D | SetThreadPriority | W0 handle, W1 priority | InvalidHandle, InvalidPriority |
 | 0x10 | GetCurrentProcessorNumber | the thread's ideal core | — |
-| 0x16 | CloseHandle | frees a table handle; pseudo-handles are not closable | InvalidHandle (114) |
-| 0x1E | GetSystemTick | host monotonic time since process start at 19.2 MHz | — |
+| 0x16 | CloseHandle | frees a table handle; pseudo-handles are not closable; an exited thread without handles is destroyed | InvalidHandle (114) |
+| 0x18 | WaitSynchronization | X1 handle array, W2 count (0–64), X3 timeout (0: poll, < 0: infinite); W1 index of the first signalled object (after a timed-out or cancelled wait, −1). Thread objects are signalled once exited | OutOfRange (119), InvalidPointer, InvalidHandle (pseudo-handles included), TimedOut (117), Cancelled (118) |
+| 0x19 | CancelSynchronization | ends a thread's WaitSynchronization with Cancelled, or makes its next one return Cancelled | InvalidHandle |
+| 0x1A | ArbitrateLock | W0 owner handle, X1 lock word, W2 caller tag: if the word still equals owner \| 0x40000000, waits until the owner hands the lock over; otherwise returns at once | InvalidAddress (alignment), InvalidCurrentMemory, InvalidHandle |
+| 0x1B | ArbitrateUnlock | X0 lock word: the best waiter (priority, then arrival) becomes owner, inheriting the other waiters; the word becomes its tag, with 0x40000000 if others still wait, or 0 | InvalidAddress, InvalidCurrentMemory |
+| 0x1C | WaitProcessWideKeyAtomic | X0 lock word, X1 key, W2 tag, X3 timeout: releases the lock as ArbitrateUnlock, sets the key word to 1 and waits to be signalled and to reacquire the lock | InvalidPointer, InvalidAddress, InvalidCurrentMemory, TimedOut |
+| 0x1D | SignalProcessWideKey | X0 key, W1 count (≤ 0: all): signalled waiters (priority, then arrival) take the lock if its word is 0, else queue on its owner with the wait bit set; the key word becomes 0 when no waiter remains; no return value | — |
+| 0x1E | GetSystemTick | the deterministic virtual clock at 19.2 MHz | — |
 | 0x24 | GetProcessId | process ID for the current-process pseudo-handle or a thread handle | InvalidHandle |
 | 0x25 | GetThreadId | thread ID for the current-thread pseudo-handle or a thread handle | InvalidHandle |
 | 0x26 | Break | fault, category `guest-break`, with reason and arguments | — |
@@ -83,17 +95,31 @@ An SVC whose bit is clear in the process's SVC access flags (or whose ID is 0xC0
 
 `svcGetInfo` process types (0–7, 12–18, 20–24, 28, 36) require subtype 0 and the current-process pseudo-handle. Values: core mask (0), priority mask (1), Alias region (2, 3), Heap region (4, 5), memory limit (6, 21), used memory (7, 22: code, stack, heap and TLS pages), code region (12, 13), Stack region (14, 15), system resource 0 (16, 17), program ID (18), user exception context address (20; the process-local region, as in Mesosphere), is-application (23), free thread slots (24), 0 for 28 and 2^39 for 36. DebuggerAttached (8) requires handle 0 and returns 0. RandomEntropy (11) requires handle 0 and subtype < 4 and returns a value derived from the program ID (*deterministic choice*). Types the kernel defines but this runtime does not model (resource limit 9, idle and thread tick counts 10 and 25, initial process ID range 19, SVC permission 26, I/O and transfer-memory hints 27 and 34, shadow stack 37 and 38) fault with category `unsupported-service`; undefined types are InvalidEnumValue.
 
+## Threads and scheduling
+
+Implementation: [`threads.rs`](../../crates/wl-runtime/src/threads.rs).
+
+A created thread starts like a Mesosphere user thread: PC = entry (bit 0 cleared), X0 = argument, SP = stack top aligned down to 16, X18 = an odd value (the kernel's random CFI value; a value derived from program and thread ID, *deterministic choice*), FPCR and FPSR copied from the creator, every other register zero, and TPIDRRO_EL0 = its own zeroed 0x200-byte thread-local region, with its handle at offset 0x110. Thread-local regions are taken from the first ThreadLocal page with a free slot (eight per page), or from a new page in the KernelMap region. A thread object, and its region, is released when it has exited and its last handle is closed. Thread IDs continue from the main thread's (`0x72`, `0x73`, …) and are never reused.
+
+All threads of the process run on one host thread under a deterministic scheduler. Translated code returns to the dispatcher after every block, so each thread's complete architectural state (X0–X30, SP, PC, NZCV, V0–V31, FPCR, FPSR, TPIDR_EL0, TPIDRRO_EL0) is in its saved context at every block boundary. The scheduler runs one thread for a slice of `--quantum` guest instructions (default 10,000), checked at block entry, then lets the next virtual core run. Virtual cores are those of the process core mask, taken in turn; on each core the runnable thread with the best priority runs, the earliest queued among equals, as Horizon schedules one core. Same-core threads are not time-sliced, except that every 10 ms of virtual time the first thread at the core's preemption priority (59; 63 on core 3) moves behind the others. A lock owner runs at the best priority of the threads waiting for its locks (priority inheritance). This models concurrency on several cores by interleaving slices on one; it does not model timing or memory ordering between truly simultaneous cores.
+
+A blocking SVC leaves its thread Waiting with the PC after the SVC. The thread that ends the wait (or the expiry of a timeout) writes the SVC's result and outputs into the saved context, so no SVC side effect is repeated. An SVC that wakes another thread also returns to the scheduler.
+
+Time is virtual: one nanosecond per retired guest instruction, plus the time skipped when every thread waits for a timeout, when the clock jumps to the earliest deadline. Timeouts follow the kernel conversion (ticks at 19.2 MHz, plus 2 ticks). Results are identical on every host. When every remaining thread waits without a timeout, execution stops with a `guest deadlock` fault listing the waits.
+
+Every SVC and every context switch clears the exclusive monitor of the thread involved, as an exception on hardware may. A later store-exclusive then fails and the guest retries, which the architecture permits. No reservation survives another thread's write.
+
 ## Handles
 
 Handles follow Mesosphere's `KHandleTable`: `index | linear_id << 15`, linear IDs from 1, free indices taken from the top of the table down. Closing a handle frees its index; the stale handle stays invalid because its linear ID no longer matches. `0xFFFF8000` and `0xFFFF8001` are the current-thread and current-process pseudo-handles.
 
 ## Diagnostics
 
-The launcher prints one JSON object: `mode`, `status` (`exit_process`, `exit_thread` or `fault`), `entry`, `pc`, `steps`, `x0`, the main thread (`id`, `handle`, `tls`, `stack`), `heap` (address, size), `process_local_region`, `config_source`, `svc_counts`, `last_svc` (PC, ID, result), `debug_output` and `fault`. Faults also print a one-line diagnostic with category, module, module offset, instruction word and step count. `--steps N` sets the instruction budget.
+The launcher prints one JSON object: `mode`, `status` (`exit_process`, `exit_thread` or `fault`), `entry`, `pc` and `x0` of the thread that ended the run, `steps` (all threads), the main thread (`id`, `handle`, `tls`, `stack`), `threads` (ID, handle, TLS, state, priority, core, PC, instructions, whether destroyed), `scheduler` (quantum, slices, context switches, blocks, wakeups, timeouts, yields, rotations, maximum runnable threads, threads created, virtual and idle nanoseconds, host seconds), `heap` (address, size), `process_local_region`, `config_source`, `svc_counts`, `last_svc` (PC, ID, result), `debug_output` and `fault`. Faults also print a one-line diagnostic with category, module, module offset, instruction word and step count. `--steps N` sets the instruction budget; `--quantum N` the slice length.
 
 ## Limits
 
-One thread; no scheduler, synchronization objects, events or `CreateThread`. No IPC (`ConnectToNamedPort`, `SendSyncRequest`) and therefore no services: applications must not depend on `__appInit` service initialization. No `MapMemory`, alias mappings, shared or transfer memory, code memory or device address spaces. Memory-mapping, interrupt and debug capabilities are parsed but have no effect. Only NSO entry semantics are implemented (NRO loader entry, with X0 = loader configuration and X1 = −1, is not).
+Threads run on their ideal core; svcGetThreadCoreMask/svcSetThreadCoreMask, thread activity, thread context access and core migration are not implemented. The only synchronization objects are threads: no events (svcCreateEvent, SignalEvent, ClearEvent, ResetSignal), no WaitForAddress/SignalToAddress. A partial svcUnmapMemory of an alias faults explicitly. No IPC (`ConnectToNamedPort`, `SendSyncRequest`) and therefore no services: applications must not depend on `__appInit` service initialization. No shared or transfer memory, code memory or device address spaces. Memory-mapping, interrupt and debug capabilities are parsed but have no effect. Only NSO entry semantics are implemented (NRO loader entry, with X0 = loader configuration and X1 = −1, is not).
 
 ## Validation
 
@@ -109,4 +135,16 @@ heap_ok=1 sum=952e8000 ratio=0.001953 used_below_total=1
 
 The test rebuilds the probe from source when devkitA64 is available and requires the same lines. Analysis recovers 12,811 instructions, 4 jump tables and 62 constant-derived roots; execution retires 64,767 guest instructions and exits with status 0. The same NSO compiled for `x86_64-pc-windows-gnu` and run on Windows 10.0.26300 printed identical lines and SVC counts.
 
-The fixture binary contains libnx (ISC, notice in [`tests/horizon/NOTICE`](../../tests/horizon/NOTICE)), newlib and libgcc from devkitA64.
+[`tests/threads.rs`](../../crates/wl-runtime/tests/threads.rs) checks thread creation (initial context, TLS slots and pages, validation, the thread limit), start and exit, waits on threads (signalled, polled, timed out with index −1, cancelled, deadline conversion), handle lifetime (destruction on last close, stale handles, TLS reuse, non-reused IDs), lock hand-over with the wait bit and priority inheritance, condition-variable release, signal and reacquisition, MapMemory/UnmapMemory, monitor clearing, and the scheduler running block functions: cross-core interleaving, strict priority on one core, idle time advance and deadlock reporting.
+
+[`threads.c`](../../tests/horizon/threads.c), built the same way into [`tests/horizon/threads/`](../../tests/horizon/threads) (NSO SHA-256 `fd188bad65649e28adbb68ff74f27a8b623da19f27db8bc88fe2b32b383f2ec2`), creates a worker with libnx `threadCreate` on core 1. Its stack comes from the heap and is mapped with svcMapMemory. Main and worker each add 3,000 values to a shared total under a libnx `Mutex`, with a slow read-modify-write inside the critical section. The worker signals a libnx `CondVar` and sleeps 2 ms; main times out after 100 µs waiting for it, finishes, joins it with `threadWaitForExit` and closes it. The CLI test requires:
+
+```text
+threads create=0 start=0 main_tid=0x72 worker_tid=0x73 tls_main=0x8204200 tls_worker=0x8204400
+sync total=0000000001180eea entries=3000,3000 tls_values=3007,3007 ready=1
+wait timed=0xea01 index=-1 joined=0 closed=0
+```
+
+The total is the sum over both threads of 24 byte windows of a mixing function, computed independently. A lost update from broken mutual exclusion would change it. Each thread's `__thread` counter ends at 7 + 3,000. The run retires 1,041,282 guest instructions in 208 slices with 156 context switches, 50 contended svcArbitrateLock calls, 54 blocking waits and 1.75 ms of idle virtual time. Linux and Windows (`x86_64-pc-windows-gnu`, Windows 10.0.26300) executables produced identical output and identical counters, taking 0.044 s and 0.062 s of host time.
+
+The fixture binaries contain libnx (ISC, notice in [`tests/horizon/NOTICE`](../../tests/horizon/NOTICE)), newlib (licences reproduced in [`tests/horizon/COPYING.NEWLIB`](../../tests/horizon/COPYING.NEWLIB)) and libgcc (GPL with the GCC Runtime Library Exception) from devkitA64.

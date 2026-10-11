@@ -3,6 +3,7 @@
 pub mod fp;
 pub mod horizon;
 pub mod simd;
+pub mod threads;
 use std::io::Write;
 
 pub const SCRATCH_BASE: u64 = 0x1000_0000;
@@ -10,7 +11,30 @@ pub const SCRATCH_SIZE: usize = 0x10000;
 pub const RETURN_PC: u64 = 0xffff_ffff_ffff_fffc;
 pub type RuntimeResult<T> = std::result::Result<T, String>;
 /// A translated guest basic block: runs to its end, then returns `Some(status)` to stop.
-pub type BlockFn = fn(&mut Cpu, &mut horizon::Process) -> RuntimeResult<Option<&'static str>>;
+pub type BlockFn = fn(&mut Cpu, &mut horizon::Process) -> RuntimeResult<Option<Stop>>;
+/// Why translated code returned control to its caller instead of continuing at `Cpu::pc`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stop {
+    /// The harness return token was reached (harness mode).
+    Returned,
+    /// svcExitProcess.
+    ExitProcess,
+    /// The last thread of the process exited.
+    ExitThread,
+    /// The current thread must be rescheduled: it blocked, yielded, exited while other
+    /// threads remain, or its time slice ended. `Cpu::pc` is where it resumes.
+    Reschedule,
+}
+impl Stop {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Stop::Returned => "returned",
+            Stop::ExitProcess => "exit_process",
+            Stop::ExitThread => "exit_thread",
+            Stop::Reschedule => "reschedule",
+        }
+    }
+}
 pub use horizon::Process;
 /// One translation unit's blocks, sorted by guest address.
 pub type BlockTable = &'static [(u64, BlockFn)];
@@ -38,6 +62,7 @@ impl Region {
 }
 #[derive(Debug, Default)]
 pub struct Memory {
+    /// Disjoint regions sorted by base address (maintained by `map_state` and `split_at`).
     pub regions: Vec<Region>,
 }
 impl Memory {
@@ -74,15 +99,20 @@ impl Memory {
         {
             return Err(format!("overlapping guest mapping at {base:#x}"));
         }
-        self.regions.push(Region {
-            base,
-            bytes,
-            read,
-            write,
-            execute,
-            state,
-            attribute: 0,
-        });
+        // Regions stay sorted by base so lookups can binary-search.
+        let at = self.regions.partition_point(|r| r.base < base);
+        self.regions.insert(
+            at,
+            Region {
+                base,
+                bytes,
+                read,
+                write,
+                execute,
+                state,
+                attribute: 0,
+            },
+        );
         Ok(())
     }
     /// Splits the region that strictly contains `address` in two at `address`; both halves
@@ -112,15 +142,21 @@ impl Memory {
     #[inline]
     fn locate(&self, address: u64, size: usize, write: bool) -> Option<(usize, usize)> {
         let end = address.checked_add(size as u64)?;
-        for (i, r) in self.regions.iter().enumerate() {
-            if address >= r.base && end <= r.base + r.bytes.len() as u64 {
-                if (write && !r.write) || (!write && !r.read) {
-                    return None;
-                }
-                return Some((i, (address - r.base) as usize));
-            }
+        let i = self.region_index(address)?;
+        let r = &self.regions[i];
+        if end > r.base + r.bytes.len() as u64 || (write && !r.write) || (!write && !r.read) {
+            return None;
         }
-        None
+        Some((i, (address - r.base) as usize))
+    }
+    /// Index of the region containing `address` (binary search over sorted regions).
+    #[inline]
+    pub fn region_index(&self, address: u64) -> Option<usize> {
+        let i = self
+            .regions
+            .partition_point(|r| r.base <= address)
+            .checked_sub(1)?;
+        (address < self.regions[i].end()).then_some(i)
     }
     /// Slow path: an access spanning adjacent regions (as on hardware, where neighbouring
     /// pages with the same permission are contiguous) is split into per-region pieces
@@ -250,13 +286,11 @@ impl Memory {
         if pc % 4 != 0 {
             return Err(format!("unaligned branch target {pc:#x}"));
         }
-        if self.regions.iter().any(|r| {
-            r.execute
-                && pc >= r.base
-                && pc
-                    .checked_add(4)
-                    .is_some_and(|end| end <= r.base + r.bytes.len() as u64)
-        }) {
+        if self
+            .region_index(pc)
+            .map(|i| &self.regions[i])
+            .is_some_and(|r| r.execute && pc + 4 <= r.end())
+        {
             Ok(())
         } else {
             Err(format!("guest execute permission fault at {pc:#x}"))
@@ -544,19 +578,12 @@ pub fn check_alignment(address: u64, size: u64) -> RuntimeResult<()> {
 }
 /// SVC entry from translated code. In a Horizon process the kernel dispatches the call; in
 /// harness mode only ExitProcess (0x07) is defined. Returns the stop status, if any.
-pub fn service(
-    cpu: &mut Cpu,
-    process: &mut Process,
-    id: u16,
-) -> RuntimeResult<Option<&'static str>> {
+pub fn service(cpu: &mut Cpu, process: &mut Process, id: u16) -> RuntimeResult<Option<Stop>> {
     if process.kernel.is_some() {
-        return Ok(horizon::dispatch(cpu, process, id)?.map(|exit| match exit {
-            horizon::Exit::Process => "exit_process",
-            horizon::Exit::Thread => "exit_thread",
-        }));
+        return horizon::dispatch(cpu, process, id);
     }
     if id == 7 {
-        return Ok(Some("exit_process"));
+        return Ok(Some(Stop::ExitProcess));
     }
     Err(format!(
         "unsupported Horizon SVC {id:#x}; guest_pc={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x}",
@@ -587,14 +614,25 @@ pub fn find_block(units: &[(u64, BlockTable)], pc: u64) -> Option<BlockFn> {
 }
 /// Dispatch loop: every guest control transfer returns here and is resolved through the
 /// translated block tables. Unknown targets fault; nothing is interpreted.
-pub fn execute(
+pub fn execute(c: &mut Cpu, m: &mut Process, units: &[(u64, BlockTable)]) -> RuntimeResult<Stop> {
+    execute_until(c, m, units, u64::MAX)
+}
+/// `execute` that also returns `Stop::Reschedule` at the first block boundary at which the
+/// thread has retired at least `slice_end` instructions (its `Cpu::steps`). Block boundaries
+/// are the only preemption points: every architectural state is in `Cpu` there, so the
+/// thread resumes exactly at `Cpu::pc`.
+pub fn execute_until(
     c: &mut Cpu,
     m: &mut Process,
     units: &[(u64, BlockTable)],
-) -> RuntimeResult<&'static str> {
+    slice_end: u64,
+) -> RuntimeResult<Stop> {
     loop {
+        if c.steps >= slice_end {
+            return Ok(Stop::Reschedule);
+        }
         if c.pc == RETURN_PC {
-            return Ok("returned");
+            return Ok(Stop::Returned);
         }
         m.check_execute(c.pc)?;
         let Some(block) = find_block(units, c.pc) else {
@@ -737,7 +775,7 @@ pub fn launch(program: &Program, memory: Memory) -> i32 {
     }
     match result {
         Ok(status) => {
-            println!("{}", cpu.report(status));
+            println!("{}", cpu.report(status.as_str()));
             0
         }
         Err(e) => {
@@ -788,29 +826,35 @@ fn json_string(text: &str) -> String {
     out.push('"');
     out
 }
-/// Starts the program as a Horizon process (`horizon::Process::horizon`) and runs its main
-/// thread until it exits or faults. Prints one JSON report on stdout. Options: `--steps N`.
+/// Starts the program as a Horizon process (`horizon::Process::horizon`) and runs its
+/// threads under the deterministic scheduler (`threads::run`) until the process exits,
+/// every thread exits, or execution faults. Prints one JSON report on stdout.
+/// Options: `--steps N` (total guest instructions), `--quantum N` (instructions per slice).
 pub fn launch_horizon(program: &Program, memory: Memory, image: &ProcessImage) -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut limit = 10_000_000_000u64;
+    let mut quantum = threads::DEFAULT_QUANTUM;
     let mut i = 0;
     while i < args.len() {
-        match (args[i].as_str(), args.get(i + 1)) {
-            ("--steps", Some(v)) => match number(v) {
-                Ok(n) => limit = n,
-                Err(e) => {
-                    eprintln!("runtime configuration: {e}");
-                    return 2;
+        let parsed = match (args[i].as_str(), args.get(i + 1)) {
+            ("--steps", Some(v)) => number(v).map(|n| limit = n),
+            ("--quantum", Some(v)) => number(v).and_then(|n| {
+                if n == 0 {
+                    Err("--quantum must be positive".into())
+                } else {
+                    quantum = n;
+                    Ok(())
                 }
-            },
+            }),
             ("--help", _) => {
-                println!("Horizon process: [--steps COUNT]");
+                println!("Horizon process: [--steps COUNT] [--quantum INSTRUCTIONS]");
                 return 0;
             }
-            (option, _) => {
-                eprintln!("runtime configuration: unknown option {option}");
-                return 2;
-            }
+            (option, _) => Err(format!("unknown option {option}")),
+        };
+        if let Err(e) = parsed {
+            eprintln!("runtime configuration: {e}");
+            return 2;
         }
         i += 2;
     }
@@ -818,17 +862,23 @@ pub fn launch_horizon(program: &Program, memory: Memory, image: &ProcessImage) -
         start: image.code_start,
         end: image.code_end,
     };
-    let (mut process, mut cpu) = match Process::horizon(memory, program.entry, code, image.config) {
+    let (mut process, cpu) = match Process::horizon(memory, program.entry, code, image.config) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("process creation: {e}");
             return 2;
         }
     };
-    cpu.limit = limit;
-    let result = execute(&mut cpu, &mut process, program.units);
+    if let Some(k) = process.kernel.as_mut() {
+        k.threads[0].context = Some(Box::new(cpu));
+    }
+    let started = std::time::Instant::now();
+    let run = threads::run(&mut process, program.units, limit, quantum);
+    let host_seconds = started.elapsed().as_secs_f64();
     let k = process.kernel.as_ref().expect("Horizon process");
-    let thread = &k.threads[0];
+    let current = k.threads[run.thread].context.as_deref();
+    let (pc, x0, steps) = current.map_or((0, 0, 0), |c| (c.pc, c.x[0], c.steps));
+    let main = &k.threads[0];
     let svcs = k
         .svc_counts
         .iter()
@@ -847,39 +897,64 @@ pub fn launch_horizon(program: &Program, memory: Memory, image: &ProcessImage) -
         .map(|s| json_string(s))
         .collect::<Vec<_>>()
         .join(",");
-    let (status, fault) = match &result {
-        Ok(status) => (status.to_string(), "null".to_string()),
+    let thread_list = k
+        .threads
+        .iter()
+        .map(|t| {
+            let (tpc, tsteps) = t.context.as_deref().map_or((0, 0), |c| (c.pc, c.steps));
+            format!(
+                "{{\"id\":{},\"handle\":{},\"tls\":{},\"state\":\"{:?}\",\"priority\":{},\"core\":{},\"pc\":{tpc},\"steps\":{tsteps},\"destroyed\":{}}}",
+                t.id, t.handle, t.tls, t.state, t.priority, t.core, t.destroyed
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let st = &k.stats;
+    let scheduler = format!(
+        "{{\"quantum\":{quantum},\"slices\":{},\"context_switches\":{},\"blocks\":{},\"wakeups\":{},\"timeouts\":{},\"yields\":{},\"rotations\":{},\"max_runnable\":{},\"threads_created\":{},\"virtual_ns\":{},\"idle_ns\":{},\"host_seconds\":{host_seconds:.6}}}",
+        st.slices,
+        st.context_switches,
+        st.blocks,
+        st.wakeups,
+        st.timeouts,
+        st.yields,
+        st.rotations,
+        st.max_runnable,
+        st.threads_created,
+        k.time_ns,
+        st.idle_ns
+    );
+    let (status, fault) = match &run.result {
+        Ok(status) => (status.as_str().to_string(), "null".to_string()),
         Err(e) => (
             "fault".to_string(),
             format!(
-                "{{\"category\":\"{}\",\"message\":{}}}",
+                "{{\"category\":\"{}\",\"thread\":{},\"message\":{}}}",
                 fault_category(e),
+                k.threads[run.thread].id,
                 json_string(e)
             ),
         ),
     };
     println!(
-        "{{\"mode\":\"horizon\",\"status\":\"{status}\",\"entry\":{},\"pc\":{},\"steps\":{},\"x0\":{},\"thread\":{{\"id\":{},\"handle\":{},\"tls\":{},\"stack\":[{},{}]}},\"heap\":[{},{}],\"process_local_region\":{},\"config_source\":\"{}\",\"svc_counts\":{{{svcs}}},\"last_svc\":{last_svc},\"debug_output\":[{output}],\"fault\":{fault}}}",
+        "{{\"mode\":\"horizon\",\"status\":\"{status}\",\"entry\":{},\"pc\":{pc},\"steps\":{},\"x0\":{x0},\"thread\":{{\"id\":{},\"handle\":{},\"tls\":{},\"stack\":[{},{}]}},\"threads\":[{thread_list}],\"scheduler\":{scheduler},\"heap\":[{},{}],\"process_local_region\":{},\"config_source\":\"{}\",\"svc_counts\":{{{svcs}}},\"last_svc\":{last_svc},\"debug_output\":[{output}],\"fault\":{fault}}}",
         program.entry,
-        cpu.pc,
-        cpu.steps,
-        cpu.x[0],
-        thread.id,
-        thread.handle,
-        thread.tls,
-        thread.stack.start,
-        thread.stack.end,
+        k.total_steps,
+        main.id,
+        main.handle,
+        main.tls,
+        main.stack.start,
+        main.stack.end,
         k.layout.heap.start,
         k.heap_size,
         k.process_local_region,
         image.config_source,
     );
-    if let Err(e) = result {
+    if let Err(e) = run.result {
         eprintln!(
-            "guest fault: {e}; category={} guest_pc={:#x} steps={}",
+            "guest fault: {e}; category={} thread={:#x} guest_pc={pc:#x} steps={steps}",
             fault_category(&e),
-            cpu.pc,
-            cpu.steps
+            k.threads[run.thread].id,
         );
         return 1;
     }
