@@ -188,6 +188,13 @@ pub struct ProcessConfig {
     pub handle_table_size: u16,
     pub thread_limit: u64,
     pub is_application: bool,
+    /// SVC access flags from the kernel capabilities: bit `id` permits SVC `id` (0..0xC0).
+    pub svc_permissions: [u64; 3],
+}
+impl ProcessConfig {
+    pub fn permits(&self, id: u16) -> bool {
+        id < 0xC0 && self.svc_permissions[usize::from(id / 64)] >> (id % 64) & 1 != 0
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,7 +210,9 @@ pub struct HandleTable {
     next_linear_id: u16,
 }
 impl HandleTable {
+    /// A table of `size` entries; 0 selects the maximum, 1024 (`KHandleTable::Initialize`).
     pub fn new(size: u16) -> Self {
+        let size = if size == 0 { 1024 } else { size.min(1024) };
         Self {
             entries: vec![None; usize::from(size)],
             free: (0..size).collect(),
@@ -692,6 +701,13 @@ pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<E
         .ok_or("Horizon SVC without a Horizon process")?;
     *k.svc_counts.entry(id).or_default() += 1;
     k.last_svc = Some((c.pc, id, None));
+    if !k.config.permits(id) {
+        // The kernel raises an exception instead of dispatching (kern_svc_handlers_asm.s).
+        return Err(format!(
+            "Horizon SVC {id:#x} is not permitted by the process capabilities; guest_pc={:#x}",
+            c.pc
+        ));
+    }
     let outcome = match id {
         0x01 => {
             let size = c.x[1];

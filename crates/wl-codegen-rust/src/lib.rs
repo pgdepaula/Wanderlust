@@ -1327,6 +1327,13 @@ pub struct HorizonOptions {
     pub main_thread_stack_size: u64,
     pub main_thread_priority: u8,
     pub ideal_core: u8,
+    pub core_mask: u64,
+    pub priority_mask: u64,
+    /// 0 selects the kernel maximum (1024).
+    pub handle_table_size: u16,
+    pub is_application: bool,
+    /// Bit `id` permits SVC `id` (0..0xC0).
+    pub svc_permissions: [u64; 3],
     pub memory_limit: u64,
     /// Origin of the values, reported by the launcher (e.g. "main.npdm").
     pub source: &'static str,
@@ -1526,7 +1533,7 @@ pub fn emit(
         Some(h) => {
             writeln!(
                 out,
-                "Ok(m) }}\nstatic IMAGE: ProcessImage = ProcessImage {{ code_start: {:#x}, code_end: {:#x}, config_source: {:?}, config: horizon::ProcessConfig {{ program_id: {:#x}, process_id: 0x51, main_thread_id: 0x72, main_thread_stack_size: {:#x}, main_thread_priority: {}, ideal_core: {}, core_mask: {:#x}, priority_mask: {:#x}, memory_limit: {:#x}, handle_table_size: 1024, thread_limit: 32, is_application: true }} }};",
+                "Ok(m) }}\nstatic IMAGE: ProcessImage = ProcessImage {{ code_start: {:#x}, code_end: {:#x}, config_source: {:?}, config: horizon::ProcessConfig {{ program_id: {:#x}, process_id: 0x51, main_thread_id: 0x72, main_thread_stack_size: {:#x}, main_thread_priority: {}, ideal_core: {}, core_mask: {:#x}, priority_mask: {:#x}, memory_limit: {:#x}, handle_table_size: {}, thread_limit: 32, is_application: {}, svc_permissions: {:#x?} }} }};",
                 h.code_start,
                 h.code_end,
                 h.source,
@@ -1534,9 +1541,12 @@ pub fn emit(
                 h.main_thread_stack_size,
                 h.main_thread_priority,
                 h.ideal_core,
-                1u64 << h.ideal_core,
-                u64::MAX,
-                h.memory_limit
+                h.core_mask,
+                h.priority_mask,
+                h.memory_limit,
+                h.handle_table_size,
+                h.is_application,
+                h.svc_permissions
             )
             .unwrap();
             "launch_horizon(&PROGRAM, m, &IMAGE)".to_string()

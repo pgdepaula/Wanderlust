@@ -627,7 +627,7 @@ pub struct Program {
 }
 /// Coarse fault category derived from the runtime's error vocabulary.
 pub fn fault_category(message: &str) -> &'static str {
-    const CATEGORIES: [(&str, &str); 10] = [
+    const CATEGORIES: [(&str, &str); 11] = [
         ("unsupported instruction", "unsupported-instruction"),
         ("unresolved native branch", "unresolved-control-flow"),
         ("unsupported Horizon SVC", "unsupported-service"),
@@ -638,6 +638,10 @@ pub fn fault_category(message: &str) -> &'static str {
         ("guest BRK", "trap"),
         ("unsupported FPCR", "unsupported-fp-configuration"),
         ("guest svcBreak", "guest-break"),
+        (
+            "not permitted by the process capabilities",
+            "svc-not-permitted",
+        ),
     ];
     CATEGORIES
         .iter()

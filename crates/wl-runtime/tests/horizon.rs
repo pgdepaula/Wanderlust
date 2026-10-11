@@ -19,6 +19,7 @@ fn config() -> ProcessConfig {
         handle_table_size: 1023,
         thread_limit: 32,
         is_application: true,
+        svc_permissions: [u64::MAX; 3],
     }
 }
 /// A process with RX code at CODE (one page), RW data after it and the main thread.
@@ -108,7 +109,7 @@ fn bootstrap_state_follows_the_nso_entry_contract() {
     assert_eq!(c.pc, CODE);
     assert_eq!(c.x[0], 0);
     assert_eq!(c.x[1], u64::from(t.handle));
-    assert_eq!(t.handle, 1022 | 1 << 15);
+    assert_eq!(t.handle, 1022 | 1 << 15); // 1023-entry table
     assert!(c.x[2..].iter().all(|&x| x == 0));
     assert_eq!(c.sp, t.stack.end);
     assert_eq!(c.sp % 16, 0);
@@ -437,6 +438,41 @@ fn thread_process_and_handle_svcs() {
     assert_eq!(dispatch(&mut c, &mut p, 0x07).unwrap(), Some(Exit::Process));
 }
 
+#[test]
+fn capabilities_gate_svcs_and_size_the_handle_table() {
+    let mut cfg = config();
+    // Only ExitProcess (0x07) and GetInfo (0x29) are permitted.
+    cfg.svc_permissions = [1 << 0x07 | 1 << 0x29, 0, 0];
+    cfg.handle_table_size = 0;
+    let mut m = Memory::default();
+    m.map_state(CODE, vec![0; 0x1000], true, false, true, state::CODE)
+        .unwrap();
+    let (mut p, mut c) = Process::horizon(
+        m,
+        CODE,
+        Range {
+            start: CODE,
+            end: CODE + 0x1000,
+        },
+        cfg,
+    )
+    .unwrap();
+    // Size 0 is the kernel maximum: the first handle takes index 1023.
+    assert_eq!(c.x[1], 1023 | 1 << 15);
+    assert_eq!(
+        svc(
+            &mut p,
+            &mut c,
+            0x29,
+            &[0, 18, u64::from(CURRENT_PROCESS), 0]
+        ),
+        result::SUCCESS
+    );
+    let e = dispatch(&mut c, &mut p, 0x25).unwrap_err();
+    assert!(e.contains("SVC 0x25 is not permitted"), "{e}");
+    assert_eq!(wl_runtime::fault_category(&e), "svc-not-permitted");
+    assert!(dispatch(&mut c, &mut p, 0xC0).is_err());
+}
 #[test]
 fn unsupported_and_break_svcs_fail_explicitly() {
     let (mut p, mut c) = process();

@@ -35,7 +35,7 @@ Mappings found inside a region (`FindFreeArea`) keep four guard pages on each si
 3. The main thread is added to the handle table.
 4. The CPU starts at the first module's text with `X0 = 0`, `X1 =` the thread handle, `SP =` the stack top, `TPIDRRO_EL0 =` the TLS address, and every other register (including X30) zero.
 
-Process parameters come from `main.npdm` (program ID, stack size, priority, ideal core); without it, defaults (1 MiB stack, priority 44, core 0, program ID 0) are used and `config_source` says so. The process memory limit (`InfoType_TotalMemorySize`) is `--memory-limit` (default 512 MiB). The handle table has 1024 entries, the kernel's size when no handle-table capability is given; the NPDM handle-table capability is not yet consumed. Process ID `0x51` and main thread ID `0x72` are *deterministic choices*.
+Process parameters come from `main.npdm`, parsed and validated by [`wl-npdm`](npdm.md) (`ProcessMetadata`): program ID, main-thread stack size, priority and ideal core from META; core mask, priority mask, handle-table size, program type and the SVC access flags from the ACI0 kernel capabilities. Without `main.npdm`, defaults are used (1 MiB stack, priority 44, core 0, core mask 1, every priority and SVC permitted, program ID 0) and `config_source` says so. A handle-table size of 0 selects the kernel maximum of 1024 entries (`KHandleTable::Initialize`). The process memory limit (`InfoType_TotalMemorySize`) is `--memory-limit` (default 512 MiB). Process ID `0x51` and main thread ID `0x72` are *deterministic choices*.
 
 ## Memory model
 
@@ -79,7 +79,7 @@ Arguments are in X0–X7. Results are in W0 and outputs from X1 upward. After ev
 | 0x27 | OutputDebugString | text to stderr as `[guest] …` and to `debug_output` (up to 64 KiB) | InvalidPointer |
 | 0x29 | GetInfo | see below | InvalidCombination, InvalidHandle, InvalidEnumValue (120) |
 
-Every other SVC is a fault of category `unsupported-service` reporting the ID, PC and X0–X3; no SVC returns success without its effect.
+An SVC whose bit is clear in the process's SVC access flags (or whose ID is 0xC0 or above) is a fault of category `svc-not-permitted`, where the kernel raises an exception instead of dispatching. Every other SVC not listed is a fault of category `unsupported-service` reporting the ID, PC and X0–X3; no SVC returns success without its effect.
 
 `svcGetInfo` process types (0–7, 12–18, 20–24, 28, 36) require subtype 0 and the current-process pseudo-handle. Values: core mask (0), priority mask (1), Alias region (2, 3), Heap region (4, 5), memory limit (6, 21), used memory (7, 22: code, stack, heap and TLS pages), code region (12, 13), Stack region (14, 15), system resource 0 (16, 17), program ID (18), user exception context address (20; the process-local region, as in Mesosphere), is-application (23), free thread slots (24), 0 for 28 and 2^39 for 36. DebuggerAttached (8) requires handle 0 and returns 0. RandomEntropy (11) requires handle 0 and subtype < 4 and returns a value derived from the program ID (*deterministic choice*). Types the kernel defines but this runtime does not model (resource limit 9, idle and thread tick counts 10 and 25, initial process ID range 19, SVC permission 26, I/O and transfer-memory hints 27 and 34, shadow stack 37 and 38) fault with category `unsupported-service`; undefined types are InvalidEnumValue.
 
@@ -93,16 +93,16 @@ The launcher prints one JSON object: `mode`, `status` (`exit_process`, `exit_thr
 
 ## Limits
 
-One thread; no scheduler, synchronization objects, events or `CreateThread`. No IPC (`ConnectToNamedPort`, `SendSyncRequest`) and therefore no services: applications must not depend on `__appInit` service initialization. No `MapMemory`, alias mappings, shared or transfer memory, code memory or device address spaces. The NPDM handle-table, core and priority capabilities are not consumed (masks report core 0 and every priority). Only NSO entry semantics are implemented (NRO loader entry, with X0 = loader configuration and X1 = −1, is not).
+One thread; no scheduler, synchronization objects, events or `CreateThread`. No IPC (`ConnectToNamedPort`, `SendSyncRequest`) and therefore no services: applications must not depend on `__appInit` service initialization. No `MapMemory`, alias mappings, shared or transfer memory, code memory or device address spaces. Memory-mapping, interrupt and debug capabilities are parsed but have no effect. Only NSO entry semantics are implemented (NRO loader entry, with X0 = loader configuration and X1 = −1, is not).
 
 ## Validation
 
-[`tests/horizon.rs`](../../crates/wl-runtime/tests/horizon.rs) checks the layout, handle encoding, bootstrap registers and TLS, QueryMemory blocks, every implemented SVC's results and memory effects, argument-validation order, permission splitting, spanning accesses, permission locking, heap growth and shrinking, and the register contract.
+[`tests/horizon.rs`](../../crates/wl-runtime/tests/horizon.rs) checks the layout, handle encoding, bootstrap registers and TLS, QueryMemory blocks, every implemented SVC's results and memory effects, argument-validation order, permission splitting, spanning accesses, permission locking, heap growth and shrinking, the register contract, SVC access flags and the handle-table size.
 
 [`probe.c`](../../tests/horizon/probe.c) is a libnx application built with devkitA64 (`tools/python/homebrew.py`, devkitA64 GCC 16.1.0, libnx 4.12.0) into the NSO and NPDM in [`tests/horizon/probe/`](../../tests/horizon/probe) (NSO SHA-256 `12d823e7496d0c82a0eeab665cf14bb6ed9b4554c22ae8a3026ef99e11cc6e73`). It runs libnx's real startup (crt0, `__nx_dynamic` DT_RELR self-relocation, RELRO reprotection and permission lock, virtual-memory and heap setup through GetInfo/SetHeapSize, stack query), then its own SVC and memory checks, newlib `malloc` and `snprintf`, and exits through `svcExitProcess`. [`tools/wl-cli/tests/horizon.rs`](../../tools/wl-cli/tests/horizon.rs) compiles it and requires these exact lines, derived independently of the runtime:
 
 ```text
-probe tid=0x72 pid=0x51 handle=0x83ff tls=0x5cbc getinfo_bad_subtype=0xe801 out=0
+probe tid=0x72 pid=0x51 handle=0x83fe tls=0x5cbc getinfo_bad_subtype=0xe801 out=0
 text state=3 perm=5 size=0x10000; stack state=11 perm=3 size=0x100000 in_stack_region=1
 heap_ok=1 sum=952e8000 ratio=0.001953 used_below_total=1
 ```

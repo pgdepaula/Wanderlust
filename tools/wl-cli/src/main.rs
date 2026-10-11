@@ -278,42 +278,60 @@ fn load_process(o: &Options) -> Result<Process> {
 /// Process parameters: from `main.npdm` when the ExeFS has one, otherwise documented defaults.
 fn horizon_options(o: &Options, p: &Process) -> Result<wl_codegen_rust::HorizonOptions> {
     let npdm_path = o.input.join("main.npdm");
-    let (stack, priority, core, program_id, source) = if npdm_path.is_file() {
-        let npdm = wl_package::parse_npdm(&fs::read(&npdm_path).map_err(|e| e.to_string())?)?;
-        if !npdm.is_64_bit || npdm.address_space != "64-bit-39" {
-            return Err(format!(
-                "main.npdm requests a {} {} process; only 64-bit processes with a 39-bit address space are supported",
-                if npdm.is_64_bit { "64-bit" } else { "32-bit" },
-                npdm.address_space
-            ));
-        }
-        let program_id = npdm
-            .program_id
-            .as_deref()
-            .map(|id| u64::from_str_radix(id, 16))
-            .transpose()
-            .map_err(|e| e.to_string())?
-            .unwrap_or(0);
-        (
-            u64::from(npdm.main_thread_stack_size),
-            npdm.main_thread_priority,
-            npdm.main_thread_core,
-            program_id,
-            "main.npdm",
-        )
-    } else {
-        (0x10_0000, 44, 0, 0, "defaults (no main.npdm)")
-    };
-    Ok(wl_codegen_rust::HorizonOptions {
+    let mut options = wl_codegen_rust::HorizonOptions {
         code_start: p.base.0,
         code_end: p.base.0 + p.size,
-        program_id,
-        main_thread_stack_size: stack,
-        main_thread_priority: priority,
-        ideal_core: core,
+        program_id: 0,
+        main_thread_stack_size: 0x10_0000,
+        main_thread_priority: 44,
+        ideal_core: 0,
+        core_mask: 1,
+        priority_mask: u64::MAX,
+        handle_table_size: 0,
+        is_application: true,
+        svc_permissions: [u64::MAX; 3],
         memory_limit: o.memory_limit,
-        source,
-    })
+        source: "defaults (no main.npdm)",
+    };
+    if !npdm_path.is_file() {
+        return Ok(options);
+    }
+    let bytes = fs::read(&npdm_path).map_err(|e| format!("{}: {e}", npdm_path.display()))?;
+    let npdm = wl_npdm::Npdm::parse(&bytes).map_err(|e| format!("main.npdm: {e}"))?;
+    let meta = npdm.meta();
+    if !meta.is_64_bit_instruction
+        || meta.address_space != wl_npdm::ProcessAddressSpace::AddressSpace64Bit39
+    {
+        return Err(format!(
+            "main.npdm requests {:?} ({}); only 64-bit processes with a 39-bit address space are supported",
+            meta.address_space,
+            if meta.is_64_bit_instruction {
+                "64-bit"
+            } else {
+                "32-bit"
+            },
+        ));
+    }
+    let md = npdm
+        .to_process_metadata()
+        .map_err(|e| format!("main.npdm: {e}"))?;
+    let mut svc_permissions = [0u64; 3];
+    for id in 0..0xC0u8 {
+        if md.syscall_bitmap.is_allowed(id) {
+            svc_permissions[usize::from(id / 64)] |= 1 << (id % 64);
+        }
+    }
+    options.program_id = md.program_id;
+    options.main_thread_stack_size = md.main_thread_stack_size;
+    options.main_thread_priority = md.main_thread_priority;
+    options.ideal_core = md.ideal_core;
+    options.core_mask = md.core_mask;
+    options.priority_mask = md.priority_mask;
+    options.handle_table_size = md.handle_table_size;
+    options.is_application = md.is_application;
+    options.svc_permissions = svc_permissions;
+    options.source = "main.npdm";
+    Ok(options)
 }
 fn analysis_summary(program: &Program) -> serde_json::Value {
     let largest = program

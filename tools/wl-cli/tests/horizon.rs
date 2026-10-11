@@ -33,11 +33,11 @@ fn cli() -> Command {
     Command::new(env!("CARGO_BIN_EXE_wanderlust"))
 }
 /// Lines the probe reports through svcOutputDebugString, derived independently:
-/// handle = index 1023 (top-down) | linear id 1 << 15; TLS value 0x5a5a + fib(15) = 0x5cbc;
+/// handle = index 1022 (top of the NPDM's 1023-entry table) | linear id 1 << 15; TLS value 0x5a5a + fib(15) = 0x5cbc;
 /// a GetInfo with subtype 1 fails with InvalidCombination (0xe801) and zero output; the
 /// checksum of 4096 values i * 2654435761 is 0x952e8000; ratio = 1 MiB stack / 512 MiB.
 const EXPECTED: [&str; 3] = [
-    "probe tid=0x72 pid=0x51 handle=0x83ff tls=0x5cbc getinfo_bad_subtype=0xe801 out=0",
+    "probe tid=0x72 pid=0x51 handle=0x83fe tls=0x5cbc getinfo_bad_subtype=0xe801 out=0",
     "text state=3 perm=5 size=0x10000; stack state=11 perm=3 size=0x100000 in_stack_region=1",
     "heap_ok=1 sum=952e8000 ratio=0.001953 used_below_total=1",
 ];
