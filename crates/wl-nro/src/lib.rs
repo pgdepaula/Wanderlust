@@ -10,6 +10,7 @@ pub mod asset;
 pub mod error;
 pub mod header;
 pub mod image;
+pub mod plan;
 
 pub use abi::{
     EntryConvention, HOMEBREW_LOADER_SENTINEL, LoaderConfig, LoaderConfigEntry, LoaderConfigKey,
@@ -21,6 +22,10 @@ pub use header::{
     NroFileOffset, NroHeader, NroSegmentHeader, NroStart,
 };
 pub use image::{NroGuestMapping, NroImage, NroSegment, PAGE_SIZE, SegmentKind};
+pub use plan::{
+    HomebrewImagePlan, HomebrewStartupRequirements, MappableRange, RelocationRequirement,
+    ZeroFillRange,
+};
 
 use serde::Serialize;
 use std::fmt;

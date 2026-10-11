@@ -484,8 +484,8 @@ impl<'a> Npdm<'a> {
     /// Constructs the bridge metadata summary for configuring a Horizon process.
     pub fn to_process_metadata(&self) -> Result<ProcessMetadata, NpdmError> {
         let mut handle_table_size = 1024u16;
-        let mut core_mask = 1u64 << self.meta.default_cpu_id;
-        let mut priority_mask = 1u64 << self.meta.main_thread_priority;
+        let mut core_mask = None;
+        let mut priority_mask = None;
         let mut is_application = self.acid.pool_partition == 0;
         let mut syscall_bitmap = SyscallBitmap::default();
 
@@ -497,14 +497,17 @@ impl<'a> Npdm<'a> {
                     lowest_cpu_id,
                     highest_cpu_id,
                 } => {
-                    core_mask = 0;
+                    let mut c_mask = 0u64;
                     for cpu in lowest_cpu_id..=highest_cpu_id {
-                        core_mask |= 1u64 << cpu;
+                        c_mask |= 1u64 << cpu;
                     }
-                    priority_mask = 0;
+                    core_mask = Some(c_mask);
+
+                    let mut p_mask = 0u64;
                     for prio in highest_thread_priority..=lowest_thread_priority {
-                        priority_mask |= 1u64 << prio;
+                        p_mask |= 1u64 << prio;
                     }
+                    priority_mask = Some(p_mask);
                 }
                 Capability::SyscallMask { slot, mask } => {
                     syscall_bitmap.apply_mask(slot, mask);
@@ -533,6 +536,9 @@ impl<'a> Npdm<'a> {
                 return Err(NpdmError::UnsupportedCapability { id, raw });
             }
         }
+
+        let core_mask = core_mask.ok_or(NpdmError::MissingCorePriorityCapability)?;
+        let priority_mask = priority_mask.ok_or(NpdmError::MissingCorePriorityCapability)?;
 
         let effective_fs_permissions = self
             .filesystem_access()?

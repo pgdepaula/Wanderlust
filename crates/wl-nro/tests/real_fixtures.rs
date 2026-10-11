@@ -105,7 +105,8 @@ void __appExit(void) {}
 
 static const char greeting[] = "Wanderlust Genuine AArch64 Guest NRO";
 static unsigned counter = 100;
-static unsigned bss_array[32];
+// BSS spanning page boundaries: 8192 bytes = 2 full 4K pages
+static volatile unsigned bss_array[2048];
 
 static unsigned calc_hash(const char* s) {
     unsigned h = 5381;
@@ -119,11 +120,11 @@ int main(int argc, char** argv) {
     (void)argc;
     (void)argv;
     counter += calc_hash(greeting);
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 2048; i++) {
         bss_array[i] = counter ^ (unsigned)i;
     }
     svcOutputDebugString(greeting, strlen(greeting));
-    return 0;
+    return (int)bss_array[2047];
 }
 "#;
 
@@ -141,6 +142,21 @@ fn test_real_independently_compiled_nro_plain() {
     assert_eq!(nro.header.version, 0);
     assert_eq!(nro.header.size as usize, nro_bytes.len());
     assert!(nro.assets.is_none());
+
+    // Verified nonzero BSS spanning page boundaries
+    assert!(
+        nro.header.bss_size > 0,
+        "BSS size must be demonstrably nonzero"
+    );
+    assert_eq!(
+        nro.header.bss_size, 0x2000,
+        "BSS must span multiple 4K pages (8192 bytes)"
+    );
+    assert_eq!(
+        nro.header.bss_size % 0x1000,
+        0,
+        "BSS size must be page aligned"
+    );
 
     // Branch instruction at offset 0
     let branch = nro.start.branch_instruction;
@@ -163,12 +179,64 @@ fn test_real_independently_compiled_nro_plain() {
     // Image conversion and guest memory mapping
     let image = nro.to_image().expect("image generation");
     assert_eq!(image.entrypoint_offset, ModuleOffset(0));
-    assert!(image.total_memory_size >= nro.header.size as u64);
+    assert_eq!(image.bss_size, 0x2000);
+    assert_eq!(
+        image.bss_offset.0,
+        (nro.header.data.file_offset.0 + nro.header.data.size) as u64
+    );
+    assert!(image.total_memory_size >= nro.header.size as u64 + 0x2000);
 
     let mappings = image.create_guest_mappings(GuestAddr(0x800_0000));
     assert_eq!(mappings.len(), 3);
     assert_eq!(mappings[0].base, GuestAddr(0x800_0000));
     assert!(mappings[0].execute);
+    assert!(!mappings[0].write);
+
+    assert_eq!(mappings[1].base, GuestAddr(0x800_2000));
+    assert!(mappings[1].read);
+    assert!(!mappings[1].write);
+    assert!(!mappings[1].execute);
+
+    assert_eq!(mappings[2].base, GuestAddr(0x800_3000));
+    assert!(mappings[2].read);
+    assert!(mappings[2].write);
+    assert!(!mappings[2].execute);
+
+    // Verify BSS zero-initialization semantics in mapped guest data segment
+    let data_file_sz = nro.header.data.size as usize;
+    assert!(
+        mappings[2].bytes.len() >= data_file_sz + 0x2000,
+        "data mapping must contain data bytes plus BSS"
+    );
+    let bss_bytes = &mappings[2].bytes[data_file_sz..data_file_sz + 0x2000];
+    assert!(
+        bss_bytes.iter().all(|&b| b == 0),
+        "mapped BSS region must be entirely zero-initialized"
+    );
+    // Nonzero data bytes immediately before the BSS boundary
+    assert!(
+        mappings[2].bytes[..data_file_sz].iter().any(|&b| b != 0),
+        "data section before BSS must contain nonzero initialized data"
+    );
+
+    // Execution plan generation
+    let plan = nro.plan().expect("plan generation");
+    assert_eq!(plan.entry_offset, 0);
+    assert_eq!(plan.page_alignment, 0x1000);
+    assert_eq!(plan.zero_fill_ranges.len(), 1);
+    assert_eq!(plan.zero_fill_ranges[0].name, "bss");
+    assert_eq!(plan.zero_fill_ranges[0].size, 0x2000);
+    assert_eq!(plan.zero_fill_ranges[0].memory_offset, image.bss_offset);
+
+    assert!(matches!(
+        plan.relocation,
+        wl_nro::RelocationRequirement::GuestSelfRelocating { .. }
+    ));
+    assert!(plan.startup.requires_loader_config);
+    assert_eq!(plan.startup.x1_sentinel, 0xFFFF_FFFF_FFFF_FFFF);
+    assert!(plan.startup.returnable_lr);
+    assert_eq!(plan.startup.recommended_stack_size, 0x10_0000);
+    assert!(plan.unsupported_features.is_empty());
 }
 
 #[test]

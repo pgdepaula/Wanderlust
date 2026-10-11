@@ -108,7 +108,7 @@ Descriptors are encoded as 32-bit little-endian words. The descriptor kind is id
 
 | Trailing 1s | Descriptor Kind | Decoded Fields |
 |---|---|---|
-| **3** | `KernelFlags` | Bits 4..=9: Highest thread priority (0..63)<br>Bits 10..=15: Lowest thread priority (0..63)<br>Bits 16..=23: Lowest CPU ID (0..3)<br>Bits 24..=31: Highest CPU ID (0..3) |
+| **3** | `KernelFlags` (CorePriority) | Bits 4..=9: Lowest thread priority / max prio number (0..63)<br>Bits 10..=15: Highest thread priority / min prio number (0..63)<br>Bits 16..=23: Lowest CPU ID (0..3)<br>Bits 24..=31: Highest CPU ID (0..3) |
 | **4** | `SyscallMask` | Bits 5..=28: 24-bit mask for SVC slot.<br>Bits 29..=31: Slot index (0..7, covering SVCs `slot*24 .. slot*24+23`). |
 | **6** | `MapRange` | **Paired descriptors**:<br>Word 1: bits 7..=30 address (`<< 12`), bit 31 read-only.<br>Word 2: bits 7..=30 size (`<< 12`), bit 31 IO flag (`0` = IO, `1` = Normal). |
 | **7** | `IoMemoryMap` | Bits 8..=31: Mapped physical IO memory page address (`<< 12`). (Switchbrew #IoMemoryMap). |

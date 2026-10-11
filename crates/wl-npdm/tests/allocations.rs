@@ -57,7 +57,7 @@ fn build_test_npdm() -> Vec<u8> {
     valid[acid_base + 0x230..acid_base + 0x234].copy_from_slice(&0x270u32.to_le_bytes());
     valid[acid_base + 0x234..acid_base + 0x238].copy_from_slice(&8u32.to_le_bytes());
     valid[acid_base + 0x270..acid_base + 0x274]
-        .copy_from_slice(&(0b0111u32 | (20 << 4) | (50 << 10)).to_le_bytes());
+        .copy_from_slice(&(0b0111u32 | (50 << 4) | (20 << 10)).to_le_bytes());
     valid[acid_base + 0x274..acid_base + 0x278].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
 
     // ACI0 at 0x380
@@ -76,7 +76,7 @@ fn build_test_npdm() -> Vec<u8> {
     valid[aci_base + 0x30..aci_base + 0x34].copy_from_slice(&0x60u32.to_le_bytes());
     valid[aci_base + 0x34..aci_base + 0x38].copy_from_slice(&8u32.to_le_bytes());
     valid[aci_base + 0x60..aci_base + 0x64]
-        .copy_from_slice(&(0b0111u32 | (20 << 4) | (50 << 10)).to_le_bytes());
+        .copy_from_slice(&(0b0111u32 | (50 << 4) | (20 << 10)).to_le_bytes());
     valid[aci_base + 0x64..aci_base + 0x68].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
 
     valid

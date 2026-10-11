@@ -72,6 +72,8 @@ pub enum NpdmError {
     },
     /// Unsupported capability descriptor cannot be granted for process bootstrap.
     UnsupportedCapability { id: u32, raw: u32 },
+    /// CorePriority capability was missing from ACI0 descriptors for process bootstrap.
+    MissingCorePriorityCapability,
 }
 
 impl fmt::Display for NpdmError {
@@ -205,6 +207,12 @@ impl fmt::Display for NpdmError {
                 write!(
                     f,
                     "unsupported capability descriptor {raw:#010x} (type id {id}) cannot be granted for process bootstrap"
+                )
+            }
+            Self::MissingCorePriorityCapability => {
+                write!(
+                    f,
+                    "missing required CorePriority capability for process creation"
                 )
             }
         }

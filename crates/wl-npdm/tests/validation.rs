@@ -97,8 +97,8 @@ impl SyntheticNpdmBuilder {
 
     fn add_standard_capabilities(&mut self) {
         // KernelFlags (ID 3, trailing ones = 3)
-        // highest_prio=20, lowest_prio=50, lowest_cpu=0, highest_cpu=3
-        let kflags: u32 = 0b0111 | (20 << 4) | (50 << 10) | (3 << 24);
+        // lowest_prio=50 (bits 4..9), highest_prio=20 (bits 10..15), lowest_cpu=0, highest_cpu=3
+        let kflags: u32 = 0b0111 | (50 << 4) | (20 << 10) | (3 << 24);
         self.aci0_kac.push(kflags);
 
         // SyscallMask (ID 4, trailing ones = 4)
@@ -688,7 +688,7 @@ fn test_capability_negatives_and_diagnostics() {
 
     // Invalid priority bounds: highest (50) > lowest (20)
     let mut builder = SyntheticNpdmBuilder::new();
-    let kflags_bad: u32 = 0b0111 | (50 << 4) | (20 << 10) | (3 << 24);
+    let kflags_bad: u32 = 0b0111 | (20 << 4) | (50 << 10) | (3 << 24);
     builder.aci0_kac.push(kflags_bad);
     let bytes = builder.build();
     assert!(matches!(
@@ -701,7 +701,7 @@ fn test_capability_negatives_and_diagnostics() {
 
     // Invalid core ID bounds
     let mut builder = SyntheticNpdmBuilder::new();
-    let kflags_bad_core: u32 = 0b0111 | (20 << 4) | (50 << 10) | (2 << 16) | (1 << 24);
+    let kflags_bad_core: u32 = 0b0111 | (50 << 4) | (20 << 10) | (2 << 16) | (1 << 24);
     builder.aci0_kac.push(kflags_bad_core);
     let bytes = builder.build();
     assert!(matches!(
@@ -963,4 +963,37 @@ fn test_npdm_preflight_inspection() {
     assert!(display.contains("NPDM structural validation: passed"));
     assert!(display.contains("Program ID: 0x0100000000001000"));
     assert!(display.contains("Signature verification: not performed"));
+}
+
+#[test]
+fn test_libnx_probe_core_priority_descriptor() {
+    // Descriptor 0x020073b7: libnx template highest=28, lowest=59, cores 0..=2
+    let desc: u32 = 0x020073b7;
+    let bytes = desc.to_le_bytes();
+    let mut caps = Capabilities::new(&bytes);
+    let cap = caps
+        .next()
+        .expect("has capability")
+        .expect("descriptor parses");
+    assert_eq!(
+        cap,
+        Capability::KernelFlags {
+            highest_thread_priority: 28,
+            lowest_thread_priority: 59,
+            lowest_cpu_id: 0,
+            highest_cpu_id: 2,
+        }
+    );
+}
+
+#[test]
+fn test_missing_core_priority_fails_process_metadata() {
+    let builder = SyntheticNpdmBuilder::new();
+    // Do not add KernelFlags
+    let bytes = builder.build();
+    let npdm = Npdm::parse(&bytes).expect("parse succeeds");
+    assert!(matches!(
+        npdm.to_process_metadata(),
+        Err(NpdmError::MissingCorePriorityCapability)
+    ));
 }

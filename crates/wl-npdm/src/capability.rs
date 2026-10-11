@@ -101,7 +101,7 @@ pub struct Capabilities<'a> {
 }
 
 impl<'a> Capabilities<'a> {
-    pub(crate) fn new(words: &'a [u8]) -> Self {
+    pub fn new(words: &'a [u8]) -> Self {
         Self { words, offset: 0 }
     }
 
@@ -143,8 +143,8 @@ impl<'a> Iterator for Capabilities<'a> {
 
             let item = match id {
                 CapabilityId::KernelFlags => {
-                    let highest_thread_priority = ((desc >> 4) & 0x3F) as u8;
-                    let lowest_thread_priority = ((desc >> 10) & 0x3F) as u8;
+                    let lowest_thread_priority = ((desc >> 4) & 0x3F) as u8;
+                    let highest_thread_priority = ((desc >> 10) & 0x3F) as u8;
                     let lowest_cpu_id = ((desc >> 16) & 0xFF) as u8;
                     let highest_cpu_id = ((desc >> 24) & 0xFF) as u8;
 

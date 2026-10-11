@@ -359,3 +359,31 @@ fn test_homebrew_abi_and_loader_config() {
     assert_eq!(parsed.entries[1].key, LoaderConfigKey::SyscallAvailableHint);
     assert_eq!(parsed.entries[2].key, LoaderConfigKey::EndOfList);
 }
+
+#[test]
+fn test_homebrew_image_plan_generation() {
+    let bytes = make_synthetic_nro();
+    let nro = Nro::parse(&bytes).expect("synthetic NRO parses");
+    let plan = nro.plan().expect("plan generation succeeds");
+
+    assert_eq!(plan.entry_offset, 0);
+    assert_eq!(plan.page_alignment, 0x1000);
+    assert_eq!(plan.mappable_ranges.len(), 3);
+    assert_eq!(plan.mappable_ranges[0].name, "text");
+    assert!(plan.mappable_ranges[0].execute);
+    assert_eq!(plan.mappable_ranges[1].name, "rodata");
+    assert!(!plan.mappable_ranges[1].write);
+    assert_eq!(plan.mappable_ranges[2].name, "data");
+    assert!(plan.mappable_ranges[2].write);
+
+    // BSS in synthetic NRO is 0x1000
+    assert_eq!(plan.zero_fill_ranges.len(), 1);
+    assert_eq!(plan.zero_fill_ranges[0].name, "bss");
+    assert_eq!(plan.zero_fill_ranges[0].size, 0x1000);
+
+    assert_eq!(plan.mod0_offset, Some(0x80));
+    assert!(plan.has_mod0);
+    assert!(plan.startup.requires_loader_config);
+    assert_eq!(plan.startup.x1_sentinel, 0xFFFF_FFFF_FFFF_FFFF);
+    assert!(plan.startup.returnable_lr);
+}

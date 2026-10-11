@@ -239,3 +239,55 @@ Output includes:
 - MOD0 dynamic header presence and offset.
 - ASET asset inventory (Icon, NACP, RomFS byte sizes).
 - Applicable entrypoint ABI convention.
+
+---
+
+## 9. Execution Readiness & Planning (`HomebrewImagePlan`)
+
+Calling `nro.plan()` extracts a validated execution-readiness plan ([`HomebrewImagePlan`](../../crates/wl-nro/src/plan.rs)):
+
+```rust
+pub struct HomebrewImagePlan<'a> {
+    pub image: NroImage<'a>,
+    pub entry_offset: u64,
+    pub page_alignment: u64,
+    pub image_end: u64,
+    pub mappable_ranges: Vec<MappableRange>,
+    pub zero_fill_ranges: Vec<ZeroFillRange>,
+    pub has_mod0: bool,
+    pub mod0_offset: Option<u32>,
+    pub dynamic_offset: Option<u32>,
+    pub relocation: RelocationRequirement,
+    pub startup: HomebrewStartupRequirements,
+    pub unsupported_features: Vec<&'static str>,
+}
+```
+
+Key guarantees provided by the plan:
+1. **Explicit Mappable Ranges**: Separates file-backed `.text`, `.rodata`, and `.data` segments with exact permissions.
+2. **Explicit Zero-Fill Ranges**: Exposes `.bss` starting immediately after `.data` up to page boundaries, ensuring guest memory materialization initializes every BSS byte to zero.
+3. **Dynamic Relocation Ownership**: Distinguishes whether the executable relies on an internal crt0 self-relocation routine (`RelocationRequirement::GuestSelfRelocating`) or host relocation (`HostRequired`). For libnx NROs, `__nx_dynamic` performs relative and RELR relocations at runtime; the host loader must provide the image unrelocated (`LinkMode::Guest` / `RelocationState::GuestLinker`) to avoid double-relocation corruption.
+4. **Startup Requirements**: Enforces X0 (`LoaderConfig` pointer), X1 (`0xFFFF_FFFF_FFFF_FFFF`), and returnable LR semantics.
+
+---
+
+## 10. Real Binary Analysis & Execution Blocker Inventory
+
+Analysis of devkitA64 / libnx compiled binaries (`switch.specs`) reveals the following concrete requirements and potential execution blockers when transitioning from binary intake to native execution under Wanderlust:
+
+1. **Entry ABI Incompatibility**:
+   - **Retail NSO**: Kernel calls entry with `X0 = 0`, `X1 = main_thread_handle`, and unmapped/zero LR.
+   - **Homebrew NRO**: `_start` executes `cmp x0, #0; ccmn x1, #1, #4, ne; b.eq normal_entry; b __libnx_exception_entry`. Calling a homebrew NRO with retail convention branches to `__libnx_exception_entry` and halts unless X0 is 0 (fallback NSO path) or X0 points to `LoaderConfig` with X1 = `-1`.
+2. **Missing Main Thread Handle in LoaderConfig**:
+   - In homebrew mode (`X0 != 0`), libnx's `envGetMainThreadHandle` searches `LoaderConfig` for `EntryType_MainThreadHandle` (key 1). If missing, it immediately calls `diagAbortWithResult(0x1d59)`.
+3. **Double Relocation Hazard**:
+   - `_start` calls `__nx_dynamic` with base address in X0 and MOD0 pointer in X1.
+   - `__nx_dynamic` iterates `_DYNAMIC` tags (`DT_RELR` / `DT_RELA`) and adds the base address to all relative pointers in `.data` and `.got`.
+   - If Wanderlust's host loader pre-relocates data pages, pointers will be relocated twice, corrupting all function pointers and `.init_array`.
+4. **BSS Memory Mapping & Clearance**:
+   - `__nx_dynamic` calls `memset(mod0 + bss_start, 0, bss_end - bss_start)`.
+   - The memory region covering BSS must be mapped with `RW-` permissions before jumping to `_start`.
+5. **Runtime SVC Coverage in `wl-runtime`**:
+   - Uncontended `mutexLock` and `mutexUnlock` execute entirely in userspace using atomic operations (`ldaxr`/`stlxr`) without issuing SVCs. Contended locks require `svcArbitrateLock` (SVC 0x1A) and `svcArbitrateUnlock` (SVC 0x1B).
+   - `__libnx_initheap` calls `svcSetHeapSize` (SVC 0x01) and requires `memory_limit` to accommodate the requested heap.
+   - Address space probing in `virtmemSetup` falls back to `svcUnmapMemory` (SVC 0x05) if `svcGetInfo` region queries fail.

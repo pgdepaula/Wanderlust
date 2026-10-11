@@ -76,9 +76,9 @@ fn test_literal_byte_fixture_conformance() {
     // ACID KAC at +0x280, size 16 (4 words)
     data[acid_base + 0x230..acid_base + 0x234].copy_from_slice(&0x280u32.to_le_bytes());
     data[acid_base + 0x234..acid_base + 0x238].copy_from_slice(&16u32.to_le_bytes());
-    // Word 0: KernelFlags (0b0111 | (10 << 4) | (60 << 10) | (0 << 16) | (3 << 24))
+    // Word 0: KernelFlags (0b0111 | (60 << 4) | (10 << 10) | (0 << 16) | (3 << 24))
     data[acid_base + 0x280..acid_base + 0x284]
-        .copy_from_slice(&(0b0111u32 | (10 << 4) | (60 << 10) | (3 << 24)).to_le_bytes());
+        .copy_from_slice(&(0b0111u32 | (60 << 4) | (10 << 10) | (3 << 24)).to_le_bytes());
     // Word 1: ApplicationType (0b01111111111111 | (1 << 14))
     data[acid_base + 0x284..acid_base + 0x288]
         .copy_from_slice(&(0b01111111111111u32 | (1 << 14)).to_le_bytes());
@@ -126,7 +126,7 @@ fn test_literal_byte_fixture_conformance() {
     data[aci_base + 0x34..aci_base + 0x38].copy_from_slice(&16u32.to_le_bytes());
     // KAC 0: KernelFlags (prio 20..=50, core 0..=3)
     data[aci_base + 0x80..aci_base + 0x84]
-        .copy_from_slice(&(0b0111u32 | (20 << 4) | (50 << 10) | (3 << 24)).to_le_bytes());
+        .copy_from_slice(&(0b0111u32 | (50 << 4) | (20 << 10) | (3 << 24)).to_le_bytes());
     // KAC 1: SyscallMask slot 0 mask 0x01 (SVC 0 allowed)
     data[aci_base + 0x84..aci_base + 0x88].copy_from_slice(&(0b01111u32 | (1 << 5)).to_le_bytes());
     // KAC 2: IoMemoryMap page 0x8000_0000 (shifted by 12 = 0x80000, descriptor 0x0080_007F)
