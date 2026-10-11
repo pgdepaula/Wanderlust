@@ -45,6 +45,14 @@ fn fifo_and_engine_method_hot_path_allocate_nothing() {
                 .is_err()
         );
         fifo.finish().unwrap();
+        let fragment = wl_gpu::shader::ConstantFragment::decode(include_bytes!(
+            "fixtures/maxwell/quarters.bin"
+        ))
+        .unwrap();
+        assert_eq!(
+            fragment.output_bits(),
+            [0x3e800000, 0x3f000000, 0x3f400000, 0x3f800000]
+        );
         assert_eq!(
             resolved_engine
                 .resolve_texture(0, 0, 0, &map, &memory)

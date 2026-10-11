@@ -240,3 +240,33 @@ Clippy and 117 Rust tests; four GPU tests are ignored in that CPU run. A separat
 newer workspace snapshot encountered NPDM Clippy warnings (`question_mark` and
 `needless_range_loop`), independently of the graphics validation. No runtime or
 NPDM source was changed by the graphics implementation.
+
+## Binary fragment translation execution
+
+Two 144-byte SPH-plus-machine-code fixtures were independently assembled and
+then disassembled using pinned envytools. The translator decodes four MOV32I
+instructions and EXIT, emits WGSL and passes Naga parsing/validation. CPU tests
+cover every truncated prefix, excessive code size, incorrect header/export fields,
+predicates, partial masks, unknown instructions/registers, nonfinite immediates,
+missing EXIT and writes after EXIT. The allocation test additionally decodes
+1,000 valid fragments with zero measured Rust allocations.
+
+`shader_gpu` compiles and executes both translated fragments on WSL GL and native
+Windows D3D12 and Vulkan. Every pixel at 66×19 and 34×13 matches exact RGBA8
+`[255,0,0,255]` and `[64,128,191,255]`, respectively. Vertex colors deliberately
+remain red/green; fragment output overrides both rectangles. Restoring the previous
+pipeline restores the original independent red/green test pattern. Two fragment
+programs create exactly two additional shader modules and pipelines; six repeated
+selections hit the latest-program cache, with no additional vertex/index upload.
+Seven submissions/readbacks transfer 216 upload bytes, 55,408 padded readback bytes
+and pack 28,616 bytes. No Maxwell hardware or original game shader execution is
+claimed.
+
+Final execution ran all five GPU test executables explicitly on each of WSL GL,
+Windows D3D12 and Windows Vulkan: 15 GPU-test executions passed, none skipped.
+`cargo test -p wl-gpu --no-default-features --locked` passed 23 CPU tests. The
+isolated `40531b1` baseline plus the complete graphics sources passed workspace
+formatting, strict Clippy and 119 Rust tests, with five GPU tests explicitly ignored
+in that separate CPU run. The known newer NPDM warnings are not counted as graphics
+successes. Reassembling the documented `.asm` files independently reproduced both
+144-byte fixture binaries exactly, including their recorded SHA-256 hashes.

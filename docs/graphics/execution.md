@@ -139,8 +139,9 @@ B197 texture state interpreter is described below. Legacy/tertiary packets and e
 
 Authentic game rendering additionally requires NV service/channel setup, GPFIFO
 entry fetching and engine state, resource descriptors, synchronization semantics
-and a Maxwell shader decoder/lowering path. Naga validates the controlled WGSL
-shader; it cannot decode Maxwell machine instructions. See [sources](sources.md)
+and a general Maxwell shader decoder/lowering path. The constant-fragment
+experiment below handles only two machine operations. Naga validates host WGSL;
+it cannot decode Maxwell machine instructions. See [sources](sources.md)
 and [executed validation](validation.md).
 
 
@@ -216,7 +217,37 @@ state from the reduced filter field alone.
 descriptor backing updates cannot leave stale decoded records. It accepts explicit
 image/sampler indices supplied by its caller. They are **not** obtained from
 `SET_BINDLESS_TEXTURE`: that register selects a constant-buffer slot, not a texture.
-Original shader handles and constant buffers are still unimplemented. The tested
+Original shader handles and constant buffers are still unimplemented; the separate
+constant-fragment experiment does not execute shader program registers. The tested
 bridge runs literal FIFO pool methods, descriptor resolution, guest texture reads,
 conversion and real sampled draw/readback. The last draw is the existing synthetic
 execution command with fixed WGSL, not a decoded Maxwell draw or shader.
+
+
+## Bounded binary fragment translation
+
+`shader::ConstantFragment` consumes an 80-byte NVIDIA shader program header plus
+complete 32-byte Maxwell code bundles. The accepted PS header declares target-zero
+RGBA exports from R0–R3, without resource, attribute or side-effect fields. It
+supports unpredicated full-mask MOV32I to those four registers and exact unconditional
+EXIT. Canonical stall-six scheduling words and NOP padding are checked separately
+from instructions. All output registers must be initialized; unknown opcodes,
+predicates, lane masks, header fields, scheduling variants, nonfinite immediates,
+missing EXIT and noncanonical padding fail explicitly. Code is bounded to 4 KiB.
+The valid decoding path allocates no heap storage.
+
+Translation interprets immediate contents as floating-point register bits and emits
+WGSL using `bitcast<f32>`, preserving those bits rather than converting integer
+values numerically. `Renderer::set_constant_fragment` compiles that fragment against
+the retained original vertex shader and pipeline layout. The latest translated
+pipeline is cached; repeating it or restoring the default requires no new shader
+or pipeline allocation. Replacement drops handles without explicitly destroying
+objects still referenced by wgpu. `pipeline_allocations`, `shader_module_allocations`
+and `shader_cache_hits` count these API operations, excluding driver internals.
+
+This is a real binary-input translation experiment with independently assembled
+synthetic code, not a general Maxwell shader compiler. It does not consume a
+0x30-byte NVN wrapper, read shader registers or constant buffers, translate TEX,
+accept vertex programs, fetch varyings, execute arithmetic/branches, or connect
+source shader-program state to a guest draw. Texture sampling still uses its fixed
+WGSL path. Both experiments share the actual wgpu execution and resource backend.

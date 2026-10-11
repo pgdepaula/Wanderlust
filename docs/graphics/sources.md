@@ -152,3 +152,26 @@ or linked. A viable mature-compiler integration requires resolving the actual fi
 licenses, then implementing bounded SPH input, constant-buffer/descriptor callbacks,
 capability control and separate texture/sampler bindings before Naga validation.
 Naga remains a host IR/compiler component, never a Maxwell machine-code decoder.
+
+## Independently assembled constant-fragment experiment
+
+The tiny fragment translator follows the
+[envytools gm107 ISA table](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/gm107.c)
+at revision `f102b82381f3f11cee113d16374c87091db039d9` (MIT), independently
+cross-checked against devkitPro UAM
+[`5a5afc2b`](https://github.com/devkitPro/uam/tree/5a5afc2bae8b55409ab36ba45be63fcb73f68993).
+UAM's Mesa instruction emitter is MIT; its header and compiler interface are zlib.
+Those sources establish MOV32I operand bits, unconditional EXIT, PS output register
+mapping, and six-cycle MOV scheduling. The
+[NVIDIA SPH specification](https://download.nvidia.com/open-gpu-doc/Shader-Program-Header/1/Shader-Program-Header.html)
+defines the header fields. Its field enumeration and UAM agree on PS type two;
+the introductory prose swaps the two type names and is insufficient alone.
+
+Actual envytools assembler/disassembler binaries built from that pinned revision
+produced two independent synthetic fixtures. Their source assembly, header
+construction, exact hashes and reproduction commands are retained in the fixtures.
+No assembler source or emulator compiler is linked. This small constant-export
+slice was selected after assessing the mature compiler's license/API obstacles;
+it does not replace a full decoder. The next shader integration needs constant
+buffer loads, TEX descriptor handles, stage interfaces and explicit capability
+lowering rather than extending the constant-only experiment into unsupported claims.

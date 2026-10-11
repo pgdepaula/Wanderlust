@@ -1,4 +1,4 @@
-//! Checked graphics execution and Maxwell method packet decoding. No shader decoder.
+//! Checked graphics execution, bounded Maxwell texture state and constant fragments.
 #![forbid(unsafe_code)]
 
 #[cfg(feature = "wgpu-backend")]
@@ -10,6 +10,7 @@ pub mod format;
 pub mod layout;
 pub mod maxwell;
 pub mod memory;
+pub mod shader;
 pub mod texture;
 #[cfg(feature = "wgpu-backend")]
 mod texture_backend;
@@ -55,4 +56,7 @@ pub struct Counters {
     pub texture_cache_hits: u64,
     pub texture_cache_misses: u64,
     pub dirty_mip_uploads: u64,
+    pub pipeline_allocations: u64,
+    pub shader_module_allocations: u64,
+    pub shader_cache_hits: u64,
 }

@@ -70,6 +70,10 @@ pub struct Renderer {
     pub(crate) device: wgpu::Device,
     pub(crate) queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
+    default_pipeline: wgpu::RenderPipeline,
+    indexed_shader: wgpu::ShaderModule,
+    indexed_layout: wgpu::PipelineLayout,
+    constant_pipeline: Option<(crate::shader::ConstantFragment, wgpu::RenderPipeline)>,
     buffers: HashMap<BufferId, Buffer>,
     state: ResourceState,
     target: Option<Target>,
@@ -134,36 +138,7 @@ impl Renderer {
             bind_group_layouts: &[],
             push_constant_ranges: &[],
         });
-        let attributes = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4];
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("indexed color pipeline"),
-            layout: Some(&layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 24,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &attributes,
-                }],
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
+        let pipeline = indexed_pipeline(&device, &layout, &shader, &shader);
         let (texture_layout, texture_pipeline) = crate::texture_backend::pipeline(&device);
         if let Some(e) = pollster::block_on(device.pop_error_scope()) {
             return Err(Error(e.to_string()));
@@ -184,6 +159,8 @@ impl Renderer {
             )
         });
         let counters = Counters {
+            pipeline_allocations: 2,
+            shader_module_allocations: 2,
             buffer_allocations: u64::from(timestamps.is_some()),
             ..Default::default()
         };
@@ -192,7 +169,11 @@ impl Renderer {
             counters,
             device,
             queue,
+            default_pipeline: pipeline.clone(),
             pipeline,
+            indexed_shader: shader,
+            indexed_layout: layout,
+            constant_pipeline: None,
             buffers: HashMap::new(),
             state: ResourceState::new(),
             target: None,
@@ -534,5 +515,96 @@ impl Renderer {
             total_time: start.elapsed(),
             gpu_nanoseconds,
         })
+    }
+}
+
+fn indexed_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    vertex_shader: &wgpu::ShaderModule,
+    fragment_shader: &wgpu::ShaderModule,
+) -> wgpu::RenderPipeline {
+    let attributes = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4];
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("indexed color pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: vertex_shader,
+            entry_point: Some("vs_main"),
+            compilation_options: Default::default(),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: 24,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &attributes,
+            }],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: fragment_shader,
+            entry_point: Some("fs_main"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
+}
+
+impl Renderer {
+    /// Install only a successfully decoded constant Maxwell fragment. This does not
+    /// execute guest shader-program registers or alter the independent texture path.
+    pub fn set_constant_fragment(
+        &mut self,
+        fragment: crate::shader::ConstantFragment,
+    ) -> Result<()> {
+        if self.poisoned {
+            return Err(invalid("renderer unavailable after backend failure"));
+        }
+        if let Some((cached, pipeline)) = &self.constant_pipeline {
+            if *cached == fragment {
+                self.pipeline = pipeline.clone();
+                self.counters.shader_cache_hits += 1;
+                return Ok(());
+            }
+        }
+        self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("translated constant Maxwell fragment"),
+                source: wgpu::ShaderSource::Wgsl(fragment.wgsl().into()),
+            });
+        let pipeline = indexed_pipeline(
+            &self.device,
+            &self.indexed_layout,
+            &self.indexed_shader,
+            &shader,
+        );
+        let validation = pollster::block_on(self.device.pop_error_scope());
+        let allocation = pollster::block_on(self.device.pop_error_scope());
+        if let Some(error) = validation.or(allocation) {
+            self.poisoned = true;
+            return Err(Error(format!("translated shader backend failure: {error}")));
+        }
+        self.counters.shader_module_allocations += 1;
+        self.counters.pipeline_allocations += 1;
+        self.pipeline = pipeline.clone();
+        self.constant_pipeline = Some((fragment, pipeline));
+        Ok(())
+    }
+    /// Restore the original interpolated-color pipeline without compiling a shader.
+    pub fn restore_default_fragment(&mut self) -> Result<()> {
+        if self.poisoned {
+            return Err(invalid("renderer unavailable after backend failure"));
+        }
+        self.pipeline = self.default_pipeline.clone();
+        Ok(())
     }
 }
