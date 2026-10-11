@@ -820,8 +820,7 @@ fn check_inner_overlaps(regions: [(&'static str, u32, u32); 3]) -> Result<(), Np
             continue;
         }
         let end_a = off_a as usize + size_a as usize;
-        for j in (i + 1)..regions.len() {
-            let (name_b, off_b, size_b) = regions[j];
+        for &(name_b, off_b, size_b) in &regions[(i + 1)..] {
             if size_b == 0 {
                 continue;
             }

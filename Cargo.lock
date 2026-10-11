@@ -1268,6 +1268,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "wl-nro"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "wl-common",
+]
+
+[[package]]
 name = "wl-nso"
 version = "0.1.0"
 dependencies = [

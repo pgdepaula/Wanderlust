@@ -121,10 +121,7 @@ impl<'a> Iterator for Capabilities<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         while self.offset < self.words.len() {
-            let desc = match self.read_u32(self.offset) {
-                Some(w) => w,
-                None => return None,
-            };
+            let desc = self.read_u32(self.offset)?;
             self.offset += 4;
 
             let trailing_ones = (!desc).trailing_zeros();
