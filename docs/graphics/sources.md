@@ -29,6 +29,16 @@ SPIR-V; there is no Maxwell instruction frontend.
 
 ## Maxwell and Switch references
 
+NVIDIA's MIT-licensed [B06F class definitions](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/host/clb06f.h)
+at revision `9fdf5c4062007929d9f4e6cbad9c9771fe61b880` define method address,
+subchannel, payload count, immediate data and secondary opcodes. They provide the
+field specification for the independent `fifo` decoder; no header code was copied.
+The [libnx channel interface](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/include/switch/nvidia/gpu_channel.h)
+at revision `feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973` separates GPFIFO entries,
+channel submission and fences. The current decoder handles pushbuffer methods,
+not those channel/service operations. Method-span overflow is rejected as a
+Wanderlust validation policy; hardware fault behavior was not established.
+
 The Ryubing repository endpoints attempted from this environment were unavailable
 (GitHub 404; self-hosted endpoint unreachable). Their current source/maintenance
 could not be independently assessed. An archived original Ryujinx source snapshot,

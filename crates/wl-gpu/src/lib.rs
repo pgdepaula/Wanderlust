@@ -1,9 +1,10 @@
-//! Checked graphics execution boundary. No Maxwell packet or shader decoding yet.
+//! Checked graphics execution and Maxwell method packet decoding. No shader decoder.
 #![forbid(unsafe_code)]
 
 #[cfg(feature = "wgpu-backend")]
 pub mod backend;
 pub mod command;
+pub mod fifo;
 pub mod format;
 pub mod layout;
 pub mod memory;

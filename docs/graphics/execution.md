@@ -96,8 +96,17 @@ compression features are reported, not implicitly required. Device limits use
 conservative downlevel defaults with the adapter's resolution limits. The baseline
 does not require descriptor indexing, push constants or pipeline-cache extensions.
 
+`fifo::Decoder` separately decodes Maxwell B06F pushbuffer method packets into
+subchannel, byte method offset and value. It handles incrementing, nonincrementing,
+increment-once, immediate and exact-zero NOP packets, preserves packet state across
+input chunks, rejects unsupported opcodes and method-address overflow, and detects
+truncation at a logical stream end. It retains no source borrows or heap storage.
+The caller supplies little-endian decoded words and stops the channel on a fault.
+This decoder does not execute engine registers or translate method writes into
+the host command stream. Legacy/tertiary packets and end-segment control are rejected.
+
 Authentic game rendering additionally requires NV service/channel setup, GPFIFO
-packet decoding and engine state, resource descriptors, synchronization semantics
+entry fetching and engine state, resource descriptors, synchronization semantics
 and a Maxwell shader decoder/lowering path. Naga validates the controlled WGSL
 shader; it cannot decode Maxwell machine instructions. See [sources](sources.md)
 and [executed validation](validation.md).

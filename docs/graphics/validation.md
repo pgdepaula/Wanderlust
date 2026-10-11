@@ -14,10 +14,17 @@ WGPU_BACKEND=gl cargo test -p wl-gpu --locked --test headless -- --ignored --noc
 WGPU_BACKEND=gl cargo run -p wl-gpu --locked --release --example headless
 ```
 
-Formatting and Clippy passed. Seven CPU tests passed, including Naga shader
+Formatting and Clippy passed. Twelve CPU tests passed, including Naga shader
 validation, checked address aliases, command preflight, exhaustive small dirty
 intervals, compressed-block geometry and an independent scalar GOB address oracle.
 The oracle exercises partial edge GOBs and GOB heights 1 through 32.
+
+Four FIFO tests additionally verify literal B06F packets, all word-aligned chunk
+splits through borrowed guest memory, full-width payloads, maximum counts,
+unsupported opcodes, method-span overflow and truncation/continuation. A separate
+allocation-instrumented test decodes 5,000 method writes plus malformed headers and
+truncation checks with zero measured Rust heap allocations or reallocations.
+These five FIFO tests also passed as native Windows GNU-target executables.
 
 The GPU test is explicitly ignored in ordinary `cargo test`: running the command
 above requests actual execution and fails if no adapter is available. It passed
@@ -105,5 +112,6 @@ The deliverable was separately validated in a temporary source snapshot containi
 the committed repository baseline plus only `wl-gpu`, these graphics documents
 and its dependency lockfile. No unrelated in-progress source was included.
 `cargo fmt --all --check`, workspace Clippy with `-D warnings` and
-`cargo test --workspace --locked` all passed in that snapshot. The headless test
+`cargo test --workspace --locked` all passed in that snapshot, with 108 passing
+tests and no failures. The headless test
 remained explicitly ignored there; actual GPU execution results are recorded above.
