@@ -53,6 +53,8 @@ pub(crate) struct ResidentVertex {
     offsets: [u64; 2],
     stamp: Option<BackingStamp>,
     flip_y: bool,
+    color: crate::raster::ColorState,
+    shader: wgpu::ShaderModule,
 }
 impl Renderer {
     /// Intermediate stage validation API. Guest method resolution supplies these
@@ -63,7 +65,7 @@ impl Renderer {
         stride: u64,
         offsets: [u64; 2],
     ) -> Result<()> {
-        self.set_vertex_program_raster(program, stride, offsets, false)
+        self.set_vertex_program_raster(program, stride, offsets, false, Default::default())
     }
     fn set_vertex_program_raster(
         &mut self,
@@ -71,6 +73,7 @@ impl Renderer {
         stride: u64,
         offsets: [u64; 2],
         flip_y: bool,
+        color: crate::raster::ColorState,
     ) -> Result<()> {
         self.vertex_ready = false;
         if self.poisoned {
@@ -102,6 +105,7 @@ impl Renderer {
                 && v.stride == stride
                 && v.offsets == offsets
                 && v.flip_y == flip_y
+                && v.color == color
         }) {
             self.counters.shader_cache_hits += 1;
             return Ok(());
@@ -109,12 +113,18 @@ impl Renderer {
         let previous = self.vertex.take();
         self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-        let shader = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("translated Maxwell vertex"),
-                source: wgpu::ShaderSource::Wgsl(program.wgsl_for_raster(flip_y).into()),
-            });
+        let cached_shader = previous
+            .as_ref()
+            .filter(|v| v.program == *program && v.flip_y == flip_y)
+            .map(|v| v.shader.clone());
+        let new_shader = cached_shader.is_none();
+        let shader = cached_shader.unwrap_or_else(|| {
+            self.device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("translated Maxwell vertex"),
+                    source: wgpu::ShaderSource::Wgsl(program.wgsl_for_raster(flip_y).into()),
+                })
+        });
         let mut groups = vec![&fragment.layout];
         if fragment.program.texture_input().is_some() {
             groups.push(&self.texture_layout);
@@ -159,8 +169,10 @@ impl Renderer {
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba8Unorm,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
+                        blend: color.blend.map(host_blend),
+                        write_mask: wgpu::ColorWrites::from_bits_truncate(u32::from(
+                            color.write_mask,
+                        )),
                     })],
                 }),
                 primitive: Default::default(),
@@ -184,8 +196,14 @@ impl Renderer {
             stride,
             offsets,
             flip_y,
+            color,
+            shader,
         });
-        self.counters.shader_module_allocations += 1;
+        if new_shader {
+            self.counters.shader_module_allocations += 1;
+        } else {
+            self.counters.shader_cache_hits += 1;
+        }
         self.counters.pipeline_allocations += 1;
         Ok(())
     }
@@ -298,15 +316,19 @@ impl Renderer {
         let stride = u64::from(array.stride);
         let offsets = array.offsets.map(u64::from);
         let flip_y = self.hardware_raster.is_some_and(|r| r.flip_y);
+        let color = self
+            .hardware_raster
+            .map_or_else(Default::default, |r| r.color);
         if self.vertex.as_ref().is_none_or(|v| {
-            v.flip_y != flip_y
+            v.color != color
+                || v.flip_y != flip_y
                 || v.program != selected.program
                 || v.fragment != fragment.program
                 || v.stride != stride
                 || v.offsets != offsets
         }) {
             let program = selected.program.clone();
-            self.set_vertex_program_raster(&program, stride, offsets, flip_y)?;
+            self.set_vertex_program_raster(&program, stride, offsets, flip_y, color)?;
         }
         let stamp = BackingStamp::new(array.address, size, map, changes)?;
         if self.vertex.as_ref().unwrap().stamp != Some(stamp) {
@@ -322,5 +344,23 @@ impl Renderer {
         }
         self.vertex_ready = true;
         self.validate_vertex_span(first, count)
+    }
+}
+
+fn host_blend(state: crate::raster::BlendState) -> wgpu::BlendState {
+    let factor = |f| match f {
+        crate::raster::BlendFactor::Zero => wgpu::BlendFactor::Zero,
+        crate::raster::BlendFactor::One => wgpu::BlendFactor::One,
+        crate::raster::BlendFactor::SourceAlpha => wgpu::BlendFactor::SrcAlpha,
+        crate::raster::BlendFactor::OneMinusSourceAlpha => wgpu::BlendFactor::OneMinusSrcAlpha,
+    };
+    let component = |f: [crate::raster::BlendFactor; 2]| wgpu::BlendComponent {
+        src_factor: factor(f[0]),
+        dst_factor: factor(f[1]),
+        operation: wgpu::BlendOperation::Add,
+    };
+    wgpu::BlendState {
+        color: component(state.color),
+        alpha: component(state.alpha),
     }
 }

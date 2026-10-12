@@ -1,6 +1,7 @@
 //! Strict single-target raster state decoded from NVIDIA MAXWELL_B byte methods.
 use crate::{Result, invalid, maxwell::MethodError, memory::GpuAddress};
-/// Explicit state accepted by the initial single-sample, no-depth/no-blend slice.
+/// Explicit baseline state for the single-sample slice. Blend enable and channel
+/// masks additionally accept the bounded dynamic values validated below.
 pub const FIXED_RASTER_STATE: &[(u16, u32)] = &[
     (0x0138, 1),      // unconditional rendering
     (0x037c, 1),      // rasterization enabled
@@ -47,11 +48,47 @@ impl ColorTarget {
             .map_err(|_| invalid("color span exceeds host"))
     }
 }
+/// Implemented global additive blending factors, independently of host enum values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlendFactor {
+    Zero,
+    One,
+    SourceAlpha,
+    OneMinusSourceAlpha,
+}
+fn factor(v: u32) -> Option<BlendFactor> {
+    match v {
+        0x4000 | 1 => Some(BlendFactor::Zero),
+        0x4001 | 2 => Some(BlendFactor::One),
+        0x4302 | 5 => Some(BlendFactor::SourceAlpha),
+        0x4303 | 6 => Some(BlendFactor::OneMinusSourceAlpha),
+        _ => None,
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlendState {
+    pub color: [BlendFactor; 2],
+    pub alpha: [BlendFactor; 2],
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColorState {
+    pub blend: Option<BlendState>,
+    pub write_mask: u8,
+}
+impl Default for ColorState {
+    fn default() -> Self {
+        Self {
+            blend: None,
+            write_mask: 15,
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rasterization {
     pub viewport: [f32; 6],
     pub scissor: [u32; 4],
     pub flip_y: bool,
+    pub color: ColorState,
 }
 #[derive(Debug, Default)]
 pub(crate) struct RasterRegisters {
@@ -62,6 +99,10 @@ pub(crate) struct RasterRegisters {
     scissor: [Option<u32>; 2],
     scissor_enable: Option<u32>,
     fixed: u32,
+    blend_enabled: bool,
+    blend_separate: Option<bool>,
+    blend: [Option<u32>; 6],
+    write_mask: u8,
 }
 impl RasterRegisters {
     pub fn apply(&mut self, method: u16, value: u32) -> std::result::Result<bool, MethodError> {
@@ -71,13 +112,42 @@ impl RasterRegisters {
             .enumerate()
             .find(|(_, v)| v.0 == method)
         {
-            if value != *expected {
+            if method == 0x1360 {
+                if value > 1 {
+                    return Err(bad());
+                }
+                self.blend_enabled = value != 0;
+            } else if method == 0x1a00 {
+                if value & !0x1111 != 0 {
+                    return Err(bad());
+                }
+                self.write_mask = (0..4).fold(0, |m, n| m | (((value >> (n * 4)) & 1) as u8) << n);
+            } else if value != *expected {
                 return Err(bad());
             }
             self.fixed |= 1 << n;
             return Ok(true);
         }
         match method {
+            0x133c => {
+                if value > 1 {
+                    return Err(bad());
+                }
+                self.blend_separate = Some(value != 0);
+            }
+            0x1340..=0x1350 | 0x1358 => {
+                let n = if method == 0x1358 {
+                    5
+                } else {
+                    ((method - 0x1340) / 4) as usize
+                };
+                if (n == 0 || n == 3) && !matches!(value, 1 | 0x8006)
+                    || n != 0 && n != 3 && factor(value).is_none()
+                {
+                    return Err(bad());
+                }
+                self.blend[n] = Some(value);
+            }
             0x0800..=0x0820 => {
                 let n = ((method - 0x0800) / 4) as usize;
                 let valid = match n {
@@ -119,6 +189,28 @@ impl RasterRegisters {
         if self.fixed != (1u32 << FIXED_RASTER_STATE.len()) - 1 || self.scissor_enable != Some(1) {
             return Err(invalid("incomplete or unsupported fixed raster state"));
         }
+        let blend = if self.blend_enabled {
+            let separate = self
+                .blend_separate
+                .ok_or_else(|| invalid("missing explicit alpha blend selection"))?;
+            let get =
+                |n: usize| self.blend[n].ok_or_else(|| invalid("incomplete global blend state"));
+            get(0)?;
+            let color = [factor(get(1)?).unwrap(), factor(get(2)?).unwrap()];
+            let alpha = if separate {
+                get(3)?;
+                [factor(get(4)?).unwrap(), factor(get(5)?).unwrap()]
+            } else {
+                color
+            };
+            Some(BlendState { color, alpha })
+        } else {
+            None
+        };
+        let color = ColorState {
+            blend,
+            write_mask: self.write_mask,
+        };
         let mut c = [0u32; 9];
         for (out, v) in c.iter_mut().zip(self.color) {
             *out = v.ok_or_else(|| invalid("incomplete color target"))?;
@@ -182,6 +274,7 @@ impl RasterRegisters {
                 viewport: vp,
                 scissor: [lo[0], lo[1], hi[0] - lo[0], hi[1] - lo[1]],
                 flip_y: sy > 0.,
+                color,
             },
         ))
     }

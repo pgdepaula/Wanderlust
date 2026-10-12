@@ -565,3 +565,29 @@ exact lockfile and excluding unrelated unfinished runtime edits and the pending
 independent conformance file, passed workspace formatting, strict workspace Clippy
 and 242 CPU/workspace tests. Sixteen GPU tests remain explicitly ignored in that
 ordinary workspace command and are accounted for by the execution runs above.
+
+## Global alpha blend and write-mask validation
+
+`blend_gpu` selects the existing independently assembled LDC fragment and vertex
+binaries through B197. Two overlapping triangles read different guest constant
+RGBA values with identical shader code. The independent per-draw UNORM oracle
+expects [37,136,75,192] in the first-only region, [56,13,33,160] in the second-only
+region, and [76,102,72,208] in overlap, from background [11,17,23,128]. A one-byte
+channel tolerance covers blend/attachment quantization; coverage-edge ties are
+excluded separately. All four coverage classes contain independently checked pixels.
+
+Switching from OGL to equivalent D3D ADD/factor encodings creates no new pipeline
+or shader module. Disabling blend and selecting red/blue writes creates exactly
+one compatible pipeline, no new shader module, and preserves green/alpha. Mutable
+constant data uploads 32 bytes over the three-draw scenario. CPU tests verify
+all sixteen masks, incomplete state and unsupported factors/operations.
+
+Final execution: 17 GPU tests passed on each of WSL OpenGL, native Windows Intel
+UHD D3D12 and Vulkan (51 successful executions, zero GPU skips). Windows startup
+transport failures were retried only before test startup; actual GPU failures were
+not skipped. Package formatting/strict Clippy passed; 48 CPU tests passed under
+both feature configurations. A faithful stable source snapshot including the
+committed independent index suite passed workspace formatting, strict Clippy and
+252 tests, with 17 GPU tests explicitly ignored by ordinary workspace Cargo test.
+Peer-owned uncommitted runtime/compiler edits were preserved and excluded from
+that snapshot; this is not a claim of live-worktree runtime integration.

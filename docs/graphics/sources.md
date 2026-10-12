@@ -254,3 +254,14 @@ NVIDIA `clb197.h` at `9fdf5c4062007929d9f4e6cbad9c9771fe61b880`
 (MIT), `nvc0_draw_elements` and pre-Turing index descriptor programming, independently
 corroborates inclusive byte limits, U16/U32 format encoding, signed base vertex,
 first-element/count and BEGIN/END ordering. No Mesa implementation was vendored.
+
+### Global blend and channel fields
+
+The pinned NVIDIA
+[`clb197.h`](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/3d/clb197.h)
+(MIT) specifies SET_BLEND_SEPARATE_FOR_ALPHA, the global color/alpha ADD equations
+and OGL/D3D coefficient aliases, SET_BLEND(0), SET_BLEND_STATE_PER_TARGET and
+SET_CT_WRITE(0). The implementation lowers only the four documented coefficients
+listed in execution.md to wgpu 26 blend factors; it imports no external compiler
+or emulator implementation. The output oracle evaluates the equations separately
+from shader translation and quantizes between draws on the UNORM attachment.

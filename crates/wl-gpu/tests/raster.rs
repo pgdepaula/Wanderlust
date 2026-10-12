@@ -124,3 +124,62 @@ fn channel_truncation_fault_is_latched() {
     assert!(c.is_faulted());
     assert!(c.finish().is_err());
 }
+
+#[test]
+fn literal_global_blend_factors_separate_alpha_and_channel_masks() {
+    use BlendFactor::*;
+    let mut e = ready();
+    assert_eq!(e.rasterization().unwrap().1.color, ColorState::default());
+    set(&mut e, 0x1360, 1).unwrap();
+    assert!(e.rasterization().is_err());
+    for (m, v) in [
+        (0x133c, 1),
+        (0x1340, 0x8006),
+        (0x1344, 0x4302),
+        (0x1348, 0x4303),
+        (0x134c, 0x8006),
+        (0x1350, 0x4001),
+        (0x1358, 0x4303),
+    ] {
+        set(&mut e, m, v).unwrap();
+    }
+    let expected = BlendState {
+        color: [SourceAlpha, OneMinusSourceAlpha],
+        alpha: [One, OneMinusSourceAlpha],
+    };
+    assert_eq!(e.rasterization().unwrap().1.color.blend, Some(expected));
+    // Documented D3D aliases normalize to the same hardware equation.
+    for (m, v) in [
+        (0x1340, 1),
+        (0x1344, 5),
+        (0x1348, 6),
+        (0x134c, 1),
+        (0x1350, 2),
+        (0x1358, 6),
+    ] {
+        set(&mut e, m, v).unwrap();
+    }
+    assert_eq!(e.rasterization().unwrap().1.color.blend, Some(expected));
+    set(&mut e, 0x133c, 0).unwrap();
+    assert_eq!(
+        e.rasterization().unwrap().1.color.blend.unwrap().alpha,
+        expected.color
+    );
+    for mask in 0u32..16 {
+        let value = (0..4).fold(0, |v, n| v | ((mask >> n) & 1) << (n * 4));
+        set(&mut e, 0x1a00, value).unwrap();
+        assert_eq!(e.rasterization().unwrap().1.color.write_mask, mask as u8);
+    }
+    for (m, v) in [
+        (0x1360, 2),
+        (0x133c, 2),
+        (0x1340, 0x800a),
+        (0x1344, 0xc902),
+        (0x1348, 0x4306),
+        (0x1350, 0xc001),
+        (0x1a00, 2),
+        (0x1a00, 0x10000),
+    ] {
+        assert!(set(&mut e, m, v).is_err());
+    }
+}

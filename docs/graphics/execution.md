@@ -453,9 +453,10 @@ dynamic state. Fractional viewport rectangles are explicitly unsupported because
 wgpu-hal 26.0.6 GLES truncates viewport coordinates/extents to integers. Empty or
 out-of-bounds viewport/clip intersections are also explicitly unsupported.
 
-`raster::FIXED_RASTER_STATE` enumerates the required explicit state writes:
+`raster::FIXED_RASTER_STATE` enumerates required explicit baseline state writes;
+color masks and global blending additionally accept the validated states below:
 unconditional rendering, rasterization enabled, one color attachment, single sample,
-RGBA writes, fill mode, no depth/stencil/blend/cull/alpha test/logic op/sample mask,
+RGBA baseline writes, fill mode, no depth/stencil/cull/alpha test/logic op/sample mask,
 no polygon smoothing/offset/stipple, and the supported viewport controls. Missing
 state or unsupported values fail. No undocumented power-on values are substituted.
 No instancing, additional shader stages, perspective IPA, arbitrary
@@ -553,3 +554,26 @@ pending output and journal version retryable. Channel faults preserve earlier
 submitted work for explicit synchronization. Dropping a renderer does not publish
 pending output. These are GPU test-adapter contracts, not Horizon fences, syncpoints,
 GPU-service wiring or cross-thread runtime memory transactions.
+
+## Global additive blending and channel writes
+
+B197 target-zero blend enable is 0x1360. Global blend selection remains explicit
+(`SET_BLEND_STATE_PER_TARGET` at 0x12e4 must be zero). When enabled,
+SET_BLEND_SEPARATE_FOR_ALPHA (0x133c) must be specified; color operation/source/
+destination are 0x1340/0x1344/0x1348, and alpha operation/source/destination are
+0x134c/0x1350/0x1358. Separate alpha disabled reuses the color equation.
+
+The implemented operation is ADD (OGL 0x8006, D3D 1); factors are ZERO
+(0x4000/1), ONE (0x4001/2), SRC_ALPHA (0x4302/5), ONE_MINUS_SRC_ALPHA
+(0x4303/6). This supports conventional source-over, premultiplied-over and other
+additive combinations of those four factors, on the existing RGBA8 UNORM target.
+Other documented operations/factors, per-target equations, constants and dual
+sources are rejected explicitly. Enabling incomplete blend state cannot draw.
+
+SET_CT_WRITE(0), 0x1a00, independently enables R/G/B/A at bits 0/4/8/12.
+All sixteen channel combinations are accepted; other bits are rejected. Disabled
+channels retain the resident target contents. Normalized blend state and channel
+mask participate in pipeline identity. Equivalent OGL/D3D encodings share that
+identity. Raster-only changes recreate a compatible pipeline while reusing the
+existing translated vertex shader module, fragment module and vertex buffer;
+mutable constant data remains outside code/pipeline identity.
