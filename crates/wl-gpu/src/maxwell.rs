@@ -724,6 +724,28 @@ pub struct Channel {
     pub(crate) faulted: bool,
 }
 impl Channel {
+    /// Shared FIFO/engine boundary; consumes one LE-decoded word and latches errors.
+    /// A returned draw effect still requires backend execution by the caller.
+    pub fn push_word(&mut self, word: u32) -> Result<MethodEffect> {
+        if self.faulted {
+            return Err(invalid("GPU channel fault is latched"));
+        }
+        let result = (|| match self
+            .fifo
+            .push_word(word)
+            .map_err(|e| crate::Error(e.to_string()))?
+        {
+            Some(method) => self
+                .engine
+                .apply(method)
+                .map_err(|e| crate::Error(e.to_string())),
+            None => Ok(MethodEffect::State),
+        })();
+        if result.is_err() {
+            self.faulted = true;
+        }
+        result
+    }
     /// Finalize the actual stream, latching a truncated packet as a channel fault.
     pub fn finish(&mut self) -> Result<()> {
         if self.faulted {

@@ -579,3 +579,81 @@ mask participate in pipeline identity. Equivalent OGL/D3D encodings share that
 identity. Raster-only changes recreate a compatible pipeline while reusing the
 existing translated vertex shader module, fragment module and vertex buffer;
 mutable constant data remains outside code/pipeline identity.
+
+## GPFIFO command acquisition
+
+`Renderer::submit_gpfifo_deferred(channel, entry_bytes, map, memory, changes)`
+accepts a stable borrowed array of eight-byte, little-endian B06F GPFIFO entries.
+This is the GPU-owned execution boundary, not an nvdrv ioctl decoder or a hardware
+ring PUT/GET implementation. The runtime must validate/copy its ioctl metadata
+before calling; this API neither dereferences an ioctl userspace pointer nor
+interprets ioctl flags/fences.
+
+| Entry field | Bits | Accepted subset |
+| --- | --- | --- |
+| Entry0 FETCH | 0 | UNCONDITIONAL = 0 |
+| Entry0 reserved | 1 | zero |
+| Entry0 GET | 31:2 | aligned address low bits |
+| Entry1 GET_HI | 7:0 | address bits 39:32 |
+| Entry1 PRIV | 8 | USER = 0 |
+| Entry1 LEVEL | 9 | MAIN = 0 |
+| Entry1 LENGTH | 30:10 | nonzero count of 32-bit words |
+| Entry1 SYNC | 31 | PROCEED = 0 |
+
+Address plus length must fit the 40-bit address space, allowing an exclusive end
+exactly at 2^40. The wire field permits 2,097,151 words. The execution policy caps
+one call at 2,048 entries and 1,048,576 aggregate words (4 MiB), independently of
+hardware limits. Empty arrays are successful no-ops on healthy channels.
+Zero-length entries have control/opcode semantics: even the documented NOP opcode
+is currently rejected, rather than treating an arbitrary control operand as an
+address or borrowing zero bytes. Conditional fetch, kernel privilege, subroutine
+level, WAIT and reserved bit 1 are explicitly rejected. WAIT is not implemented
+by calling a CPU sleep or interpreting it as a complete host fence.
+
+Metadata length, flags, address ranges and aggregate work are preflighted before
+any FIFO word or engine method is consumed. Entries are decoded a second time during execution to avoid
+allocating an owned entry array; the decode counter includes both passes. A
+preflight failure latches the channel with zero executed words/draws. Command
+mapping/access and engine errors occur during ordered execution and may follow
+successful draws. The returned `SubmissionFault` includes its phase and progress:
+completed entries, consumed words (including a rejected method word), and draws
+accepted by the queue. This is not an atomic transaction or a completion fence.
+Whole-array retry on a faulted channel is rejected without replay; prior pending
+output remains available through `synchronize_target`. Failed explicit writeback
+can be retried without rerunning commands.
+
+Each full entry range must resolve inside one AddressMap mapping. Adjacent
+mappings are rejected even if they name adjacent guest bytes; a runtime gather
+extension has not been approved. GuestMemory must supply the entire requested
+contiguous span, with permissions and backing stable for the borrow. Short reads
+fail explicitly. GPU addresses never become host pointers. The current mapper's
+canonical GuestAddress is the backing identity; replacing an AddressMap between
+calls is observed without a cached command-pointer assumption.
+
+The bridge borrows remaining command bytes and decodes scalar words explicitly
+with `u32::from_le_bytes`. It uses the same `Channel::push_word` FIFO/engine
+operation as direct pushbuffer submission, stopping at each draw. The borrow ends
+before mutable resource resolution, queue submission or a conditional coherence
+barrier. Remaining bytes are borrowed afresh afterward; no command Vec or guest
+borrow survives GPU submission. Byte spans can overlap across these borrows;
+`gpfifo_borrowed_bytes` counts successful span lengths and `gpfifo_command_bytes`
+counts actual consumed words. Neither counter claims a bulk CPU copy. A GPU-newer
+target overlapping command bytes triggers the existing explicit completion and
+writeback before acquisition, preventing execution of stale RAM instructions.
+This is a conservative host coherency contract, not a model of PBDMA command
+prefetch timing or a hardware guarantee for self-modifying PROCEED buffers.
+WAIT/no-prefetch behavior and hardware synchronization remain unsupported.
+
+FIFO packet and B197 object/register state survive entry boundaries and calls.
+No implicit `Channel::finish` occurs: the caller invokes it only at logical stream
+termination, where truncation latches a fault. Entry order and draw queue order are
+preserved. Reads after a draw can observe its required visibility barrier; unrelated
+CPU writes concurrent with this exclusive host call are not modeled. CPU changes
+between calls must be reported through the existing exact backing dirty journal.
+No unconditional framebuffer publication is introduced.
+
+The bridge does not implement production GPU page tables, nvdrv channel handles,
+Horizon service dispatch, syncpoints/semaphores, nvhost fences, arbitrary engine
+classes, general NVN/shader compatibility or VI presentation. Metadata acceptance,
+command consumption, host queue acceptance, GPU completion and guest visibility
+remain distinct states.

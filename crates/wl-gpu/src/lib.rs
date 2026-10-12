@@ -9,6 +9,9 @@ pub mod compression;
 mod draw_backend;
 pub mod fifo;
 pub mod format;
+pub mod gpfifo;
+#[cfg(feature = "wgpu-backend")]
+mod gpfifo_backend;
 pub mod index;
 #[cfg(feature = "wgpu-backend")]
 mod index_backend;
@@ -44,6 +47,13 @@ pub(crate) fn invalid(message: &str) -> Error {
 /// Explicit operations observed by this crate; excludes driver/internal allocations.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Counters {
+    pub gpfifo_submissions: u64,
+    pub gpfifo_entry_decodes: u64,
+    pub gpfifo_read_calls: u64,
+    /// Borrowed spans may overlap when execution resumes after a draw.
+    pub gpfifo_borrowed_bytes: u64,
+    /// Words actually consumed, four scalar bytes per word; no owned command array.
+    pub gpfifo_command_bytes: u64,
     pub owned_output_allocations: u64,
     pub guest_to_host_bytes: u64,
     pub upload_bytes: u64,

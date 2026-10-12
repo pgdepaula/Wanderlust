@@ -265,3 +265,33 @@ SET_CT_WRITE(0). The implementation lowers only the four documented coefficients
 listed in execution.md to wgpu 26 blend factors; it imports no external compiler
 or emulator implementation. The output oracle evaluates the equations separately
 from shader translation and quantizes between draws on the UNORM attachment.
+
+## GPFIFO channel boundary references
+
+- NVIDIA open-gpu-doc, MIT, revision
+  `9fdf5c4062007929d9f4e6cbad9c9771fe61b880`,
+  [classes/host/clb06f.h](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/host/clb06f.h),
+  GPFIFO entry definitions 154–176: eight bytes, GET/FETCH/PRIV/LEVEL/LENGTH/SYNC
+  and control opcodes. This is the source of the accepted wire fields; it does not
+  justify pretending unsupported scheduling or control semantics are implemented.
+- libnx, ISC, revision `feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973`,
+  [gpu_channel.c](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/gpu_channel.c)
+  and [ioctl.h](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/include/switch/nvidia/ioctl.h).
+  AppendEntry sets descriptor=start and high word |= flags|(num_cmds<<10),
+  independently confirming the word count and two-word entry packing. Kickoff's
+  ioctl flags/fence bookkeeping are separate from entry flags and are not adopted
+  as GPU completion semantics. Its 0x800 queue size informs the bounded call policy,
+  not a claim that every hardware channel has that limit.
+- [Switchbrew GPU, revision 12795](https://switchbrew.org/w/index.php?title=GPU&oldid=12795)
+  and [NV services](https://switchbrew.org/wiki/NV_services), inspected 2026-10-12:
+  mapped command buffers and inline GPFIFO entries in channel submission. The
+  NV-services page's informal allow_flush/is_push_buf bit names differ from the
+  NVIDIA class names; those bits are rejected, not assigned speculative semantics.
+- Ryujinx reference fork `alula/Ryujinx`, MIT, revision
+  `4930dced25c0d9ec33096b0f2601d262daa477bf`,
+  [GPFifoProcessor.cs](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs)
+  retains method-count state across Process calls, independently corroborating
+  packet continuation. [GPFifoDevice.cs](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs)
+  corroborates address/word-length extraction and gives WAIT distinct prefetch
+  handling. It is a source reference, not a dependency or proof that WAIT is
+  implemented here. No processor code was copied or vendored.

@@ -607,3 +607,72 @@ Their caches cannot be populated from stale RAM outside the channel's guarded
 source resolution. The GPU writeback-retry test verifies rejection of direct
 fragment, constant, vertex and texture synchronization with unchanged counters,
 then completes the pending image and independently validates its pixels.
+
+## GPFIFO acquisition and execution validation
+
+`gpfifo_gpu` enters exclusively through guest-format GPFIFO bytes and mapped
+command memory. It uses existing independently assembled Maxwell VS/TEX/quarters
+binaries and literal B197 state. The primary fixture fetches an indexed triangle
+with an asymmetric texture into a 52x29 pitched RGBA8 target. A scalar barycentric
+oracle specifies coverage and UV samples independently of host rasterization;
+texture colors and untouched background are checked at unambiguous pixel centers.
+The first SET_OBJECT packet is split across both entries and submission calls.
+
+The five GPU scenarios exercise:
+
+- Ordered indexed draws, two program changes/draws in one entry, unchanged warm
+  reuse, GPU VA command aliases, texture mutation without recompilation, and
+  replacement command backing at the same GPU address selecting another binary.
+- A valid draw followed by an unsupported packet or unmapped entry. Fault progress
+  reports the submitted prefix; retry does not replay it. Atomic writeback rejection
+  preserves pending output, and retry publishes the independently checked image.
+- GPU-written target bytes subsequently fetched as another entry's command word.
+  Publication must precede the read; generated color bytes reject as unsupported
+  opcode 7 rather than executing the stale guest NOP.
+- Metadata preflight versus fetch/engine failures, adjacent separate mappings,
+  short guest reads, unsupported class and a zero-allocation NOP acquisition path.
+- A draw overwriting the unread suffix of its own current entry. The old suffix
+  contains NOPs; the generated [64,128,191,255] pixel is a different instruction
+  word. Resumed acquisition performs one barrier/readback and rejects opcode 7,
+  with one submitted draw and zero completed entries. A prematurely owned snapshot
+  of the suffix would incorrectly succeed, so this tests actual reacquisition.
+
+CPU cases cover literal field extremes, 40-bit end bounds, every rejected flag,
+zero-length control entries, wire maximum versus supported aggregate budget,
+entry-array boundaries, full-range mapping and packet continuation/fault latching.
+A separate one-test allocation executable avoids interference from parallel Rust
+unit tests: 1,000 metadata preflights and entry iterations allocate zero Rust heap
+objects. The GPU-enabled NOP loop separately executes 1,000 submissions/8,000
+command bytes with zero measured Rust allocations, excluding device setup/draws.
+This does not imply driver allocation freedom during real drawing.
+
+The 32-draw warm fixture consumes 1,024 command bytes through 64 successful guest
+reads and 64 entry decodes (preflight plus execution), borrowing 1,280 span bytes
+including overlap when resuming after draw. No owned command-buffer array is
+created. Shader/descriptor reads, uploads and pipelines remain unchanged. Final
+visibility requires one readback/wait; 32 draws plus readback use 33 submissions.
+The earlier four-scenario native D3D12 observation measured 30.25 ms CPU submission,
+1,346 process-wide Rust allocations/34 reallocations for that draw loop. These
+noisy debug samples are not a throughput or game-frame performance claim.
+
+The first CPU allocation probe incorrectly shared its executable with parallel
+tests and observed unrelated allocations; isolating the probe fixes its scope.
+The initial negative class assertion expected the wrong diagnostic capitalization;
+its correction preserves UnsupportedClass rejection. Strict Clippy also identified
+an API newer than the declared Rust 1.85 MSRV; byte-array divisibility now uses a
+compatible operation. These unsuccessful runs are not counted as validation passes.
+
+Final package validation passed formatting and strict Clippy. CPU graphics tests
+passed under default and no-default features: 53 passed, zero failed. The final
+five GPFIFO GPU scenarios passed on WSL OpenGL and native Intel UHD Windows D3D12
+and Vulkan. Together with all seventeen existing GPU regressions executed on each
+backend, the matrix covers 22 successful scenarios per backend, 66 total, with
+zero GPU skips. Windows transport startup errors occurred before test execution;
+retries were limited to those startup failures, never used to conceal GPU failures.
+
+A faithful ordinary source snapshot retaining the exact Cargo.lock, including the
+final GPU sources and excluding unfinished runtime/compiler edits, passed workspace
+formatting, strict workspace Clippy and 257 tests. Its 22 GPU tests are ignored by
+ordinary Cargo test and accounted for by the explicit execution matrix above.
+This does not establish integration of the unfinished runtime changes or execution
+of an original game-submitted command stream.

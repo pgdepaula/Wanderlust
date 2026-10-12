@@ -94,15 +94,8 @@ impl Renderer {
         let result = (|| {
             let mut last = None;
             for word in words {
-                if let Some(method) = channel
-                    .fifo
-                    .push_word(*word)
-                    .map_err(|e| crate::Error(e.to_string()))?
                 {
-                    let effect = channel
-                        .engine
-                        .apply(method)
-                        .map_err(|e| crate::Error(e.to_string()))?;
+                    let effect = channel.push_word(*word)?;
                     if matches!(
                         effect,
                         MethodEffect::Draw { .. } | MethodEffect::DrawIndices { .. }
@@ -188,7 +181,28 @@ impl Renderer {
         self.target_pending = false;
         Ok(Some(frame))
     }
-    fn guest_draw(
+    pub(crate) fn synchronize_command_source(
+        &mut self,
+        address: GuestAddress,
+        size: usize,
+        memory: &mut impl GuestMemoryWrite,
+        changes: &mut TextureChanges,
+    ) -> Result<()> {
+        let end = address
+            .0
+            .checked_add(size as u64)
+            .ok_or_else(|| invalid("command source overflow"))?;
+        if self.target_pending
+            && self
+                .guest_target
+                .is_some_and(|p| address.0 < p.guest.0 + p.size as u64 && p.guest.0 < end)
+        {
+            self.counters.coherence_barriers += 1;
+            self.synchronize_target(memory, changes)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn guest_draw(
         &mut self,
         engine: &Maxwell3d,
         draw: MethodEffect,
