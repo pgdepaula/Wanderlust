@@ -104,6 +104,10 @@ pub struct Counters {
     pub render_target_allocations: u64,
     pub render_target_reuses: u64,
     pub render_target_guest_bytes: u64,
+    pub target_deswizzle_bytes: u64,
+    pub target_swizzle_bytes: u64,
+    pub target_pack_copy_bytes: u64,
+    pub target_patch_bytes: u64,
     pub render_target_upload_bytes: u64,
     pub guest_framebuffer_write_bytes: u64,
 }

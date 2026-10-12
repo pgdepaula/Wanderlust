@@ -36,16 +36,67 @@ pub const FIXED_RASTER_STATE: &[(u16, u32)] = &[
     (0x0c0c, 0x3f800000),
 ];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorLayout {
+    Pitch { bytes_per_row: u32 },
+    BlockLinear { block_height_log2: u8 },
+}
+/// RGBA8_UNORM, single layer, depth one. Logical host pixels and guest storage
+/// are distinct. Pitch WIDTH retains the existing full-pitch pixel interpretation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColorTarget {
     pub address: GpuAddress,
-    pub pitch: u32,
     pub width: u32,
     pub height: u32,
+    pub layout: ColorLayout,
 }
 impl ColorTarget {
+    pub fn linear_pitch(&self) -> Result<u32> {
+        self.width
+            .checked_mul(4)
+            .ok_or_else(|| invalid("color row overflow"))
+    }
+    pub fn block_linear(&self) -> Result<Option<crate::layout::BlockLinear2d>> {
+        match self.layout {
+            ColorLayout::BlockLinear { block_height_log2 } => {
+                let layout = crate::layout::BlockLinear2d::new(
+                    self.width,
+                    self.height,
+                    crate::format::Format::Rgba8Unorm,
+                    block_height_log2,
+                )?;
+                // Bound the complete publication transaction: padded work image,
+                // tiled output, readback/redecoded logical pixels and raw CPU patches.
+                if layout.tiled_size > (64 * 1024 * 1024) / 5 {
+                    return Err(invalid(
+                        "color conversion transaction exceeds 64 MiB budget",
+                    ));
+                }
+                Ok(Some(layout))
+            }
+            ColorLayout::Pitch { bytes_per_row } => {
+                if self.width == 0 || self.height == 0 || bytes_per_row != self.linear_pitch()? {
+                    return Err(invalid("invalid pitch color geometry"));
+                }
+                Ok(None)
+            }
+        }
+    }
     pub fn size(&self) -> Result<usize> {
-        usize::try_from(u64::from(self.pitch) * u64::from(self.height))
-            .map_err(|_| invalid("color span exceeds host"))
+        let size = if let Some(layout) = self.block_linear()? {
+            layout.tiled_size
+        } else {
+            usize::try_from(u64::from(self.linear_pitch()?) * u64::from(self.height))
+                .map_err(|_| invalid("color span exceeds host"))?
+        };
+        if self
+            .address
+            .0
+            .checked_add(size as u64)
+            .is_none_or(|end| end > 1 << 40)
+        {
+            return Err(invalid("color target exceeds 40-bit GPU space"));
+        }
+        Ok(size)
     }
 }
 /// Implemented global additive blending factors, independently of host enum values.
@@ -165,12 +216,13 @@ impl RasterRegisters {
                 let valid = match n {
                     0 => value <= 255,
                     1 => value % 256 == 0,
-                    2 => value > 0 && value <= 0x0fffffff && value % 4 == 0,
+                    2 => value > 0 && value <= 0x0fffffff,
                     3 => value > 0 && value <= 0x1ffff,
                     4 => value == 0xd5,
-                    5 => value == 0x1000,
+                    5 => value == 0x1000 || (value & !0x70 == 0 && (value >> 4) <= 5),
                     6 => value == 1,
-                    7 | 8 => value == 0,
+                    7 => true, // DWORD array pitch is checked after complete geometry is known.
+                    8 => value == 0,
                     _ => false,
                 };
                 if !valid {
@@ -228,17 +280,37 @@ impl RasterRegisters {
             *out = v.ok_or_else(|| invalid("incomplete color target"))?;
         }
         let address = (u64::from(c[0]) << 32) | u64::from(c[1]);
-        let size = u64::from(c[2]) * u64::from(c[3]);
-        if address.checked_add(size).is_none_or(|v| v > 1 << 40) {
-            return Err(invalid("color target exceeds 40-bit GPU space"));
-        }
-        // For pitch layout WIDTH is byte pitch, not a pixel dimension (Mesa FB setup).
+        // WIDTH is byte pitch for PITCH, pixels for BLOCKLINEAR (Mesa FB setup).
+        let (width, layout) = if c[5] == 0x1000 {
+            if c[2] % 4 != 0 {
+                return Err(invalid("RGBA8 pitch is not pixel aligned"));
+            }
+            (
+                c[2] / 4,
+                ColorLayout::Pitch {
+                    bytes_per_row: c[2],
+                },
+            )
+        } else {
+            (
+                c[2],
+                ColorLayout::BlockLinear {
+                    block_height_log2: (c[5] >> 4) as u8,
+                },
+            )
+        };
         let target = ColorTarget {
             address: GpuAddress(address),
-            pitch: c[2],
-            width: c[2] / 4,
+            width,
             height: c[3],
+            layout,
         };
+        let size = target.size()?;
+        if c[7] != 0
+            && (matches!(layout, ColorLayout::Pitch { .. }) || u64::from(c[7]) * 4 != size as u64)
+        {
+            return Err(invalid("unsupported single-layer array pitch"));
+        }
         let mut v = [0f32; 6];
         for (out, word) in v.iter_mut().zip(self.viewport) {
             *out = f32::from_bits(word.ok_or_else(|| invalid("incomplete viewport"))?);

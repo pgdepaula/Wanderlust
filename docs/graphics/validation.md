@@ -548,8 +548,8 @@ Additional actual GPU tests cover CPU patch merging, target aliases/rebinds,
 CPU writes before another draw, source texture aliasing pending GPU output,
 readback after channel faults, failed atomic writeback retries, epoch changes and
 lost dirty-journal history. The texture alias deliberately reinterprets linear RT
-bytes through a block-linear TIC; its independent scalar GOB oracle does not imply
-block-linear render-target support. All tests use redistributable fixtures.
+bytes through a block-linear TIC; that sampled-texture test alone does not establish
+block-linear render-target support; the color-publication tests below cover it. All tests use redistributable fixtures.
 
 The deferred/coherence implementation was explicitly executed on WSL OpenGL and
 native Intel UHD D3D12/Vulkan: 16 GPU tests per backend passed (48 executions,
@@ -736,3 +736,89 @@ deliverable and unchanged Cargo.lock passed workspace formatting, strict workspa
 Clippy and 262 CPU tests; 25 ignored GPU tests are accounted for by the explicit
 backend matrix. This excludes unfinished shared compiler/CLI edits and is not a
 claim that those live-worktree modifications passed workspace integration.
+
+## Block-linear color publication
+
+Three CPU tests compare every byte of bidirectional conversion with an independent
+scalar GOB oracle for 1x1, 7x9, 16x17, 33x13, 64x8, 65x65 and 127x31 RGBA8
+surfaces, each at all six block heights. Literal within-GOB landmarks supplement
+roundtrips. Tests retain every padding byte, reject truncated buffers and validate
+mode-dependent WIDTH, array pitch, unsupported memory fields, zero dimensions,
+conversion limits and the exact 40-bit surface-end boundary. Existing pitch raster
+assertions still check identical dimensions/stride/size, with complete-state
+validation used for fields whose interpretation now depends on layout.
+
+Four ignored `block_target_gpu` scenarios enter through `GpuDriver::submit` using
+real GPFIFO entries and literal B06F/B197 indexed draw methods. They execute the
+existing independently assembled ALD/AST vertex and LDC/IPA/TEX fragment fixtures:
+
+- A non-square 52x29 target begins with asymmetric guest colors and nonzero padding.
+  Independent barycentric coverage and nearest sampling check clipped textured
+  geometry and uncovered pixels. Full storage bytes match the scalar oracle.
+  A subsequent LDC color draw exercises alpha blending and R/B-only writes.
+  A CPU texel write before another draw refreshes the tiled attachment and survives
+  uncovered, with shader/pipeline reuse.
+  Thirty-two warmed draws add no upload, conversion, module/pipeline creation,
+  readback or blocking wait; one explicit final publication exposes the result.
+- A valid draw followed by a malformed packet preserves the accepted GPU prefix.
+  An unaligned raw CPU patch crosses a GOB microtile boundary; a disjoint patch
+  modifies padding beyond the logical linear byte count. Atomic publication failure
+  preserves RAM and pending output. Retry retains both patches, the rendered image
+  and untouched padding without increasing the GPU draw count.
+- A GPU VA alias reuses the same resident canonical target without upload/readback.
+  Command acquisition from padding beyond logical image size forces full-footprint
+  visibility. A block-height switch with identical dimensions and allocation size,
+  without a CPU target write, forces publication and correct reinterpretation.
+  Pitch/tiled rebinding reuses the host attachment and pipelines. Close publishes
+  remaining tiled output.
+- Remapping the same target GPU VA selects different canonical storage, retaining
+  old backing and using new asymmetric contents. Pending unmap is blocked. A later
+  target with only its first page mapped rejects the missing final GOBs before a
+  draw or guest-memory mutation.
+
+Expected pixel colors are independently specified by source image and barycentric
+math. Boundary tie pixels are excluded from color assertions, while byte layout
+and padding assertions still cover the complete allocation. Blending permits at
+most one UNORM code step per checked color channel; other comparisons are exact.
+
+Final live package validation passed `cargo fmt --all --check`, strict
+`cargo clippy -p wl-gpu --all-targets --locked -- -D warnings`, and locked tests
+with default and no-default features: 65 CPU tests passed in each configuration.
+Ordinary default tests ignore 31 GPU scenarios; they were explicitly executed
+with `WGPU_BACKEND=gl cargo test -p wl-gpu --locked -- --ignored --nocapture
+--test-threads=1` and native Windows binaries through `windows_gpu.py`. All 31
+passed per backend: WSL llvmpipe OpenGL, native Intel UHD D3D12 and native Intel
+UHD Vulkan, 93 unique scenario/backend executions with zero GPU failures/skips.
+The four tiled scenarios also passed after the final CPU-before-next-draw assertion
+was added. WSL interop startup failures occurred before test execution and only
+those launches were retried. An intermediate package check exposed the old raster
+test's removed `pitch` field; it now asserts the equivalent `linear_pitch()` and
+retains invalid pitch/stride validation. That failed check is not counted as a pass.
+
+At 52x29/BH2, logical pixels occupy 6,032 bytes and guest tiled storage 8,192.
+The controlled 36-draw workload (including 32 warm draws, blend/mask and a CPU
+refresh) measured one target allocation, 35 reuses, 12,064 target upload bytes,
+49,152 guest target read bytes, 44,832 decode bytes, 32,768 encode bytes,
+24,128 overlay-copy bytes, four readbacks/waits, and 32,768 guest publication
+bytes. The warm interval alone added 32 queue submissions and zero uploads,
+conversions, target allocations, shader modules, pipelines, readbacks or waits.
+Publication uses two padded conversion vectors plus the packed GPU readback;
+CPU patch/redecode vectors are additional when required. This is not allocation-free.
+The failed-publication fixture acquired seven exact CPU patch bytes twice, without
+issuing another draw.
+
+Single debug observations of 32 warmed tiled submissions measured 46.73 ms,
+1,409 Rust allocations/34 reallocations on D3D12; 57.83 ms, 1,570/33 on Vulkan;
+and 148.82 ms, 1,569/128 on GL during concurrent workspace compilation. Timing
+includes wgpu/channel/callback work and excludes final publication. Process-wide
+allocator traffic remains; these noisy observations are not GPU durations or a
+game benchmark. The existing pitch workload uses the same 52x29 dimensions and
+also adds zero warm uploads/readbacks/waits. Tiling adds conversion and an 8,192-byte
+publication span instead of 6,032 bytes at explicit visibility, not a per-draw wait.
+No comparative speedup is established.
+
+A faithful ordinary snapshot of committed `270b5e4` plus the GPU deliverable,
+retaining the exact Cargo.lock and excluding unfinished compiler/CLI/IDE changes,
+passed workspace formatting, strict workspace Clippy and 269 CPU tests. Its 31
+ignored GPU scenarios are accounted for by the explicit backend matrix. This is
+not validation of unfinished peer modifications or original-game GPU execution.

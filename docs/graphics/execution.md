@@ -432,14 +432,15 @@ UV linkage, never the fragment harness's fullscreen vertex entry.
 
 Target zero uses 0x0800..0x0820: address A/B, width, height, format, memory layout,
 third dimension, array pitch and layer. The accepted subset is A8B8G8R8 (`0xd5`,
-little-endian RGBA bytes), pitch layout (`0x1000`), third dimension one, zero array
-pitch/layer and a 256-byte-aligned 40-bit address. The address alignment is a
+little-endian RGBA bytes), pitch (`0x1000`) or bounded block-linear layout,
+third dimension one, layer zero and a 256-byte-aligned 40-bit address. Block-linear
+array stride and footprint rules are specified under Block-linear color storage. The address alignment is a
 supported-subset restriction, not a universal hardware alignment claim. In pitch
 layout **WIDTH is byte pitch**. It must be positive and divisible by four; storage
 width is pitch/4. Logical visible bounds come from surface/viewport clipping and
 scissor. Padding pixels remain initialized guest data and are preserved.
-Block-linear, layered, depth, compressed and multisampled render targets are not
-supported, independently of sampled-texture layout support.
+Layered, depth, compressed and multisampled render targets are unsupported.
+Block-linear RGBA8 target conversion is implemented separately from sampled textures.
 
 Viewport zero uses scale/offset 0x0a00..0x0a14, identity coordinate swizzle at
 0x0a18, clip rectangle/depth at 0x0c00..0x0c0c, surface clips 0x0ff4/0x0ff8 and
@@ -471,19 +472,21 @@ adapter must keep backing identity, permissions and contents stable during the
 exclusive call; no guest borrow outlives queue upload or spans GPU completion.
 
 The existing bounded offscreen target gains COPY_DST. First use/rebinding/content
-changes initialize it from guest bytes through `Queue::write_texture`, using byte
-pitch without the buffer-copy 256-byte row restriction. The render pass uses Load,
+changes initialize it from guest bytes (deswizzled when tiled) through
+`Queue::write_texture`, using packed byte pitch without the buffer-copy 256-byte
+row restriction. The render pass uses Load,
 so uncovered pixels are retained. Readback uses the existing 256-byte-aligned buffer
 copy, submission completion wait and row packing. After completion one checked
 whole-span guest write publishes the framebuffer and updates the shared generation
 journal. Host resource handles remain owned by wgpu across submissions; no explicit
 destroy or sleep is used. Allocation/upload validation errors poison the backend.
 
-This is an explicitly synchronous validation visibility contract, not a hardware
-fence/semaphore implementation. Every draw still waits and reads back the entire
-storage target. Asynchronous GPU/CPU visibility and presentation require a separate
-runtime service contract. The latest target cache keys canonical guest backing,
-size, dimensions and journal version, not GPU VA alone. An alias can reuse contents;
+The synchronous compatibility wrapper waits and publishes after drawing; deferred
+submission instead retains GPU-newer contents until explicit publication or a
+required coherence barrier. Neither API implements a guest hardware semaphore.
+Production GPU/CPU visibility and presentation require a runtime service contract.
+The target cache keys canonical guest backing, size, dimensions, storage layout
+and journal version, not GPU VA alone. An alias can reuse contents;
 remapping, CPU writes, target changes or host-harness rendering invalidate them.
 Same-size rebinding reuses the host texture but uploads the newly selected guest
 contents. Caches remain bounded; revisiting evicted state may rebuild resources.
@@ -736,3 +739,57 @@ source/destination coefficients. Since enablement is unsupported, no additional
 pipeline variant is required. Direct raster register application also rejects
 unaligned offsets before range indexing, even though normal FIFO methods are
 already aligned.
+
+## Block-linear color storage
+
+Target zero accepts RGBA8_UNORM (`A8B8G8R8`, format `0xd5`), one 2D layer,
+third dimension one, and layer zero. `ColorTarget` separates logical dimensions
+from `ColorLayout::Pitch { bytes_per_row }` and
+`ColorLayout::BlockLinear { block_height_log2 }`. WIDTH (`0x0808`) is a byte
+stride for pitch storage and a pixel width for block-linear storage. Pitch storage
+retains the existing full-stride host width, with surface clipping limiting visible
+coverage. HEIGHT (`0x080c`) counts rows. MEMORY (`0x0814`) accepts either pitch
+bit 12 alone, or block-linear with log2 block height in bits 7:4, values 0..5
+(1, 2, 4, 8, 16 or 32 GOBs). Block width/depth must be one GOB, with array
+third-dimension control. Other bits and layouts fail explicitly. ARRAY_PITCH
+(`0x081c`) is in DWORDs; this single-layer subset accepts zero or the exact tiled
+footprint divided by four. Pitch storage requires zero array pitch. Arbitrary
+layer strides, arrays, 3D, multisampling and other color formats are unsupported.
+The existing 256-byte address alignment remains an implementation restriction.
+
+For width W, height H and block height B GOBs, the tiled span is
+`ceil(4*W/64) * ceil(H/(8*B)) * 512*B`. Mapping/read/write validation and pending
+source hazards cover this complete span, including edge GOB padding. The address
+plus footprint must fit the 40-bit GPU address domain. The bounded publication
+transaction limits tiled storage to `floor(64 MiB / 5)` bytes, conservatively
+bounding simultaneously owned conversion, logical output and CPU patch vectors.
+This bound excludes resident wgpu resources and driver-internal allocations.
+`tegra_swizzle` retains its separate 64 MiB per-conversion bound.
+
+Initialization deswizzles logical texels and uploads packed RGBA rows into the
+existing resident attachment. Deferred draws continue to use load/store and do
+not convert, read back or wait between unchanged draws. Canonical guest span,
+logical dimensions, layout, block height and dirty generation determine residency;
+numerically different GPU addresses mapping the same canonical surface can reuse
+it. A layout change invalidates interpretation even when dimensions and allocation
+size match. Compatible host attachments and shader/pipeline resources remain
+reusable across guest storage layouts. `GpuDriver` submission/completion/publication
+signatures are unchanged; NVDRV does not perform surface conversion.
+
+Publication validates the whole destination and journal history, then decodes the
+current full padded allocation into a bijective working image using the dependency.
+After actual GPU completion/readback, it overlays only logical texel rows, swizzles
+the entire padded image, and reapplies CPU-after-GPU dirty intervals in exact guest
+byte coordinates. Padding and unrelated bytes survive: no partial-edge swizzle
+result replaces the allocation with zero padding. CPU intervals are never treated
+as row-major RGBA offsets. The public returned Frame remains logical RGBA, including
+CPU modifications; a patched target is conservatively reinitialized on the next
+draw. Atomic guest write and journal advancement occur last. Failure retains
+pending GPU output and dirty history for publication retry, without replaying draws.
+
+Counters distinguish full guest target reads, host uploads, logical/padded decode
+bytes (`target_deswizzle_bytes`), full encoded bytes (`target_swizzle_bytes`),
+logical overlay copies (`target_pack_copy_bytes`), and raw CPU intervals acquired
+(`target_patch_bytes`). Retried attempts count actual repeated work. Conversion
+allocates vectors and publication copies the complete allocation; these are not
+zero-copy operations. Unchanged draws do not incur those conversion allocations.

@@ -39,7 +39,12 @@ fn documented_pitch_raster_and_compact_draw_fields() {
     let mut e = ready();
     let (t, r) = e.rasterization().unwrap();
     assert_eq!(
-        (t.width, t.height, t.pitch, t.size().unwrap()),
+        (
+            t.width,
+            t.height,
+            t.linear_pitch().unwrap(),
+            t.size().unwrap()
+        ),
         (52, 29, 208, 6032)
     );
     assert_eq!(t.address, GpuAddress(0x90000));
@@ -67,12 +72,10 @@ fn raster_invalid_incomplete_bounds_and_unsupported_formats() {
         (0x800, 256),
         (0x804, 1),
         (0x808, 0),
-        (0x808, 207),
         (0x80c, 0),
         (0x810, 0xd6),
-        (0x814, 0),
+        (0x814, 0x60),
         (0x818, 2),
-        (0x81c, 1),
         (0x820, 1),
         (0xa00, f32::NAN.to_bits()),
         (0x12cc, 1),
@@ -80,7 +83,10 @@ fn raster_invalid_incomplete_bounds_and_unsupported_formats() {
     ] {
         assert!(set(&mut ready(), m, v).is_err(), "{m:x}");
     }
+    // Pitch-dependent width/stride checks occur when the complete target resolves.
     for (m, v) in [
+        (0x808, 207),
+        (0x81c, 1),
         (0xa00, 0),
         (0xa04, 0),
         (0xa00, 11.75f32.to_bits()),

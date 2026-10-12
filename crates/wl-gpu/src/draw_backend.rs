@@ -9,22 +9,28 @@ use crate::{
     texture::TextureChanges,
 };
 use std::cell::Cell;
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy)]
 pub(crate) struct GuestTargetStamp {
     guest: GuestAddress,
     size: usize,
-    width: u32,
-    height: u32,
+    surface: crate::raster::ColorTarget,
     version: (u64, u64),
 }
 impl GuestTargetStamp {
     fn same_backing(self, other: Self) -> bool {
         self.guest == other.guest
             && self.size == other.size
-            && self.width == other.width
-            && self.height == other.height
+            && self.surface.width == other.surface.width
+            && self.surface.height == other.surface.height
+            && self.surface.layout == other.surface.layout
     }
 }
+impl PartialEq for GuestTargetStamp {
+    fn eq(&self, other: &Self) -> bool {
+        self.same_backing(*other) && self.version == other.version
+    }
+}
+impl Eq for GuestTargetStamp {}
 // A pending GPU target is newer than RAM. Cache generations force overlapping
 // sources through this guard; an overlap requires a coherence barrier and retry.
 struct SourceMemory<'a, M> {
@@ -143,6 +149,17 @@ impl Renderer {
             stamp.version,
         )?;
         let patched = !dirty.is_empty();
+        let tiled_layout = stamp.surface.block_linear()?;
+        let mut padded = if let Some(layout) = &tiled_layout {
+            let bytes = memory.read(stamp.guest, stamp.size)?;
+            if bytes.len() != stamp.size {
+                return Err(invalid("short padded target read"));
+            }
+            self.counters.render_target_guest_bytes += stamp.size as u64;
+            Some(layout.padded_linear(bytes, &mut self.counters)?)
+        } else {
+            None
+        };
         let mut patches = Vec::new();
         for range in dirty {
             let size = (range.end - range.start) as usize;
@@ -157,15 +174,35 @@ impl Renderer {
             patch.extend_from_slice(bytes);
             self.counters.temporary_allocations += 1;
             self.counters.guest_to_host_bytes += size as u64;
+            self.counters.target_patch_bytes += size as u64;
             patches.push(((range.start - stamp.guest.0) as usize, patch));
         }
         changes.can_mark_write()?;
         let mut frame = self.read_resident_target()?;
-        for (offset, patch) in patches {
-            frame.rgba[offset..offset + patch.len()].copy_from_slice(&patch);
+        // CPU writes are guest byte intervals. Overlay them AFTER conversion;
+        // a tiled offset is never interpreted as a host row-major pixel offset.
+        if let Some(layout) = tiled_layout {
+            let mut tiled = layout.from_padded_linear(
+                padded.as_mut().unwrap(),
+                &frame.rgba,
+                &mut self.counters,
+            )?;
+            for (offset, patch) in patches {
+                tiled[offset..offset + patch.len()].copy_from_slice(&patch);
+            }
+            // Keep the public Frame in logical RGBA coordinates, including CPU patches.
+            if patched {
+                frame.rgba = layout.to_linear(&tiled, &mut self.counters)?;
+                self.counters.target_deswizzle_bytes += frame.rgba.len() as u64;
+            }
+            memory.write(stamp.guest, &tiled)?;
+        } else {
+            for (offset, patch) in patches {
+                frame.rgba[offset..offset + patch.len()].copy_from_slice(&patch);
+            }
+            memory.write(stamp.guest, &frame.rgba)?;
         }
-        // An unsuccessful atomic write must not become a false CPU dirty patch.
-        memory.write(stamp.guest, &frame.rgba)?;
+        // Failed atomic writes retain the original pending GPU image and journal.
         changes.mark_write(stamp.guest, stamp.size)?;
         self.counters.guest_framebuffer_write_bytes += stamp.size as u64;
         // If patches changed the GPU readback, RAM is now newer than the resident
@@ -220,8 +257,7 @@ impl Renderer {
         let mut stamp = GuestTargetStamp {
             guest,
             size,
-            width: target.width,
-            height: target.height,
+            surface: target,
             version: changes.stamp(guest.0..guest.0 + size as u64),
         };
         if self.target_pending
@@ -298,6 +334,14 @@ impl Renderer {
                     if bytes.len() != size {
                         return Err(invalid("short guest target upload"));
                     }
+                    let linear;
+                    let upload = if let Some(layout) = target.block_linear()? {
+                        linear = layout.to_linear(bytes, &mut self.counters)?;
+                        self.counters.target_deswizzle_bytes += linear.len() as u64;
+                        linear.as_slice()
+                    } else {
+                        bytes
+                    };
                     self.queue.write_texture(
                         wgpu::TexelCopyTextureInfo {
                             texture: &self.target.as_ref().unwrap().texture,
@@ -305,10 +349,10 @@ impl Renderer {
                             origin: wgpu::Origin3d::ZERO,
                             aspect: wgpu::TextureAspect::All,
                         },
-                        bytes,
+                        upload,
                         wgpu::TexelCopyBufferLayout {
                             offset: 0,
-                            bytes_per_row: Some(target.pitch),
+                            bytes_per_row: Some(target.linear_pitch()?),
                             rows_per_image: Some(target.height),
                         },
                         wgpu::Extent3d {
@@ -318,8 +362,8 @@ impl Renderer {
                         },
                     );
                     self.counters.render_target_guest_bytes += size as u64;
-                    self.counters.render_target_upload_bytes += size as u64;
-                    self.counters.upload_bytes += size as u64;
+                    self.counters.render_target_upload_bytes += upload.len() as u64;
+                    self.counters.upload_bytes += upload.len() as u64;
                     self.counters.upload_calls += 1;
                     self.counters.staging_allocations += 1;
                 }

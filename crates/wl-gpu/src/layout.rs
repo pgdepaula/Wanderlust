@@ -1,7 +1,10 @@
 //! Bounded adapter around the MIT-licensed Tegra X1 block-linear implementation.
 //! One 2D mip only. Compressed formats use block coordinates, not pixel coordinates.
 use crate::{Counters, Error, Result, format::Format, invalid};
-use tegra_swizzle::{BlockHeight, swizzle::deswizzle_block_linear};
+use tegra_swizzle::{
+    BlockHeight,
+    swizzle::{deswizzle_block_linear, swizzle_block_linear},
+};
 
 const MAX_CONVERSION_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Debug, Clone, Copy)]
@@ -68,5 +71,73 @@ impl BlockLinear2d {
         counters.guest_to_host_bytes += self.linear_size as u64;
         counters.texture_conversions += 1;
         Ok(result)
+    }
+    /// Decode all padded byte coordinates, including incomplete edge GOBs. This
+    /// creates a bijective linear working image of the entire storage footprint.
+    pub fn padded_linear(&self, tiled: &[u8], counters: &mut Counters) -> Result<Vec<u8>> {
+        if tiled.len() != self.tiled_size {
+            return Err(invalid("padded surface storage size mismatch"));
+        }
+        let (width, height) = self.padded_dimensions();
+        let result = deswizzle_block_linear(
+            width,
+            height,
+            1,
+            tiled,
+            self.block_height,
+            self.bytes_per_block,
+        )
+        .map_err(|e| Error(format!("Tegra padded decode: {e:?}")))?;
+        counters.temporary_allocations += 1;
+        counters.target_deswizzle_bytes += self.tiled_size as u64;
+        Ok(result)
+    }
+    fn padded_dimensions(&self) -> (u32, u32) {
+        let row = self.width_blocks * self.bytes_per_block;
+        let rows = 8 * self.block_height as u32;
+        (
+            row.div_ceil(64) * 64 / self.bytes_per_block,
+            self.height_blocks.div_ceil(rows) * rows,
+        )
+    }
+    /// Replace only logical rows in a previously decoded padded storage image,
+    /// then use the dependency to encode every byte, preserving edge/padding data.
+    pub fn from_padded_linear(
+        &self,
+        padded: &mut [u8],
+        linear: &[u8],
+        counters: &mut Counters,
+    ) -> Result<Vec<u8>> {
+        if padded.len() != self.tiled_size || linear.len() != self.linear_size {
+            return Err(invalid("linear/padded surface size mismatch"));
+        }
+        let (width, height) = self.padded_dimensions();
+        let row = self.width_blocks as usize * self.bytes_per_block as usize;
+        let pitch = width as usize * self.bytes_per_block as usize;
+        for (dst, src) in padded.chunks_exact_mut(pitch).zip(linear.chunks_exact(row)) {
+            dst[..row].copy_from_slice(src);
+        }
+        let result = swizzle_block_linear(
+            width,
+            height,
+            1,
+            padded,
+            self.block_height,
+            self.bytes_per_block,
+        )
+        .map_err(|e| Error(format!("Tegra padded encode: {e:?}")))?;
+        counters.temporary_allocations += 1;
+        counters.target_swizzle_bytes += self.tiled_size as u64;
+        counters.target_pack_copy_bytes += self.linear_size as u64;
+        Ok(result)
+    }
+    pub fn to_tiled_preserving(
+        &self,
+        linear: &[u8],
+        tiled: &[u8],
+        counters: &mut Counters,
+    ) -> Result<Vec<u8>> {
+        let mut padded = self.padded_linear(tiled, counters)?;
+        self.from_padded_linear(&mut padded, linear, counters)
     }
 }

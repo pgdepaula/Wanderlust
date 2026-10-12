@@ -326,3 +326,34 @@ SubmissionIndex. No sleeps, guessed timing or synthetic syncpoint increments
 are used. The pinned NVIDIA B197 header above defines GLOBAL_COLOR_KEY at 1354,
 ENABLE 0:0, FALSE=0 and TRUE=1; only the documented disable state is implemented.
 External service-emulator implementations are not imported or vendored.
+
+## Block-linear color target storage
+
+The NVIDIA MIT header at revision
+`9fdf5c4062007929d9f4e6cbad9c9771fe61b880`,
+[`clb197.h`](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/3d/clb197.h),
+defines color target WIDTH 27:0, HEIGHT 16:0, MEMORY BLOCK_WIDTH 3:0,
+BLOCK_HEIGHT 7:4, BLOCK_DEPTH 11:8, LAYOUT 12:12 and THIRD_DIMENSION_CONTROL
+16:16. ONE_GOB has encoding zero; BLOCKLINEAR is zero and PITCH is one.
+These definitions establish field positions, not alone the mode-dependent WIDTH
+units or a universal target address-alignment rule.
+
+Mesa Nouveau, MIT, revision `e7959c6009d85d278585b2896495b2b3046d461b`,
+[`nvc0_state_validate.c`, nvc0_validate_fb](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nvc0/nvc0_state_validate.c),
+programs tiled width/height in pixels, tile mode and array stride in DWORDs;
+pitch targets instead use byte pitch as WIDTH and MEMORY bit 12. This independently
+corroborates the descriptor interpretation. No framebuffer implementation was copied.
+
+The locked MIT dependency
+[`tegra_swizzle` 0.4.0, swizzle module](https://docs.rs/tegra_swizzle/0.4.0/tegra_swizzle/swizzle/index.html)
+provides both single-mip deswizzling and swizzling. Its source cites Tegra X1 TRM
+v1.3 pages 1217–1218 for GOB addressing. Both public conversions allocate output;
+partial logical swizzling zero-initializes unused storage. The surrounding renderer
+therefore converts the full padded extent, overlays logical rows, and reconverts
+that complete extent to retain every padding byte. No dependency fork or new
+swizzle implementation is introduced.
+
+The independent scalar test oracle in `tests/common/gob.rs` derives the byte
+address from GOB/block equations and within-GOB bit interleaving, without calling
+the dependency. Literal offsets and exact expected allocation bytes supplement
+roundtrips, including partial edge GOBs and all six supported block heights.
