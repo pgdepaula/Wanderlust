@@ -88,6 +88,7 @@ pub struct Renderer {
     pub(crate) hardware_raster: Option<crate::raster::Rasterization>,
     pub(crate) guest_target: Option<crate::draw_backend::GuestTargetStamp>,
     pub(crate) target_pending: bool,
+    pub(crate) resolving_channel_sources: bool,
     timestamps: Option<(wgpu::QuerySet, wgpu::Buffer)>,
     pub(crate) poisoned: bool,
     pub(crate) textures:
@@ -197,6 +198,7 @@ impl Renderer {
             hardware_raster: None,
             guest_target: None,
             target_pending: false,
+            resolving_channel_sources: false,
             timestamps,
             poisoned: false,
             textures: HashMap::new(),
@@ -259,6 +261,15 @@ impl Renderer {
         self.counters.texture_allocations += 1;
         self.counters.buffer_allocations += 1;
         self.counters.cache_misses += 1;
+        Ok(())
+    }
+
+    pub(crate) fn validate_guest_resource_access(&self) -> Result<()> {
+        if self.target_pending && !self.resolving_channel_sources {
+            return Err(invalid(
+                "synchronize pending target before direct guest resource access",
+            ));
+        }
         Ok(())
     }
 

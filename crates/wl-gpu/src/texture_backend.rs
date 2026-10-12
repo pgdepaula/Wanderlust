@@ -117,6 +117,7 @@ impl Renderer {
         changes: &TextureChanges,
         policy: TextureUploadPolicy,
     ) -> Result<()> {
+        self.validate_guest_resource_access()?;
         if self.poisoned {
             return Err(invalid("renderer unavailable after backend failure"));
         }

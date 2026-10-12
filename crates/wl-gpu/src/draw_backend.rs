@@ -228,6 +228,7 @@ impl Renderer {
                     pending: self.guest_target.filter(|_| self.target_pending),
                     hazard: Cell::new(false),
                 };
+                self.resolving_channel_sources = true;
                 let resolved = (|| {
                     self.sync_selected_fragment(engine, map, &source, changes)?;
                     match draw {
@@ -251,6 +252,7 @@ impl Renderer {
                         _ => Err(invalid("not a draw effect")),
                     }
                 })();
+                self.resolving_channel_sources = false;
                 let hazard = source.hazard.get();
                 match resolved {
                     Ok(c) => {

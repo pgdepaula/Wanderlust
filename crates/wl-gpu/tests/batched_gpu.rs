@@ -436,6 +436,38 @@ fn failed_atomic_writeback_keeps_pending_output_retryable() {
     let mut r = Renderer::new().unwrap();
     let mut c = Channel::default();
     deferred(&mut r, &mut c, &words, &map, &mut data, &mut changes);
+    // Direct resource helpers must not populate caches from stale guest RAM.
+    let before = r.counters;
+    let memory = SliceMemory {
+        base: GuestAddress(0),
+        bytes: &data,
+    };
+    assert!(
+        r.sync_selected_fragment(&c.engine, &map, &memory, &changes)
+            .is_err()
+    );
+    assert!(
+        r.sync_fragment_resources(&c.engine, 4, &map, &memory, &changes)
+            .is_err()
+    );
+    assert!(
+        r.sync_selected_vertices(&c.engine, &map, &memory, &changes, 0, 3)
+            .is_err()
+    );
+    let desc = TextureImage::decode(TIC_RGBA)
+        .unwrap()
+        .with_sampler(TextureSampler::decode(TSC_NEAREST).unwrap());
+    assert!(
+        r.sync_texture(
+            wl_gpu::texture::TextureId(999),
+            desc,
+            &map,
+            &memory,
+            &changes
+        )
+        .is_err()
+    );
+    assert_eq!(r.counters, before);
     let stamp = changes.stamp(RT as u64..(RT + SIZE) as u64);
     let before = data[RT..RT + SIZE].to_vec();
     assert!(

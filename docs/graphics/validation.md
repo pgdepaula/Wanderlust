@@ -589,8 +589,8 @@ not skipped. Package formatting/strict Clippy passed; 48 CPU tests passed under
 both feature configurations. A faithful stable source snapshot including the
 committed independent index suite passed workspace formatting, strict Clippy and
 252 tests, with 17 GPU tests explicitly ignored by ordinary workspace Cargo test.
-Peer-owned uncommitted runtime/compiler edits were preserved and excluded from
-that snapshot; this is not a claim of live-worktree runtime integration.
+Uncommitted runtime/compiler changes were excluded from that snapshot; this
+does not establish live-worktree runtime integration.
 
 The indexed GPU fixture additionally verifies that a second GPU VA alias of the
 same U32 index backing causes zero extra index reads/uploads. A three-element
@@ -601,3 +601,9 @@ Clippy. It measured 60 guest index bytes including the rejected final scan,
 56 uploaded index bytes, two index cache hits and one CPU padding allocation.
 The previously reported four-draw/48-byte measurement above describes the smaller
 fixture before these additional alias/alignment cases.
+
+Direct guest-resource helpers additionally reject calls while a target is pending.
+Their caches cannot be populated from stale RAM outside the channel's guarded
+source resolution. The GPU writeback-retry test verifies rejection of direct
+fragment, constant, vertex and texture synchronization with unchanged counters,
+then completes the pending image and independently validates its pixels.

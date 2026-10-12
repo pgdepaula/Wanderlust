@@ -524,7 +524,9 @@ the canonical guest backing. It returns None without work if nothing is pending.
 The existing synchronous entry invokes this boundary after each hardware draw,
 preserving its externally visible framebuffer contract. Optional GPU timestamps
 refer to the latest draw, not the sum of deferred work or end-to-end frame time.
-Standalone harness execution is rejected while guest output is pending.
+Standalone harness execution and direct guest-resource synchronization are
+rejected while output is pending. Only guarded channel source resolution may
+synchronize resources before the explicit visibility boundary.
 
 Residency is deliberately bounded to one color target. Rebinding to another
 backing, format/extent replacement, or CPU writes to the pending target require a

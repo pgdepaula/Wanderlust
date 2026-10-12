@@ -281,6 +281,7 @@ impl Renderer {
         first: u32,
         count: u32,
     ) -> Result<()> {
+        self.validate_guest_resource_access()?;
         self.vertex_ready = false;
         let source = engine.vertex_program()?;
         let array = engine.vertex_array()?;

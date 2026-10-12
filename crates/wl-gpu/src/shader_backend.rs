@@ -39,6 +39,7 @@ impl Renderer {
         memory: &impl GuestMemory,
         changes: &TextureChanges,
     ) -> Result<()> {
+        self.validate_guest_resource_access()?;
         if let Some(f) = self.resource_fragment.as_mut() {
             f.ready = false;
         }
@@ -219,6 +220,7 @@ impl Renderer {
         memory: &impl GuestMemory,
         changes: &TextureChanges,
     ) -> Result<()> {
+        self.validate_guest_resource_access()?;
         if self.poisoned {
             return Err(invalid("renderer unavailable after backend failure"));
         }
