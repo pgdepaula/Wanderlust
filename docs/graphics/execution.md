@@ -324,3 +324,36 @@ are allocated from unused entries; dropping/replacing a resident program release
 its cached texture entry, while wgpu retains submitted/bound resource references.
 No explicit resource destruction occurs before completion. Every harness draw
 requires a successful synchronization; an invalid handle disables the draw.
+
+## Guest pixel-program selection
+
+B197 `SET_PROGRAM_REGION_A/B` (0x1608/0x160c) establish a 40-bit code base.
+Pixel pipeline index five accepts `SET_PIPELINE_SHADER(5)` (0x2140) type five
+with explicit enable/disable, `SET_PIPELINE_PROGRAM(5)` (0x2144) byte offset,
+`SET_PIPELINE_REGISTER_COUNT(5)` (0x214c) and `SET_PIPELINE_BINDING(5)` (0x2150)
+constant-binding group zero through four. Complete state is required; no previous
+shader or implicit group is substituted. Decoded register usage must fit the
+selected count. Other enabled shader stages and unimplemented methods fault.
+
+`sync_selected_fragment` resolves base+offset through AddressMap/GuestMemory,
+reads the 80-byte SPH and scans complete scheduled 32-byte bundles to the first
+exact unconditional EXIT, within a 4 KiB code budget. The final bundle's padding
+is validated. There is no fabricated B197 program-length register. Short, unmapped,
+overflowing, unsupported or unterminated programs fail with the harness unready.
+Code addresses, fetch spans and pool addresses remain GPU VAs, never host pointers.
+
+The latest code-read cache uses canonical guest start/span and write-journal
+version/epoch. GPU aliases of that backing reuse it; a remap or code write forces
+fetch/decode. Its translated-program/pipeline identity is separate from constant
+values, descriptor handles and texture contents. Manual installation of another
+translated program invalidates the selected-code cache. Resource-only writes
+preserve code; register-count and group changes are checked even on a code hit.
+Program and texture caches retain the latest resident program, not an unbounded
+compiler cache. Revisited evicted programs may compile again.
+
+Literal B06F packets now select the pixel binary and its constant binding group;
+the binary's LDC and TEX choose resource data and descriptors. The caller no longer
+passes a shader fixture or TIC/TSC indices to this path. Geometry and destination
+remain the explicit fullscreen fragment harness. No B197 draw trigger, vertex
+binary execution, guest render-target writeback or nvhost service integration is
+implemented. These are required before claiming a guest-directed hardware draw.

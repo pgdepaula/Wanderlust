@@ -192,9 +192,11 @@ opcode `0xdeb80000`, LZ mode one in bits 38:37, 2D dimension one in 30:29,
 RGBA mask 15 in 34:31, coordinate base in 15:8 and handle GPR in 27:20.
 `emitIPA`, `TargetGM107::isBarrierRequired` and UAM `SetPsImap` establish
 screen-linear generic input fields and the required variable-latency write barriers.
-Mesa's MIT `nvc0_tex.c` uses combined TIC-low20/TSC-high12 handles; these are not
-invented descriptor IDs. The pinned NVIDIA pool/TIC/TSC definitions remain the
-source of descriptor semantics.
+Mesa's MIT [`nvc0_tex.c`](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nvc0/nvc0_tex.c)
+at `e7959c6009d85d278585b2896495b2b3046d461b` uses combined TIC-low20/TSC-high12
+handles; these are not invented descriptor IDs. Its API-level 64-bit residency
+marker is separate from the 32-bit TEX operand. The pinned NVIDIA pool/TIC/TSC
+definitions remain the source of descriptor semantics.
 
 The TEX fixture uses envytools with one development-only grammar repair: in
 `envydis/gm107.c`, the TEX.B dummy token `N("0x0")` is named `N("zero")` so envyas
@@ -202,3 +204,10 @@ can parse it as a keyword rather than a numeric expression. No encoding fields
 change. The original unmodified envydis disassembles the resulting bytes as
 `tex b lz ... 0x0 t2d 0xf`; Mesa independently confirms those fields. Neither
 assembler nor patched source is linked or needed at runtime.
+
+B197 pixel selection uses the pinned NVIDIA `clb197.h` program-region and
+`SET_PIPELINE_*` definitions. Pixel pipeline index five is distinct from constant
+binding group four; the explicit pipeline-binding field selects the group. Program
+offsets are added as checked GPU byte addresses. The SPH/code reader imposes its
+own termination/size budget because those method definitions provide no binary
+length. Register allocation is checked against the actual supported dataflow.

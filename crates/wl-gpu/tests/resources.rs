@@ -165,3 +165,78 @@ fn independently_assembled_tex_ipa_and_resource_provenance() {
         );
     }
 }
+#[test]
+fn literal_pixel_program_state_and_faults() {
+    let mut engine = Maxwell3d::default();
+    let mut fifo = Decoder::default();
+    for word in [
+        0x20010000, CLASS, 0x20020582, 0, 0x50000, 0x20020850, 0x51, 0x100, 0x20020853, 8, 4,
+    ] {
+        if let Some(w) = fifo.push_word(word).unwrap() {
+            engine.apply(w).unwrap();
+        }
+    }
+    fifo.finish().unwrap();
+    assert_eq!(
+        engine.fragment_program().unwrap(),
+        FragmentSource {
+            address: GpuAddress(0x50100),
+            registers: 8,
+            group: 4
+        }
+    );
+    assert!(
+        engine
+            .apply(MethodWrite {
+                subchannel: 0,
+                method: 0x2140,
+                value: 0x41
+            })
+            .is_err()
+    );
+    assert!(
+        engine
+            .apply(MethodWrite {
+                subchannel: 0,
+                method: 0x2150,
+                value: 5
+            })
+            .is_err()
+    );
+    engine
+        .apply(MethodWrite {
+            subchannel: 0,
+            method: 0x2140,
+            value: 0x50,
+        })
+        .unwrap();
+    assert!(engine.fragment_program().is_err());
+    engine
+        .apply(MethodWrite {
+            subchannel: 0,
+            method: 0x2140,
+            value: 0x51,
+        })
+        .unwrap();
+    engine
+        .apply(MethodWrite {
+            subchannel: 0,
+            method: 0x1608,
+            value: 0xff,
+        })
+        .unwrap();
+    engine
+        .apply(MethodWrite {
+            subchannel: 0,
+            method: 0x160c,
+            value: 0xffffff80,
+        })
+        .unwrap();
+    assert!(engine.fragment_program().is_err());
+    assert_eq!(
+        FragmentProgram::decode(include_bytes!("fixtures/maxwell/tex.bin"))
+            .unwrap()
+            .required_registers(),
+        7
+    );
+}

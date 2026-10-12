@@ -21,7 +21,108 @@ pub(crate) struct ResidentFragment {
     data: [u8; 256],
     stamps: [Option<Stamp>; 64],
 }
+#[derive(Clone, Copy)]
+pub(crate) struct SelectedShader {
+    guest: GuestAddress,
+    size: usize,
+    version: (u64, u64),
+}
 impl Renderer {
+    /// Select/load the guest binary using actual B197 pixel-program state. This
+    /// synchronizes fragment resources; draw geometry is still the explicit harness.
+    pub fn sync_selected_fragment(
+        &mut self,
+        engine: &Maxwell3d,
+        map: &AddressMap,
+        memory: &impl GuestMemory,
+        changes: &TextureChanges,
+    ) -> Result<()> {
+        if let Some(f) = self.resource_fragment.as_mut() {
+            f.ready = false;
+        }
+        if self.poisoned {
+            return Err(invalid("renderer unavailable after backend failure"));
+        }
+        let source = engine.fragment_program()?;
+        if source
+            .address
+            .0
+            .checked_add(80)
+            .is_none_or(|end| end > 1 << 40)
+        {
+            return Err(invalid("shader header exceeds 40-bit address space"));
+        }
+        let cached = self.selected_shader.filter(|cache| {
+            source
+                .address
+                .0
+                .checked_add(cache.size as u64)
+                .is_some_and(|end| end <= 1 << 40)
+                && map.resolve(source.address, cache.size).ok() == Some(cache.guest)
+                && changes.stamp(cache.guest.0..cache.guest.0 + cache.size as u64) == cache.version
+        });
+        if cached.is_some() {
+            self.counters.shader_cache_hits += 1;
+        } else {
+            self.selected_shader = None;
+            let header = map.read(memory, source.address, 80)?;
+            if header.len() != 80 {
+                return Err(invalid("short guest shader header"));
+            }
+            let mut binary = Vec::with_capacity(112);
+            binary.extend_from_slice(header);
+            self.counters.shader_binary_bytes += 80;
+            self.counters.guest_to_host_bytes += 80;
+            let mut terminated = false;
+            for _ in 0..128 {
+                let address = source
+                    .address
+                    .0
+                    .checked_add(binary.len() as u64)
+                    .ok_or_else(|| invalid("shader fetch overflow"))?;
+                if address.checked_add(32).is_none_or(|end| end > 1 << 40) {
+                    return Err(invalid("shader fetch exceeds 40-bit address space"));
+                }
+                let bundle = map.read(memory, GpuAddress(address), 32)?;
+                if bundle.len() != 32 {
+                    return Err(invalid("short guest shader bundle"));
+                }
+                binary.extend_from_slice(bundle);
+                self.counters.shader_binary_bytes += 32;
+                self.counters.guest_to_host_bytes += 32;
+                if bundle[8..]
+                    .chunks_exact(8)
+                    .any(|word| u64::from_le_bytes(word.try_into().unwrap()) == 0xe30000000007000f)
+                {
+                    terminated = true;
+                    break;
+                }
+            }
+            if !terminated {
+                return Err(invalid("shader has no EXIT within 4 KiB code budget"));
+            }
+            self.counters.shader_decodes += 1;
+            let program = FragmentProgram::decode(&binary)?;
+            if program.required_registers() > u16::from(source.registers) {
+                return Err(invalid("pixel program register count below decoded usage"));
+            }
+            self.set_resource_fragment(&program)?;
+            let guest = map.resolve(source.address, binary.len())?;
+            self.selected_shader = Some(SelectedShader {
+                guest,
+                size: binary.len(),
+                version: changes.stamp(guest.0..guest.0 + binary.len() as u64),
+            });
+        }
+        if self
+            .resource_fragment
+            .as_ref()
+            .is_none_or(|f| f.program.required_registers() > u16::from(source.registers))
+        {
+            return Err(invalid("pixel program register allocation insufficient"));
+        }
+        self.sync_fragment_resources(engine, source.group, map, memory, changes)
+    }
     /// Code only. Mutable constants are synchronized separately, never embedded in WGSL.
     pub fn set_resource_fragment(&mut self, program: &FragmentProgram) -> Result<()> {
         if self.poisoned {
@@ -119,6 +220,7 @@ impl Renderer {
         if let Some(old) = self.resource_fragment.as_ref().and_then(|f| f.texture_id) {
             self.textures.remove(&old);
         }
+        self.selected_shader = None;
         self.resource_fragment = Some(ResidentFragment {
             program: program.clone(),
             pipeline,

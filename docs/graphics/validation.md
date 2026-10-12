@@ -328,3 +328,49 @@ The complete LDC delivery's committed-baseline workspace snapshot additionally
 passed formatting, strict workspace Clippy and 224 tests (six GPU tests explicitly
 ignored there and separately executed as documented above). This does not assert
 that unrelated concurrent live-worktree edits passed those checks.
+
+## Guest-selected fragment program validation
+
+Literal B06F packets configure the B197 program region, pixel pipeline, register
+count, binding group and constant-buffer state. `program_gpu` obtains the binary
+from guest memory without a host shader or texture-index argument. It samples the
+37x19 asymmetric Tegra image, observes a texel change, selects the LDC binary at
+another program offset (exact blue), replaces that code in place (exact
+[64,128,191,255]), follows a GPU alias without rereading code, and remaps the same
+GPU address to a red binary (exact [255,0,0,255]). The decoded TEX sample uses the
+existing one-byte maximum texture comparison tolerance. Invalid SPH, insufficient
+register allocation, disabled pixel stage, unmapped code and a truncated mapping
+all disable the draw rather than retaining the last valid output program.
+
+Final package checks passed: `cargo test -p wl-gpu --no-default-features --locked`
+(28 tests), `cargo test -p wl-gpu --locked` (28 passed, eight GPU tests explicitly
+ignored), `cargo fmt -p wl-gpu --check` and strict all-target package Clippy.
+All eight GPU executables were then run with `--ignored --nocapture` on each of
+WSL OpenGL llvmpipe and native Windows Intel UHD D3D12/Vulkan: 24 executions
+passed, zero GPU skips. A Windows launch initially failed in WSL `UtilAcceptVsock`
+before running any test; repeating through the working local interop endpoint
+completed the entire native suite. Linux Vulkan availability is not inferred from
+the successful Windows Vulkan execution.
+
+A normal source snapshot of committed baseline `88e9d34` plus the complete GPU
+deliverable and the exact committed Cargo.lock passed workspace formatting, strict
+all-target Clippy and 226 tests. Eight GPU tests were explicitly ignored in that
+CPU run and separately executed above. Concurrent uncommitted CPU/runtime/tool
+files were excluded; this is not a claim that the live workspace passed wholesale.
+
+The selected-program test executes 29 method writes and five draw/readback
+commands. Thirty-two unchanged synchronizations perform zero Rust allocations,
+reallocations, shader reads, descriptor reads or uploads. One debug WSL run took
+389.623 microseconds for those synchronizations; a native D3D12 run took 1.9087 ms.
+These noisy CPU measurements exclude draw/readback and imply no game-level speedup.
+Including valid program changes and rejected input, counters record 832 shader
+bytes read, five decode attempts, 36 shader-cache hits, two descriptor reads,
+20 constant guest bytes and eight constant upload bytes. Four valid distinct
+programs create four modules/pipelines in addition to the renderer's two baseline
+pipelines. Texture content changes preserve shader compilation. Readbacks transfer
+19,792 padded bytes and pack 10,928 bytes; uploads remain explicit driver transfers.
+
+These tests execute synthetic independently assembled fragment binaries through
+real host GPUs. Geometry is still the fullscreen validation harness. No Maxwell
+vertex program, B197 hardware draw trigger, guest render-target writeback or
+original game-submitted graphics workload is established by these results.

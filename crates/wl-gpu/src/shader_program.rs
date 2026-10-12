@@ -219,6 +219,33 @@ impl FragmentProgram {
         }
         Ok(out)
     }
+    pub fn required_registers(&self) -> u16 {
+        let mut largest = 3;
+        for op in &self.operations {
+            match *op {
+                Operation::Immediate { dst, .. }
+                | Operation::Constant { dst, .. }
+                | Operation::Interpolate { dst, .. } => largest = largest.max(u16::from(dst)),
+                Operation::Move { dst, src } => {
+                    largest = largest.max(u16::from(dst));
+                    if src != 255 {
+                        largest = largest.max(u16::from(src));
+                    }
+                }
+                Operation::Sample2d {
+                    dst,
+                    coordinates,
+                    handle,
+                } => {
+                    largest = largest
+                        .max(u16::from(dst) + 3)
+                        .max(u16::from(coordinates) + 1)
+                        .max(u16::from(handle))
+                }
+            }
+        }
+        largest + 1
+    }
     pub fn texture_input(&self) -> Option<u8> {
         self.texture_input
     }

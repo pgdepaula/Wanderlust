@@ -94,13 +94,26 @@ pub(crate) struct DescriptorStamp {
     image_epoch: u64,
     sampler_epoch: u64,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FragmentSource {
+    pub address: GpuAddress,
+    pub registers: u8,
+    pub group: u8,
+}
 /// One channel's single MAXWELL_B instance. Subchannels route to the same state;
 /// rebinding the same class does not manufacture an independent register bank.
 #[derive(Debug, Default)]
 pub struct Maxwell3d {
+    method_writes: u64,
     bound: [bool; 8],
     modern_headers: bool,
     images: Pool,
+    program_upper: Option<u32>,
+    program_lower: Option<u32>,
+    fragment_enabled: bool,
+    fragment_offset: Option<u32>,
+    fragment_registers: Option<u8>,
+    fragment_group: Option<u8>,
     cb_size: Option<u32>,
     cb_upper: Option<u32>,
     cb_lower: Option<u32>,
@@ -112,6 +125,7 @@ pub struct Maxwell3d {
 impl Maxwell3d {
     /// Allocation-free even on errors. Caller must stop the channel on a fault.
     pub fn apply(&mut self, write: MethodWrite) -> std::result::Result<MethodEffect, MethodError> {
+        self.method_writes = self.method_writes.saturating_add(1);
         let MethodWrite {
             subchannel,
             method,
@@ -136,6 +150,32 @@ impl Maxwell3d {
             return Err(MethodError::UnboundSubchannel(subchannel));
         }
         match method {
+            0x1608 => {
+                if value > 0xff {
+                    return Err(bad());
+                }
+                self.program_upper = Some(value);
+            }
+            0x160c => self.program_lower = Some(value),
+            0x2140 => {
+                if !matches!(value, 0x50 | 0x51) {
+                    return Err(bad());
+                }
+                self.fragment_enabled = value & 1 != 0;
+            }
+            0x2144 => self.fragment_offset = Some(value),
+            0x214c => {
+                if value == 0 || value > 255 {
+                    return Err(bad());
+                }
+                self.fragment_registers = Some(value as u8);
+            }
+            0x2150 => {
+                if value > 4 {
+                    return Err(bad());
+                }
+                self.fragment_group = Some(value as u8);
+            }
             0x2380 => {
                 if value == 0 || value > 65536 || value % 4 != 0 {
                     return Err(bad());
@@ -233,6 +273,36 @@ impl Maxwell3d {
             _ => return Err(MethodError::UnsupportedMethod(method)),
         }
         Ok(MethodEffect::State)
+    }
+    /// Counts attempted method writes, including rejected writes; saturates at u64::MAX.
+    pub fn method_writes(&self) -> u64 {
+        self.method_writes
+    }
+    /// Pixel pipeline index five explicitly selects its constant-binding group.
+    pub fn fragment_program(&self) -> Result<FragmentSource> {
+        if !self.bound.iter().any(|b| *b) || !self.fragment_enabled {
+            return Err(invalid("pixel program disabled or B197 unbound"));
+        }
+        let (Some(hi), Some(lo), Some(offset), Some(registers), Some(group)) = (
+            self.program_upper,
+            self.program_lower,
+            self.fragment_offset,
+            self.fragment_registers,
+            self.fragment_group,
+        ) else {
+            return Err(invalid("incomplete pixel program state"));
+        };
+        let address = ((u64::from(hi) << 32) | u64::from(lo))
+            .checked_add(u64::from(offset))
+            .ok_or_else(|| invalid("shader program address overflow"))?;
+        if address >= 1 << 40 {
+            return Err(invalid("shader program exceeds 40-bit address space"));
+        }
+        Ok(FragmentSource {
+            address: GpuAddress(address),
+            registers,
+            group,
+        })
     }
     pub fn constant_buffer(&self, group: u8, slot: u8) -> Result<ConstantBuffer> {
         self.constants
