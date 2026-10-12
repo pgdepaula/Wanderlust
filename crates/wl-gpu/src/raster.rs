@@ -140,6 +140,63 @@ pub struct Rasterization {
     pub scissor: [u32; 4],
     pub flip_y: bool,
     pub color: ColorState,
+    pub depth: Option<DepthState>,
+}
+/// B197 comparison identity, independent of host API enum values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DepthCompare {
+    Never,
+    Less,
+    Equal,
+    LessEqual,
+    Greater,
+    NotEqual,
+    GreaterEqual,
+    Always,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepthState {
+    pub compare: DepthCompare,
+    pub write: bool,
+}
+/// Single-layer ZF32, block-linear, four little-endian bytes per depth sample.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepthTarget {
+    pub address: GpuAddress,
+    pub width: u32,
+    pub height: u32,
+    pub block_height_log2: u8,
+}
+impl DepthTarget {
+    // ColorTarget is reused ONLY as a checked four-byte storage geometry, not a
+    // color format interpretation. Depth transfers remain f32 throughout.
+    pub(crate) fn storage(self) -> ColorTarget {
+        ColorTarget {
+            address: self.address,
+            width: self.width,
+            height: self.height,
+            layout: ColorLayout::BlockLinear {
+                block_height_log2: self.block_height_log2,
+            },
+        }
+    }
+    pub fn size(self) -> Result<usize> {
+        self.storage().size()
+    }
+}
+fn depth_compare(value: u32) -> Option<DepthCompare> {
+    use DepthCompare::*;
+    Some(match value {
+        1 | 0x200 => Never,
+        2 | 0x201 => Less,
+        3 | 0x202 => Equal,
+        4 | 0x203 => LessEqual,
+        5 | 0x204 => Greater,
+        6 | 0x205 => NotEqual,
+        7 | 0x206 => GreaterEqual,
+        8 | 0x207 => Always,
+        _ => return None,
+    })
 }
 #[derive(Debug, Default)]
 pub(crate) struct RasterRegisters {
@@ -154,6 +211,11 @@ pub(crate) struct RasterRegisters {
     blend_separate: Option<bool>,
     blend: [Option<u32>; 6],
     write_mask: u8,
+    depth_test: bool,
+    depth_write: bool,
+    depth_select: bool,
+    depth_func: Option<DepthCompare>,
+    zt: [Option<u32>; 9],
 }
 impl RasterRegisters {
     pub fn apply(&mut self, method: u16, value: u32) -> std::result::Result<bool, MethodError> {
@@ -175,7 +237,16 @@ impl RasterRegisters {
             .enumerate()
             .find(|(_, v)| v.0 == method)
         {
-            if method == 0x1360 {
+            if matches!(method, 0x12cc | 0x12e8 | 0x1538) {
+                if value > 1 {
+                    return Err(bad());
+                }
+                match method {
+                    0x12cc => self.depth_test = value != 0,
+                    0x12e8 => self.depth_write = value != 0,
+                    _ => self.depth_select = value != 0,
+                }
+            } else if method == 0x1360 {
                 if value > 1 {
                     return Err(bad());
                 }
@@ -192,6 +263,30 @@ impl RasterRegisters {
             return Ok(true);
         }
         match method {
+            0x130c => self.depth_func = Some(depth_compare(value).ok_or_else(bad)?),
+            0x0fe0..=0x0ff0 | 0x1228..=0x1230 | 0x179c => {
+                let n = match method {
+                    0xfe0..=0xff0 => ((method - 0xfe0) / 4) as usize,
+                    0x1228..=0x1230 => 5 + ((method - 0x1228) / 4) as usize,
+                    _ => 8,
+                };
+                let valid = match n {
+                    0 => value <= 255,
+                    1 => value % 256 == 0,
+                    2 => value == 0xa,
+                    3 => value & !0x70 == 0 && value >> 4 <= 5,
+                    4 => true,
+                    5 => value > 0 && value <= 0xfffffff,
+                    6 => value > 0 && value <= 0x1ffff,
+                    7 => matches!(value, 1 | 0x10001),
+                    8 => value == 0,
+                    _ => false,
+                };
+                if !valid {
+                    return Err(bad());
+                }
+                self.zt[n] = Some(value);
+            }
             0x133c => {
                 if value > 1 {
                     return Err(bad());
@@ -248,6 +343,40 @@ impl RasterRegisters {
             _ => return Ok(false),
         }
         Ok(true)
+    }
+    fn depth_state(&self) -> Result<Option<DepthState>> {
+        if !self.depth_test && !self.depth_write && !self.depth_select {
+            return Ok(None);
+        }
+        if !self.depth_test || !self.depth_select {
+            return Err(invalid("unsupported depth test/target selection"));
+        }
+        Ok(Some(DepthState {
+            compare: self
+                .depth_func
+                .ok_or_else(|| invalid("missing depth comparison"))?,
+            write: self.depth_write,
+        }))
+    }
+    pub fn depth_target(&self) -> Result<Option<DepthTarget>> {
+        if self.depth_state()?.is_none() {
+            return Ok(None);
+        }
+        let mut z = [0; 9];
+        for (out, v) in z.iter_mut().zip(self.zt) {
+            *out = v.ok_or_else(|| invalid("incomplete ZF32 target"))?;
+        }
+        let target = DepthTarget {
+            address: GpuAddress((u64::from(z[0]) << 32) | u64::from(z[1])),
+            width: z[5],
+            height: z[6],
+            block_height_log2: (z[3] >> 4) as u8,
+        };
+        let size = target.size()?;
+        if z[4] != 0 && u64::from(z[4]) * 4 != size as u64 {
+            return Err(invalid("unsupported depth array pitch"));
+        }
+        Ok(Some(target))
     }
     pub fn resolve(&self) -> Result<(ColorTarget, Rasterization)> {
         if self.fixed != (1u32 << FIXED_RASTER_STATE.len()) - 1 || self.scissor_enable != Some(1) {
@@ -359,6 +488,7 @@ impl RasterRegisters {
                 scissor: [lo[0], lo[1], hi[0] - lo[0], hi[1] - lo[1]],
                 flip_y: sy > 0.,
                 color,
+                depth: self.depth_state()?,
             },
         ))
     }

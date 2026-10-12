@@ -822,3 +822,39 @@ retaining the exact Cargo.lock and excluding unfinished compiler/CLI/IDE changes
 passed workspace formatting, strict workspace Clippy and 269 CPU tests. Its 31
 ignored GPU scenarios are accounted for by the explicit backend matrix. This is
 not validation of unfinished peer modifications or original-game GPU execution.
+
+## B197 ZF32 validation
+
+`depth_gpu` adds six hardware-channel scenarios. Actual GpuDriver/KickoffPb
+requests acquire mapped GPFIFO buffers, select guest shaders and indexed vertices,
+and execute B197 depth state. Independent pixel-center barycentrics, scalar depth
+comparisons and GOB byte addresses check the output, rather than using the
+production conversion as an oracle. Coverage includes all eight comparisons with
+writes on/off, asymmetric initialized depth, textured output, ordered overlapping
+Z=.5/.625 geometry, additive blending/channel masking, CPU patches in texels and
+padding, aliases, backing remaps, source feedback, malformed descriptors/storage,
+channel faults, failed depth/color writes and retry without draw replay.
+A separate exact-bit corpus checks zero/one, arbitrary normalized mantissas and
+the smallest normal f32 through actual GPU initialization/export. Subnormals,
+negative zero, NaNs and out-of-range initialization are unsupported.
+
+The six scenarios ran successfully on WSL OpenGL/llvmpipe, native Windows D3D12
+and Vulkan/Intel UHD. Native execution used actual Windows test executables.
+The unchanged-depth 32-draw interval adds exactly 32 queue submissions and no
+uploads, readbacks, waits, texture/target allocations, shader modules or pipelines.
+One depth initialization uploads 6,032 logical bytes from 8,192 padded guest bytes
+for the 52x29 BH=2 fixture. Explicit depth-plus-color publication currently uses
+two readbacks/waits. It is a per-attachment visibility boundary, not per-draw
+synchronization. Process allocator activity remains nonzero; the debug workload
+is not a game benchmark. No original-game GPU submission is demonstrated.
+
+Depth delivery gates: 67 CPU tests passed with default features and 67 without;
+formatting and strict package Clippy passed. The regression matrix plus the six
+new scenarios comprises 37 GPU scenarios per backend, all explicitly executed
+on GL, D3D12 and Vulkan (111 distinct backend/scenario passes). Startup-only WSL
+vsock failures were retried; GPU failures were not treated as skips. A faithful
+ordinary source snapshot of the committed base plus the depth changes and exact
+Cargo.lock passed strict workspace Clippy and 271 CPU tests; 37 GPU tests were
+ignored by that ordinary suite and executed separately as above. The snapshot
+excluded unrelated unfinished analysis/CLI/IDE changes; it is not a live shared
+workspace integration result.

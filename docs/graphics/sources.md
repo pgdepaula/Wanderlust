@@ -357,3 +357,26 @@ The independent scalar test oracle in `tests/common/gob.rs` derives the byte
 address from GOB/block equations and within-GOB bit interleaving, without calling
 the dependency. Literal offsets and exact expected allocation bytes supplement
 roundtrips, including partial edge GOBs and all six supported block heights.
+
+## ZF32 depth attachments
+
+The same pinned NVIDIA `clb197.h` defines ZT address/format/block size/array
+pitch at `0xfe0..0xff0`, size at `0x1228..0x1230`, layer at `0x179c`,
+selection at `0x1538`, depth test/write at `0x12cc/0x12e8`, and comparison
+at `0x130c`. ZF32 is format `0x0a`. All eight OGL (`0x200..0x207`) and
+D3D (`1..8`) comparison encodings map to the same eight comparisons.
+Pinned Mesa `nvc0_state_validate.c::nvc0_validate_fb` programs the ZT dimensions
+in pixels, array pitch in DWORDs, and the 2D single-layer size control.
+The four-byte ZF32 storage uses the existing Tegra GOB conversion; it is not
+interpreted as RGBA color during depth execution.
+
+The locked `wgpu-core 26.0.1/src/conv.rs::is_valid_copy_dst_texture_format`
+forbids CPU copies into Depth32Float. Its transfer validation requires
+`DEPTH_TEXTURE_AND_BUFFER_COPIES` for direct readback; GLES lacks that flag.
+Portable transfers therefore use R32Uint bit staging/export around real
+Depth32Float render attachments. `wgpu-core/src/device/resource.rs` permits
+an unfilterable float binding to a depth view; this avoids Naga 26's GLSL
+rejection of `textureLoad` on `texture_depth_2d`. Initialization returns
+`frag_depth`; export samples the actual depth attachment as `texture_2d<f32>`
+and writes its bitcast into an integer color attachment. No CPU shadow depth
+calculation substitutes for host depth testing.

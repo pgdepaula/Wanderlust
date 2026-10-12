@@ -433,6 +433,9 @@ impl Maxwell3d {
     ) -> Result<(crate::raster::ColorTarget, crate::raster::Rasterization)> {
         self.raster.resolve()
     }
+    pub fn depth_target(&self) -> Result<Option<crate::raster::DepthTarget>> {
+        self.raster.depth_target()
+    }
     pub fn vertex_program(&self) -> Result<ProgramSource> {
         if !self.bound.iter().any(|b| *b) || !self.vertex_enabled {
             return Err(invalid("vertex program disabled or B197 unbound"));

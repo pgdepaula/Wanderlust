@@ -125,8 +125,11 @@ impl TextureChanges {
     }
     #[cfg(feature = "wgpu-backend")]
     pub(crate) fn can_mark_write(&self) -> Result<()> {
+        self.can_mark_writes(1)
+    }
+    pub(crate) fn can_mark_writes(&self, count: u64) -> Result<()> {
         self.revision
-            .checked_add(1)
+            .checked_add(count)
             .ok_or_else(|| invalid("dirty revision overflow"))?;
         Ok(())
     }

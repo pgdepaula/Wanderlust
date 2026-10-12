@@ -439,7 +439,8 @@ supported-subset restriction, not a universal hardware alignment claim. In pitch
 layout **WIDTH is byte pitch**. It must be positive and divisible by four; storage
 width is pitch/4. Logical visible bounds come from surface/viewport clipping and
 scissor. Padding pixels remain initialized guest data and are preserved.
-Layered, depth, compressed and multisampled render targets are unsupported.
+Layered, compressed and multisampled color targets are unsupported.
+The separate bounded ZF32 depth attachment is described below.
 Block-linear RGBA8 target conversion is implemented separately from sampled textures.
 
 Viewport zero uses scale/offset 0x0a00..0x0a14, identity coordinate swizzle at
@@ -455,7 +456,8 @@ wgpu-hal 26.0.6 GLES truncates viewport coordinates/extents to integers. Empty o
 out-of-bounds viewport/clip intersections are also explicitly unsupported.
 
 `raster::FIXED_RASTER_STATE` enumerates required explicit baseline state writes;
-color masks and global blending additionally accept the validated states below:
+color masks, global blending and ZF32 depth additionally accept the validated
+states described below. The explicit disabled-depth baseline uses:
 unconditional rendering, rasterization enabled, one color attachment, single sample,
 RGBA baseline writes, fill mode, no depth/stencil/cull/alpha test/logic op/sample mask,
 no polygon smoothing/offset/stipple, and the supported viewport controls. Missing
@@ -793,3 +795,30 @@ logical overlay copies (`target_pack_copy_bytes`), and raw CPU intervals acquire
 (`target_patch_bytes`). Retried attempts count actual repeated work. Conversion
 allocates vectors and publication copies the complete allocation; these are not
 zero-copy operations. Unchanged draws do not incur those conversion allocations.
+
+## B197 ZF32 depth execution
+
+A bounded single-layer ZF32 attachment is selected entirely by B197 ZT state.
+Block heights 1–32 GOBs use the same checked four-byte Tegra geometry as color
+storage, with complete padded mapping coverage. Color/depth dimensions must
+match; overlapping canonical attachment spans are rejected. Arrays, stencil,
+other depth formats, depth bounds/bias and alternate depth transforms remain
+unsupported. The implemented viewport has zero-to-one clip depth, scale Z one
+and offset Z zero. All eight comparisons and depth-write enable are supported;
+active depth requires explicit target selection, test enable, comparison and
+complete descriptor state. Initial samples must be finite normalized f32 in
+[0,1]; subnormals and negative zero are explicitly outside this transfer subset.
+
+Depth remains GPU-resident across draws. A cold attachment requires a GPU
+initialization pass; an unchanged draw neither uploads depth nor waits for it.
+Explicit publication exports actual GPU depth, packs logical rows, swizzles into
+the original padded storage and overlays exact raw CPU-after-GPU byte ranges.
+Padding is preserved. Depth and color are atomically published **per attachment**,
+in depth-first order. This is not a transaction spanning separate allocations.
+A failure retains each unpublished attachment and retries without command replay;
+a successful depth publication is not repeated if color publication subsequently
+fails. Guest-visible completion is reported only after the complete publication
+boundary succeeds. Source aliases and command fetches guard both pending padded
+spans. GpuDriver's mapping/teardown restrictions apply while either output is
+pending. Pipeline identity includes depth comparison/write state, while shader
+module identity remains independent of depth data.

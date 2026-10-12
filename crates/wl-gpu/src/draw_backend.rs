@@ -35,7 +35,7 @@ impl Eq for GuestTargetStamp {}
 // sources through this guard; an overlap requires a coherence barrier and retry.
 struct SourceMemory<'a, M> {
     memory: &'a M,
-    pending: Option<GuestTargetStamp>,
+    pending: [Option<GuestTargetStamp>; 2],
     hazard: Cell<bool>,
 }
 impl<M: GuestMemory> GuestMemory for SourceMemory<'_, M> {
@@ -46,7 +46,9 @@ impl<M: GuestMemory> GuestMemory for SourceMemory<'_, M> {
             .ok_or_else(|| invalid("source read overflow"))?;
         if self
             .pending
-            .is_some_and(|p| address.0 < p.guest.0 + p.size as u64 && p.guest.0 < end)
+            .iter()
+            .flatten()
+            .any(|p| address.0 < p.guest.0 + p.size as u64 && p.guest.0 < end)
         {
             self.hazard.set(true);
             return Err(invalid("source depends on pending GPU output"));
@@ -137,7 +139,18 @@ impl Renderer {
         memory: &mut impl GuestMemoryWrite,
         changes: &mut TextureChanges,
     ) -> Result<Option<Frame>> {
-        if !self.target_pending {
+        // Publication is atomic per attachment, not across disjoint allocations.
+        // Publish depth first; if color fails, depth is already retired and is not
+        // copied again on retry. Commands are never replayed.
+        self.synchronize_depth(memory, changes)?;
+        self.synchronize_color(memory, changes)
+    }
+    fn synchronize_color(
+        &mut self,
+        memory: &mut impl GuestMemoryWrite,
+        changes: &mut TextureChanges,
+    ) -> Result<Option<Frame>> {
+        if !self.color_pending {
             return Ok(None);
         }
         let stamp = self
@@ -215,8 +228,66 @@ impl Renderer {
                 ..stamp
             })
         };
-        self.target_pending = false;
+        self.color_pending = false;
+        self.target_pending = self.depth_pending;
         Ok(Some(frame))
+    }
+    fn synchronize_depth(
+        &mut self,
+        memory: &mut impl GuestMemoryWrite,
+        changes: &mut TextureChanges,
+    ) -> Result<()> {
+        if !self.depth_pending {
+            return Ok(());
+        }
+        let stamp = self
+            .guest_depth
+            .ok_or_else(|| invalid("missing pending depth backing"))?;
+        memory.validate_write(stamp.guest, stamp.size)?;
+        let dirty = changes.writes_since(
+            stamp.guest.0..stamp.guest.0 + stamp.size as u64,
+            stamp.version,
+        )?;
+        let patched = !dirty.is_empty();
+        let source = memory.read(stamp.guest, stamp.size)?;
+        if source.len() != stamp.size {
+            return Err(invalid("short depth storage read"));
+        }
+        // Snapshot padding and exact raw CPU patches before GPU readback.
+        let mut original = Vec::new();
+        original
+            .try_reserve_exact(stamp.size)
+            .map_err(|e| crate::Error(e.to_string()))?;
+        original.extend_from_slice(source);
+        self.counters.temporary_allocations += 1;
+        self.counters.depth_guest_bytes += stamp.size as u64;
+        changes.can_mark_write()?;
+        let linear = self.read_depth()?;
+        let layout = stamp
+            .surface
+            .block_linear()?
+            .ok_or_else(|| invalid("depth must be block-linear"))?;
+        let mut tiled = layout.to_tiled_preserving(&linear, &original, &mut self.counters)?;
+        for range in dirty {
+            let start = (range.start - stamp.guest.0) as usize;
+            let end = (range.end - stamp.guest.0) as usize;
+            tiled[start..end].copy_from_slice(&original[start..end]);
+            self.counters.target_patch_bytes += (end - start) as u64;
+        }
+        memory.write(stamp.guest, &tiled)?;
+        changes.mark_write(stamp.guest, stamp.size)?;
+        self.counters.depth_write_bytes += stamp.size as u64;
+        self.guest_depth = if patched {
+            None
+        } else {
+            Some(GuestTargetStamp {
+                version: changes.stamp(stamp.guest.0..stamp.guest.0 + stamp.size as u64),
+                ..stamp
+            })
+        };
+        self.depth_pending = false;
+        self.target_pending = self.color_pending;
+        Ok(())
     }
     pub(crate) fn synchronize_command_source(
         &mut self,
@@ -230,9 +301,13 @@ impl Renderer {
             .checked_add(size as u64)
             .ok_or_else(|| invalid("command source overflow"))?;
         if self.target_pending
-            && self
-                .guest_target
-                .is_some_and(|p| address.0 < p.guest.0 + p.size as u64 && p.guest.0 < end)
+            && [
+                self.guest_target.filter(|_| self.color_pending),
+                self.guest_depth.filter(|_| self.depth_pending),
+            ]
+            .iter()
+            .flatten()
+            .any(|p| address.0 < p.guest.0 + p.size as u64 && p.guest.0 < end)
         {
             self.counters.coherence_barriers += 1;
             self.synchronize_target(memory, changes)?;
@@ -260,14 +335,45 @@ impl Renderer {
             surface: target,
             version: changes.stamp(guest.0..guest.0 + size as u64),
         };
+        let depth_target = engine.depth_target()?;
+        let mut depth_stamp = if let Some(d) = depth_target {
+            if (d.width, d.height) != (target.width, target.height) {
+                return Err(invalid("depth/color dimensions differ"));
+            }
+            let size = d.size()?;
+            let guest = map.resolve(d.address, size)?;
+            memory.validate_write(guest, size)?;
+            if guest.0 < stamp.guest.0 + stamp.size as u64 && stamp.guest.0 < guest.0 + size as u64
+            {
+                return Err(invalid("overlapping color/depth attachments unsupported"));
+            }
+            Some(GuestTargetStamp {
+                guest,
+                size,
+                surface: d.storage(),
+                version: changes.stamp(guest.0..guest.0 + size as u64),
+            })
+        } else {
+            None
+        };
+        let changed_depth = self.depth_pending
+            && match (self.guest_depth, depth_stamp) {
+                (Some(old), Some(new)) => old != new,
+                _ => true,
+            };
         if self.target_pending
-            && self
-                .guest_target
-                .is_none_or(|p| !p.same_backing(stamp) || p.version != stamp.version)
+            && (changed_depth
+                || (self.color_pending
+                    && self
+                        .guest_target
+                        .is_none_or(|p| !p.same_backing(stamp) || p.version != stamp.version)))
         {
             self.counters.coherence_barriers += 1;
             self.synchronize_target(memory, changes)?;
             stamp.version = changes.stamp(guest.0..guest.0 + size as u64);
+            if let Some(d) = &mut depth_stamp {
+                d.version = changes.stamp(d.guest.0..d.guest.0 + d.size as u64);
+            }
         }
         self.hardware_raster = Some(raster);
         let result = (|| {
@@ -275,7 +381,10 @@ impl Renderer {
             for attempt in 0..2 {
                 let source = SourceMemory {
                     memory: &*memory,
-                    pending: self.guest_target.filter(|_| self.target_pending),
+                    pending: [
+                        self.guest_target.filter(|_| self.color_pending),
+                        self.guest_depth.filter(|_| self.depth_pending),
+                    ],
                     hazard: Cell::new(false),
                 };
                 self.resolving_channel_sources = true;
@@ -313,6 +422,9 @@ impl Renderer {
                         self.counters.coherence_barriers += 1;
                         self.synchronize_target(memory, changes)?;
                         stamp.version = changes.stamp(guest.0..guest.0 + size as u64);
+                        if let Some(d) = &mut depth_stamp {
+                            d.version = changes.stamp(d.guest.0..d.guest.0 + d.size as u64);
+                        }
                     }
                     Err(e) => return Err(e),
                 }
@@ -367,6 +479,27 @@ impl Renderer {
                     self.counters.upload_calls += 1;
                     self.counters.staging_allocations += 1;
                 }
+                if let Some(d) = depth_stamp {
+                    let bytes;
+                    let upload = if self.guest_depth != Some(d)
+                        || self
+                            .depth
+                            .as_ref()
+                            .is_none_or(|r| r.extent != (d.surface.width, d.surface.height))
+                    {
+                        let tiled = memory.read(d.guest, d.size)?;
+                        bytes = d
+                            .surface
+                            .block_linear()?
+                            .unwrap()
+                            .to_linear(tiled, &mut self.counters)?;
+                        self.counters.depth_guest_bytes += d.size as u64;
+                        Some(bytes.as_slice())
+                    } else {
+                        None
+                    };
+                    self.prepare_depth(d.surface.width, d.surface.height, upload)?;
+                }
                 Ok(())
             })();
             let validation = pollster::block_on(self.device.pop_error_scope());
@@ -378,17 +511,37 @@ impl Renderer {
             prepared?;
             // Each draw is submitted before the next queue write. Deferring all
             // submits would make earlier draws see later buffer/constant updates.
-            changes.can_mark_write()?;
+            changes.can_mark_writes(
+                u64::from(!self.color_pending)
+                    + u64::from(
+                        depth_stamp.is_some()
+                            && raster.depth.is_some_and(|s| s.write)
+                            && !self.depth_pending,
+                    ),
+            )?;
             self.execute_mode(target.width, target.height, &[command], false)?;
             // Invalidate overlapping source caches once per pending interval.
             // Further GPU writes are ordered and still unreadable through the
             // guard; do not consume the bounded CPU journal on every draw.
-            if !self.target_pending {
+            if !self.color_pending {
                 changes.mark_write(guest, size)?;
+            }
+            if let Some(mut d) = depth_stamp {
+                if raster.depth.is_some_and(|s| s.write) {
+                    if !self.depth_pending {
+                        changes.mark_write(d.guest, d.size)?;
+                    }
+                    self.depth_pending = true;
+                }
+                d.version = changes.stamp(d.guest.0..d.guest.0 + d.size as u64);
+                self.guest_depth = Some(d);
+            } else {
+                self.guest_depth = None;
             }
             self.counters.gpu_target_writes += 1;
             stamp.version = changes.stamp(guest.0..guest.0 + size as u64);
             self.guest_target = Some(stamp);
+            self.color_pending = true;
             self.target_pending = true;
             if synchronous {
                 self.synchronize_target(memory, changes)

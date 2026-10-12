@@ -54,6 +54,7 @@ pub(crate) struct ResidentVertex {
     stamp: Option<BackingStamp>,
     flip_y: bool,
     color: crate::raster::ColorState,
+    depth: Option<crate::raster::DepthState>,
     shader: wgpu::ShaderModule,
 }
 impl Renderer {
@@ -65,7 +66,7 @@ impl Renderer {
         stride: u64,
         offsets: [u64; 2],
     ) -> Result<()> {
-        self.set_vertex_program_raster(program, stride, offsets, false, Default::default())
+        self.set_vertex_program_raster(program, stride, offsets, false, Default::default(), None)
     }
     fn set_vertex_program_raster(
         &mut self,
@@ -74,6 +75,7 @@ impl Renderer {
         offsets: [u64; 2],
         flip_y: bool,
         color: crate::raster::ColorState,
+        depth: Option<crate::raster::DepthState>,
     ) -> Result<()> {
         self.vertex_ready = false;
         if self.poisoned {
@@ -106,6 +108,7 @@ impl Renderer {
                 && v.offsets == offsets
                 && v.flip_y == flip_y
                 && v.color == color
+                && v.depth == depth
         }) {
             self.counters.shader_cache_hits += 1;
             return Ok(());
@@ -176,7 +179,7 @@ impl Renderer {
                     })],
                 }),
                 primitive: Default::default(),
-                depth_stencil: None,
+                depth_stencil: depth.map(crate::depth_backend::host_depth),
                 multisample: Default::default(),
                 multiview: None,
                 cache: None,
@@ -197,6 +200,7 @@ impl Renderer {
             offsets,
             flip_y,
             color,
+            depth,
             shader,
         });
         if new_shader {
@@ -320,8 +324,10 @@ impl Renderer {
         let color = self
             .hardware_raster
             .map_or_else(Default::default, |r| r.color);
+        let depth = self.hardware_raster.and_then(|r| r.depth);
         if self.vertex.as_ref().is_none_or(|v| {
-            v.color != color
+            v.depth != depth
+                || v.color != color
                 || v.flip_y != flip_y
                 || v.program != selected.program
                 || v.fragment != fragment.program
@@ -329,7 +335,7 @@ impl Renderer {
                 || v.offsets != offsets
         }) {
             let program = selected.program.clone();
-            self.set_vertex_program_raster(&program, stride, offsets, flip_y, color)?;
+            self.set_vertex_program_raster(&program, stride, offsets, flip_y, color, depth)?;
         }
         let stamp = BackingStamp::new(array.address, size, map, changes)?;
         if self.vertex.as_ref().unwrap().stamp != Some(stamp) {

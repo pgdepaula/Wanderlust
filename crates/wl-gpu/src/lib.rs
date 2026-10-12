@@ -6,6 +6,8 @@ pub mod backend;
 pub mod command;
 pub mod compression;
 #[cfg(feature = "wgpu-backend")]
+mod depth_backend;
+#[cfg(feature = "wgpu-backend")]
 mod draw_backend;
 pub mod driver;
 #[cfg(feature = "wgpu-backend")]
@@ -101,6 +103,10 @@ pub struct Counters {
     pub vertex_upload_bytes: u64,
     pub vertex_shader_bytes: u64,
     pub vertex_shader_decodes: u64,
+    pub depth_allocations: u64,
+    pub depth_upload_bytes: u64,
+    pub depth_guest_bytes: u64,
+    pub depth_write_bytes: u64,
     pub render_target_allocations: u64,
     pub render_target_reuses: u64,
     pub render_target_guest_bytes: u64,

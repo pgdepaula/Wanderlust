@@ -78,7 +78,7 @@ fn raster_invalid_incomplete_bounds_and_unsupported_formats() {
         (0x818, 2),
         (0x820, 1),
         (0xa00, f32::NAN.to_bits()),
-        (0x12cc, 1),
+        (0x12cc, 2),
         (0xe00, 0),
     ] {
         assert!(set(&mut ready(), m, v).is_err(), "{m:x}");

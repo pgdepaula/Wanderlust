@@ -89,6 +89,10 @@ pub struct Renderer {
     pub(crate) hardware_raster: Option<crate::raster::Rasterization>,
     pub(crate) guest_target: Option<crate::draw_backend::GuestTargetStamp>,
     pub(crate) target_pending: bool,
+    pub(crate) color_pending: bool,
+    pub(crate) depth_pending: bool,
+    pub(crate) depth: Option<crate::depth_backend::ResidentDepth>,
+    pub(crate) guest_depth: Option<crate::draw_backend::GuestTargetStamp>,
     pub(crate) resolving_channel_sources: bool,
     timestamps: Option<(wgpu::QuerySet, wgpu::Buffer)>,
     pub(crate) poisoned: bool,
@@ -200,6 +204,10 @@ impl Renderer {
             hardware_raster: None,
             guest_target: None,
             target_pending: false,
+            color_pending: false,
+            depth_pending: false,
+            depth: None,
+            guest_depth: None,
             resolving_channel_sources: false,
             timestamps,
             poisoned: false,
@@ -480,7 +488,16 @@ impl Renderer {
                                 store: wgpu::StoreOp::Store,
                             },
                         })],
-                        depth_stencil_attachment: None,
+                        depth_stencil_attachment: self.hardware_raster.and_then(|r| r.depth).map(
+                            |_| wgpu::RenderPassDepthStencilAttachment {
+                                view: &self.depth.as_ref().expect("validated depth").view,
+                                depth_ops: Some(wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                }),
+                                stencil_ops: None,
+                            },
+                        ),
                         timestamp_writes: self.timestamps.as_ref().map(|(q, _)| {
                             wgpu::RenderPassTimestampWrites {
                                 query_set: q,
