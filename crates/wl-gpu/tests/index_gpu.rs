@@ -180,11 +180,73 @@ fn b197_indexed_quad_offsets_base_mutation_and_remap() {
         .unwrap()
         .unwrap();
     check(&frame.rgba, false);
+    // A second GPU VA aliases the same index backing: no reread or upload.
+    map.map(GpuAddress(0xe0000), GuestAddress(0x6100), 28)
+        .unwrap();
+    let before = r.counters;
+    let mut alias = Vec::new();
+    method(&mut alias, 0x17cc, 0xe0000);
+    method(&mut alias, 0x17d4, 0xe001b);
+    draw(&mut alias, 1, 6);
+    let frame = r
+        .submit_pushbuffer(
+            &mut channel,
+            &alias,
+            &map,
+            &mut SliceMemoryMut {
+                base: GuestAddress(0),
+                bytes: &mut data,
+            },
+            &mut changes,
+        )
+        .unwrap()
+        .unwrap();
+    check(&frame.rgba, false);
+    assert_eq!(r.counters.index_guest_bytes, before.index_guest_bytes);
+    assert_eq!(r.counters.index_upload_bytes, before.index_upload_bytes);
+    // An odd U16 count has six source bytes and an eight-byte host upload.
+    for (n, i) in [0u16, 1, 2].iter().enumerate() {
+        data[0x6200 + n * 2..0x6202 + n * 2].copy_from_slice(&i.to_le_bytes());
+    }
+    map.map(GpuAddress(0xf0000), GuestAddress(0x6200), 6)
+        .unwrap();
+    for p in data[0x8000..0x8000 + SIZE].chunks_exact_mut(4) {
+        p.copy_from_slice(&BG);
+    }
+    changes.mark_write(GuestAddress(0x8000), SIZE).unwrap();
+    let mut words = Vec::new();
+    for (m, v) in [
+        (0x17cc, 0xf0000),
+        (0x17d4, 0xf0005),
+        (0x17d8, 1),
+        (0x1434, 1),
+    ] {
+        method(&mut words, m, v);
+    }
+    draw(&mut words, 0, 3);
+    let before = r.counters;
+    let frame = r
+        .submit_pushbuffer(
+            &mut channel,
+            &words,
+            &map,
+            &mut SliceMemoryMut {
+                base: GuestAddress(0),
+                bytes: &mut data,
+            },
+            &mut changes,
+        )
+        .unwrap()
+        .unwrap();
+    check(&frame.rgba, true);
+    assert_eq!(r.counters.index_guest_bytes - before.index_guest_bytes, 6);
+    assert_eq!(r.counters.index_upload_bytes - before.index_upload_bytes, 8);
+    assert_eq!(r.counters.pipeline_allocations, before.pipeline_allocations);
     // Invalid resulting vertex index faults before submission/writeback.
     let before = r.counters;
     let framebuffer = data[0x8000..0x8000 + SIZE].to_vec();
-    data[0x6104..0x6108].copy_from_slice(&999u32.to_le_bytes());
-    changes.mark_write(GuestAddress(0x6104), 4).unwrap();
+    data[0x6200..0x6202].copy_from_slice(&999u16.to_le_bytes());
+    changes.mark_write(GuestAddress(0x6200), 2).unwrap();
     assert!(
         r.submit_pushbuffer(
             &mut channel,

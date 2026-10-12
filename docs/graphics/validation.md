@@ -591,3 +591,13 @@ committed independent index suite passed workspace formatting, strict Clippy and
 252 tests, with 17 GPU tests explicitly ignored by ordinary workspace Cargo test.
 Peer-owned uncommitted runtime/compiler edits were preserved and excluded from
 that snapshot; this is not a claim of live-worktree runtime integration.
+
+The indexed GPU fixture additionally verifies that a second GPU VA alias of the
+same U32 index backing causes zero extra index reads/uploads. A three-element
+U16 draw reads six bytes and uploads eight, validating four-byte upload padding
+without fetching the padded element. The expanded six-draw fixture passed again
+on WSL OpenGL and native Windows D3D12/Vulkan, with formatting and strict package
+Clippy. It measured 60 guest index bytes including the rejected final scan,
+56 uploaded index bytes, two index cache hits and one CPU padding allocation.
+The previously reported four-draw/48-byte measurement above describes the smaller
+fixture before these additional alias/alignment cases.
