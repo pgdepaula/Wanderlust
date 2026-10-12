@@ -1,70 +1,67 @@
 # AArch64 ISA Coverage, Gap Taxonomy & Root Discovery in Tears of the Kingdom
 
-## 1. Executive Summary
+## 1. Executive Summary & Scope Boundary
 
-During the breakthrough authentic execution of **The Legend of Zelda: Tears of the Kingdom** (v1.0.0 base and v1.2.0 update), Wanderlust successfully executed **48,424,921 guest instructions** through `rtld` dynamic linking and into early `sdk` initialization before pausing for instruction-set gap investigation.
+During authentic execution of **The Legend of Zelda: Tears of the Kingdom** (v1.0.0 base and v1.2.0 update), Wanderlust executed **48,424,921 guest instructions** through `rtld` dynamic self-relocation and into early Nintendo SDK (`sdk`) initialization before pausing for instruction-set gap investigation. This milestone represents genuine execution of the game's original executable code in the startup path; it is not a complete game boot or rendered frame.
 
-An extensive ahead-of-time (AOT) reachability analysis bounded to 1,000,000 instructions on the authentic Switch `sdk` executable (`local-inputs/totk/analysis-sdk.json`) recorded **1,832 unsupported instruction sites**.
+An ahead-of-time (AOT) reachability analysis bounded to 1,000,000 instructions on the authentic Switch `sdk` executable (`local-inputs/totk/analysis-sdk.json`) recorded **1,832 unsupported instruction sites**.
 
 This document establishes the authoritative architectural taxonomy of these sites, categorizing them into:
-1. **Non-Code Data Root Artifacts (84.9%, 1,556 sites):** False code roots introduced by unconstrained candidate pointer discovery entering literal data pools and alignment padding.
-2. **Genuine Executable Instruction Set Gaps (15.1%, 276 sites):** Real instructions spanning four distinct architectural families:
-   - System Counter Reads (`CNTPCT_EL0`)
+1. **Probable Non-Code Data Root Artifacts (84.9%, 1,556 sites):** Addresses containing non-code data words reached due to unconstrained candidate code-pointer harvesting entering literal data pools and alignment padding.
+2. **Recognized Instruction Set Gaps (15.1%, 276 sites across 76 unique opcodes):** Valid instruction encodings spanning four distinct architectural families:
+   - System Counter Reads (`CNTPCT_EL0`, `CNTVCT_EL0`, `CNTFRQ_EL0`)
    - CRC32 and CRC32C (Standard and Castagnoli polynomials)
-   - Cryptographic Extensions (`AES`, `SHA-1`, `SHA-256`, `PMULL`)
-   - Advanced SIMD (`SMULL`, `SQDMULH`, `SQRDMULH`, `SQRSHRN`)
+   - Cryptographic Extensions (exact recognized forms of `AESE`, `AESD`, `AESIMC`, `SHA1C`, `SHA256SU0`, `PMULL`)
+   - Advanced SIMD (`SMULL`, `SMULL2`, `SQDMULH`, `SQRDMULH`, `SQRSHRN`, etc.)
+
+> [!IMPORTANT]
+> **Engineering Scope Boundary & AOT Execution Status:**
+> This workstream delivers validated instruction decoding, taxonomy classification, and independent reference semantic verification. It does **not** establish end-to-end AOT execution for these operations. Lowering in `wl-codegen-rust`, control-flow dataflow in `wl-analysis`, and runtime execution in `wl-runtime` remain strictly owned by Claude for integration starting October 14.
 
 ---
 
-## 2. Non-Code Data Root Phenomenon & Pruning Strategy
+## 2. Non-Code Data Root Analysis & Candidate Pruning Guidelines
 
-### 2.1 Root Cause Analysis
+### 2.1 Phenomenon & Data Distribution
 
-Wanderlust's speculative function pointer discovery scans `.rodata` and `.data` for 64-bit values aligned to 4 bytes that fall within the `.text` virtual address range. In modern optimized Switch binaries:
-- Jump tables, dispatch vectors, and virtual method tables (`vtable`) frequently intermingle with literal constants, alignment padding, and metadata pointers.
+Wanderlust's speculative function pointer discovery scans `.rodata` and `.data` for 64-bit values aligned to 4 bytes that point within the `.text` virtual address range. In modern optimized Switch binaries:
+- Jump tables, dispatch vectors, and virtual method tables (`vtable`) intermingle with literal constants, alignment padding, and metadata pointers.
 - Of the 1,832 unsupported sites in `analysis-sdk.json`:
   - **1,309 sites (71.5%)** consist of literal `0x00000000` (`udf #0` or zero-fill padding).
   - **246 sites (13.4%)** consist of literal `0x00008002` (a 16-bit constant/offset `0x8002` in little-endian data).
   - **1 site (0.1%)** consists of literal `0x00000001` (data flag `1`).
   - Total non-code data words: **1,556 sites (84.9%)**.
 
-When an invalid data word is speculatively treated as a function root, the recursive block disassembler attempts to parse non-code bytes until encountering an invalid opcode, artificially inflating the apparent ISA gap by over 5.5x.
+### 2.2 Distinguishing Data Origins from Control-Flow Reachability
 
-### 2.2 Recommended Root Filtering Gates for AOT Analysis
-
-To eliminate false positives without omitting legitimate indirect targets, the AOT analysis pipeline (`wl-analysis`) should apply the following pre-filtering gates before admitting candidate roots:
-
-1. **Zero and Padding Exclusion:** Reject candidate targets whose initial 32-bit word is `0x00000000`, `0x00008002`, or falls within known padding blocks.
-2. **Function Prologue Heuristics:**
-   - Valid compiler-generated AArch64 function entries overwhelmingly begin with:
-     - Stack frame allocation: `stp x29, x30, [sp, -imm]!` (`0xa9b...`)
-     - Stack pointer adjustment: `sub sp, sp, #imm` (`0xd10...`)
-     - Callee-saved register preservation: `stp x..., x..., [sp, ...]` (`0xa90...`)
-     - Return address signing / hint: `paciasp` (`0xd503233f`) or `nop` (`0xd503201f`)
-   - Candidate roots beginning with invalid opcodes, raw immediates, or illegal branches must be discarded.
-3. **Cross-Referenced Section Provenance:** Validate that indirect pointers originate from genuine `.init_array`, `.fini_array`, or identified C++ virtual tables, rather than raw asset buffers.
+- **Probable Data Origins vs. Proven Unreachability:** An address containing `0x00000000`, `0x00008002`, or another data-like pattern indicates a probable data origin rather than control-flow-proven unreachability.
+- **Recognized Encodings vs. Reached Execution:** Conversely, recognizing a valid instruction opcode in the binary does not prove that execution reaches that location during normal gameplay.
+- **Candidate Guidelines (Not Rigid Enforcements):**
+  - Heuristics such as checking for standard function prologue patterns (`stp x29, x30, [sp, -N]!`, `sub sp, sp, #N`) are **candidate guidelines** for future evaluation by Claude, not mandatory filters.
+  - Mandating standard prologues would erroneously reject legitimate frameless leaf functions, tail-call targets, or hand-written assembly routines.
+  - Zero/padding exclusions (`0x00000000`) and cross-referencing against verified metadata sections (`.init_array`, `.fini_array`) provide a safer initial pruning filter.
 
 ---
 
 ## 3. Genuine AArch64 Instruction Gap Taxonomy
 
-Filtering non-code data leaves **276 genuine instruction sites** across **76 unique opcodes**.
+Filtering probable data words leaves **276 genuine instruction sites** across **76 unique opcodes**:
 
-| Architectural Family | Site Count | Relative % of Real Gaps | Key Opcodes |
+| Architectural Family | Site Count | Relative % of Real Gaps | Key Encodings Recognized |
 |---|---|---|---|
-| **System Counter Reads** | 38 | 13.8% | `mrs Xt, cntpct_el0` |
+| **System Counter Reads** | 38 | 13.8% | `mrs Xt, cntpct_el0` (exact opcodes for x0, x8, x19..x22) |
 | **CRC32 / CRC32C** | 13 | 4.7% | `crc32b`, `crc32x`, `crc32cb`, `crc32cx` |
-| **Cryptographic Extensions** | 38 | 13.8% | `aese`, `aesd`, `aesimc`, `sha1c`, `sha256su0`, `pmull` |
-| **Integer Advanced SIMD** | 187 | 67.8% | `smull`, `smull2`, `sqdmulh`, `sqrdmulh`, `sqrshrn`, `saddlp`, `smlal` |
+| **Cryptographic Extensions** | 38 | 13.8% | Exact forms of `aese`, `aesd`, `aesimc`, `sha1c`, `sha256su0`, `pmull` |
+| **Integer Advanced SIMD** | 187 | 67.8% | `smull`, `smull2`, `sqdmulh`, `sqrdmulh`, `sqrshrn`, `saddlp`, `smlal`, `frecpe` |
 | **Total Genuine Gaps** | **276** | **100.0%** | |
 
 ---
 
-## 4. Deep Architectural Specification
+## 4. Architectural Encodings & Decoder Scope
 
 ### 4.1 System Counter Registers (`CNTPCT_EL0`)
 
-Nintendo Switch applications and the Nintendo SDK rely extensively on the ARM Generic Timer virtual/physical counters for timing, delta calculation, and profiling.
+Nintendo Switch applications and the Nintendo SDK rely on the ARM Generic Timer virtual/physical counters for timing, delta calculation, and profiling.
 
 #### Encodings
 - `mrs Xt, cntpct_el0`: `0xd53be020 | Rt`
@@ -73,31 +70,19 @@ Nintendo Switch applications and the Nintendo SDK rely extensively on the ARM Ge
 - `mrs Xt, cntvct_el0`: `0xd53be040 | Rt` (`0x5F02`)
 - `mrs Xt, cntfrq_el0`: `0xd53be000 | Rt` (`0x5F00`)
 
-#### Observed TOTK Usage in `sdk`
-- Total: 38 sites
-- Target registers:
-  - `x0`: 10 sites (`0xd53be020`)
-  - `x8`: 11 sites (`0xd53be028`)
-  - `x19`: 2 sites (`0xd53be033`)
-  - `x20`: 7 sites (`0xd53be034`)
-  - `x21`: 6 sites (`0xd53be035`)
-  - `x22`: 2 sites (`0xd53be036`)
+#### Observed Usage in TOTK `sdk` (38 sites)
+- Target registers: `x0` (10x), `x8` (11x), `x19` (2x), `x20` (7x), `x21` (6x), `x22` (2x).
 
-#### Recompilation & Host Semantics
-- **Clock Frequency:** The Nintendo Switch hardware timer ticks at **19.2 MHz** (19,200,000 Hz, period ≈ 52.083 ns).
-- **Host Execution:** On Windows x86-64, map to host performance counters:
-  ```rust
-  // Scaled QueryPerformanceCounter or virtual deterministic clock ticks:
-  let ticks = (host_qpc * 19_200_000) / qpc_frequency;
-  c.x[t] = ticks;
-  ```
-- **Permission:** EL0 read-only; attempts to execute `msr cntpct_el0, Xt` must raise `unsupported(word, pc)`.
+#### Recompilation & Host Semantics (for Claude's integration)
+- **Clock Frequency:** Switch hardware timer ticks at **19.2 MHz** (19,200,000 Hz, period ≈ 52.083 ns).
+- **Host Execution:** On Windows x86-64, map to host performance counters (`QueryPerformanceCounter` or virtual deterministic ticks).
+- **Permissions:** EL0 read-only; attempts to execute `msr cntpct_el0, Xt` are strictly rejected by the decoder.
 
 ---
 
 ### 4.2 CRC32 and CRC32C (Data-Processing 2-Source)
 
-CRC32 instructions are part of the ARMv8.0-A CRC32 extension, used in game engines for asset hashing, checksum validation, and string hashing.
+CRC32 instructions belong to the ARMv8.0-A CRC32 extension, used for asset hashing, checksum validation, and string hashing.
 
 #### Architectural Encoding
 - Class: Data-processing (2 source), `word & 0x7fe00000 == 0x1ac00000`
@@ -110,78 +95,61 @@ CRC32 instructions are part of the ARMv8.0-A CRC32 extension, used in game engin
     - `0b01` (1): Halfword (16-bit), requires `sf = 0` (`crc32h` / `crc32ch`)
     - `0b10` (2): Word (32-bit), requires `sf = 0` (`crc32w` / `crc32cw`)
     - `0b11` (3): Doubleword (64-bit), requires `sf = 1` (`crc32x` / `crc32cx`)
-  - Reserved rule: `(sz == 3 && sf == 0) || (sz < 3 && sf == 1)` is reserved and must fault.
+  - Reserved rule: `(sz == 3 && sf == 0) || (sz < 3 && sf == 1)` is reserved and rejected.
 
-#### Observed TOTK Usage in `sdk`
-- `crc32b w8, w8, w11`: 3 sites (`0x1acb4108`)
-- `crc32b w8, w8, w10`: 1 site (`0x1aca4108`)
-- `crc32b w8, w8, w13`: 1 site (`0x1acd4108`)
-- `crc32x w8, w8, x4`: 1 site (`0x9ac44d08`)
-- `crc32x w8, w8, x3`: 1 site (`0x9ac34d08`)
-- `crc32x w8, w8, x13`: 1 site (`0x9acd4d08`)
-- `crc32x w8, w8, x9`: 1 site (`0x9ac94d08`)
-- `crc32cb w8, w8, w11`: 2 sites (`0x1acb5108`)
-- `crc32cb w8, w8, w13`: 1 site (`0x1acd5108`)
-- `crc32cx w8, w8, x9`: 1 site (`0x9ac95d08`)
+#### Observed Usage in TOTK `sdk` (13 sites)
+- `crc32b`: `w8, w8, w11` (3x), `w8, w8, w10` (1x), `w8, w8, w13` (1x)
+- `crc32x`: `w8, w8, x4` (1x), `w8, w8, x3` (1x), `w8, w8, x13` (1x), `w8, w8, x9` (1x)
+- `crc32cb`: `w8, w8, w11` (2x), `w8, w8, w13` (1x)
+- `crc32cx`: `w8, w8, x9` (1x)
 
-#### Host Execution Mapping
-- **CRC-32C (`C = true`):** Maps directly to hardware x86-64 SSE4.2 instructions:
-  - 8-bit: `_mm_crc32_u8(acc, val)`
-  - 16-bit: `_mm_crc32_u16(acc, val)`
-  - 32-bit: `_mm_crc32_u32(acc, val)`
-  - 64-bit: `_mm_crc32_u64(acc, val)`
-- **Standard CRC-32 (`C = false`):** Bit-reflected bitwise table lookup using standard IEEE polynomial `0xEDB88320`.
+#### Host Execution Mapping (for Claude's integration)
+- **CRC-32C (`C = true`):** Maps to hardware x86-64 SSE4.2 intrinsics (`_mm_crc32_u8/u16/u32/u64`).
+- **Standard CRC-32 (`C = false`):** Software bit-reflected table lookup using standard IEEE polynomial `0xEDB88320`.
 
 ---
 
-### 4.3 Cryptographic Extensions
+### 4.3 Cryptographic Extensions (Recognized Subsets)
 
-Tears of the Kingdom uses hardware-accelerated cryptographic primitives for save-game integrity, asset authentication, and network communication.
+The extension decoder recognized the exact forms present in the TOTK analysis:
+- `AESE Vd.16B, Vn.16B` (`0x4E284800`, mask `0xFFFFFC00`): AddRoundKey + SubBytes + ShiftRows.
+- `AESD Vd.16B, Vn.16B` (`0x4E285800`, mask `0xFFFFFC00`): AddRoundKey + InvSubBytes + InvShiftRows.
+- `AESIMC Vd.16B, Vn.16B` (`0x4E287800`, mask `0xFFFFFC00`): InvMixColumns.
+- `SHA1C Qd, Sn, Vm.4S` (`0x5E000000`, mask `0xFFE0FC00`): SHA-1 round computation.
+- `SHA256SU0 Vd.4S, Vn.4S` (`0x5E282800`, mask `0xFFFFFC00`): SHA-256 schedule update stage 0.
+- `PMULL Vd.1Q, Vn.1D, Vm.1D` (`0x0EE0E000`, mask `0xFFE0FC00`): 64x64 carry-less multiplication.
 
-1. **AES Instructions:**
-   - `AESE Vd.16B, Vn.16B` (`0x4E284800`): AddRoundKey + SubBytes + ShiftRows.
-   - `AESD Vd.16B, Vn.16B` (`0x4E285800`): AddRoundKey + InvSubBytes + InvShiftRows.
-   - `AESIMC Vd.16B, Vn.16B` (`0x4E287800`): InvMixColumns.
-   - Host mapping: x86 AES-NI instructions (`_mm_aesenc_si128`, `_mm_aesdec_si128`, `_mm_aesimc_si128`).
-2. **SHA Instructions:**
-   - `SHA1C Qd, Sn, Vm.4S` (`0x5E000000`): SHA-1 hash computation (round 0..19 function).
-   - `SHA256SU0 Vd.4S, Vn.4S` (`0x5E282800`): SHA-256 schedule update stage 0.
-   - Host mapping: x86 SHA-NI instructions or high-performance software rollouts.
-3. **Carry-less Multiplication:**
-   - `PMULL Vd.1Q, Vn.1D, Vm.1D` (`0x0EE0E000`): 64x64 carry-less multiplication producing 128-bit result.
-   - Host mapping: x86 PCLMULQDQ instruction (`_mm_clmulepi64_si128`).
+*(Note: The decoder does not claim full coverage of all ARMv8 cryptographic variants outside these observed encodings).*
 
 ---
 
 ### 4.4 Advanced SIMD (NEON) Integer Operations
 
-Representing 67.8% of real gaps (187 sites), these instructions perform DSP audio processing, physics, and vector transforms:
-
-1. **Widening Multiply (`SMULL`, `SMULL2` - 58 sites):**
-   - Multiplies lower or upper half of vector elements, widening from 16-bit to 32-bit (`.4H -> .4S`) or 32-bit to 64-bit (`.2S -> .2D`).
-   - High-frequency variant: `SMULL Vd.2D, Vn.2S, Vm.S[index]` (vector-by-scalar).
-2. **Saturating Doubling Multiply High (`SQDMULH`, `SQRDMULH` - 91 sites):**
-   - Multiplies corresponding elements, doubles result with signed saturation, and extracts high half (with optional rounding in `SQRDMULH`).
-   - Host mapping: x86 SSSE3 `_mm_mulhrs_epi16` for 16-bit rounded variant.
-3. **Saturating Round Shift Right Narrow (`SQRSHRN` - 33 sites):**
-   - Shifts right with rounding, narrows element width with signed saturation (`.2D -> .2S` or `.4S -> .4H`).
+Representing 67.8% of real gaps (187 sites):
+1. **Widening Multiply (`SMULL`, `SMULL2` - 58 sites):** `.4H -> .4S` or `.2S -> .2D`. High-frequency form: vector-by-scalar.
+2. **Saturating Doubling Multiply High (`SQDMULH`, `SQRDMULH` - 91 sites):** Multiplies, doubles with signed saturation, extracts high half. Host mapping: SSSE3 `_mm_mulhrs_epi16`.
+3. **Saturating Round Shift Right Narrow (`SQRSHRN` - 33 sites):** Shifts right with rounding, narrows with signed saturation.
 
 ---
 
 ## 5. Delivered Software & Verification Substrate
 
-The following components are implemented, tested, and verified on `main`:
+The following deliverables are committed, tested, and verified on `main`:
 
 1. **`crates/wl-aarch64::extensions`:**
-   - Strictly validates and decodes `SystemCounterOp`, `Crc32Op`, and `CryptoOp`.
-   - Bounded unit tests in `crates/wl-aarch64/tests/extensions.rs` verifying all combinations and negative reserved-encoding rejection.
-   - 21 passing tests in `wl-aarch64`.
+   - Strict semantic decoders: `decode_system_counter`, `decode_crc32`, `decode_crypto`, and unified `decode_extension`.
+   - Rejects EL0 writes to system counters.
+   - Rejects reserved CRC32 forms.
+   - Comprehensive unit tests in `crates/wl-aarch64/tests/extensions.rs` (21 passing tests in `wl-aarch64`).
 2. **`tools/isa/analyze_gaps.py`:**
-   - Automated offline classification and frequency analyzer.
-   - Filters data/padding artifacts.
-   - Built-in self-test verified against authentic TOTK opcodes.
+   - Standalone CLI analysis tool with data-filtering and JSON report export.
+   - Built-in self-test passed against authentic TOTK test vectors.
 3. **`tools/isa/reference_semantics.py`:**
-   - Unicorn-based reference test vector generator producing authoritative input-output pairs for all 8 CRC32/CRC32C width and polynomial configurations.
+   - Unicorn Engine-based reference vector generator covering all 8 CRC32/CRC32C width/polynomial combinations.
+   - Tested across edge cases (all-zeros, all-ones seeds, maximum inputs).
+   - Built-in self-assertion against independent known golden constants.
+4. **`tools/isa/README.md`:**
+   - Clear usage instructions and command references.
 
 ---
 
@@ -189,22 +157,15 @@ The following components are implemented, tested, and verified on `main`:
 
 To integrate these decoded extensions into the compilation and execution pipeline:
 
-1. **`crates/wl-aarch64::Op` & `SystemRegister`:**
-   - Claude may promote `CounterRegister` variants (`CntpctEl0`, `CntvctEl0`, `CntfrqEl0`) into `SystemRegister`, and `Crc32Op` into `Op::Crc32`.
-2. **`crates/wl-codegen-rust`:**
-   - In `generate_block`:
-     - Map `SystemRegister::CntpctEl0` to guest timer query:
-       ```rust
-       SystemRegister::CntpctEl0 => "m.get_system_tick()",
-       ```
-     - Map `Op::Crc32` to host intrinsic / software CRC helper:
-       ```rust
-       Op::Crc32 { dst, acc, val, sz, c } => {
-           let helper = if c { "host_crc32c" } else { "host_crc32" };
-           writeln!(out, "let res = {helper}({}, {}, {sz});", read(acc), read(val))?;
-           out.push_str(&write(dst, "res", Width::W32));
-       }
-       ```
-3. **`crates/wl-analysis`:**
-   - Include `Op::Crc32` in pure register operations (no branch, no memory effect).
-   - Apply the recommended root filtering heuristics in `find_indirect_targets` and candidate root selection to prune the 1,556 non-code data words.
+1. **Decoder Integration in `crates/wl-aarch64`:**
+   - Promote `CounterRegister` variants into `SystemRegister`, and `Crc32Op` into `Op::Crc32`.
+2. **Analysis Integration in `crates/wl-analysis`:**
+   - Add `Op::Crc32` to pure register dataflow (no branch, no memory effect).
+   - Evaluate candidate root filtering heuristics in `find_indirect_targets` with appropriate care for frameless functions.
+3. **Code Generation in `crates/wl-codegen-rust`:**
+   - Lower `SystemRegister::CntpctEl0` to guest timer query (`m.get_system_tick()`).
+   - Lower `Op::Crc32` to host x86-64 SSE4.2 intrinsic or software table lookup.
+4. **Runtime & Scheduler in `crates/wl-runtime`:**
+   - Ensure `get_system_tick()` scales virtual deterministic time appropriately.
+5. **Next CPU Milestone:**
+   - Re-running TOTK startup under AOT with System Counter and CRC32 lowered to observe the next stopping condition.
