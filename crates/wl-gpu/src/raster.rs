@@ -106,6 +106,18 @@ pub(crate) struct RasterRegisters {
 }
 impl RasterRegisters {
     pub fn apply(&mut self, method: u16, value: u32) -> std::result::Result<bool, MethodError> {
+        if method % 4 != 0 {
+            return Err(MethodError::InvalidMethod(method));
+        }
+        // NVB197_SET_GLOBAL_COLOR_KEY_ENABLE is bit 0. Only FALSE is
+        // implemented; enabling color-key comparison requires separate semantics.
+        if method == 0x1354 {
+            return if value == 0 {
+                Ok(true)
+            } else {
+                Err(MethodError::UnsupportedValue { method, value })
+            };
+        }
         let bad = || MethodError::UnsupportedValue { method, value };
         if let Some((n, (_, expected))) = FIXED_RASTER_STATE
             .iter()
@@ -277,5 +289,20 @@ impl RasterRegisters {
                 color,
             },
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn unaligned_direct_method_cannot_alias_register() {
+        let mut r = RasterRegisters::default();
+        for method in [0x1341, 0x0801, 0x0a01, 0x1355] {
+            assert_eq!(r.apply(method, 0), Err(MethodError::InvalidMethod(method)));
+        }
+        assert_eq!(r.blend, [None; 6]);
+        assert_eq!(r.color, [None; 9]);
+        assert_eq!(r.viewport, [None; 6]);
     }
 }

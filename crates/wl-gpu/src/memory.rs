@@ -72,6 +72,20 @@ impl AddressMap {
         });
         Ok(())
     }
+    /// Remove exactly one mapping; partial split/unmap requires a separate contract.
+    pub fn unmap_exact(&mut self, gpu: GpuAddress, size: u64) -> Result<()> {
+        let end = gpu
+            .0
+            .checked_add(size)
+            .ok_or_else(|| invalid("GPU unmap overflow"))?;
+        let n = self
+            .mappings
+            .iter()
+            .position(|m| m.gpu.start == gpu.0 && m.gpu.end == end)
+            .ok_or_else(|| invalid("unmap must match an existing full mapping"))?;
+        self.mappings.remove(n);
+        Ok(())
+    }
     /// Cross-mapping reads require a runtime-owned gather operation, not an unsafe borrow.
     pub fn resolve(&self, gpu: GpuAddress, size: usize) -> Result<GuestAddress> {
         let end = gpu

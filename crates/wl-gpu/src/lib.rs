@@ -7,6 +7,9 @@ pub mod command;
 pub mod compression;
 #[cfg(feature = "wgpu-backend")]
 mod draw_backend;
+pub mod driver;
+#[cfg(feature = "wgpu-backend")]
+pub mod driver_backend;
 pub mod fifo;
 pub mod format;
 pub mod gpfifo;

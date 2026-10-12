@@ -657,3 +657,82 @@ Horizon service dispatch, syncpoints/semaphores, nvhost fences, arbitrary engine
 classes, general NVN/shader compatibility or VI presentation. Metadata acceptance,
 command consumption, host queue acceptance, GPU completion and guest visibility
 remain distinct states.
+
+## GPU-owned driver contexts
+
+`driver_backend::GpuDriver` owns a fresh Renderer, a canonical dirty journal,
+registered runtime-owned backing, address spaces and Maxwell channel contexts.
+The constructor deliberately cannot import a renderer with existing guest caches:
+caller-chosen journal epochs could otherwise collide with cached resource stamps.
+These opaque, process-unique IDs are not Horizon fds, nvmap handles or syncpoints.
+The runtime retains ownership of guest bytes and must keep backing stable until
+explicit release. Overlapping registrations are rejected; GPU aliases must map
+one existing BackingId. All guest byte access remains checked and scoped.
+
+The typed mapping API supports fixed, nonzero, 4 KiB-aligned reservations and
+full-reservation mappings of aligned backing subregions. It uses AddressMap,
+including its single-contiguous-mapping borrow restriction. Explicit full unmap
+invalidates the old MappingId; remapping produces a fresh ID and advances the
+address-space epoch. Partial unmap, sparse memory, automatic VA allocation, other
+page sizes, GMMU page tables and memory-kind conversion are unsupported. This is
+a bounded adapter policy, not a claim about the full Switch allocator. Limits are
+16 spaces/channels and 128 backings/reservations per registry/space respectively.
+
+Mapping/backing mutation is rejected while a target is GPU-newer. Pending
+publication therefore cannot be redirected to recycled RAM. Backing release also
+requires all aliases unmapped; space destruction requires all reservations freed
+and channels closed. Canonical-address reuse marks the whole newly registered
+backing dirty, invalidating existing guest resource stamps. Changes between
+submissions must use `write_backing` (or a future equivalent runtime notification
+contract); unreported external writes and recycled canonical storage are invalid.
+While output is pending, at most 32 CPU writes are accepted before publication,
+preserving enough bounded journal history for exact CPU-after-GPU patch merging.
+
+`submit(channel, code, payload, extra, memory)` decodes the libnx submission wire
+layout. Legacy SubmitGpfifo is IOWR('H', 0x08, 24+8*n), with up to 512 inline
+entries. KickoffPb is ioctl2 IOWR('H', 0x1b, 24), code `0xc018481b`, with a
+separate entry buffer and up to 2,048 entries. Header offsets are: ignored u64
+pointer at 0, u32 entry count at 8, flags at 12, input fence ID/value at 16/20.
+Only HW_FORMAT=4 with zero input fence is accepted. Fence wait/get/increment,
+WFI suppression and other flags fail explicitly. No output syncpoint fence or
+nvdrv service result is synthesized. Request bytes use explicit little-endian
+reads, exact buffer sizes and the existing aggregate GPFIFO work budget.
+
+Metadata and channel-identity failures reject before admission and do not fault
+an otherwise healthy channel. Accepted requests return a SubmissionReport; its
+optional execution fault must be inspected even when admission returned Ok.
+Progress includes consumed words, completed entries and queue-accepted draws.
+Execution faults latch only that channel, preserve earlier submitted work and
+return a completion token for the accepted prefix. Whole-request replay is
+rejected. FIFO continuation and B197 registers persist per channel across calls.
+Channels can alternate when no target is pending; one pending target has one
+channel owner. Cross-channel submission/publication is blocked until that owner
+publishes. This is serialized context switching, not concurrent hardware channels.
+
+A token has channel identity and sequence, with at most 64 outstanding records.
+`query` polls without blocking and observes a wgpu completion callback;
+`wait` waits on the actual SubmissionIndex for its queue prefix. Neither operation
+publishes RAM or adds a readback. A fast device may already be complete on the first
+query. NOP-only prefixes without host work are already complete. Callback flags
+are not advanced by draw counts or software sequence numbers. `publish` separately
+performs checked readback/CPU-patch merging/atomic guest writeback; failure retains
+pending output for retry without replay. Completion is distinct from visibility.
+Retirement requires both completion and publication. `close` drains and publishes
+before invalidating channel tokens; it is not cancellation. A failed close remains
+retryable. Callers must close explicitly before dropping the controller if guest
+visibility is required; Drop cannot publish without a runtime memory adapter.
+
+The adapter does not dispatch Horizon IPC, implement nvhost handle allocation,
+AllocGpfifoEx2/AllocObjCtx, hardware syncpoint increments or guest kernel events.
+Those operations cannot be replaced with these service-independent tokens.
+
+### Disabled global color key
+
+B197 `SET_GLOBAL_COLOR_KEY` at `0x1354` defines ENABLE bit 0. The accepted subset
+supports the FALSE write (zero) and rejects TRUE/reserved bits. It is an enable
+field, not a blend coefficient or arbitrary ignored register. A seven-word INC
+packet from `0x1340` can therefore include an explicit disable between alpha
+source/destination coefficients. Since enablement is unsupported, no additional
+pipeline variant is required. Direct raster register application also rejects
+unaligned offsets before range indexing, even though normal FIFO methods are
+already aligned.

@@ -676,3 +676,63 @@ formatting, strict workspace Clippy and 257 tests. Its 22 GPU tests are ignored 
 ordinary Cargo test and accounted for by the explicit execution matrix above.
 This does not establish integration of the unfinished runtime changes or execution
 of an original game-submitted command stream.
+
+## Driver-owned channels, mappings and completion
+
+`driver.rs` has four CPU integration tests for literal ioctl direction/size/
+command fields, both submission buffer layouts, truncated headers, wrong entry
+counts, unsupported flags/fences, exact capacity limits, fixed page alignment,
+reservation overlap, alias identity, wrong-space IDs, full unmap/remap, stale IDs,
+address overflow and cross-mapping borrow rejection. A private raster unit test
+proves direct unaligned offsets cannot mutate aligned registers. A literal INC
+packet covers 1340..1358 including GLOBAL_COLOR_KEY=0; enabled/reserved values fault.
+
+Three ignored `driver_gpu` scenarios are explicitly executed with real adapters:
+
+- A page-mapped driver/channel submission executes indexed TEX shaders. Independent
+  barycentric coverage and nearest-texture expectations check asymmetric geometry
+  and background pixels. Waiting completes host work without readback or RAM
+  publication. Pending target ownership blocks another channel and mapping teardown.
+  Thirty-two CPU patches survive publication; write 33 fails before changing RAM.
+  Thirty-two warmed draws preserve uploads, shader reads and pipelines and perform
+  zero intermediate readbacks/waits. Index remapping selects degenerate geometry,
+  yielding background rather than stale indices. Closed tokens cannot be reused.
+- A valid draw followed by malformed command returns its submitted prefix and
+  faults only that channel. Real completion remains available. Injected atomic
+  guest-write failure leaves RAM unchanged and close retry publishes the correct
+  frame without incrementing draw count. A fresh channel can subsequently draw.
+- One thousand NOP submit/retire calls measure zero Rust allocations/reallocations,
+  4,000 command bytes borrowed and zero queue submissions (device setup excluded).
+  The 65th outstanding token is rejected before consuming commands; retirement
+  restores admission. Alternating channels preserve an incomplete packet in one
+  channel without leaking its B197 binding into the other.
+
+Final live package checks: `cargo fmt --all --check`, strict package Clippy,
+`cargo test -p wl-gpu --no-default-features --locked` and default-feature tests
+passed: 58 CPU tests, zero failures. Default Cargo execution ignores 25 GPU tests;
+these were separately executed via `WGPU_BACKEND=gl cargo test -p wl-gpu --locked
+-- --ignored --nocapture --test-threads=1`, and the same Windows test executables
+ran with DX12 and Vulkan. Each backend passed 25 scenarios, zero failures/skips:
+75 actual GPU executions. WSL used llvmpipe; native Windows used Intel UHD Graphics
+(driver 32.0.101.7076 / Vulkan 101.7076).
+
+A debug native D3D12 observation for 32 warm driver draws measured 14.53 ms CPU
+submission, 1,420 process-wide Rust allocations and 36 reallocations. Vulkan
+measured 10.51 ms, 1,580 allocations and 34 reallocations; GL measured 55.16 ms,
+1,569 allocations and 128 reallocations. These include wgpu and callback overhead,
+exclude final publication, and are noisy single observations, not GPU durations
+or game benchmarks. Warm draws added zero upload bytes, readbacks or blocking
+waits. One final publication submits one readback and waits once. The NOP loop
+measured 5.59 ms on DX12 and 5.45 ms on Vulkan with zero measured Rust allocations;
+it is not directly comparable to earlier NOP loops of different command lengths.
+
+During development one warm-upload assertion incorrectly included the necessary
+refresh after a CPU framebuffer patch. The final measurement begins after that
+refresh. An MSRV-incompatible integer helper and a needless reference were also
+corrected; these failed intermediate checks are not counted as passes.
+
+A faithful ordinary source snapshot of committed `1aacfd4` plus the exact GPU
+deliverable and unchanged Cargo.lock passed workspace formatting, strict workspace
+Clippy and 262 CPU tests; 25 ignored GPU tests are accounted for by the explicit
+backend matrix. This excludes unfinished shared compiler/CLI edits and is not a
+claim that those live-worktree modifications passed workspace integration.

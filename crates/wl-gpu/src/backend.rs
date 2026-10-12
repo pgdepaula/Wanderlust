@@ -71,6 +71,7 @@ pub struct Renderer {
     pub counters: Counters,
     pub(crate) device: wgpu::Device,
     pub(crate) queue: wgpu::Queue,
+    pub(crate) last_submission: Option<wgpu::SubmissionIndex>,
     pipeline: wgpu::RenderPipeline,
     default_pipeline: wgpu::RenderPipeline,
     indexed_shader: wgpu::ShaderModule,
@@ -181,6 +182,7 @@ impl Renderer {
             counters,
             device,
             queue,
+            last_submission: None,
             default_pipeline: pipeline.clone(),
             pipeline,
             indexed_shader: shader,
@@ -590,7 +592,7 @@ impl Renderer {
             });
         }
         if !readback {
-            self.queue.submit([encoder.finish()]);
+            self.last_submission = Some(self.queue.submit([encoder.finish()]));
             self.counters.submissions += 1;
             self.state = next;
             return Ok(None);
@@ -648,6 +650,7 @@ impl Renderer {
             }
         }
         let submission = self.queue.submit([encoder.finish()]);
+        self.last_submission = Some(submission.clone());
         self.counters.submissions += 1;
         let encode_time = start.elapsed();
         let (tx, rx) = mpsc::sync_channel(1);

@@ -295,3 +295,34 @@ from shader translation and quantizes between draws on the UNORM attachment.
   corroborates address/word-length extraction and gives WAIT distinct prefetch
   handling. It is a source reference, not a dependency or proof that WAIT is
   implemented here. No processor code was copied or vendored.
+
+## Driver-context ABI and host completion
+
+libnx ISC revision `feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973`:
+
+- [ioctl/nvchannel.c](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/ioctl/nvchannel.c),
+  SubmitGpfifo and KickoffPb: IOWR group 'H', commands 08/1b, 24-byte header,
+  inline versus ioctl2 entry storage, ignored pointer and input/output fence pair.
+  [gpu_channel.c](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/gpu_channel.c)
+  supplies flag bit 2 for hardware entries and separately bit 8 for fence increments.
+  Only bit 2 is adopted; the input fence must be zero and no fence is manufactured.
+- [ioctl/nvhost-as-gpu.c](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/ioctl/nvhost-as-gpu.c)
+  and [address_space.c](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/address_space.c)
+  establish distinct BindChannel, AllocSpace, MapBufferEx, UnmapBuffer and FreeSpace
+  operations, fixed offset/page-size arguments and mapping subregions. Their full
+  ioctl surface is not implemented: the typed adapter adopts only fixed complete
+  reservations/mappings. [map.c](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/map.c)
+  checks 4 KiB CPU backing alignment and size. The adapter's 4 KiB-only policy is
+  deliberately narrower than available GPU page sizes; it is not nvmap emulation.
+- [ioctl/nvhost-ctrl.c](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/ioctl/nvhost-ctrl.c)
+  distinguishes syncpoint reads/increments/threshold waits and event operations.
+  Host queue tokens do not implement these hardware/guest event semantics.
+
+[wgpu 26.0.1 Queue completion documentation](https://docs.rs/wgpu/26.0.1/wgpu/struct.Queue.html#method.on_submitted_work_done)
+and [Device::poll](https://docs.rs/wgpu/26.0.1/wgpu/struct.Device.html#method.poll)
+(MIT/Apache-2.0) specify callbacks for previously submitted work and explicit
+native polling/waiting. Completion tracking uses these APIs and the actual
+SubmissionIndex. No sleeps, guessed timing or synthetic syncpoint increments
+are used. The pinned NVIDIA B197 header above defines GLOBAL_COLOR_KEY at 1354,
+ENABLE 0:0, FALSE=0 and TRUE=1; only the documented disable state is implemented.
+External service-emulator implementations are not imported or vendored.
