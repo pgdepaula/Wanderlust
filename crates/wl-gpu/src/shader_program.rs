@@ -1,4 +1,4 @@
-//! Bounded straight-line Maxwell fragment dataflow. Registers contain raw bits.
+//! Bounded straight-line Maxwell vertex/fragment dataflow. Registers contain raw bits.
 //! Resource data is runtime input, never a specialization of shader code.
 use crate::{Error, Result, invalid};
 
@@ -21,6 +21,16 @@ pub enum Operation {
         dst: u8,
         input: u8,
     },
+    AttributeRead {
+        dst: u8,
+        attribute: u16,
+        words: u8,
+    },
+    AttributeWrite {
+        src: u8,
+        attribute: u16,
+        words: u8,
+    },
     Interpolate {
         dst: u8,
         component: u8,
@@ -32,28 +42,32 @@ pub enum Operation {
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FragmentProgram {
+struct Program {
     operations: Vec<Operation>,
     constants: Vec<ConstantRef>,
     texture_input: Option<u8>,
 }
-impl FragmentProgram {
-    pub fn decode(input: &[u8]) -> Result<Self> {
+impl Program {
+    fn decode(input: &[u8], vertex: bool) -> Result<Self> {
         if input.len() < 112 || input.len() > 0x50 + 4096 || (input.len() - 0x50) % 32 != 0 {
             return Err(invalid("invalid Maxwell fragment length"));
         }
-        let interpolated = u32::from_le_bytes(input[24..28].try_into().unwrap()) == 15;
-        for (n, b) in input[..0x50].chunks_exact(4).enumerate() {
-            let expected = match n {
-                0 => 0x61462,
-                4 => 0xff000,
-                18 => 15,
-                6 if interpolated => 15,
-                _ => 0,
-            };
-            if u32::from_le_bytes(b.try_into().unwrap()) != expected {
-                return Err(invalid("unsupported resource fragment SPH"));
+        let interpolated = !vertex && u32::from_le_bytes(input[24..28].try_into().unwrap()) == 15;
+        let mut header = [0u8; 80];
+        header[..4].copy_from_slice(&if vertex { 0x60461u32 } else { 0x61462u32 }.to_le_bytes());
+        header[16..20].copy_from_slice(&0xff000u32.to_le_bytes());
+        if vertex {
+            header[24] = 0x3f;
+            header[50..54].copy_from_slice(&0xf0000000u32.to_le_bytes());
+            header[54] = 3;
+        } else {
+            header[72..76].copy_from_slice(&15u32.to_le_bytes());
+            if interpolated {
+                header[24] = 15;
             }
+        }
+        if input[..80] != header {
+            return Err(invalid("unsupported shader stage/SPH interface"));
         }
         let mut out = Self {
             operations: Vec::new(),
@@ -65,6 +79,7 @@ impl FragmentProgram {
         let mut pending = [false; 256];
         let mut provenance = [None; 256];
         let mut exited = false;
+        let mut exports = 0u8;
         for (bundle_index, bundle) in input[0x50..].chunks_exact(32).enumerate() {
             let control = u64::from_le_bytes(bundle[..8].try_into().unwrap());
             if control >> 63 != 0 {
@@ -95,10 +110,46 @@ impl FragmentProgram {
                     continue;
                 }
                 if word == 0xe30000000007000f {
-                    if write_barrier != 7 || (0..4).any(|r| !initialized[r] || pending[r]) {
+                    if write_barrier != 7
+                        || if vertex {
+                            exports != 0x3f
+                        } else {
+                            (0..4).any(|r| !initialized[r] || pending[r])
+                        }
+                    {
                         return Err(fail("unready fragment exports"));
                     }
                     exited = true;
+                    continue;
+                }
+                let attribute_mask = 255 | (0x3ffu64 << 20) | (3u64 << 47);
+                if vertex && word & !attribute_mask == 0xeff07f800007ff00 {
+                    let src = (word & 255) as u8;
+                    let attribute = ((word >> 20) & 0x3ff) as u16;
+                    let words = (((word >> 47) & 3) + 1) as u8;
+                    let output = match attribute {
+                        0x70..=0x7c => (attribute - 0x70) / 4,
+                        0x80..=0x84 => 4 + (attribute - 0x80) / 4,
+                        _ => return Err(fail("unsupported AST output")),
+                    };
+                    if attribute % 4 != 0
+                        || output + u16::from(words) > 6
+                        || (output < 4 && output + u16::from(words) > 4)
+                        || write_barrier != 7
+                        || u16::from(src) + u16::from(words) > 256
+                        || (0..words).any(|c| {
+                            let r = usize::from(src) + usize::from(c);
+                            !initialized[r] || pending[r]
+                        })
+                    {
+                        return Err(fail("invalid/unready AST group"));
+                    }
+                    exports |= ((1u8 << words) - 1) << output;
+                    out.operations.push(Operation::AttributeWrite {
+                        src,
+                        attribute,
+                        words,
+                    });
                     continue;
                 }
                 let dst = (word & 255) as u8;
@@ -108,7 +159,30 @@ impl FragmentProgram {
                 let immediate_mask = (u64::from(u32::MAX) << 20) | 255;
                 let move_mask = (255u64 << 20) | 255;
                 let ldc_mask = (31u64 << 36) | (0xffffu64 << 20) | 255;
-                let op = if word & !immediate_mask == 0x010000000007f000 {
+                let op = if vertex && word & !attribute_mask == 0xefd87f800007ff00 {
+                    let attribute = ((word >> 20) & 0x3ff) as u16;
+                    let words = (((word >> 47) & 3) + 1) as u8;
+                    if !matches!(attribute,0x80..=0x8c | 0x90..=0x94)
+                        || attribute % 4 != 0
+                        || attribute + u16::from(words) * 4 > 0x98
+                        || (attribute < 0x90 && attribute + u16::from(words) * 4 > 0x90)
+                        || u16::from(dst) + u16::from(words) > 255
+                        || write_barrier != 0
+                        || pending.iter().any(|p| *p)
+                    {
+                        return Err(fail("unsupported ALD group or scoreboard"));
+                    }
+                    for r in dst..dst + words {
+                        initialized[r as usize] = true;
+                        pending[r as usize] = true;
+                        provenance[r as usize] = None;
+                    }
+                    Operation::AttributeRead {
+                        dst,
+                        attribute,
+                        words,
+                    }
+                } else if word & !immediate_mask == 0x010000000007f000 {
                     if write_barrier != 7 {
                         return Err(fail("ALU write barrier unsupported"));
                     }
@@ -122,7 +196,7 @@ impl FragmentProgram {
                         return Err(fail("unready MOV source or unsupported schedule"));
                     }
                     Operation::Move { dst, src }
-                } else if word & !ldc_mask == 0xef9400000007ff00 {
+                } else if !vertex && word & !ldc_mask == 0xef9400000007ff00 {
                     if write_barrier != 0 || pending.iter().any(|v| *v) {
                         return Err(fail("LDC requires an unused write barrier zero"));
                     }
@@ -149,7 +223,7 @@ impl FragmentProgram {
                         dst,
                         input: index as u8,
                     }
-                } else if word & !(255 | (0x3ffu64 << 28)) == 0xe003ff800ff7ff00 {
+                } else if !vertex && word & !(255 | (0x3ffu64 << 28)) == 0xe003ff800ff7ff00 {
                     let attribute = ((word >> 28) & 0x3ff) as u32;
                     if !interpolated
                         || !matches!(attribute, 0x80 | 0x84)
@@ -163,7 +237,9 @@ impl FragmentProgram {
                         dst,
                         component: ((attribute - 0x80) / 4) as u8,
                     }
-                } else if word & !(255 | (255u64 << 8) | (255u64 << 20)) == 0xdeb80027a0070000 {
+                } else if !vertex
+                    && word & !(255 | (255u64 << 8) | (255u64 << 20)) == 0xdeb80027a0070000
+                {
                     let coordinates = ((word >> 8) & 255) as u8;
                     let handle = ((word >> 20) & 255) as u8;
                     if dst > 251
@@ -199,6 +275,7 @@ impl FragmentProgram {
                     && !matches!(
                         op,
                         Operation::Constant { .. }
+                            | Operation::AttributeRead { .. }
                             | Operation::Interpolate { .. }
                             | Operation::Sample2d { .. }
                     )
@@ -223,6 +300,14 @@ impl FragmentProgram {
         let mut largest = 3;
         for op in &self.operations {
             match *op {
+                Operation::AttributeRead { dst, words, .. } => {
+                    largest = largest.max(u16::from(dst) + u16::from(words) - 1)
+                }
+                Operation::AttributeWrite { src, words, .. } => {
+                    if src != 255 {
+                        largest = largest.max(u16::from(src) + u16::from(words) - 1)
+                    }
+                }
                 Operation::Immediate { dst, .. }
                 | Operation::Constant { dst, .. }
                 | Operation::Interpolate { dst, .. } => largest = largest.max(u16::from(dst)),
@@ -266,6 +351,9 @@ impl FragmentProgram {
         s.push_str("struct Vertex { @builtin(position) position:vec4<f32>, @location(0) @interpolate(linear) uv:vec2<f32> };\n@vertex fn vs_main(@builtin(vertex_index) i:u32)->Vertex { let ps=array<vec2<f32>,3>(vec2(-1.,-1.),vec2(3.,-1.),vec2(-1.,3.));let p=ps[i];var v:Vertex;v.position=vec4(p,0.,1.);v.uv=vec2((p.x+1.)*.5,(1.-p.y)*.5);return v;}\n@fragment fn fs_main(v:Vertex)->@location(0) vec4<f32>{var r:array<u32,256>;\n");
         for op in &self.operations {
             match *op {
+                Operation::AttributeRead { .. } | Operation::AttributeWrite { .. } => {
+                    unreachable!("vertex operation in fragment")
+                }
                 Operation::Interpolate { dst, component } => {
                     writeln!(s, "r[{dst}]=bitcast<u32>(v.uv[{component}]);").unwrap()
                 }
@@ -286,6 +374,100 @@ impl FragmentProgram {
             }
         }
         s.push_str("return vec4(bitcast<f32>(r[0]),bitcast<f32>(r[1]),bitcast<f32>(r[2]),bitcast<f32>(r[3]));}");
+        s
+    }
+}
+
+/// Strict PS interface; retained independently from vertex-header acceptance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FragmentProgram(Program);
+impl FragmentProgram {
+    pub fn decode(input: &[u8]) -> Result<Self> {
+        Ok(Self(Program::decode(input, false)?))
+    }
+    pub fn required_registers(&self) -> u16 {
+        self.0.required_registers()
+    }
+    pub fn texture_input(&self) -> Option<u8> {
+        self.0.texture_input()
+    }
+    pub fn constants(&self) -> &[ConstantRef] {
+        self.0.constants()
+    }
+    pub fn operations(&self) -> &[Operation] {
+        self.0.operations()
+    }
+    pub fn wgsl(&self) -> String {
+        self.0.wgsl()
+    }
+}
+/// VTG vertex stage: generic-zero float4 and generic-one float2 input,
+/// position xyzw and generic-zero xy output. Other interfaces fail explicitly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VertexProgram(Program);
+impl VertexProgram {
+    pub fn decode(input: &[u8]) -> Result<Self> {
+        Ok(Self(Program::decode(input, true)?))
+    }
+    pub fn required_registers(&self) -> u16 {
+        self.0.required_registers()
+    }
+    pub fn operations(&self) -> &[Operation] {
+        self.0.operations()
+    }
+    pub fn wgsl(&self) -> String {
+        use std::fmt::Write;
+        let mut s = String::from(
+            "struct Vertex { @builtin(position) position:vec4<f32>, @location(0) @interpolate(linear) uv:vec2<f32> };\n@vertex fn vs_main(@location(0) a0:vec4<f32>,@location(1) a1:vec2<f32>)->Vertex {var r:array<u32,256>;var v:Vertex;\n",
+        );
+        for op in self.operations() {
+            match *op {
+                Operation::AttributeRead {
+                    dst,
+                    attribute,
+                    words,
+                } => {
+                    for c in 0..words {
+                        let (a, n) = if attribute < 0x90 {
+                            (0, (attribute - 0x80) / 4)
+                        } else {
+                            (1, (attribute - 0x90) / 4)
+                        };
+                        writeln!(
+                            s,
+                            "r[{}]=bitcast<u32>(a{a}[{}]);",
+                            u16::from(dst) + u16::from(c),
+                            n + u16::from(c)
+                        )
+                        .unwrap();
+                    }
+                }
+                Operation::AttributeWrite {
+                    src,
+                    attribute,
+                    words,
+                } => {
+                    for c in 0..words {
+                        let (name, n) = if attribute < 0x80 {
+                            ("position", (attribute - 0x70) / 4)
+                        } else {
+                            ("uv", (attribute - 0x80) / 4)
+                        };
+                        writeln!(
+                            s,
+                            "v.{name}[{}]=bitcast<f32>(r[{}]);",
+                            n + u16::from(c),
+                            u16::from(src) + u16::from(c)
+                        )
+                        .unwrap();
+                    }
+                }
+                Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
+                Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
+                _ => unreachable!("resource/fragment operation in strict vertex program"),
+            }
+        }
+        s.push_str("return v;}");
         s
     }
 }

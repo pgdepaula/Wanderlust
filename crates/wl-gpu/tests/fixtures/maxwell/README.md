@@ -60,3 +60,18 @@ Assembly uses the development grammar alias described in `docs/graphics/sources.
 rename the TEX.B dummy `N("0x0")` to `N("zero")` in the pinned gm107 table.
 The original envydis confirms the resulting TEX.B opcode/operands. SHA-256 of the
 144-byte fixture: `7297c6d6a48aaa36e12372e3a228e3fdbe9c6141caedab5e1d4f30bb08cf2f70`.
+
+
+The vertex fixtures use the same unmodified pinned envyas/envydis. `vertex.asm`
+loads generic-zero xyzw (0x80) and generic-one xy (0x90) through ALD B128/B64,
+exports position xyzw (0x70) and generic-zero xy (0x80) through AST, and exits.
+`vertex-swap.asm` adds three register MOVs that exchange clip-space X/Y. Both
+assign barrier zero to ALD and wait before consuming/reusing it. AST uses no write
+barrier. The VTG SPH is constructed from an otherwise zero 80-byte array:
+word zero 0x60461, word four 0xff000, byte 24 0x3f, little-endian uint32 at byte
+50 0xf0000000, byte 54 0x03. OmapSystemValuesAB is deliberately not word aligned;
+NVIDIA's VTG field widths and UAM's packed layout independently agree. No output
+attribute is read back by the shader, so the store-request range stays unused.
+
+vertex.bin: 144 bytes, SHA-256 `ccfba2e1190befe39a174186870752588e828ce981abd73cca6219c9ffd9a776`.
+vertex-swap.bin: 176 bytes, SHA-256 `5852b1f783f4a6d76d7cfbb7d3b74767c2225832fc9a1ea63d8c0233e0c0e3b0`.

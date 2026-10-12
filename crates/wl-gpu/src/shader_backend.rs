@@ -10,6 +10,8 @@ struct Stamp {
     version: (u64, u64),
 }
 pub(crate) struct ResidentFragment {
+    pub shader: wgpu::ShaderModule,
+    pub layout: wgpu::BindGroupLayout,
     pub program: FragmentProgram,
     pub pipeline: wgpu::RenderPipeline,
     pub binding: wgpu::BindGroup,
@@ -222,6 +224,8 @@ impl Renderer {
         }
         self.selected_shader = None;
         self.resource_fragment = Some(ResidentFragment {
+            shader,
+            layout,
             program: program.clone(),
             pipeline,
             binding,

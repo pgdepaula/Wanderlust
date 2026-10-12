@@ -75,6 +75,7 @@ pub struct Renderer {
     indexed_layout: wgpu::PipelineLayout,
     pub(crate) selected_shader: Option<crate::shader_backend::SelectedShader>,
     pub(crate) resource_fragment: Option<crate::shader_backend::ResidentFragment>,
+    pub(crate) vertex: Option<crate::vertex_backend::ResidentVertex>,
     constant_pipeline: Option<(crate::shader::ConstantFragment, wgpu::RenderPipeline)>,
     buffers: HashMap<BufferId, Buffer>,
     state: ResourceState,
@@ -177,6 +178,7 @@ impl Renderer {
             indexed_layout: layout,
             constant_pipeline: None,
             resource_fragment: None,
+            vertex: None,
             selected_shader: None,
             buffers: HashMap::new(),
             state: ResourceState::new(),
@@ -252,8 +254,13 @@ impl Renderer {
             return Err(invalid("renderer unavailable after backend failure"));
         }
         for command in commands {
-            if matches!(command, Command::DrawFragment)
-                && self.resource_fragment.as_ref().is_none_or(|f| !f.ready)
+            if let Command::DrawVertices { first, count } = command {
+                self.validate_vertices(*first, *count)?;
+            }
+            if matches!(
+                command,
+                Command::DrawFragment | Command::DrawVertices { .. }
+            ) && self.resource_fragment.as_ref().is_none_or(|f| !f.ready)
             {
                 return Err(invalid("fragment resources not synchronized"));
             }
@@ -320,6 +327,7 @@ impl Renderer {
                     Command::DrawIndexed { .. }
                         | Command::DrawTexture { .. }
                         | Command::DrawFragment
+                        | Command::DrawVertices { .. }
                 )
             })
             .count();
@@ -399,7 +407,7 @@ impl Renderer {
                     first = false;
                     self.counters.cache_hits += 2;
                 }
-                Command::DrawFragment => {
+                Command::DrawFragment | Command::DrawVertices { .. } => {
                     let fragment = self.resource_fragment.as_ref().expect("validated fragment");
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("translated Maxwell resource fragment"),
@@ -426,12 +434,26 @@ impl Renderer {
                         }),
                         occlusion_query_set: None,
                     });
-                    pass.set_pipeline(&fragment.pipeline);
-                    pass.set_bind_group(0, &fragment.binding, &[]);
-                    if let Some(binding) = &fragment.texture_binding {
-                        pass.set_bind_group(1, binding, &[]);
+                    if let Command::DrawVertices { first, count } = cmd {
+                        let vertex = self.vertex.as_ref().expect("validated vertex stage");
+                        pass.set_pipeline(&vertex.pipeline);
+                        pass.set_vertex_buffer(
+                            0,
+                            vertex.buffer.as_ref().expect("uploaded vertices").slice(..),
+                        );
+                        pass.set_bind_group(0, &fragment.binding, &[]);
+                        if let Some(binding) = &fragment.texture_binding {
+                            pass.set_bind_group(1, binding, &[]);
+                        }
+                        pass.draw(*first..*first + *count, 0..1);
+                    } else {
+                        pass.set_pipeline(&fragment.pipeline);
+                        pass.set_bind_group(0, &fragment.binding, &[]);
+                        if let Some(binding) = &fragment.texture_binding {
+                            pass.set_bind_group(1, binding, &[]);
+                        }
+                        pass.draw(0..3, 0..1);
                     }
-                    pass.draw(0..3, 0..1);
                     draws_remaining -= 1;
                     first = false;
                     self.counters.draw_commands += 1;

@@ -211,3 +211,12 @@ binding group four; the explicit pipeline-binding field selects the group. Progr
 offsets are added as checked GPU byte addresses. The SPH/code reader imposes its
 own termination/size budget because those method definitions provide no binary
 length. Register allocation is checked against the actual supported dataflow.
+
+
+Vertex ALD/AST encodings are cross-checked against the pinned envytools gm107
+attribute tables and MIT UAM/Mesa `emitALD`/`emitAST`: width-minus-one at bits
+48:47, direct attribute byte offset at 29:20, RZ address/vertex selectors,
+GPR group at 7:0. NVIDIA's SPH VTG table and zlib UAM `SetVtgImap`/`SetVtgOmap`
+establish generic masks and position sysvalues 28..31. The packed VTG output map
+starts at byte 50, not byte 52. Actual pinned envyas produced and unmodified
+envydis decoded both vertex fixtures; no production assembler dependency exists.

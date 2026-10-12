@@ -18,6 +18,8 @@ pub mod texture;
 #[cfg(feature = "wgpu-backend")]
 mod texture_backend;
 #[cfg(feature = "wgpu-backend")]
+mod vertex_backend;
+#[cfg(feature = "wgpu-backend")]
 pub use texture_backend::TextureUploadPolicy;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,4 +72,8 @@ pub struct Counters {
     pub shader_binary_bytes: u64,
     pub descriptor_reads: u64,
     pub draw_commands: u64,
+    pub vertex_guest_bytes: u64,
+    pub vertex_upload_bytes: u64,
+    pub vertex_shader_bytes: u64,
+    pub vertex_shader_decodes: u64,
 }

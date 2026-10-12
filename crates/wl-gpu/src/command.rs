@@ -37,6 +37,12 @@ pub enum Command<'a> {
     /// Fullscreen fragment validation harness. Resources must be synchronized from
     /// B197 state; this is not a hardware draw-method implementation.
     DrawFragment,
+    /// Translated vertex/fragment validation boundary. Hardware methods are
+    /// decoded separately; callers must not describe this command as a B197 method.
+    DrawVertices {
+        first: u32,
+        count: u32,
+    },
     DrawTexture {
         id: TextureId,
         mip: u32,
@@ -123,7 +129,7 @@ pub fn validate(
                     .remove(id)
                     .ok_or_else(|| invalid("destroy unknown buffer"))?;
             }
-            Command::DrawFragment | Command::DrawTexture { .. } => {
+            Command::DrawFragment | Command::DrawTexture { .. } | Command::DrawVertices { .. } => {
                 drew = true;
             }
         }

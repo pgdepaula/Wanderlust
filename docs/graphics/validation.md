@@ -374,3 +374,24 @@ These tests execute synthetic independently assembled fragment binaries through
 real host GPUs. Geometry is still the fullscreen validation harness. No Maxwell
 vertex program, B197 hardware draw trigger, guest render-target writeback or
 original game-submitted graphics workload is established by these results.
+
+
+## Vertex binary rasterization
+
+Two independently assembled VTG programs load float4 position/float2 UV and export
+position/generic-zero xy. The second exchanges X/Y through three MOVs. Both run
+through the translated vertex stage on a 47x29 target; independently evaluated
+edge functions verify covered red pixels and untouched opaque-black pixels for
+two different asymmetric triangles. Only pixels within 0.005 barycentric distance
+of an edge are excluded from coverage assertions; over 200 interior and 500
+exterior pixels are required in each case. This test supplies vertices through the
+explicit validation API, not B197 vertex state.
+
+The vertex GPU executable passed on WSL OpenGL llvmpipe and native Windows Intel
+UHD D3D12/Vulkan. Two draws upload 144 vertex bytes, read back 14,880 padded bytes
+and pack 10,904 bytes. Each distinct vertex program creates one additional shader
+module/pipeline, sharing the resident fragment module/layout; repeated program
+selection creates neither. CPU checks pass 30 tests including stage separation,
+truncation, attribute/width/modifier/predicate errors, invalid exports/register
+groups and missing dependency waits. Strict package Clippy passes. This establishes
+real decoded vertex influence on rasterization, without claiming a hardware draw.

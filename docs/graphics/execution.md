@@ -357,3 +357,30 @@ passes a shader fixture or TIC/TSC indices to this path. Geometry and destinatio
 remain the explicit fullscreen fragment harness. No B197 draw trigger, vertex
 binary execution, guest render-target writeback or nvhost service integration is
 implemented. These are required before claiming a guest-directed hardware draw.
+
+
+## Translated vertex stage and linkage
+
+The bounded straight-line decoder shares scheduling and MOV handling across
+strict stage wrappers. Fragment SPH acceptance remains unchanged. Vertex VTG SPH
+accepts exactly generic-zero float4/generic-one float2 input, position xyzw and
+generic-zero xy output. ALD B32/B64/B96/B128 accepts direct aligned attributes
+within those input vectors, RZ addressing, no output/per-patch/indirect modifiers,
+and the existing conservative barrier-zero/wait-one subset. AST accepts direct
+position/generic-zero output groups from initialized, ready GPRs. All six output
+components must have been written before EXIT. Other vertex instructions, including
+vertex resources, built-ins and control flow, are unsupported.
+
+The translated vertex entry exports actual decoded clip-space position and
+screen-linear UV to the existing translated fragment stage. Typed stage wrappers
+prevent reuse of fragment header acceptance for vertex binaries. Pipelines pair
+vertex/fragment semantics, float4/float2 formats, stride and offsets; changing
+geometry bytes does not change program identity. The resident fragment retains its
+shader module and binding layout for paired pipelines. Wgpu owns resource lifetimes
+across submitted work; no raw guest borrow is retained.
+
+`set_vertex_program`, `upload_vertices` and `Command::DrawVertices` are intermediate
+validation boundaries, not B197 draw methods. The initial vertex test provides its
+buffer explicitly and checks non-fullscreen rasterization. Guest vertex arrays,
+viewport, target selection and hardware draw initiation require separate B197
+resolution; this interface does not imply their support.
