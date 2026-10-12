@@ -67,42 +67,7 @@ impl Renderer {
             self.counters.shader_cache_hits += 1;
         } else {
             self.selected_shader = None;
-            let header = map.read(memory, source.address, 80)?;
-            if header.len() != 80 {
-                return Err(invalid("short guest shader header"));
-            }
-            let mut binary = Vec::with_capacity(112);
-            binary.extend_from_slice(header);
-            self.counters.shader_binary_bytes += 80;
-            self.counters.guest_to_host_bytes += 80;
-            let mut terminated = false;
-            for _ in 0..128 {
-                let address = source
-                    .address
-                    .0
-                    .checked_add(binary.len() as u64)
-                    .ok_or_else(|| invalid("shader fetch overflow"))?;
-                if address.checked_add(32).is_none_or(|end| end > 1 << 40) {
-                    return Err(invalid("shader fetch exceeds 40-bit address space"));
-                }
-                let bundle = map.read(memory, GpuAddress(address), 32)?;
-                if bundle.len() != 32 {
-                    return Err(invalid("short guest shader bundle"));
-                }
-                binary.extend_from_slice(bundle);
-                self.counters.shader_binary_bytes += 32;
-                self.counters.guest_to_host_bytes += 32;
-                if bundle[8..]
-                    .chunks_exact(8)
-                    .any(|word| u64::from_le_bytes(word.try_into().unwrap()) == 0xe30000000007000f)
-                {
-                    terminated = true;
-                    break;
-                }
-            }
-            if !terminated {
-                return Err(invalid("shader has no EXIT within 4 KiB code budget"));
-            }
+            let binary = read_program(source.address, map, memory, &mut self.counters, false)?;
             self.counters.shader_decodes += 1;
             let program = FragmentProgram::decode(&binary)?;
             if program.required_registers() > u16::from(source.registers) {
@@ -359,4 +324,60 @@ impl Renderer {
         self.counters.bind_group_reuses += 1;
         Ok(())
     }
+}
+
+pub(crate) fn read_program(
+    source: GpuAddress,
+    map: &AddressMap,
+    memory: &impl GuestMemory,
+    counters: &mut crate::Counters,
+    vertex: bool,
+) -> Result<Vec<u8>> {
+    if source.0.checked_add(80).is_none_or(|end| end > 1 << 40) {
+        return Err(invalid("shader header exceeds 40-bit address space"));
+    }
+    let header = map.read(memory, source, 80)?;
+    if header.len() != 80 {
+        return Err(invalid("short guest shader header"));
+    }
+    let mut binary = Vec::with_capacity(112);
+    binary.extend_from_slice(header);
+    if vertex {
+        counters.vertex_shader_bytes += 80;
+    } else {
+        counters.shader_binary_bytes += 80;
+    }
+    counters.guest_to_host_bytes += 80;
+    let mut terminated = false;
+    for _ in 0..128 {
+        let address = source
+            .0
+            .checked_add(binary.len() as u64)
+            .ok_or_else(|| invalid("shader fetch overflow"))?;
+        if address.checked_add(32).is_none_or(|end| end > 1 << 40) {
+            return Err(invalid("shader fetch exceeds 40-bit address space"));
+        }
+        let bundle = map.read(memory, GpuAddress(address), 32)?;
+        if bundle.len() != 32 {
+            return Err(invalid("short guest shader bundle"));
+        }
+        binary.extend_from_slice(bundle);
+        if vertex {
+            counters.vertex_shader_bytes += 32;
+        } else {
+            counters.shader_binary_bytes += 32;
+        }
+        counters.guest_to_host_bytes += 32;
+        if bundle[8..]
+            .chunks_exact(8)
+            .any(|word| u64::from_le_bytes(word.try_into().unwrap()) == 0xe30000000007000f)
+        {
+            terminated = true;
+            break;
+        }
+    }
+    if !terminated {
+        return Err(invalid("shader has no EXIT within 4 KiB code budget"));
+    }
+    Ok(binary)
 }

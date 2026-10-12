@@ -395,3 +395,30 @@ selection creates neither. CPU checks pass 30 tests including stage separation,
 truncation, attribute/width/modifier/predicate errors, invalid exports/register
 groups and missing dependency waits. Strict package Clippy passes. This establishes
 real decoded vertex influence on rasterization, without claiming a hardware draw.
+
+
+## Guest vertex-array/interstage validation
+
+Literal B06F packets select vertex/pixel binaries, stream-zero address/limit/stride,
+FLOAT float4/float2 attributes and guest texture resources. A 47x29 asymmetric
+textured triangle is checked against independent double-precision edge/barycentric
+calculations and row-major source texels; a one-byte channel tolerance applies.
+Samples within 0.005 of triangle edges or 0.02 texel of a nearest-filter boundary
+are excluded to avoid asserting unspecified precision. Over 150 interior pixels
+and exterior opaque-black pixels are required. Position writes move the triangle,
+UV writes change sampling, GPU aliases preserve the upload, remaps replace vertex
+backing and a guest program offset selects the X/Y-swapping vertex binary.
+
+Thirty-two unchanged joint vertex/fragment synchronizations allocate/reallocate
+zero Rust storage and add no shader reads, vertex reads or uploads. Geometry-only
+changes preserve pipeline creation counts. A too-short inclusive vertex limit
+fails and disables drawing. CPU tests independently validate literal stream fields,
+formats, limits, bad instancing/frequency, stage classification and overflow.
+This remains a guest-state geometry test with an explicit draw count and host
+validation target; it is not yet a hardware draw trigger.
+
+The guest-geometry GPU test passed on WSL GL, native Windows D3D12 and Vulkan.
+D3D12 initially exposed a nearest-texel boundary within the original 0.001-texel
+exclusion; the final 0.02-texel exclusion accounts for finite subpixel rasterization
+precision without enlarging the one-byte channel tolerance. Both vertex tests pass
+on both native APIs. CPU checks pass 31 tests and strict package Clippy.

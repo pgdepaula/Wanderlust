@@ -95,10 +95,39 @@ pub(crate) struct DescriptorStamp {
     sampler_epoch: u64,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FragmentSource {
+pub struct ProgramSource {
     pub address: GpuAddress,
     pub registers: u8,
     pub group: u8,
+}
+/// Backward-compatible name for the pixel-stage source descriptor.
+pub type FragmentSource = ProgramSource;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VertexArray {
+    pub address: GpuAddress,
+    pub limit: GpuAddress,
+    pub stride: u16,
+    pub offsets: [u16; 2],
+}
+impl VertexArray {
+    pub fn size(&self, first: u32, count: u32) -> Result<usize> {
+        let size = first
+            .checked_add(count)
+            .and_then(|n| u64::from(n).checked_mul(u64::from(self.stride)))
+            .ok_or_else(|| invalid("vertex range overflow"))?;
+        if count == 0
+            || count % 3 != 0
+            || size == 0
+            || self
+                .address
+                .0
+                .checked_add(size - 1)
+                .is_none_or(|end| end > self.limit.0)
+        {
+            return Err(invalid("vertex fetch exceeds inclusive limit"));
+        }
+        usize::try_from(size).map_err(|_| invalid("vertex span exceeds host"))
+    }
 }
 /// One channel's single MAXWELL_B instance. Subchannels route to the same state;
 /// rebinding the same class does not manufacture an independent register bank.
@@ -110,6 +139,18 @@ pub struct Maxwell3d {
     images: Pool,
     program_upper: Option<u32>,
     program_lower: Option<u32>,
+    vertex_enabled: bool,
+    vertex_offset: Option<u32>,
+    vertex_registers: Option<u8>,
+    vertex_group: Option<u8>,
+    vertex_format: Option<u32>,
+    vertex_upper: Option<u32>,
+    vertex_lower: Option<u32>,
+    vertex_limit_upper: Option<u32>,
+    vertex_limit_lower: Option<u32>,
+    vertex_frequency: Option<u32>,
+    vertex_instance: Option<u32>,
+    vertex_attributes: [Option<u32>; 2],
     fragment_enabled: bool,
     fragment_offset: Option<u32>,
     fragment_registers: Option<u8>,
@@ -157,6 +198,62 @@ impl Maxwell3d {
                 self.program_upper = Some(value);
             }
             0x160c => self.program_lower = Some(value),
+            0x2040 => {
+                if !matches!(value, 0x10 | 0x11) {
+                    return Err(bad());
+                }
+                self.vertex_enabled = value & 1 != 0;
+            }
+            0x2044 => self.vertex_offset = Some(value),
+            0x204c => {
+                if value == 0 || value > 255 {
+                    return Err(bad());
+                }
+                self.vertex_registers = Some(value as u8);
+            }
+            0x2050 => {
+                if value > 4 {
+                    return Err(bad());
+                }
+                self.vertex_group = Some(value as u8);
+            }
+            0x1c00 => {
+                if value & !0x1fff != 0 {
+                    return Err(bad());
+                }
+                self.vertex_format = Some(value);
+            }
+            0x1c04 | 0x1f00 => {
+                if value > 255 {
+                    return Err(bad());
+                }
+                if method == 0x1c04 {
+                    self.vertex_upper = Some(value);
+                } else {
+                    self.vertex_limit_upper = Some(value);
+                }
+            }
+            0x1c08 => self.vertex_lower = Some(value),
+            0x1f04 => self.vertex_limit_lower = Some(value),
+            0x1c0c => {
+                if value != 1 {
+                    return Err(bad());
+                }
+                self.vertex_frequency = Some(value);
+            }
+            0x1880 => {
+                if value != 0 {
+                    return Err(bad());
+                }
+                self.vertex_instance = Some(value);
+            }
+            0x1160 | 0x1164 => {
+                let size = if method == 0x1160 { 1 } else { 4 };
+                if value & !(0x3fffu32 << 7) != (7 << 27) | (size << 21) {
+                    return Err(bad());
+                }
+                self.vertex_attributes[((method - 0x1160) / 4) as usize] = Some(value);
+            }
             0x2140 => {
                 if !matches!(value, 0x50 | 0x51) {
                     return Err(bad());
@@ -302,6 +399,74 @@ impl Maxwell3d {
             address: GpuAddress(address),
             registers,
             group,
+        })
+    }
+    pub fn vertex_program(&self) -> Result<ProgramSource> {
+        if !self.bound.iter().any(|b| *b) || !self.vertex_enabled {
+            return Err(invalid("vertex program disabled or B197 unbound"));
+        }
+        let (Some(hi), Some(lo), Some(offset), Some(registers), Some(group)) = (
+            self.program_upper,
+            self.program_lower,
+            self.vertex_offset,
+            self.vertex_registers,
+            self.vertex_group,
+        ) else {
+            return Err(invalid("incomplete vertex program state"));
+        };
+        let address = ((u64::from(hi) << 32) | u64::from(lo))
+            .checked_add(u64::from(offset))
+            .filter(|a| *a < 1 << 40)
+            .ok_or_else(|| invalid("vertex program address overflow"))?;
+        Ok(ProgramSource {
+            address: GpuAddress(address),
+            registers,
+            group,
+        })
+    }
+    pub fn vertex_array(&self) -> Result<VertexArray> {
+        let (
+            Some(format),
+            Some(hi),
+            Some(lo),
+            Some(lhi),
+            Some(llo),
+            Some(1),
+            Some(0),
+            [Some(a0), Some(a1)],
+        ) = (
+            self.vertex_format,
+            self.vertex_upper,
+            self.vertex_lower,
+            self.vertex_limit_upper,
+            self.vertex_limit_lower,
+            self.vertex_frequency,
+            self.vertex_instance,
+            self.vertex_attributes,
+        )
+        else {
+            return Err(invalid("incomplete vertex stream/attributes"));
+        };
+        let stride = (format & 4095) as u16;
+        let offsets = [((a0 >> 7) & 0x3fff) as u16, ((a1 >> 7) & 0x3fff) as u16];
+        let address = (u64::from(hi) << 32) | u64::from(lo);
+        let limit = (u64::from(lhi) << 32) | u64::from(llo);
+        if format & 0x1000 == 0
+            || stride == 0
+            || stride % 4 != 0
+            || offsets.iter().any(|v| v % 4 != 0)
+            || u32::from(offsets[0]) + 16 > u32::from(stride)
+            || u32::from(offsets[1]) + 8 > u32::from(stride)
+            || address % 4 != 0
+            || limit < address
+        {
+            return Err(invalid("invalid vertex stream bounds/layout"));
+        }
+        Ok(VertexArray {
+            address: GpuAddress(address),
+            limit: GpuAddress(limit),
+            stride,
+            offsets,
         })
     }
     pub fn constant_buffer(&self, group: u8, slot: u8) -> Result<ConstantBuffer> {

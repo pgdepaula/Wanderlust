@@ -3,8 +3,45 @@ use crate::{
     Result,
     backend::Renderer,
     invalid,
+    maxwell::Maxwell3d,
+    memory::*,
     shader_program::{FragmentProgram, VertexProgram},
+    texture::TextureChanges,
 };
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct BackingStamp {
+    guest: GuestAddress,
+    size: usize,
+    version: (u64, u64),
+}
+impl BackingStamp {
+    fn matches(&self, address: GpuAddress, map: &AddressMap, changes: &TextureChanges) -> bool {
+        address
+            .0
+            .checked_add(self.size as u64)
+            .is_some_and(|e| e <= 1 << 40)
+            && map.resolve(address, self.size).ok() == Some(self.guest)
+            && changes.stamp(self.guest.0..self.guest.0 + self.size as u64) == self.version
+    }
+    fn new(
+        address: GpuAddress,
+        size: usize,
+        map: &AddressMap,
+        changes: &TextureChanges,
+    ) -> Result<Self> {
+        let guest = map.resolve(address, size)?;
+        Ok(Self {
+            guest,
+            size,
+            version: changes.stamp(guest.0..guest.0 + size as u64),
+        })
+    }
+}
+pub(crate) struct SelectedVertex {
+    stamp: BackingStamp,
+    program: VertexProgram,
+}
 
 pub(crate) struct ResidentVertex {
     program: VertexProgram,
@@ -14,6 +51,7 @@ pub(crate) struct ResidentVertex {
     size: u64,
     stride: u64,
     offsets: [u64; 2],
+    stamp: Option<BackingStamp>,
 }
 impl Renderer {
     /// Intermediate stage validation API. Guest method resolution supplies these
@@ -24,6 +62,7 @@ impl Renderer {
         stride: u64,
         offsets: [u64; 2],
     ) -> Result<()> {
+        self.vertex_ready = false;
         if self.poisoned {
             self.vertex = None;
             return Err(invalid("renderer unavailable after backend failure"));
@@ -56,7 +95,7 @@ impl Renderer {
             self.counters.shader_cache_hits += 1;
             return Ok(());
         }
-        self.vertex = None;
+        let previous = self.vertex.take();
         self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let shader = self
@@ -128,8 +167,9 @@ impl Renderer {
             program: program.clone(),
             fragment: fragment.program.clone(),
             pipeline,
-            buffer: None,
-            size: 0,
+            buffer: previous.as_ref().and_then(|v| v.buffer.clone()),
+            size: previous.as_ref().map_or(0, |v| v.size),
+            stamp: previous.as_ref().and_then(|v| v.stamp),
             stride,
             offsets,
         });
@@ -138,6 +178,7 @@ impl Renderer {
         Ok(())
     }
     pub fn upload_vertices(&mut self, bytes: &[u8]) -> Result<()> {
+        self.vertex_ready = false;
         let v = self
             .vertex
             .as_mut()
@@ -166,6 +207,8 @@ impl Renderer {
         self.counters.upload_bytes += bytes.len() as u64;
         self.counters.upload_calls += 1;
         self.counters.staging_allocations += 1;
+        v.stamp = None;
+        self.vertex_ready = true;
         Ok(())
     }
     pub(crate) fn validate_vertices(&self, first: u32, count: u32) -> Result<()> {
@@ -178,6 +221,7 @@ impl Renderer {
             .as_ref()
             .ok_or_else(|| invalid("missing linked fragment stage"))?;
         if self.poisoned
+            || !self.vertex_ready
             || v.fragment != f.program
             || v.buffer.is_none()
             || count == 0
@@ -190,5 +234,74 @@ impl Renderer {
             return Err(invalid("invalid vertex draw range or stale shader pair"));
         }
         Ok(())
+    }
+    /// Resolve B197 vertex stage/stream through checked guest mappings. No host
+    /// geometry or stage binary argument is accepted. Draw/target remain separate.
+    pub fn sync_selected_vertices(
+        &mut self,
+        engine: &Maxwell3d,
+        map: &AddressMap,
+        memory: &impl GuestMemory,
+        changes: &TextureChanges,
+        first: u32,
+        count: u32,
+    ) -> Result<()> {
+        self.vertex_ready = false;
+        let source = engine.vertex_program()?;
+        let array = engine.vertex_array()?;
+        let size = array.size(first, count)?;
+        if self
+            .selected_vertex
+            .as_ref()
+            .is_none_or(|s| !s.stamp.matches(source.address, map, changes))
+        {
+            self.selected_vertex = None;
+            let binary = crate::shader_backend::read_program(
+                source.address,
+                map,
+                memory,
+                &mut self.counters,
+                true,
+            )?;
+            self.counters.vertex_shader_decodes += 1;
+            let program = VertexProgram::decode(&binary)?;
+            let stamp = BackingStamp::new(source.address, binary.len(), map, changes)?;
+            self.selected_vertex = Some(SelectedVertex { stamp, program });
+        } else {
+            self.counters.shader_cache_hits += 1;
+        }
+        let selected = self.selected_vertex.as_ref().unwrap();
+        if selected.program.required_registers() > u16::from(source.registers) {
+            return Err(invalid("vertex register allocation insufficient"));
+        }
+        let fragment = self
+            .resource_fragment
+            .as_ref()
+            .ok_or_else(|| invalid("missing fragment for vertex pairing"))?;
+        let stride = u64::from(array.stride);
+        let offsets = array.offsets.map(u64::from);
+        if self.vertex.as_ref().is_none_or(|v| {
+            v.program != selected.program
+                || v.fragment != fragment.program
+                || v.stride != stride
+                || v.offsets != offsets
+        }) {
+            let program = selected.program.clone();
+            self.set_vertex_program(&program, stride, offsets)?;
+        }
+        let stamp = BackingStamp::new(array.address, size, map, changes)?;
+        if self.vertex.as_ref().unwrap().stamp != Some(stamp) {
+            let bytes = map.read(memory, array.address, size)?;
+            if bytes.len() != size {
+                return Err(invalid("short guest vertex read"));
+            }
+            self.counters.vertex_guest_bytes += size as u64;
+            self.upload_vertices(bytes)?;
+            self.vertex.as_mut().unwrap().stamp = Some(stamp);
+        } else {
+            self.counters.cache_hits += 1;
+        }
+        self.vertex_ready = true;
+        self.validate_vertices(first, count)
     }
 }

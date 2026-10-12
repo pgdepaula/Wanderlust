@@ -220,3 +220,12 @@ GPR group at 7:0. NVIDIA's SPH VTG table and zlib UAM `SetVtgImap`/`SetVtgOmap`
 establish generic masks and position sysvalues 28..31. The packed VTG output map
 starts at byte 50, not byte 52. Actual pinned envyas produced and unmodified
 envydis decoded both vertex fixtures; no production assembler dependency exists.
+
+
+The pinned NVIDIA B197 header establishes stream A stride/enable and inclusive
+limit addresses, attribute A component-size encodings one/four and FLOAT encoding
+seven. Generic attribute slots 0/1 correspond to shader byte addresses 0x80/0x90,
+as independently specified by UAM's `nv_attributes.h`. FIFO fixture headers divide
+byte method addresses by four; method arguments remain unmodified little-endian
+words. Vertex input and program caches share the previously validated GPU mapping
+and write-journal contract rather than introducing another guest memory owner.

@@ -52,3 +52,49 @@ fn invalid_vertex_header_instruction_and_scoreboard() {
     b[104] = 255;
     assert!(VertexProgram::decode(&b).is_err());
 }
+#[test]
+fn b197_vertex_stream_fields_and_bounds() {
+    use wl_gpu::{
+        fifo::{Decoder, MethodWrite},
+        maxwell::*,
+        memory::*,
+    };
+    let mut e = Maxwell3d::default();
+    let mut f = Decoder::default();
+    for w in [
+        0x20010000, CLASS, 0x20020582, 0, 0x50000, 0x20020810, 0x11, 0x200, 0x20020813, 8, 0,
+        0x20040700, 0x1018, 0, 0x70000, 1, 0x200207c0, 0, 0x70047, 0x20010620, 0, 0x20020458,
+        0x38200000, 0x38800800,
+    ] {
+        if let Some(m) = f.push_word(w).unwrap() {
+            e.apply(m).unwrap();
+        }
+    }
+    f.finish().unwrap();
+    assert_eq!(e.vertex_program().unwrap().address, GpuAddress(0x50200));
+    let a = e.vertex_array().unwrap();
+    assert_eq!(a.offsets, [0, 16]);
+    assert_eq!(a.size(0, 3).unwrap(), 72);
+    for (first, count) in [(1, 3), (0, 0), (0, 2), (u32::MAX, 3)] {
+        assert!(a.size(first, count).is_err());
+    }
+    for (method, value) in [
+        (0x2040, 0x51),
+        (0x204c, 0),
+        (0x2050, 5),
+        (0x1c04, 256),
+        (0x1160, 0x38200001),
+        (0x1164, 0x38200800),
+        (0x1880, 1),
+        (0x1c0c, 2),
+    ] {
+        assert!(
+            e.apply(MethodWrite {
+                subchannel: 0,
+                method,
+                value
+            })
+            .is_err()
+        );
+    }
+}

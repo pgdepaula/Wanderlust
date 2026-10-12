@@ -384,3 +384,29 @@ validation boundaries, not B197 draw methods. The initial vertex test provides i
 buffer explicitly and checks non-fullscreen rasterization. Guest vertex arrays,
 viewport, target selection and hardware draw initiation require separate B197
 resolution; this interface does not imply their support.
+
+
+## Guest vertex arrays
+
+Vertex pipeline index one uses B197 0x2040/0x2044/0x204c/0x2050 for vertex type
+one, program offset, GPR budget and binding group. Stage-specific code caches use
+checked canonical backing spans and the shared write journal, separately from the
+pixel cache. Shader fetch and termination scanning are shared across both stages.
+
+The initial stream-zero subset uses 0x1c00..0x1c0c for enabled stride, 40-bit
+address and frequency one; 0x1880 explicitly selects noninstanced fetching.
+0x1f00/0x1f04 establish an inclusive byte limit. Attribute A0/A1 at 0x1160/0x1164
+accept active stream-zero FLOAT R32_G32_B32_A32 and R32_G32, respectively, with
+checked four-byte-aligned offsets within the stride. All fields must be explicit.
+Other formats/streams/instancing are unsupported. The supported fetch span includes
+the final vertex's complete stride; buffers without that trailing padding are
+currently rejected even if all individual attributes would fit.
+
+`sync_selected_vertices` resolves code and array state without host binary or
+geometry arguments. Borrowed vertex bytes are uploaded directly to a persistent
+wgpu buffer; no permanent CPU shadow is kept. Unchanged canonical backing/version
+skips reads and uploads. Position/UV writes and remapping synchronize data without
+changing shader code. Paired-pipeline changes preserve a compatible vertex buffer.
+Any failed resolution disables vertex drawing. The draw count and destination are
+still supplied through the explicit validation boundary until hardware draw/target
+methods are connected.
