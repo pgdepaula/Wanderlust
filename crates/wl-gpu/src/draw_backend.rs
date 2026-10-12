@@ -42,18 +42,16 @@ impl Renderer {
                     .push_word(*word)
                     .map_err(|e| crate::Error(e.to_string()))?
                 {
-                    if let MethodEffect::Draw { first, count } = channel
+                    let effect = channel
                         .engine
                         .apply(method)
-                        .map_err(|e| crate::Error(e.to_string()))?
-                    {
-                        last = Some(self.guest_draw(
-                            &channel.engine,
-                            (first, count),
-                            map,
-                            memory,
-                            changes,
-                        )?);
+                        .map_err(|e| crate::Error(e.to_string()))?;
+                    if matches!(
+                        effect,
+                        MethodEffect::Draw { .. } | MethodEffect::DrawIndices { .. }
+                    ) {
+                        last =
+                            Some(self.guest_draw(&channel.engine, effect, map, memory, changes)?);
                     }
                 }
             }
@@ -69,12 +67,11 @@ impl Renderer {
     fn guest_draw(
         &mut self,
         engine: &Maxwell3d,
-        draw: (u32, u32),
+        draw: MethodEffect,
         map: &AddressMap,
         memory: &mut impl GuestMemoryWrite,
         changes: &mut TextureChanges,
     ) -> Result<Frame> {
-        let (first, count) = draw;
         self.vertex_ready = false;
         self.hardware_raster = None;
         let (target, raster) = engine.rasterization()?;
@@ -86,7 +83,21 @@ impl Renderer {
         self.sync_selected_fragment(engine, map, memory, changes)?;
         self.hardware_raster = Some(raster);
         let result = (|| {
-            self.sync_selected_vertices(engine, map, memory, changes, first, count)?;
+            let command = match draw {
+                MethodEffect::Draw { first, count } => {
+                    self.sync_selected_vertices(engine, map, memory, changes, first, count)?;
+                    Command::DrawVertices { first, count }
+                }
+                MethodEffect::DrawIndices { first, count } => {
+                    let vertices = self.sync_indices(engine, map, memory, changes, first, count)?;
+                    self.sync_selected_vertices(engine, map, memory, changes, 0, vertices)?;
+                    Command::DrawGuestIndices {
+                        count,
+                        base: engine.index_buffer(first, count)?.base,
+                    }
+                }
+                _ => return Err(invalid("not a draw effect")),
+            };
             let stamp = GuestTargetStamp {
                 guest,
                 size,
@@ -144,11 +155,7 @@ impl Renderer {
                 return Err(crate::Error(error.to_string()));
             }
             prepared?;
-            let frame = self.execute(
-                target.width,
-                target.height,
-                &[Command::DrawVertices { first, count }],
-            )?;
+            let frame = self.execute(target.width, target.height, &[command])?;
             // Conservative whole-target generation publication. Marking before
             // the atomic write is safe on failure (extra invalidation, never stale).
             changes.mark_write(guest, size)?;

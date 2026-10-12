@@ -78,6 +78,7 @@ pub struct Renderer {
     pub(crate) vertex: Option<crate::vertex_backend::ResidentVertex>,
     pub(crate) selected_vertex: Option<crate::vertex_backend::SelectedVertex>,
     pub(crate) vertex_ready: bool,
+    pub(crate) indices: Option<crate::index_backend::ResidentIndex>,
     constant_pipeline: Option<(crate::shader::ConstantFragment, wgpu::RenderPipeline)>,
     buffers: HashMap<BufferId, Buffer>,
     state: ResourceState,
@@ -185,6 +186,7 @@ impl Renderer {
             vertex: None,
             selected_vertex: None,
             vertex_ready: false,
+            indices: None,
             selected_shader: None,
             buffers: HashMap::new(),
             state: ResourceState::new(),
@@ -267,12 +269,17 @@ impl Renderer {
             return Err(invalid("renderer unavailable after backend failure"));
         }
         for command in commands {
+            if let Command::DrawGuestIndices { count, base } = command {
+                self.validate_indices(*count, *base)?;
+            }
             if let Command::DrawVertices { first, count } = command {
                 self.validate_vertices(*first, *count)?;
             }
             if matches!(
                 command,
-                Command::DrawFragment | Command::DrawVertices { .. }
+                Command::DrawFragment
+                    | Command::DrawVertices { .. }
+                    | Command::DrawGuestIndices { .. }
             ) && self.resource_fragment.as_ref().is_none_or(|f| !f.ready)
             {
                 return Err(invalid("fragment resources not synchronized"));
@@ -341,6 +348,7 @@ impl Renderer {
                         | Command::DrawTexture { .. }
                         | Command::DrawFragment
                         | Command::DrawVertices { .. }
+                        | Command::DrawGuestIndices { .. }
                 )
             })
             .count();
@@ -420,7 +428,9 @@ impl Renderer {
                     first = false;
                     self.counters.cache_hits += 2;
                 }
-                Command::DrawFragment | Command::DrawVertices { .. } => {
+                Command::DrawFragment
+                | Command::DrawVertices { .. }
+                | Command::DrawGuestIndices { .. } => {
                     let fragment = self.resource_fragment.as_ref().expect("validated fragment");
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("translated Maxwell resource fragment"),
@@ -447,7 +457,10 @@ impl Renderer {
                         }),
                         occlusion_query_set: None,
                     });
-                    if let Command::DrawVertices { first, count } = cmd {
+                    if matches!(
+                        cmd,
+                        Command::DrawVertices { .. } | Command::DrawGuestIndices { .. }
+                    ) {
                         let vertex = self.vertex.as_ref().expect("validated vertex stage");
                         pass.set_pipeline(&vertex.pipeline);
                         if let Some(raster) = self.hardware_raster {
@@ -464,7 +477,17 @@ impl Renderer {
                         if let Some(binding) = &fragment.texture_binding {
                             pass.set_bind_group(1, binding, &[]);
                         }
-                        pass.draw(*first..*first + *count, 0..1);
+                        match cmd {
+                            Command::DrawVertices { first, count } => {
+                                pass.draw(*first..*first + *count, 0..1)
+                            }
+                            Command::DrawGuestIndices { count, base } => {
+                                let i = self.indices.as_ref().unwrap();
+                                pass.set_index_buffer(i.buffer.slice(..), i.format);
+                                pass.draw_indexed(0..*count, *base, 0..1);
+                            }
+                            _ => unreachable!(),
+                        }
                     } else {
                         pass.set_pipeline(&fragment.pipeline);
                         pass.set_bind_group(0, &fragment.binding, &[]);

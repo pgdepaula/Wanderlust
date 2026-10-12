@@ -506,3 +506,22 @@ it is not zero-copy or asynchronous game rendering.
 The result establishes a bounded hardware-driven synthetic guest draw. It does
 not establish nvdrv/VI integration, a visible Windows presentation surface, original
 game-submitted graphics commands or a Tears of the Kingdom frame.
+
+## Indexed B197 validation
+
+The indexed quad fixture uses four shared vertices plus an intentionally invalid
+unused dummy vertex. A U16 prefix is skipped by first-index one and base vertex
++1; U32 rebinding uses base -1 and independently changed backing at the same GPU
+VA. Independent rectangle/diagonal coverage assertions verify RGBA
+[64,128,191,255] inside and [11,17,23,255] outside, including pitch padding.
+Changing index contents removes the second triangle. An out-of-bounds resulting
+vertex faults before submission and leaves framebuffer bytes unchanged.
+
+Executed package checks: 37 CPU tests passed under both feature configurations;
+12 GPU tests are ignored by ordinary Cargo test and explicitly executed on WSL
+OpenGL (12 passed). The new indexed test and previous hardware test also passed
+on native Windows D3D12 and Vulkan (four executions); the final indexed negative
+case was rerun on both native backends (two passed). Formatting and strict package
+Clippy passed. The indexed four-draw workload read/uploaded 48 index bytes in
+three updates; its unchanged draw caused no index upload or pipeline creation.
+These measurements describe this synthetic workload, not game performance.

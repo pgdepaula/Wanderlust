@@ -458,7 +458,7 @@ unconditional rendering, rasterization enabled, one color attachment, single sam
 RGBA writes, fill mode, no depth/stencil/blend/cull/alpha test/logic op/sample mask,
 no polygon smoothing/offset/stipple, and the supported viewport controls. Missing
 state or unsupported values fail. No undocumented power-on values are substituted.
-No indexed draws, instancing, additional shader stages, perspective IPA, arbitrary
+No instancing, additional shader stages, perspective IPA, arbitrary
 formats or guest semaphore operations are implemented by this slice.
 
 ## Framebuffer visibility and ownership
@@ -486,3 +486,23 @@ size, dimensions and journal version, not GPU VA alone. An alias can reuse conte
 remapping, CPU writes, target changes or host-harness rendering invalidate them.
 Same-size rebinding reuses the host texture but uploads the newly selected guest
 contents. Caches remain bounded; revisiting evicted state may rebuild resources.
+
+## Indexed triangle lists
+
+The additional B197 path uses INDEX_BUFFER_A..F (0x17c8..0x17dc),
+DRAW_INDEX_BUFFER (0x17e0), BEGIN (0x1618) and END (0x1614). Address and inclusive
+limit are 40-bit; format E is one for U16 and two for U32. F is a first **element**,
+not byte offset. BEGIN must explicitly select triangle list, first instance (4),
+with END zero. GLOBAL_BASE_VERTEX_INDEX (0x1434) is signed; base instance (0x1438)
+and primitive restart (0x1644) must explicitly be zero. Compact forced-width
+methods and U8 indices remain unsupported.
+
+Selected indices are checked little-endian, scanned for minimum/maximum, and
+validated after signed base adjustment against the guest vertex limit before
+encoding. The supported scan budget is at most 1,048,576 elements per draw; this
+is an implementation limit. Indices are uploaded to persistent INDEX/COPY_DST
+buffers; U16 uploads with odd element counts are padded to four bytes without
+changing the draw count. The host draw uses the selected index span starting at
+zero and the original signed base. Shader code and pipelines are independent of
+mutable index contents. Cache identity includes canonical guest backing, selected
+byte span, width and dirty generation; base changes revalidate vertex bounds.

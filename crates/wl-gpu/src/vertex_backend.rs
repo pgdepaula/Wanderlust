@@ -224,6 +224,12 @@ impl Renderer {
         Ok(())
     }
     pub(crate) fn validate_vertices(&self, first: u32, count: u32) -> Result<()> {
+        if count % 3 != 0 {
+            return Err(invalid("invalid triangle vertex count"));
+        }
+        self.validate_vertex_span(first, count)
+    }
+    pub(crate) fn validate_vertex_span(&self, first: u32, count: u32) -> Result<()> {
         let v = self
             .vertex
             .as_ref()
@@ -237,7 +243,6 @@ impl Renderer {
             || v.fragment != f.program
             || v.buffer.is_none()
             || count == 0
-            || count % 3 != 0
             || first
                 .checked_add(count)
                 .and_then(|n| u64::from(n).checked_mul(v.stride))
@@ -261,7 +266,7 @@ impl Renderer {
         self.vertex_ready = false;
         let source = engine.vertex_program()?;
         let array = engine.vertex_array()?;
-        let size = array.size(first, count)?;
+        let size = array.span(first, count)?;
         if self
             .selected_vertex
             .as_ref()
@@ -316,6 +321,6 @@ impl Renderer {
             self.counters.cache_hits += 1;
         }
         self.vertex_ready = true;
-        self.validate_vertices(first, count)
+        self.validate_vertex_span(first, count)
     }
 }

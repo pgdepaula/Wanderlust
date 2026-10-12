@@ -43,6 +43,10 @@ pub enum Command<'a> {
         first: u32,
         count: u32,
     },
+    DrawGuestIndices {
+        count: u32,
+        base: i32,
+    },
     DrawTexture {
         id: TextureId,
         mip: u32,
@@ -129,7 +133,10 @@ pub fn validate(
                     .remove(id)
                     .ok_or_else(|| invalid("destroy unknown buffer"))?;
             }
-            Command::DrawFragment | Command::DrawTexture { .. } | Command::DrawVertices { .. } => {
+            Command::DrawFragment
+            | Command::DrawTexture { .. }
+            | Command::DrawVertices { .. }
+            | Command::DrawGuestIndices { .. } => {
                 drew = true;
             }
         }

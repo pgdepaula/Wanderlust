@@ -245,3 +245,12 @@ loss for a fractional extent that passed D3D12/Vulkan. The accepted hardware sub
 therefore requires integral viewport rectangles, instead of silently accepting
 backend-dependent geometry. This is a host-backend restriction, not Maxwell behavior.
 No new dependency or shader compiler code is imported for this hardware slice.
+
+### Indexed command corroboration
+
+NVIDIA `clb197.h` at `9fdf5c4062007929d9f4e6cbad9c9771fe61b880`
+(MIT) defines index methods 0x17c8..0x17e0 and BEGIN/END. Mesa
+[`nvc0_vbo.c`](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nvc0/nvc0_vbo.c)
+(MIT), `nvc0_draw_elements` and pre-Turing index descriptor programming, independently
+corroborates inclusive byte limits, U16/U32 format encoding, signed base vertex,
+first-element/count and BEGIN/END ordering. No Mesa implementation was vendored.

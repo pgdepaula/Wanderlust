@@ -27,6 +27,7 @@ pub enum MethodEffect {
     TextureHeadersInvalidated(Option<u32>),
     SamplersInvalidated(Option<u32>),
     Draw { first: u32, count: u32 },
+    DrawIndices { first: u32, count: u32 },
 }
 #[derive(Debug, Clone, Copy, Default)]
 struct Pool {
@@ -112,12 +113,17 @@ pub struct VertexArray {
 }
 impl VertexArray {
     pub fn size(&self, first: u32, count: u32) -> Result<usize> {
+        if count % 3 != 0 {
+            return Err(invalid("invalid triangle vertex count"));
+        }
+        self.span(first, count)
+    }
+    pub fn span(&self, first: u32, count: u32) -> Result<usize> {
         let size = first
             .checked_add(count)
             .and_then(|n| u64::from(n).checked_mul(u64::from(self.stride)))
             .ok_or_else(|| invalid("vertex range overflow"))?;
         if count == 0
-            || count % 3 != 0
             || size == 0
             || self
                 .address
@@ -136,6 +142,7 @@ impl VertexArray {
 pub struct Maxwell3d {
     method_writes: u64,
     raster: crate::raster::RasterRegisters,
+    indices: crate::index::IndexRegisters,
     bound: [bool; 8],
     modern_headers: bool,
     images: Pool,
@@ -378,6 +385,9 @@ impl Maxwell3d {
                 return Ok(MethodEffect::Draw { first, count });
             }
             _ => {
+                if let Some(effect) = self.indices.apply(method, value)? {
+                    return Ok(effect);
+                }
                 if !self.raster.apply(method, value)? {
                     return Err(MethodError::UnsupportedMethod(method));
                 }
@@ -414,6 +424,9 @@ impl Maxwell3d {
             registers,
             group,
         })
+    }
+    pub fn index_buffer(&self, first: u32, count: u32) -> Result<crate::index::IndexBuffer> {
+        self.indices.resolve(first, count)
     }
     pub fn rasterization(
         &self,
