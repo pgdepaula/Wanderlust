@@ -5,11 +5,14 @@
 pub mod backend;
 pub mod command;
 pub mod compression;
+#[cfg(feature = "wgpu-backend")]
+mod draw_backend;
 pub mod fifo;
 pub mod format;
 pub mod layout;
 pub mod maxwell;
 pub mod memory;
+pub mod raster;
 pub mod shader;
 #[cfg(feature = "wgpu-backend")]
 mod shader_backend;
@@ -76,4 +79,9 @@ pub struct Counters {
     pub vertex_upload_bytes: u64,
     pub vertex_shader_bytes: u64,
     pub vertex_shader_decodes: u64,
+    pub render_target_allocations: u64,
+    pub render_target_reuses: u64,
+    pub render_target_guest_bytes: u64,
+    pub render_target_upload_bytes: u64,
+    pub guest_framebuffer_write_bytes: u64,
 }

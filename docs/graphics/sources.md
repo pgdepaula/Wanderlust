@@ -229,3 +229,19 @@ as independently specified by UAM's `nv_attributes.h`. FIFO fixture headers divi
 byte method addresses by four; method arguments remain unmodified little-endian
 words. Vertex input and program caches share the previously validated GPU mapping
 and write-journal contract rather than introducing another guest memory owner.
+
+
+The hardware draw/target/raster subset uses the same pinned MIT NVIDIA B197 header,
+including compact draw 0x1214 and color-target 0x0800 fields. MIT Mesa
+[`nvc0_state_validate.c`](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nvc0/nvc0_state_validate.c)
+at the already pinned revision independently distinguishes linear target byte pitch
+from tiled pixel width in framebuffer setup. Its viewport scale/translation setup
+cross-checks the affine guest-to-window relationship. The shader fixtures continue
+to come from pinned envyas/envydis, with no commercial shader input.
+
+The locked [`wgpu-hal 26.0.6 GLES command source`](https://docs.rs/crate/wgpu-hal/26.0.6/source/src/gles/command.rs)
+casts viewport rectangles to integers in `set_viewport`. WSL execution exposed that
+loss for a fractional extent that passed D3D12/Vulkan. The accepted hardware subset
+therefore requires integral viewport rectangles, instead of silently accepting
+backend-dependent geometry. This is a host-backend restriction, not Maxwell behavior.
+No new dependency or shader compiler code is imported for this hardware slice.

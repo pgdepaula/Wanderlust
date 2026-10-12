@@ -416,6 +416,9 @@ impl VertexProgram {
         self.0.operations()
     }
     pub fn wgsl(&self) -> String {
+        self.wgsl_for_raster(false)
+    }
+    pub(crate) fn wgsl_for_raster(&self, flip_y: bool) -> String {
         use std::fmt::Write;
         let mut s = String::from(
             "struct Vertex { @builtin(position) position:vec4<f32>, @location(0) @interpolate(linear) uv:vec2<f32> };\n@vertex fn vs_main(@location(0) a0:vec4<f32>,@location(1) a1:vec2<f32>)->Vertex {var r:array<u32,256>;var v:Vertex;\n",
@@ -466,6 +469,9 @@ impl VertexProgram {
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
                 _ => unreachable!("resource/fragment operation in strict vertex program"),
             }
+        }
+        if flip_y {
+            s.push_str("v.position.y = -v.position.y;\n");
         }
         s.push_str("return v;}");
         s

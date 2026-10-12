@@ -26,6 +26,7 @@ pub enum MethodEffect {
     State,
     TextureHeadersInvalidated(Option<u32>),
     SamplersInvalidated(Option<u32>),
+    Draw { first: u32, count: u32 },
 }
 #[derive(Debug, Clone, Copy, Default)]
 struct Pool {
@@ -134,6 +135,7 @@ impl VertexArray {
 #[derive(Debug, Default)]
 pub struct Maxwell3d {
     method_writes: u64,
+    raster: crate::raster::RasterRegisters,
     bound: [bool; 8],
     modern_headers: bool,
     images: Pool,
@@ -367,7 +369,19 @@ impl Maxwell3d {
                     MethodEffect::TextureHeadersInvalidated(index)
                 });
             }
-            _ => return Err(MethodError::UnsupportedMethod(method)),
+            0x1214 => {
+                let first = value & 65535;
+                let count = (value >> 16) & 4095;
+                if value >> 28 != 4 || count == 0 || count % 3 != 0 {
+                    return Err(bad());
+                }
+                return Ok(MethodEffect::Draw { first, count });
+            }
+            _ => {
+                if !self.raster.apply(method, value)? {
+                    return Err(MethodError::UnsupportedMethod(method));
+                }
+            }
         }
         Ok(MethodEffect::State)
     }
@@ -400,6 +414,11 @@ impl Maxwell3d {
             registers,
             group,
         })
+    }
+    pub fn rasterization(
+        &self,
+    ) -> Result<(crate::raster::ColorTarget, crate::raster::Rasterization)> {
+        self.raster.resolve()
     }
     pub fn vertex_program(&self) -> Result<ProgramSource> {
         if !self.bound.iter().any(|b| *b) || !self.vertex_enabled {
@@ -680,5 +699,29 @@ impl TextureSampler {
             _ => return Err(invalid("unsupported TSC filter")),
         };
         Ok(Self { filter })
+    }
+}
+
+/// State owned by one ordered GPU channel. FIFO packet continuation and engine
+/// registers survive chunks; faults require explicit channel replacement.
+#[derive(Debug, Default)]
+pub struct Channel {
+    pub fifo: crate::fifo::Decoder,
+    pub engine: Maxwell3d,
+    pub(crate) faulted: bool,
+}
+impl Channel {
+    /// Finalize the actual stream, latching a truncated packet as a channel fault.
+    pub fn finish(&mut self) -> Result<()> {
+        if self.faulted {
+            return Err(invalid("GPU channel fault is latched"));
+        }
+        self.fifo.finish().map_err(|e| {
+            self.faulted = true;
+            crate::Error(e.to_string())
+        })
+    }
+    pub fn is_faulted(&self) -> bool {
+        self.faulted
     }
 }

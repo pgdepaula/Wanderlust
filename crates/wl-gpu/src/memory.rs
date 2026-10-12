@@ -133,3 +133,49 @@ impl DirtyRanges {
         self.ranges.clear();
     }
 }
+
+/// Optional synchronous writeback boundary. Validation and write must cover the
+/// entire range; write is all-or-nothing. The adapter owns permissions/backing
+/// stability during the exclusive call. No asynchronous host borrow is retained.
+pub trait GuestMemoryWrite: GuestMemory {
+    fn validate_write(&self, address: GuestAddress, length: usize) -> Result<()>;
+    fn write(&mut self, address: GuestAddress, bytes: &[u8]) -> Result<()>;
+}
+pub struct SliceMemoryMut<'a> {
+    pub base: GuestAddress,
+    pub bytes: &'a mut [u8],
+}
+impl GuestMemory for SliceMemoryMut<'_> {
+    fn read(&self, address: GuestAddress, length: usize) -> Result<&[u8]> {
+        let start = usize::try_from(
+            address
+                .0
+                .checked_sub(self.base.0)
+                .ok_or_else(|| invalid("unmapped mutable guest address"))?,
+        )
+        .map_err(|_| invalid("guest offset overflow"))?;
+        address
+            .0
+            .checked_add(length as u64)
+            .ok_or_else(|| invalid("guest range overflow"))?;
+        self.bytes
+            .get(
+                start
+                    ..start
+                        .checked_add(length)
+                        .ok_or_else(|| invalid("guest length overflow"))?,
+            )
+            .ok_or_else(|| invalid("unmapped mutable guest range"))
+    }
+}
+impl GuestMemoryWrite for SliceMemoryMut<'_> {
+    fn validate_write(&self, address: GuestAddress, length: usize) -> Result<()> {
+        self.read(address, length).map(|_| ())
+    }
+    fn write(&mut self, address: GuestAddress, bytes: &[u8]) -> Result<()> {
+        self.validate_write(address, bytes.len())?;
+        let start = (address.0 - self.base.0) as usize;
+        self.bytes[start..start + bytes.len()].copy_from_slice(bytes);
+        Ok(())
+    }
+}

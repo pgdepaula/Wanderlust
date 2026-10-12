@@ -52,6 +52,7 @@ pub(crate) struct ResidentVertex {
     stride: u64,
     offsets: [u64; 2],
     stamp: Option<BackingStamp>,
+    flip_y: bool,
 }
 impl Renderer {
     /// Intermediate stage validation API. Guest method resolution supplies these
@@ -61,6 +62,15 @@ impl Renderer {
         program: &VertexProgram,
         stride: u64,
         offsets: [u64; 2],
+    ) -> Result<()> {
+        self.set_vertex_program_raster(program, stride, offsets, false)
+    }
+    fn set_vertex_program_raster(
+        &mut self,
+        program: &VertexProgram,
+        stride: u64,
+        offsets: [u64; 2],
+        flip_y: bool,
     ) -> Result<()> {
         self.vertex_ready = false;
         if self.poisoned {
@@ -91,6 +101,7 @@ impl Renderer {
                 && v.fragment == fragment.program
                 && v.stride == stride
                 && v.offsets == offsets
+                && v.flip_y == flip_y
         }) {
             self.counters.shader_cache_hits += 1;
             return Ok(());
@@ -102,7 +113,7 @@ impl Renderer {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("translated Maxwell vertex"),
-                source: wgpu::ShaderSource::Wgsl(program.wgsl().into()),
+                source: wgpu::ShaderSource::Wgsl(program.wgsl_for_raster(flip_y).into()),
             });
         let mut groups = vec![&fragment.layout];
         if fragment.program.texture_input().is_some() {
@@ -172,6 +183,7 @@ impl Renderer {
             stamp: previous.as_ref().and_then(|v| v.stamp),
             stride,
             offsets,
+            flip_y,
         });
         self.counters.shader_module_allocations += 1;
         self.counters.pipeline_allocations += 1;
@@ -280,14 +292,16 @@ impl Renderer {
             .ok_or_else(|| invalid("missing fragment for vertex pairing"))?;
         let stride = u64::from(array.stride);
         let offsets = array.offsets.map(u64::from);
+        let flip_y = self.hardware_raster.is_some_and(|r| r.flip_y);
         if self.vertex.as_ref().is_none_or(|v| {
-            v.program != selected.program
+            v.flip_y != flip_y
+                || v.program != selected.program
                 || v.fragment != fragment.program
                 || v.stride != stride
                 || v.offsets != offsets
         }) {
             let program = selected.program.clone();
-            self.set_vertex_program(&program, stride, offsets)?;
+            self.set_vertex_program_raster(&program, stride, offsets, flip_y)?;
         }
         let stamp = BackingStamp::new(array.address, size, map, changes)?;
         if self.vertex.as_ref().unwrap().stamp != Some(stamp) {

@@ -422,3 +422,87 @@ D3D12 initially exposed a nearest-texel boundary within the original 0.001-texel
 exclusion; the final 0.02-texel exclusion accounts for finite subpixel rasterization
 precision without enlarging the one-byte channel tolerance. Both vertex tests pass
 on both native APIs. CPU checks pass 31 tests and strict package Clippy.
+
+## B197 hardware draw and guest framebuffer
+
+`hardware_gpu` supplies one literal B06F stream, GPU mappings and checked mutable
+guest memory. It does not supply a host draw, geometry slice, shader selection,
+TIC/TSC index or output size. The stream configures both independently assembled
+stages, LDC-backed texture resources, stream-zero FLOAT attributes, color target,
+viewport/scissor and all required fixed raster state, then executes byte method
+0x1214. The first packet is deliberately split across chunks.
+
+The off-center triangle uses three different positions/UVs. The color target at
+GPU VA 0x90000 maps to guest address 0x8000, with 208-byte pitch and 29 rows: 52
+storage pixels per row, clipped to 47 visible pixels. Independent double-precision
+edge/barycentric calculations check coverage and nearest texels. Pixels near edges
+(0.005 barycentric distance) or nearest texel boundaries (0.02 texel) are excluded;
+all asserted sampled channels retain the one-byte tolerance. Over 100 covered and
+600 uncovered pixels are required for each variant. Uncovered pixels, including
+the five padding pixels per row, retain `[11,17,23,255]` exactly. Frame readback and
+the selected guest framebuffer bytes are equal across the entire storage span.
+
+Thirteen actual method-triggered draws verify unchanged reuse, moved guest vertices,
+texture-only mutation to `[9,200,41,255]`, pixel-program selection yielding
+`[64,128,191,255]`, destination rebinding, both viewport Y signs, scissor narrowing,
+vertex-program selection, in-place vertex binary mutation, target remapping, target
+VA aliasing and a narrower integral viewport. The old destination remains unchanged
+after rebinding/remapping. Invalid format, unmapped target, short vertex range and
+short writable target fail without a further GPU submission. Faulted channels reject
+subsequent draws. CPU tests cover pitch/field interpretations, unsupported state,
+viewport/clip bounds, truncation fault latching and atomic checked guest writes.
+
+The final graphics package passes 35 CPU tests with and without default features,
+strict package Clippy and live workspace formatting. Normal package testing marks
+11 hardware executables ignored; explicit execution runs all eleven successfully
+on each of WSL OpenGL llvmpipe, native Windows Intel UHD D3D12 and Vulkan: **33 GPU
+executions passed, zero GPU skips**. Some earlier native starts failed in WSL
+`UtilAcceptVsock` before entering the test process; the completed final regression
+ran all 22 native cases on their first attempt. A fractional viewport experiment
+passed native APIs but failed GLES, which truncates it; the supported subset now
+rejects fractional rectangles rather than broadening pixel tolerances.
+
+Validation commands are `cargo test -p wl-gpu --no-default-features --locked`,
+`cargo test -p wl-gpu --locked`, `cargo clippy -p wl-gpu --all-targets --locked -- -D warnings`
+and `WGPU_BACKEND=gl cargo test -p wl-gpu --locked -- --ignored --nocapture`.
+Native test binaries were cross-built with the exact lockfile and actually executed
+with `WGPU_BACKEND=dx12` and `vulkan`; compilation alone is not counted. An ordinary
+source snapshot of the committed workspace plus these graphics changes, using the
+exact committed Cargo.lock, passes workspace formatting, strict workspace Clippy
+and **239 workspace tests**, with the 11 GPU cases separately executed above.
+Unfinished analysis/CLI/IDE changes remain outside that snapshot; this result does
+not assert whole-workspace tests against those live edits. The first workspace run
+was interrupted during CLI integration tests; the final complete rerun exited zero.
+
+Measured counters for the controlled hardware workload are:
+
+| Operation | Cold first draw | Identical next draw, added work |
+| --- | ---: | ---: |
+| Vertex shader code read | 144 bytes | 0 |
+| Pixel shader code read | 144 bytes | 0 |
+| Vertex guest read/upload | 72 bytes | 0 |
+| Target guest read/upload | 6,032 bytes | 0 |
+| Total host-to-GPU upload | 8,916 bytes | 0 |
+| Shader modules/pipelines, including two renderer defaults | 4 | 0 |
+| Target allocations | 1 | 0 |
+| GPU-to-host padded readback | 7,440 bytes | 7,440 bytes |
+| Packed framebuffer write to guest | 6,032 bytes | 6,032 bytes |
+
+Across all thirteen variants, the workload records 105 method writes before fault
+probes, 144 vertex-upload bytes, 464 vertex-code bytes/three decodes, 288 pixel-code
+bytes/two decodes, two descriptor reads, one target allocation/twelve reuses,
+72,120 total upload bytes and 78,416 bytes written to guest framebuffers. CPU resets
+of the background deliberately trigger target uploads before mutation comparisons.
+
+One complete unchanged D3D12 draw/readback/writeback observation took 3.34 ms and
+performed 57 process-wide Rust allocations/one reallocation, including wgpu and
+owned frame output. WSL observations varied by milliseconds. These debug, tiny
+synchronous samples establish no speedup or game-frame timing. The separate
+32-iteration resource synchronization test still records zero Rust allocations,
+reads or uploads; it excludes draw encoding/readback and must not be confused with
+a complete draw. This path transfers real data and synchronizes on every draw;
+it is not zero-copy or asynchronous game rendering.
+
+The result establishes a bounded hardware-driven synthetic guest draw. It does
+not establish nvdrv/VI integration, a visible Windows presentation surface, original
+game-submitted graphics commands or a Tears of the Kingdom frame.

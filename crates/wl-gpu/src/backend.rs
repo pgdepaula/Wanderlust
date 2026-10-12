@@ -50,9 +50,9 @@ impl Frame {
     }
 }
 
-struct Target {
+pub(crate) struct Target {
     extent: (u32, u32),
-    texture: wgpu::Texture,
+    pub(crate) texture: wgpu::Texture,
     view: wgpu::TextureView,
     readback: wgpu::Buffer,
     pitch: u32,
@@ -81,7 +81,9 @@ pub struct Renderer {
     constant_pipeline: Option<(crate::shader::ConstantFragment, wgpu::RenderPipeline)>,
     buffers: HashMap<BufferId, Buffer>,
     state: ResourceState,
-    target: Option<Target>,
+    pub(crate) target: Option<Target>,
+    pub(crate) hardware_raster: Option<crate::raster::Rasterization>,
+    pub(crate) guest_target: Option<crate::draw_backend::GuestTargetStamp>,
     timestamps: Option<(wgpu::QuerySet, wgpu::Buffer)>,
     pub(crate) poisoned: bool,
     pub(crate) textures:
@@ -187,6 +189,8 @@ impl Renderer {
             buffers: HashMap::new(),
             state: ResourceState::new(),
             target: None,
+            hardware_raster: None,
+            guest_target: None,
             timestamps,
             poisoned: false,
             textures: HashMap::new(),
@@ -196,7 +200,7 @@ impl Renderer {
         })
     }
 
-    fn ensure_target(&mut self, width: u32, height: u32) -> Result<()> {
+    pub(crate) fn ensure_target(&mut self, width: u32, height: u32) -> Result<()> {
         let limit = self.capabilities.device_limits.max_texture_dimension_2d;
         if width == 0 || height == 0 || width > limit || height > limit {
             return Err(invalid("invalid render extent"));
@@ -226,7 +230,9 @@ impl Renderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -254,6 +260,9 @@ impl Renderer {
     /// Buffer drop releases the CPU handle; wgpu retains submitted resource references.
     /// No explicit Buffer::destroy is used while encoding/submitted work can refer to it.
     pub fn execute(&mut self, width: u32, height: u32, commands: &[Command<'_>]) -> Result<Frame> {
+        if self.hardware_raster.is_none() {
+            self.guest_target = None;
+        }
         if self.poisoned {
             return Err(invalid("renderer unavailable after backend failure"));
         }
@@ -420,7 +429,7 @@ impl Renderer {
                             resolve_target: None,
                             depth_slice: None,
                             ops: wgpu::Operations {
-                                load: if first {
+                                load: if first && self.hardware_raster.is_none() {
                                     wgpu::LoadOp::Clear(wgpu::Color::BLACK)
                                 } else {
                                     wgpu::LoadOp::Load
@@ -441,6 +450,12 @@ impl Renderer {
                     if let Command::DrawVertices { first, count } = cmd {
                         let vertex = self.vertex.as_ref().expect("validated vertex stage");
                         pass.set_pipeline(&vertex.pipeline);
+                        if let Some(raster) = self.hardware_raster {
+                            let v = raster.viewport;
+                            pass.set_viewport(v[0], v[1], v[2], v[3], v[4], v[5]);
+                            let s = raster.scissor;
+                            pass.set_scissor_rect(s[0], s[1], s[2], s[3]);
+                        }
                         pass.set_vertex_buffer(
                             0,
                             vertex.buffer.as_ref().expect("uploaded vertices").slice(..),

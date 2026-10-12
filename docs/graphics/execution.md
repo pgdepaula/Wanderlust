@@ -353,10 +353,9 @@ compiler cache. Revisited evicted programs may compile again.
 
 Literal B06F packets now select the pixel binary and its constant binding group;
 the binary's LDC and TEX choose resource data and descriptors. The caller no longer
-passes a shader fixture or TIC/TSC indices to this path. Geometry and destination
-remain the explicit fullscreen fragment harness. No B197 draw trigger, vertex
-binary execution, guest render-target writeback or nvhost service integration is
-implemented. These are required before claiming a guest-directed hardware draw.
+passes a shader fixture or TIC/TSC indices to this path. The original fragment-only API retains its explicit fullscreen validation harness.
+The paired vertex and hardware draw paths below resolve guest geometry and targets
+separately. Nvhost service integration is not implemented.
 
 
 ## Translated vertex stage and linkage
@@ -407,6 +406,83 @@ geometry arguments. Borrowed vertex bytes are uploaded directly to a persistent
 wgpu buffer; no permanent CPU shadow is kept. Unchanged canonical backing/version
 skips reads and uploads. Position/UV writes and remapping synchronize data without
 changing shader code. Paired-pipeline changes preserve a compatible vertex buffer.
-Any failed resolution disables vertex drawing. The draw count and destination are
-still supplied through the explicit validation boundary until hardware draw/target
-methods are connected.
+Any failed resolution disables vertex drawing. This intermediate API takes a draw
+range; the hardware submission boundary below obtains it from the B197 method.
+
+
+## Hardware channel draw and guest color target
+
+`Renderer::submit_pushbuffer(channel, words, map, memory, changes)` consumes the
+existing B06F decoder and B197 engine in channel order. Its arguments contain no
+host geometry, shader binary, descriptor index, draw count or target extent.
+`Channel` owns those existing state objects and a fault latch, not another command
+interpreter. Chunks may split packets; `Channel::finish` validates the actual end
+and latches truncation. Any packet, method, resource or draw fault stops the channel.
+Previously completed draws remain visible; failed later state cannot execute a
+stale resident pipeline. Replacing a faulted channel is explicit.
+
+B197 `DRAW_VERTEX_ARRAY_BEGIN_END_INSTANCE_FIRST` at byte method 0x1214 supplies
+start index bits 15:0, count 27:16 and topology 31:28. Only nonempty triangle lists
+(topology four, count divisible by three) and a single instance are accepted.
+Literal FIFO words `0x20010485, 0x40030000` initiate three vertices starting at zero.
+The method resolves the existing selected vertex/pixel programs, constant buffers,
+TIC/TSC resources and stream-zero attributes before encoding `DrawVertices` through
+the existing renderer. This uses actual decoded vertex exports and screen-linear
+UV linkage, never the fragment harness's fullscreen vertex entry.
+
+Target zero uses 0x0800..0x0820: address A/B, width, height, format, memory layout,
+third dimension, array pitch and layer. The accepted subset is A8B8G8R8 (`0xd5`,
+little-endian RGBA bytes), pitch layout (`0x1000`), third dimension one, zero array
+pitch/layer and a 256-byte-aligned 40-bit address. The address alignment is a
+supported-subset restriction, not a universal hardware alignment claim. In pitch
+layout **WIDTH is byte pitch**. It must be positive and divisible by four; storage
+width is pitch/4. Logical visible bounds come from surface/viewport clipping and
+scissor. Padding pixels remain initialized guest data and are preserved.
+Block-linear, layered, depth, compressed and multisampled render targets are not
+supported, independently of sampled-texture layout support.
+
+Viewport zero uses scale/offset 0x0a00..0x0a14, identity coordinate swizzle at
+0x0a18, clip rectangle/depth at 0x0c00..0x0c0c, surface clips 0x0ff4/0x0ff8 and
+enabled scissor 0x0e00..0x0e08. The subset requires positive X scale, nonzero Y scale,
+Z scale one/offset zero, upper-left origin, zero window offsets, half-integer pixel
+centers and zero-to-one depth clipping. Wgpu viewport/scissor are derived from
+those fields. Positive Maxwell Y scale negates translated clip Y to implement
+`window_y = offset_y + scale_y * clip_y/clip_w`; negative scale needs no negation.
+The flip flag participates in paired-pipeline identity; viewport dimensions remain
+dynamic state. Fractional viewport rectangles are explicitly unsupported because
+wgpu-hal 26.0.6 GLES truncates viewport coordinates/extents to integers. Empty or
+out-of-bounds viewport/clip intersections are also explicitly unsupported.
+
+`raster::FIXED_RASTER_STATE` enumerates the required explicit state writes:
+unconditional rendering, rasterization enabled, one color attachment, single sample,
+RGBA writes, fill mode, no depth/stencil/blend/cull/alpha test/logic op/sample mask,
+no polygon smoothing/offset/stipple, and the supported viewport controls. Missing
+state or unsupported values fail. No undocumented power-on values are substituted.
+No indexed draws, instancing, additional shader stages, perspective IPA, arbitrary
+formats or guest semaphore operations are implemented by this slice.
+
+## Framebuffer visibility and ownership
+
+The optional `GuestMemoryWrite` boundary extends checked read access with whole-span
+write validation and an atomic all-or-nothing write. `SliceMemoryMut` implements
+that independent test contract. It is not a runtime memory implementation. The
+adapter must keep backing identity, permissions and contents stable during the
+exclusive call; no guest borrow outlives queue upload or spans GPU completion.
+
+The existing bounded offscreen target gains COPY_DST. First use/rebinding/content
+changes initialize it from guest bytes through `Queue::write_texture`, using byte
+pitch without the buffer-copy 256-byte row restriction. The render pass uses Load,
+so uncovered pixels are retained. Readback uses the existing 256-byte-aligned buffer
+copy, submission completion wait and row packing. After completion one checked
+whole-span guest write publishes the framebuffer and updates the shared generation
+journal. Host resource handles remain owned by wgpu across submissions; no explicit
+destroy or sleep is used. Allocation/upload validation errors poison the backend.
+
+This is an explicitly synchronous validation visibility contract, not a hardware
+fence/semaphore implementation. Every draw still waits and reads back the entire
+storage target. Asynchronous GPU/CPU visibility and presentation require a separate
+runtime service contract. The latest target cache keys canonical guest backing,
+size, dimensions and journal version, not GPU VA alone. An alias can reuse contents;
+remapping, CPU writes, target changes or host-harness rendering invalidate them.
+Same-size rebinding reuses the host texture but uploads the newly selected guest
+contents. Caches remain bounded; revisiting evicted state may rebuild resources.
