@@ -506,3 +506,50 @@ changing the draw count. The host draw uses the selected index span starting at
 zero and the original signed base. Shader code and pipelines are independent of
 mutable index contents. Cache identity includes canonical guest backing, selected
 byte span, width and dirty generation; base changes revalidate vertex bounds.
+
+## Deferred hardware draws and explicit visibility
+
+`submit_pushbuffer_deferred` accepts the same channel, guest mappings, exclusive
+memory adapter and write journal as the synchronous entry, and returns the number
+of submitted draws. Draws use the resident color image with Load/Store. Each draw
+is submitted **before** subsequent queue uploads, so mutable vertex/constant data
+cannot retroactively change earlier draws. There is one queue submission per draw,
+but no unconditional readback, buffer mapping or CPU completion wait per draw.
+This is not yet one encoder/submission for an entire frame.
+
+`synchronize_target(memory, changes)` orders one texture readback after pending
+draws, waits for that submission, and atomically publishes packed RGBA bytes to
+the canonical guest backing. It returns None without work if nothing is pending.
+The existing synchronous entry invokes this boundary after each hardware draw,
+preserving its externally visible framebuffer contract. Optional GPU timestamps
+refer to the latest draw, not the sum of deferred work or end-to-end frame time.
+Standalone harness execution is rejected while guest output is pending.
+
+Residency is deliberately bounded to one color target. Rebinding to another
+backing, format/extent replacement, or CPU writes to the pending target require a
+conditional barrier before reuse. Aliased GPU VAs resolving to the same canonical
+backing and dimensions retain the image. Changing mappings cannot redirect old
+pending writeback: it retains the original checked guest backing. This assumes the
+adapter's backing identity remains stable within its process epoch.
+
+GPU write generation is counted separately (`gpu_target_writes`). The first GPU
+write in a pending interval invalidates overlapping resource caches in the shared
+write journal; further ordered writes do not consume a journal slot per draw.
+A source-read guard rejects reads from pending output during channel resource
+resolution. A hazard causes one completion/publication and a resource-resolution
+retry, covering shader code, constants, descriptors, vertices, indices and sampled
+texture aliases without silently reading stale RAM. Feedback currently uses a CPU
+coherence barrier, not direct resident-target sampling.
+
+CPU writes must be declared with exact canonical guest byte ranges. Before
+readback, subsequent journal entries are intersected/coalesced and their current
+CPU bytes saved. Those patches override the corresponding GPU output bytes at
+atomic publication; unchanged pixels retain the GPU result. A patched target is
+initialized from merged RAM before the next draw. Overlapping writes therefore
+preserve CPU-after-GPU ordering without interpreting tiled dirty offsets as linear
+texels. A changed epoch or evicted patch history fails before writeback; the caller
+must synchronize before such a transition. Failure of an atomic guest write leaves
+pending output and journal version retryable. Channel faults preserve earlier
+submitted work for explicit synchronization. Dropping a renderer does not publish
+pending output. These are GPU test-adapter contracts, not Horizon fences, syncpoints,
+GPU-service wiring or cross-thread runtime memory transactions.

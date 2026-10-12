@@ -525,3 +525,43 @@ case was rerun on both native backends (two passed). Formatting and strict packa
 Clippy passed. The indexed four-draw workload read/uploaded 48 index bytes in
 three updates; its unchanged draw caused no index upload or pipeline creation.
 These measurements describe this synthetic workload, not game performance.
+
+## Deferred draw and coherence scenarios
+
+`batched_gpu` executes three overlapping guest triangles, selecting independent
+Maxwell quarters/red/TEX binaries through B197. The final texture draw uses the
+real guest VS varying. An independent barycentric/pixel oracle verifies visible
+layers, draw order and untouched pitch padding. Before explicit synchronization,
+guest RAM retains its old bytes. Three draws use one target initialization, three
+queue submissions, zero readbacks/waits; final visibility adds one submission,
+one readback/wait and 6,032 guest write bytes (52x29 RGBA8). Padded readback is
+7,424 bytes plus 16 optional timestamp bytes.
+
+A 32-draw warm sequence asserts no additional shader or descriptor reads,
+uploads, pipeline creations, intermediate readbacks or waits. Final visibility
+uses one readback/wait and 33 submissions in total. Process-wide Rust allocations
+and CPU submission/completion times are logged, with tests serialized for the
+measurement; driver activity still contributes. No zero-allocation, zero-copy or
+game frame-time claim follows from these counters.
+
+Additional actual GPU tests cover CPU patch merging, target aliases/rebinds,
+CPU writes before another draw, source texture aliasing pending GPU output,
+readback after channel faults, failed atomic writeback retries, epoch changes and
+lost dirty-journal history. The texture alias deliberately reinterprets linear RT
+bytes through a block-linear TIC; its independent scalar GOB oracle does not imply
+block-linear render-target support. All tests use redistributable fixtures.
+
+The deferred/coherence implementation was explicitly executed on WSL OpenGL and
+native Intel UHD D3D12/Vulkan: 16 GPU tests per backend passed (48 executions,
+zero GPU skips). Two D3D12 texture-test process launches failed in WSL transport
+before test startup; the third launch executed and passed. Those transport errors
+are not counted as successful GPU runs. The 32-draw warm D3D12 observation recorded
+7.82 ms CPU submission time and 1,346 process-wide Rust allocations plus 34
+reallocations, with zero added uploads/pipelines/descriptor reads and one final
+7,440-byte readback/wait. This is a debug microbenchmark, not a frame-rate estimate.
+
+A faithful ordinary source snapshot of the intended GPU delivery, retaining the
+exact lockfile and excluding unrelated unfinished runtime edits and the pending
+independent conformance file, passed workspace formatting, strict workspace Clippy
+and 242 CPU/workspace tests. Sixteen GPU tests remain explicitly ignored in that
+ordinary workspace command and are accounted for by the execution runs above.

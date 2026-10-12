@@ -123,6 +123,13 @@ impl TextureChanges {
             writes: VecDeque::with_capacity(64),
         }
     }
+    #[cfg(feature = "wgpu-backend")]
+    pub(crate) fn can_mark_write(&self) -> Result<()> {
+        self.revision
+            .checked_add(1)
+            .ok_or_else(|| invalid("dirty revision overflow"))?;
+        Ok(())
+    }
     pub fn mark_write(&mut self, address: GuestAddress, size: usize) -> Result<()> {
         let end = address
             .0
@@ -141,6 +148,27 @@ impl TextureChanges {
         self.writes.push_back((self.revision, address.0..end));
         Ok(())
     }
+    /// Exact subsequent writes for preserving CPU changes over pending GPU output.
+    /// Evicted history or a new backing epoch cannot be merged safely.
+    #[cfg(any(feature = "wgpu-backend", test))]
+    pub(crate) fn writes_since(
+        &self,
+        range: Range<u64>,
+        version: (u64, u64),
+    ) -> Result<Vec<Range<u64>>> {
+        if self.epoch != version.0 || self.floor > version.1 {
+            return Err(invalid(
+                "pending target dirty history unavailable; synchronize before epoch change or journal eviction",
+            ));
+        }
+        let mut dirty = crate::memory::DirtyRanges::default();
+        for (v, r) in &self.writes {
+            if *v > version.1 && r.start < range.end && range.start < r.end {
+                dirty.insert(r.start.max(range.start)..r.end.min(range.end))?;
+            }
+        }
+        Ok(dirty.ranges().to_vec())
+    }
     /// A floor advance conservatively invalidates older resources after journal eviction.
     pub fn stamp(&self, range: Range<u64>) -> (u64, u64) {
         let revision = self
@@ -152,5 +180,29 @@ impl TextureChanges {
             .unwrap_or(0)
             .max(self.floor);
         (self.epoch, revision)
+    }
+}
+
+#[cfg(test)]
+mod journal_tests {
+    use super::*;
+    #[test]
+    fn exact_patch_union_and_history_bounds() {
+        let mut c = TextureChanges::new(4);
+        let version = c.stamp(100..200);
+        c.mark_write(GuestAddress(90), 20).unwrap();
+        c.mark_write(GuestAddress(105), 25).unwrap();
+        c.mark_write(GuestAddress(195), 20).unwrap();
+        assert_eq!(
+            c.writes_since(100..200, version).unwrap(),
+            vec![100..130, 195..200]
+        );
+        assert!(c.writes_since(100..200, (5, 0)).is_err());
+        let now = c.stamp(100..200);
+        assert!(c.writes_since(100..200, now).unwrap().is_empty());
+        for _ in 0..65 {
+            c.mark_write(GuestAddress(1000), 4).unwrap();
+        }
+        assert!(c.writes_since(100..200, version).is_err());
     }
 }

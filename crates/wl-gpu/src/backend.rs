@@ -24,6 +24,8 @@ pub struct Frame {
     pub rgba: Vec<u8>,
     pub encode_time: Duration,
     pub total_time: Duration,
+    /// For explicit guest-target synchronization, times only the latest draw,
+    /// not the sum of queued draws or completion/readback latency.
     pub gpu_nanoseconds: Option<f64>,
 }
 impl Frame {
@@ -85,6 +87,7 @@ pub struct Renderer {
     pub(crate) target: Option<Target>,
     pub(crate) hardware_raster: Option<crate::raster::Rasterization>,
     pub(crate) guest_target: Option<crate::draw_backend::GuestTargetStamp>,
+    pub(crate) target_pending: bool,
     timestamps: Option<(wgpu::QuerySet, wgpu::Buffer)>,
     pub(crate) poisoned: bool,
     pub(crate) textures:
@@ -193,6 +196,7 @@ impl Renderer {
             target: None,
             hardware_raster: None,
             guest_target: None,
+            target_pending: false,
             timestamps,
             poisoned: false,
             textures: HashMap::new(),
@@ -262,6 +266,21 @@ impl Renderer {
     /// Buffer drop releases the CPU handle; wgpu retains submitted resource references.
     /// No explicit Buffer::destroy is used while encoding/submitted work can refer to it.
     pub fn execute(&mut self, width: u32, height: u32, commands: &[Command<'_>]) -> Result<Frame> {
+        if self.target_pending {
+            return Err(invalid(
+                "synchronize pending guest target before standalone execution",
+            ));
+        }
+        self.execute_mode(width, height, commands, true)?
+            .ok_or_else(|| invalid("missing synchronous frame"))
+    }
+    pub(crate) fn execute_mode(
+        &mut self,
+        width: u32,
+        height: u32,
+        commands: &[Command<'_>],
+        readback: bool,
+    ) -> Result<Option<Frame>> {
         if self.hardware_raster.is_none() {
             self.guest_target = None;
         }
@@ -309,7 +328,7 @@ impl Renderer {
         }
         self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         self.device.push_error_scope(wgpu::ErrorFilter::Validation);
-        let result = self.execute_validated(width, height, commands, next);
+        let result = self.execute_validated(width, height, commands, next, readback);
         let validation = pollster::block_on(self.device.pop_error_scope());
         let allocation = pollster::block_on(self.device.pop_error_scope());
         if let Some(error) = validation.or(allocation) {
@@ -328,7 +347,8 @@ impl Renderer {
         height: u32,
         commands: &[Command<'_>],
         next: ResourceState,
-    ) -> Result<Frame> {
+        readback: bool,
+    ) -> Result<Option<Frame>> {
         let start = Instant::now();
         self.ensure_target(width, height)?;
         let target = self.target.as_ref().expect("validated target");
@@ -558,6 +578,37 @@ impl Renderer {
                 occlusion_query_set: None,
             });
         }
+        if !readback {
+            self.queue.submit([encoder.finish()]);
+            self.counters.submissions += 1;
+            self.state = next;
+            return Ok(None);
+        }
+        self.finish_readback(encoder, start, !first, next).map(Some)
+    }
+    pub(crate) fn read_resident_target(&mut self) -> Result<Frame> {
+        if self.poisoned {
+            return Err(invalid("renderer unavailable after backend failure"));
+        }
+        let encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("explicit guest visibility"),
+            });
+        self.finish_readback(encoder, Instant::now(), true, self.state.clone())
+    }
+    fn finish_readback(
+        &mut self,
+        mut encoder: wgpu::CommandEncoder,
+        start: Instant,
+        has_draw: bool,
+        next: ResourceState,
+    ) -> Result<Frame> {
+        let target = self
+            .target
+            .as_ref()
+            .ok_or_else(|| invalid("no resident target"))?;
+        let (width, height) = target.extent;
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture: &target.texture,
@@ -579,7 +630,7 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
         );
-        if !first {
+        if has_draw {
             if let Some((query, resolve)) = &self.timestamps {
                 encoder.resolve_query_set(query, 0..2, resolve, 0);
                 encoder.copy_buffer_to_buffer(resolve, 0, &target.readback, target.image_size, 16);
@@ -609,7 +660,7 @@ impl Renderer {
         for row in mapped[..target.image_size as usize].chunks_exact(target.pitch as usize) {
             rgba.extend_from_slice(&row[..width as usize * 4]);
         }
-        let gpu_nanoseconds = if !first && self.timestamps.is_some() {
+        let gpu_nanoseconds = if has_draw && self.timestamps.is_some() {
             let offset = target.image_size as usize;
             let begin = u64::from_le_bytes(mapped[offset..offset + 8].try_into().unwrap());
             let end = u64::from_le_bytes(mapped[offset + 8..offset + 16].try_into().unwrap());
@@ -617,6 +668,7 @@ impl Renderer {
         } else {
             None
         };
+        self.counters.readback_operations += 1;
         self.counters.readback_host_copy_bytes += rgba.len() as u64;
         self.counters.owned_output_allocations += 1; // owned packed pixel output only
         self.counters.readback_bytes +=
