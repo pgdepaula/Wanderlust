@@ -1,7 +1,12 @@
 //! A strict semantic decoder for the ARMv8.0 A64 integer instruction set used by AArch64
 //! application code. Encodings outside the implemented set, reserved encodings and
 //! constrained-unpredictable forms are rejected rather than given a host-dependent meaning.
+pub mod extensions;
 pub mod simd;
+pub use extensions::{
+    CounterRegister, Crc32Op, CryptoOp, ExtensionOp, SystemCounterOp, decode_crc32, decode_crypto,
+    decode_extension, decode_system_counter,
+};
 use serde::Serialize;
 pub use simd::{FpBinary, FpOp, FpUnary, PostIndex, Shape, SimdOp, Structures};
 use wl_common::{GuestAddr, Result};
