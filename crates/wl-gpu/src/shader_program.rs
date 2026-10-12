@@ -8,7 +8,18 @@ pub struct ConstantRef {
     pub offset: u32,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatOperator {
+    Add,
+    Multiply,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
+    Float {
+        dst: u8,
+        left: u8,
+        right: u8,
+        operator: FloatOperator,
+    },
     Immediate {
         dst: u8,
         bits: u32,
@@ -78,6 +89,7 @@ impl Program {
         initialized[255] = true; // RZ
         let mut pending = [false; 256];
         let mut provenance = [None; 256];
+        let mut multiply_result = [false; 256];
         let mut exited = false;
         let mut exports = 0u8;
         for (bundle_index, bundle) in input[0x50..].chunks_exact(32).enumerate() {
@@ -176,6 +188,7 @@ impl Program {
                         initialized[r as usize] = true;
                         pending[r as usize] = true;
                         provenance[r as usize] = None;
+                        multiply_result[r as usize] = false;
                     }
                     Operation::AttributeRead {
                         dst,
@@ -196,6 +209,34 @@ impl Program {
                         return Err(fail("unready MOV source or unsupported schedule"));
                     }
                     Operation::Move { dst, src }
+                } else if matches!(
+                    word & !(255 | (255u64 << 8) | (255u64 << 20)),
+                    0x5c58000000070000 | 0x5c68000000070000
+                ) {
+                    let left = ((word >> 8) & 255) as u8;
+                    let right = ((word >> 20) & 255) as u8;
+                    if write_barrier != 7
+                        || [left, right]
+                            .iter()
+                            .any(|r| !initialized[*r as usize] || pending[*r as usize])
+                    {
+                        return Err(fail("unready floating ALU operand or unsupported schedule"));
+                    }
+                    if word >> 48 == 0x5c58
+                        && (multiply_result[left as usize] || multiply_result[right as usize])
+                    {
+                        return Err(fail("FMUL-derived FADD requires unfused rounding control"));
+                    }
+                    Operation::Float {
+                        dst,
+                        left,
+                        right,
+                        operator: if word >> 48 == 0x5c58 {
+                            FloatOperator::Add
+                        } else {
+                            FloatOperator::Multiply
+                        },
+                    }
                 } else if !vertex && word & !ldc_mask == 0xef9400000007ff00 {
                     if write_barrier != 0 || pending.iter().any(|v| *v) {
                         return Err(fail("LDC requires an unused write barrier zero"));
@@ -262,6 +303,7 @@ impl Program {
                         initialized[r as usize] = true;
                         pending[r as usize] = true;
                         provenance[r as usize] = None;
+                        multiply_result[r as usize] = false;
                     }
                     Operation::Sample2d {
                         dst,
@@ -282,6 +324,14 @@ impl Program {
                 {
                     return Err(fail("write to pending register"));
                 }
+                multiply_result[dst as usize] = match op {
+                    Operation::Float {
+                        operator: FloatOperator::Multiply,
+                        ..
+                    } => true,
+                    Operation::Move { src, .. } => multiply_result[src as usize],
+                    _ => false,
+                };
                 provenance[dst as usize] = match op {
                     Operation::Constant { input, .. } => Some(input),
                     Operation::Move { src, .. } => provenance[src as usize],
@@ -311,6 +361,16 @@ impl Program {
                 Operation::Immediate { dst, .. }
                 | Operation::Constant { dst, .. }
                 | Operation::Interpolate { dst, .. } => largest = largest.max(u16::from(dst)),
+                Operation::Float {
+                    dst, left, right, ..
+                } => {
+                    largest = largest.max(u16::from(dst));
+                    for r in [left, right] {
+                        if r != 255 {
+                            largest = largest.max(u16::from(r));
+                        }
+                    }
+                }
                 Operation::Move { dst, src } => {
                     largest = largest.max(u16::from(dst));
                     if src != 255 {
@@ -366,6 +426,18 @@ impl Program {
                     }
                 }
 
+                Operation::Float {
+                    dst,
+                    left,
+                    right,
+                    operator,
+                } => {
+                    let symbol = match operator {
+                        FloatOperator::Add => "+",
+                        FloatOperator::Multiply => "*",
+                    };
+                    writeln!(s,"r[{dst}]=bitcast<u32>(bitcast<f32>(r[{left}]) {symbol} bitcast<f32>(r[{right}]));").unwrap();
+                }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
                 Operation::Constant { dst, input } => {
@@ -464,6 +536,18 @@ impl VertexProgram {
                         )
                         .unwrap();
                     }
+                }
+                Operation::Float {
+                    dst,
+                    left,
+                    right,
+                    operator,
+                } => {
+                    let symbol = match operator {
+                        FloatOperator::Add => "+",
+                        FloatOperator::Multiply => "*",
+                    };
+                    writeln!(s,"r[{dst}]=bitcast<u32>(bitcast<f32>(r[{left}]) {symbol} bitcast<f32>(r[{right}]));").unwrap();
                 }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),

@@ -822,3 +822,23 @@ boundary succeeds. Source aliases and command fetches guard both pending padded
 spans. GpuDriver's mapping/teardown restrictions apply while either output is
 pending. Pipeline identity includes depth comparison/write state, while shader
 module identity remains independent of depth data.
+
+## Bounded floating arithmetic
+
+The straight-line vertex/fragment decoder accepts unpredicated GPR/GPR FADD
+and FMUL with default modifier bits and six-cycle stalls. Registers retain raw
+u32 bits; operations bitcast their operands to f32, perform host arithmetic and
+bitcast the result back. RZ reads as positive zero. Undefined or pending source
+registers, pending destination writes, alternate rounding, FTZ/FMZ, scaling,
+negation/absolute value, saturation and condition-code writes are rejected.
+The existing pending-destination guard remains in force.
+
+Multiplication provenance follows MOV and is cleared by actual overwrites,
+including every lane of ALD/TEX groups. FADD consuming an FMUL-derived register
+is explicitly unsupported: this excludes contraction-prone dataflow until an
+unfused rounding contract is available. This restriction alone does not establish
+Maxwell numerical equivalence. WGSL host f32 does not promise Maxwell-exact NaN,
+denormal, signed-zero, overflow/underflow or rounding behavior. Current executable
+numeric evidence covers exactly representable finite fixtures, including
+independent addition/multiplication, chained addition and RZ. General precise
+floating shader compatibility remains unproven.

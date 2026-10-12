@@ -858,3 +858,36 @@ Cargo.lock passed strict workspace Clippy and 271 CPU tests; 37 GPU tests were
 ignored by that ordinary suite and executed separately as above. The snapshot
 excluded unrelated unfinished analysis/CLI/IDE changes; it is not a live shared
 workspace integration result.
+
+## Maxwell FADD/FMUL validation
+
+`alu_gpu` enters through GpuDriver/GPFIFO with guest-selected shader binaries.
+The pixel program loads three mutable guest constants and performs FADD/FMUL,
+producing independently specified covered-pixel RGBA values [191,128,191,255]
+and [64,16,64,64]. Changing only constants preserves shader modules, pipelines
+and decode counts. Replacing the independent FMUL with the independently established
+FADD opcode produces [191,255,191,255] and one additional binary decode. Outside
+pixels retain the guest background. A separate independently assembled vertex
+program applies x*=.5 and y+=.5 to guest positions; scalar barycentrics verify
+its changed raster coverage. Neither test supplies host replacement geometry.
+CPU tests verify masks, default register fields, stage identity, RZ operands,
+uninitialized/pending registers, unsupported modifiers, existing WAW rejection
+and direct/MOV-mediated contraction-prone dataflow rejection.
+
+Arithmetic delivery validation passed 72 CPU tests in each feature configuration,
+strict package Clippy and formatting. All 39 GPU scenarios passed explicitly on
+WSL OpenGL, native Windows D3D12 and Vulkan: 117 distinct backend/scenario passes.
+A faithful source snapshot of depth commit 1e1fbd5 plus arithmetic changes, with
+exact Cargo.lock and excluding unfinished peer files, passed strict workspace
+Clippy and 276 CPU tests; its 39 ordinary ignored GPU tests are covered separately.
+One intermediate mutation fixture created deliberately unsupported FMUL-to-FADD
+dataflow and failed on GL/D3D12; replacing an independent operation corrected the
+fixture without weakening the decoder. One native startup failed before entering
+tests and was retried. These failures are not counted as passing executions.
+
+The four-draw arithmetic fixture measured 48 constant guest/upload bytes, two
+pixel decodes/352 binary bytes, 72 vertex upload bytes, eight index upload bytes,
+one target allocation/three reuses, eight queue submissions and four explicit
+publication readbacks/waits. Constant-only updates created no new shader modules
+or pipelines. Coverage uses exact binary fractions and UNORM quantization; no
+claim of general Maxwell floating-point equivalence or game performance follows.

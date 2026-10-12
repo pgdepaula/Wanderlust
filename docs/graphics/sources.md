@@ -380,3 +380,15 @@ rejection of `textureLoad` on `texture_depth_2d`. Initialization returns
 `frag_depth`; export samples the actual depth attachment as `texture_2d<f32>`
 and writes its bitcast into an integer color attachment. No CPU shadow depth
 calculation substitutes for host depth testing.
+
+## GPR floating arithmetic
+
+Pinned MIT envytools `gm107.c` and UAM/Mesa `emitFADD`/`emitFMUL` independently
+specify the GPR opcode bases `0x5c58` and `0x5c68`, destination at bit 0,
+left source at bit 8 and right source at bit 20. The strict full-word masks
+exclude predicates and all unimplemented modifiers. UAM's GM107 target latency
+function assigns six cycles to non-F64 ADD/MUL, consistent with the accepted
+stall-six fixtures. Newly retained assembly/binaries were produced by the same
+pinned envyas and disassembled with unmodified envydis. The portable host f32
+lowering is a bounded implementation, not evidence of exact Maxwell exceptional
+arithmetic; WGSL offers no per-operation unfused-rounding control here.

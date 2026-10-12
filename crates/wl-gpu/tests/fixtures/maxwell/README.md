@@ -1,7 +1,7 @@
 # Synthetic Maxwell fragment binaries
 
 These redistributable test programs contain no game code. Each `.bin` is an
-80-byte shader program header followed by 64 bytes independently assembled and
+80-byte shader program header followed by scheduled binary code independently assembled and
 disassembled using MIT-licensed envytools revision
 `f102b82381f3f11cee113d16374c87091db039d9` (`envyas`/`envydis`, architecture gm107).
 The matching `.asm` files specify every instruction and scheduling word.
@@ -75,3 +75,12 @@ attribute is read back by the shader, so the store-request range stays unused.
 
 vertex.bin: 144 bytes, SHA-256 `ccfba2e1190befe39a174186870752588e828ce981abd73cca6219c9ffd9a776`.
 vertex-swap.bin: 176 bytes, SHA-256 `5852b1f783f4a6d76d7cfbb7d3b74767c2225832fc9a1ea63d8c0233e0c0e3b0`.
+
+`alu.asm` and `vertex-alu.asm` each contain three scheduled bundles (96 code
+bytes, 176 bytes including SPH). They use the PS header from ldc.bin and VS
+header from vertex.bin respectively. Both were independently assembled with
+pinned envyas and disassembled using the original envydis. `alu` loads c0[.10],
+c0[.14], c0[.18], adds the first two, multiplies the latter two, adds RZ and
+squares the third. `vertex-alu` loads real attributes, halves X and adds .5 to Y,
+then exports position and UV. These fixtures use exact binary fractions; they
+do not establish general IEEE/Maxwell arithmetic equivalence.
