@@ -137,3 +137,19 @@ For the chosen finite normal inputs this clips negative X to negative zero and
 preserves Y, followed by genuine position/UV exports. This raw-bit transformation
 is not a general floating MIN/MAX operation. The fixture is 176 bytes; SHA-256:
 `64982273037c4b5196f9ade14bf277f1b670cd13f16aa6140efffffe82939baf`.
+
+
+`predicate.asm`/`predicate.bin` load four scalar LDC words, compare unsigned
+values into P0 and select either color with P0/!P0. A subsequent equality compare
+rewrites P0 before another selection. Only AND PT with complementary output
+discarded to PT is used; outer execution remains PT. Predicate producers use
+conservative stall 13, other instructions stall six. The 208-byte PS fixture
+retains the existing LDC SPH and was assembled/disassembled with unmodified pinned
+envytools. SHA-256:
+`757e2351c6cf63fb6eb052b18a7beab1c5cbe57e9b839b4e705b93f5707403b8`.
+`vertex-predicate.asm`/`vertex-predicate.bin` use unsigned comparison of clip-X
+bits with `0x80000000` and select X or RZ through P0, followed by genuine position
+and UV exports. For the finite normal fixture inputs, negative X becomes zero
+and other components are preserved. The 176-byte VTG fixture uses the existing
+vertex SPH. SHA-256:
+`83fbaa26cd8b5e71b6ba3bd3310ce9c550557c8906b0e390419d5ebc0b7b4154`.

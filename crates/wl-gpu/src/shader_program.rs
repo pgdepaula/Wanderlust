@@ -24,7 +24,29 @@ pub enum IntegerOperator {
     ShiftRight { wrap: bool },
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnsignedComparison {
+    Less,
+    Equal,
+    LessEqual,
+    Greater,
+    NotEqual,
+    GreaterEqual,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
+    /// Compare into P0; the complementary predicate output is discarded to PT.
+    PredicateCompare {
+        left: u8,
+        right: u8,
+        comparison: UnsignedComparison,
+    },
+    /// Unconditionally select GPR bits using initialized P0 or its inversion.
+    Select {
+        dst: u8,
+        left: u8,
+        right: u8,
+        invert: bool,
+    },
     Integer {
         dst: u8,
         left: u8,
@@ -130,6 +152,8 @@ impl Program {
         // supported. This is not a general approximate MUFU implementation.
         let mut position_w = [false; 256];
         let mut reciprocal_w = [false; 256];
+        let mut predicate_initialized = false;
+        let mut predicate_multiply = false;
         let mut exited = false;
         let mut exports = 0u8;
         for (bundle_index, bundle) in input[0x50..].chunks_exact(32).enumerate() {
@@ -143,7 +167,7 @@ impl Program {
                 let schedule = (control >> (slot * 21)) & 0x1fffff;
                 let wait = (schedule >> 11) & 63;
                 let write_barrier = (schedule >> 5) & 7;
-                if schedule & 31 != 6
+                if !matches!(schedule & 31, 6 | 13)
                     || (schedule >> 8) & 7 != 7
                     || schedule >> 17 != 0
                     || !matches!(wait, 0 | 1)
@@ -155,6 +179,11 @@ impl Program {
                     pending.fill(false);
                 }
                 let word = u64::from_le_bytes(b.try_into().unwrap());
+                // Predicate-producing ISETP has its own conservative fixed latency.
+                // Do not generalize the new stall encoding to other instructions.
+                if schedule & 31 != if word >> 52 == 0x5b6 { 13 } else { 6 } {
+                    return Err(fail("unsupported instruction fixed-latency schedule"));
+                }
                 if exited {
                     if word != 0x50b0000000070f00 || schedule != 0x7e6 {
                         return Err(fail("invalid EXIT padding"));
@@ -204,6 +233,38 @@ impl Program {
                     });
                     continue;
                 }
+                let compare_mask = (7u64 << 49) | (255u64 << 8) | (255u64 << 20);
+                if word & !compare_mask == 0x5b60038000070007 {
+                    let comparison = match (word >> 49) & 7 {
+                        1 => UnsignedComparison::Less,
+                        2 => UnsignedComparison::Equal,
+                        3 => UnsignedComparison::LessEqual,
+                        4 => UnsignedComparison::Greater,
+                        5 => UnsignedComparison::NotEqual,
+                        6 => UnsignedComparison::GreaterEqual,
+                        _ => return Err(fail("unsupported unsigned comparison mode")),
+                    };
+                    let left = ((word >> 8) & 255) as u8;
+                    let right = ((word >> 20) & 255) as u8;
+                    if write_barrier != 7
+                        || [left, right]
+                            .iter()
+                            .any(|r| !initialized[*r as usize] || pending[*r as usize])
+                    {
+                        return Err(fail("unready predicate operand or unsupported schedule"));
+                    }
+                    predicate_initialized = true;
+                    predicate_multiply =
+                        multiply_result[left as usize] || multiply_result[right as usize];
+                    out.operations.push(Operation::PredicateCompare {
+                        left,
+                        right,
+                        comparison,
+                    });
+                    // Predicate pair bits are not a GPR destination. In particular,
+                    // do not initialize/clear R7 metadata from the low-byte value 7.
+                    continue;
+                }
                 let dst = (word & 255) as u8;
                 if dst == 255 {
                     return Err(fail("RZ destination unsupported"));
@@ -251,6 +312,27 @@ impl Program {
                         return Err(fail("unready MOV source or unsupported schedule"));
                     }
                     Operation::Move { dst, src }
+                } else if word & !(255 | (255u64 << 8) | (255u64 << 20) | (1u64 << 42))
+                    == 0x5ca0000000070000
+                {
+                    let left = ((word >> 8) & 255) as u8;
+                    let right = ((word >> 20) & 255) as u8;
+                    if !predicate_initialized {
+                        return Err(fail("uninitialized selector predicate P0"));
+                    }
+                    if write_barrier != 7
+                        || [left, right]
+                            .iter()
+                            .any(|r| !initialized[*r as usize] || pending[*r as usize])
+                    {
+                        return Err(fail("unready selector operand or unsupported schedule"));
+                    }
+                    Operation::Select {
+                        dst,
+                        left,
+                        right,
+                        invert: word & (1 << 42) != 0,
+                    }
                 } else if matches!(
                     word & !(255 | (255u64 << 8) | (255u64 << 20)),
                     0x5c58000000070000 | 0x5c68000000070000
@@ -447,6 +529,11 @@ impl Program {
                 multiply_result[dst as usize] = match op {
                     // Integer identities can disappear in host optimization.
                     // Retain the unfused-rounding hazard even across bit operations.
+                    Operation::Select { left, right, .. } => {
+                        multiply_result[left as usize]
+                            || multiply_result[right as usize]
+                            || predicate_multiply
+                    }
                     Operation::Integer { left, right, .. } => {
                         multiply_result[left as usize] || multiply_result[right as usize]
                     }
@@ -505,7 +592,17 @@ impl Program {
                 } => {
                     largest = largest.max(u16::from(dst)).max(u16::from(multiplier));
                 }
+                Operation::PredicateCompare { left, right, .. } => {
+                    for r in [left, right] {
+                        if r != 255 {
+                            largest = largest.max(u16::from(r));
+                        }
+                    }
+                }
                 Operation::Integer {
+                    dst, left, right, ..
+                }
+                | Operation::Select {
                     dst, left, right, ..
                 }
                 | Operation::Float {
@@ -556,6 +653,14 @@ impl Program {
             s.push_str("@group(1) @binding(0) var image:texture_2d<f32>; @group(1) @binding(1) var image_sampler:sampler;\n");
         }
         s.push_str("struct Vertex { @builtin(position) position:vec4<f32>, @location(0) @interpolate(linear) uv:vec2<f32> };\n@vertex fn vs_main(@builtin(vertex_index) i:u32)->Vertex { let ps=array<vec2<f32>,3>(vec2(-1.,-1.),vec2(3.,-1.),vec2(-1.,3.));let p=ps[i];var v:Vertex;v.position=vec4(p,0.,1.);v.uv=vec2((p.x+1.)*.5,(1.-p.y)*.5);return v;}\n@fragment fn fs_main(v:Vertex)->@location(0) vec4<f32>{var r:array<u32,256>;\n");
+        if self.operations.iter().any(|op| {
+            matches!(
+                op,
+                Operation::PredicateCompare { .. } | Operation::Select { .. }
+            )
+        }) {
+            s.push_str("var p0:bool;\n");
+        }
         for op in &self.operations {
             match *op {
                 Operation::AttributeRead { .. } | Operation::AttributeWrite { .. } => {
@@ -582,6 +687,11 @@ impl Program {
                     }
                 }
 
+                Operation::PredicateCompare { left, right, comparison } => emit_comparison(&mut s, left, right, comparison),
+                Operation::Select { dst, left, right, invert } => {
+                    let condition = if invert { "!p0" } else { "p0" };
+                    writeln!(s, "r[{dst}]=select(r[{right}],r[{left}],{condition});").unwrap();
+                }
                 Operation::Float {
                     dst,
                     left,
@@ -660,6 +770,14 @@ impl VertexProgram {
         let mut s = String::from(
             "struct Vertex { @builtin(position) position:vec4<f32>, @location(0) @interpolate(linear) uv:vec2<f32> };\n@vertex fn vs_main(@location(0) a0:vec4<f32>,@location(1) a1:vec2<f32>)->Vertex {var r:array<u32,256>;var v:Vertex;\n",
         );
+        if self.operations().iter().any(|op| {
+            matches!(
+                op,
+                Operation::PredicateCompare { .. } | Operation::Select { .. }
+            )
+        }) {
+            s.push_str("var p0:bool;\n");
+        }
         for op in self.operations() {
             match *op {
                 Operation::AttributeRead {
@@ -701,6 +819,20 @@ impl VertexProgram {
                         )
                         .unwrap();
                     }
+                }
+                Operation::PredicateCompare {
+                    left,
+                    right,
+                    comparison,
+                } => emit_comparison(&mut s, left, right, comparison),
+                Operation::Select {
+                    dst,
+                    left,
+                    right,
+                    invert,
+                } => {
+                    let condition = if invert { "!p0" } else { "p0" };
+                    writeln!(s, "r[{dst}]=select(r[{right}],r[{left}],{condition});").unwrap();
                 }
                 Operation::Float {
                     dst,
@@ -767,4 +899,17 @@ fn emit_integer(s: &mut String, dst: u8, left: u8, right: u8, operator: IntegerO
         ),
     }
     .unwrap();
+}
+
+fn emit_comparison(s: &mut String, left: u8, right: u8, comparison: UnsignedComparison) {
+    use std::fmt::Write;
+    let symbol = match comparison {
+        UnsignedComparison::Less => "<",
+        UnsignedComparison::Equal => "==",
+        UnsignedComparison::LessEqual => "<=",
+        UnsignedComparison::Greater => ">",
+        UnsignedComparison::NotEqual => "!=",
+        UnsignedComparison::GreaterEqual => ">=",
+    };
+    writeln!(s, "p0=r[{left}] {symbol} r[{right}];").unwrap();
 }

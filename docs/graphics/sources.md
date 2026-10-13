@@ -512,3 +512,29 @@ independently corroborate the fields and unsigned true=min / false=max semantics
 The pinned UAM target schedules integer min/max at six cycles. Original unmodified
 envyas/envydis fixtures independently corroborate encodings; no implementation
 source was copied. These are original-format synthetic programs, not retail shaders.
+
+
+## ISETP and SEL predicate dataflow
+
+Pinned envytools GM107 and UAM/Mesa `emitISETP/emitSEL`, plus pinned MIT Mesa NAK
+[`OpISetP::encode` and `OpSel::encode`](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs),
+establish unsigned ISETP opcode `0x5b60`, compare bits 51:49, signedness 48,
+Boolean combine 46:45, accumulator predicate 41:39 with inversion 42, primary
+predicate destination 5:3 and complementary destination 2:0. The accepted P0/PT,
+AND PT form has fixed base `0x5b60038000070007`. SEL's GPR form is `0x5ca0`,
+condition predicate 41:39 and inversion 42, with ordinary GPR operand fields.
+Exact masks reject all unimplemented fields.
+
+NAK [`OpISetP::fold` and `PredSetOp::eval`](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/ir.rs)
+independently corroborate unsigned comparisons and Boolean combination semantics.
+Pinned MIT Ryujinx [`EmitSel`](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMove.cs)
+corroborates true selecting the first GPR candidate. WGSL select reverses candidate
+argument order to preserve this contract.
+
+The old pinned UAM latency table assigns generic SET/SELP six cycles. Maintained
+NAK `instr_latency` and `paw_latency` instead distinguish GPR six from predicate
+13, with explicit calibration caveats. Therefore the accepted producer controls
+use conservative stall 13; adjacent ISETP→SEL at stall six is rejected. Neither
+model establishes the exact original-hardware minimum latency. Independently
+assembled/disassembled conservative fixtures verify encoding; host execution
+validates translation, not original Maxwell timing. No source code was copied.

@@ -983,3 +983,30 @@ selection P0..P6, signed comparison, extended modes, CC and alternate operand fo
 The existing binary-integer IR lowers to WGSL min/max on raw u32, retaining
 initialization/readiness, six-stall scheduling and provenance/rounding-hazard rules.
 This does not introduce general predicate registers or conditional execution.
+
+
+## Predicate comparisons and conditional data selection
+
+Both stages accept unsigned GPR ISETP LT/EQ/LE/GT/NE/GE with AND PT, primary
+output P0 and complementary output discarded to PT. SEL accepts two ready GPRs
+and initialized P0 or !P0, writing the left value when its condition is true and
+the right otherwise. Both candidates require initialization even if one is not
+selected at runtime. Outer execution remains unconditional PT. Other predicates,
+signed/extended comparisons, Boolean combinations, alternate operands, general
+predicated instructions and branches remain unsupported.
+
+Predicate initialization is tracked separately from GPR dataflow. ISETP bypasses
+GPR destination processing: its low byte encodes predicate outputs and must not
+initialize, clear readiness or overwrite provenance for R7. Predicates do not
+increase guest GPR allocation requirements. The bounded schedule requires stall
+13 for ISETP and six for GPR operations, with no variable-latency predicate barrier;
+prior LDC/ALD waits remain necessary. These are conservative source-model-based
+accepted combinations, not a claim about Maxwell's exact minimum latency or
+compatibility with every valid scheduling sequence.
+
+WGSL introduces a local P0 bool only in programs using these operations. Source
+values remain runtime u32 bits, and conditional selection does not specialize on
+mutable guest data. SEL clears special constant-handle/PositionW/reciprocal
+provenance and conservatively retains FMUL rounding-hazard taint from either
+candidate and the predicate's comparison inputs. Existing programs retain their
+previous WGSL shape and scheduling acceptance.

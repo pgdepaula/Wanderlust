@@ -1164,3 +1164,53 @@ and formatting passed. A faithful ordinary snapshot based on
 passed strict workspace Clippy and 312 CPU tests, with 55 GPU scenarios ignored
 there and explicitly executed above. Peer analysis/CLI/IDE changes remain preserved
 and excluded; this is not a live Horizon integration claim.
+
+
+## Predicate comparisons and SEL
+
+Eight CPU tests validate the conservative scheduling subset, all six unsigned
+ISETP comparisons, initialized P0 selection/inversion, rejected signed/extended/
+Boolean/other-predicate forms, and independent GPR metadata. ISETP cannot initialize
+or clear pending R7; an LDC-derived R7 texture handle retains its provenance across
+the predicate write. SEL cannot manufacture constant-handle/PositionW/reciprocal
+provenance. Candidate and predicate-only FMUL-taint regressions preserve the
+existing conservative unfused-rounding guard. Both independently reassembled
+fixtures matched their documented hashes; generated VS/PS WGSL passed Naga.
+
+The PS GpuDriver scenario performs 27 genuine indexed draws. Nine literal color
+cases cover unsigned sign boundaries, equality, false/true and inverted P0, P0
+rewriting and independently changing the selected colors. The nine mutable-data
+cases retain shader modules, pipelines and PS decode count. Eighteen additional
+cases change the guest compare opcode through all six unsigned modes, checking
+less/equal/greater operands against a separate scalar oracle. Condition true must
+select the first candidate. For .25/.75 colors, `(0,1)` under LT yields
+`[64,191,191,255]`; `(1,0)` yields `[191,64,191,255]`; equality yields
+`[191,64,64,255]`. Compare inputs may contain all u32 bits without being
+misinterpreted as floating-point values.
+
+The controlled PS workload reads 432 constant bytes and uploads 192 changed
+constant bytes. It decodes seven PS binaries (1456 bytes), including the notified
+same-code write and five distinct mode changes. Only the five actual mode changes
+allocate additional PS modules/paired pipelines. One VS decode (144 bytes), one
+72-byte vertex upload, one eight-byte padded index upload, one target allocation
+and 26 target reuses are observed. Its 27 requested publications perform 27
+readbacks/waits (200,880 staging bytes), with 54 queue submissions. This intentionally
+synchronous validation does not characterize frame-like performance.
+
+The VS scenario selects clip X or RZ using an unsigned predicate, then mutates
+only guest vertex X values. A separate finite-position coverage oracle confirms
+the changed triangle. The mutation uploads 72 vertex bytes and retains VS decode,
+shader modules and pipelines; an unchanged repeat uploads nothing. Genuine B197
+clear state removes the earlier image before checking moved geometry.
+
+All 57 GPU scenarios passed on WSL OpenGL and actual native Windows D3D12/Vulkan
+(171 passes, zero skips). Native runs use the existing build configuration and
+single-parent Windows process runner with individual logs and timeouts. Both
+package feature configurations passed 116 CPU tests, including the final added
+predicate-only taint case. Strict package Clippy and formatting passed.
+
+A faithful ordinary source snapshot based on `29b1f559503a62e632794dc44ab90a7e13f63da0`
+plus the owned predicate changes and exact Cargo.lock passed strict workspace
+Clippy and 320 CPU tests; its 57 GPU scenarios were ignored there and explicitly
+executed above. It excludes unfinished peer analysis/CLI/IDE changes and does not
+establish live Horizon GPU-service execution.
