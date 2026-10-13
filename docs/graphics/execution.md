@@ -972,3 +972,14 @@ operand bits, and RZ is zero. Initialization, readiness, six-cycle scheduling,
 no variable-latency write barrier and existing integer provenance/rounding-hazard
 rules remain enforced. Signed SHR, carry/CC, `.X`, `.BREV`, execution predicates,
 immediate/constant operand forms and other modifiers remain unsupported.
+
+
+## Unsigned integer minimum and maximum
+
+Both stages accept GPR IMNMX with unsigned 32-bit comparison and static selection
+PT (minimum) or !PT (maximum). The selection predicate is distinct from the outer
+execution predicate, which remains unconditional PT. Exact masks exclude dynamic
+selection P0..P6, signed comparison, extended modes, CC and alternate operand forms.
+The existing binary-integer IR lowers to WGSL min/max on raw u32, retaining
+initialization/readiness, six-stall scheduling and provenance/rounding-hazard rules.
+This does not introduce general predicate registers or conditional execution.

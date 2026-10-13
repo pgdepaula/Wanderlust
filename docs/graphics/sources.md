@@ -495,3 +495,20 @@ Pinned MIT Mesa NAK
 also independently define checked unsigned shifts: wrapping masks the count to
 five bits, and nonwrapping out-of-range shifts produce zero. This corroborates
 the high-count semantics beyond the archived Switch translator.
+
+
+## Unsigned IMNMX
+
+Pinned envytools GM107 and UAM/Mesa `emitIMNMX` establish unsigned GPR bases
+`0x5c20038000070000` (PT minimum) and `0x5c20078000070000` (!PT maximum), with
+ordinary GPR operand fields. Selection predicate is bits 41:39 and inversion bit
+42; signedness is bit 48, CC bit 47, extended mode bits 44:43. Outer execution
+predicate remains the separate P7 field at 18:16 with inversion 19 clear.
+
+Pinned MIT Mesa NAK
+[`OpIMnMx` SM50 encoding](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs)
+and [`OpIMnMx::fold`](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/ir.rs)
+independently corroborate the fields and unsigned true=min / false=max semantics.
+The pinned UAM target schedules integer min/max at six cycles. Original unmodified
+envyas/envydis fixtures independently corroborate encodings; no implementation
+source was copied. These are original-format synthetic programs, not retail shaders.

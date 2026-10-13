@@ -1124,3 +1124,43 @@ plus the owned shader changes and exact lockfile passed strict workspace Clippy
 and 307 CPU tests; its 53 GPU scenarios were ignored there and executed explicitly
 above. Unfinished peer analysis/CLI/IDE changes remain excluded and preserved.
 This does not establish live Horizon GPU-service integration.
+
+
+## Unsigned Maxwell IMNMX
+
+Five CPU tests validate exact static-predicate min/max fields, unsigned WGSL/Naga
+lowering in both stages, readiness/RZ, rejected signed/extended/CC/dynamic-predicate
+forms, and retained special-resource provenance and FMUL rounding-hazard guards.
+Independent unmodified envyas reproduction matched both fixture hashes exactly.
+
+Two actual GpuDriver GPU scenarios verify unsigned ordering in seven literal
+RGBA cases, including reversed/equal operands and sign boundaries. Raw operands
+`0xbf800000` and `0x3f000000` produce `[128,0,128,0]`; a mistaken signed comparison
+would reverse that result. `0x80000000` and `0x3f800000` produce `[255,0,255,0]`.
+An in-place guest MIN-to-MAX opcode replacement changes `[64,191,64,191]` into
+`[191,191,64,191]` and adds exactly one PS decode. Mutable constant changes alone
+retain shader modules/pipelines. The separate VS min/max program changes negative
+clip X to zero while preserving Y, checked with independent asymmetric coverage.
+An unchanged repeat uploads no resource or shader and recreates no pipeline.
+
+The eight-draw PS workload uses one vertex/index upload (72/eight bytes), one
+resident target allocation and seven reuses, 64 constant-read/upload bytes, two
+PS decodes (352 bytes) including intentional code replacement, one VS decode
+(144 bytes), eight explicit publications/readbacks/waits (59,520 staging bytes)
+and 16 queue submissions. The code replacement creates one new PS module and
+rebuilds its fragment harness and paired graphics pipelines; constant data changes
+do not. These are bounded correctness measurements, not game performance evidence.
+
+All 55 GPU scenarios actually passed on each of WSL OpenGL, native Windows D3D12
+and native Windows Vulkan (165 passes, zero skips). Windows binaries were built
+with the existing helper's build configuration, then executed as native child
+processes of one PowerShell validation runner, retaining individual logs/backend
+selection and 90-second per-process deadlines. This avoids repeated WSL process
+handoffs without changing rendering or treating compilation as execution.
+
+108 CPU tests passed in each package feature configuration; strict package Clippy
+and formatting passed. A faithful ordinary snapshot based on
+`1cd79a22aa51d4924c2d89f089cf3f2af3fba04f` plus owned IMNMX edits and exact Cargo.lock
+passed strict workspace Clippy and 312 CPU tests, with 55 GPU scenarios ignored
+there and explicitly executed above. Peer analysis/CLI/IDE changes remain preserved
+and excluded; this is not a live Horizon integration claim.

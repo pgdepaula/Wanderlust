@@ -18,6 +18,8 @@ pub enum IntegerOperator {
     And,
     Or,
     Xor,
+    MinUnsigned,
+    MaxUnsigned,
     ShiftLeft { wrap: bool },
     ShiftRight { wrap: bool },
 }
@@ -287,6 +289,8 @@ impl Program {
                         | 0x5c48008000070000
                         | 0x5c28000000070000
                         | 0x5c28008000070000
+                        | 0x5c20038000070000
+                        | 0x5c20078000070000
                 ) {
                     let left = ((word >> 8) & 255) as u8;
                     let right = ((word >> 20) & 255) as u8;
@@ -309,7 +313,9 @@ impl Program {
                             0x5c48000000070000 => IntegerOperator::ShiftLeft { wrap: false },
                             0x5c48008000070000 => IntegerOperator::ShiftLeft { wrap: true },
                             0x5c28000000070000 => IntegerOperator::ShiftRight { wrap: false },
-                            _ => IntegerOperator::ShiftRight { wrap: true },
+                            0x5c28008000070000 => IntegerOperator::ShiftRight { wrap: true },
+                            0x5c20038000070000 => IntegerOperator::MinUnsigned,
+                            _ => IntegerOperator::MaxUnsigned,
                         },
                     }
                 } else if !vertex && word & !ldc_mask == 0xef9400000007ff00 {
@@ -739,6 +745,14 @@ fn emit_integer(s: &mut String, dst: u8, left: u8, right: u8, operator: IntegerO
         IntegerOperator::And => ("&", None),
         IntegerOperator::Or => ("|", None),
         IntegerOperator::Xor => ("^", None),
+        IntegerOperator::MinUnsigned => {
+            writeln!(s, "r[{dst}]=min(r[{left}],r[{right}]);").unwrap();
+            return;
+        }
+        IntegerOperator::MaxUnsigned => {
+            writeln!(s, "r[{dst}]=max(r[{left}],r[{right}]);").unwrap();
+            return;
+        }
         IntegerOperator::ShiftLeft { wrap } => ("<<", Some(wrap)),
         IntegerOperator::ShiftRight { wrap } => (">>", Some(wrap)),
     };

@@ -123,3 +123,17 @@ fixture's finite normal positions this yields X=abs(X), Y unchanged; this is a
 raw-bit transformation, not a general floating arithmetic identity. Position/UV
 are exported by genuine AST. SHA-256:
 `66952bdeb0ee615ffa71e91f44c1282bc5b31ab35f6beb52afa4c5d6a7b48183`.
+
+
+`minmax.asm`/`minmax.bin` load two scalar LDC words and perform unsigned GPR
+IMNMX with static selection predicates PT (minimum) and !PT (maximum), in both
+operand orders. The outer execution predicate is PT in every instruction.
+Unmodified pinned envyas/envydis produced and decoded the 176-byte PS fixture,
+using the existing LDC SPH. SHA-256:
+`51c0881af54a2135ab4d8addf34ee68c7775a15d704c862418e14db0634d53ea`.
+`vertex-minmax.asm`/`vertex-minmax.bin` prepend the existing VTG SPH and use
+unsigned MIN of X bits with `0x80000000`, plus unsigned MAX of Y bits with RZ.
+For the chosen finite normal inputs this clips negative X to negative zero and
+preserves Y, followed by genuine position/UV exports. This raw-bit transformation
+is not a general floating MIN/MAX operation. The fixture is 176 bytes; SHA-256:
+`64982273037c4b5196f9ade14bf277f1b670cd13f16aa6140efffffe82939baf`.

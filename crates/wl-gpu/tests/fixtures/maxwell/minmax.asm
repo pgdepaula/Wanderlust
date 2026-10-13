@@ -1,0 +1,12 @@
+sched (st 0x6 wr 0x0) (st 0x6 wr 0x0 wt 0x1) (st 0x6 wt 0x1);
+ld b32 $r4 c0[0x10];
+ld b32 $r5 c0[0x14];
+imnmx u32 $r0 $r4 $r5 $p7;
+sched (st 0x6) (st 0x6) (st 0x6);
+imnmx u32 $r1 $r4 $r5 not $p7;
+imnmx u32 $r2 $r5 $r4 $p7;
+imnmx u32 $r3 $r5 $r4 not $p7;
+sched (st 0x6) (st 0x6) (st 0x6);
+exit;
+nop 0;
+nop 0;
