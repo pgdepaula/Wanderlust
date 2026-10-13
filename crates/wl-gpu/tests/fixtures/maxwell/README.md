@@ -93,3 +93,16 @@ It was independently assembled with pinned envytools plus the already documented
 TEX dummy-token grammar alias, and decoded with unmodified envydis. SHA-256:
 `b80062812d98f5b98152e154b5921704d5f7910405f7262504635069c1d5ac52`.
 This is synthetic original-format shader evidence, not a commercial game shader.
+
+`integer.asm`/`integer.bin` contain five scalar LDC loads, GPR IADD and LOP
+AND/OR/XOR, then EXIT and canonical padding. The 208-byte PS fixture was assembled
+and disassembled with unmodified pinned envytools. Constants
+`ffffffff 3f000001 00400000 3e800000 3fc00000` at c0[0x10..0x20] yield raw exports
+`3f000000 3e800000 3f400000 3f800000`, including real 32-bit addition overflow.
+SHA-256 `c5afab1532b72057320de0bbcb87266da1b1150da6949032d5a505ad50ae2f12`.
+`vertex-integer` reads attributes, adds `0x00800000` to X bits and XORs Y with
+`0x80000000`, then exports position/UV. Its chosen finite normal inputs produce
+X*=2 and Y=-Y; these are integer bit operations, not a claimed general float
+transform identity. Its 208-byte file includes one trailing canonical NOP bundle;
+the selected-program fetch stops at the earlier EXIT bundle. SHA-256
+`8f580ea90431a7e879aeee774cb219219a28b6b4202316a5f00e74140cfd47de`.

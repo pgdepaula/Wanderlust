@@ -417,3 +417,18 @@ point before choosing a texel; raster positions also undergo fixed-point snappin
 The perspective pixel oracle excludes one 1/256 texel fractional step around
 nearest-sampling boundaries. Its three literal distinguishing samples are well
 outside this uncertainty region. No backend-specific shader change is introduced.
+
+## Integer IADD and LOP
+
+The pinned MIT envytools `gm107.c` table at lines 2009/2015 and pinned UAM
+`nv50_ir_emit_gm107.cpp::emitLOP/emitIADD` independently establish the accepted
+GPR forms. After removing destination bits 7:0, left source 15:8 and right source
+27:20, exact remaining words are IADD `0x5c10000000070000`, LOP.AND
+`0x5c47000000070000`, OR `0x5c47020000070000`, XOR `0x5c47040000070000`.
+LOP predicate output PT=7 is bits 50:48, separate from execution predicate P7.
+Full-word masks reject carry/CC, inversion, alternate predicate modes and modifiers.
+Pinned UAM `nv50_ir_peephole.cpp::ConstantFolding::expr` performs both S32/U32
+addition on u32 bit patterns. WGSL concrete integer arithmetic wraps modulo the
+bit width, so raw-u32 lowering preserves the supported addition semantics.
+Independent unmodified envyas/envydis fixtures corroborate the encodings and
+canonical six-stall scheduling; no source implementation was copied.

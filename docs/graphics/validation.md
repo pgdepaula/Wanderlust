@@ -939,3 +939,34 @@ observation measured 22.10 ms and 1,640 allocations/131 reallocations on GL,
 are process-wide and timings are CPU observations under concurrent builds, not
 GPU duration, throughput claims or a game benchmark. No zero-copy/zero-allocation
 claim or original-game graphics execution is established.
+
+## Integer shader validation
+
+The independently assembled PS fixture loads five raw words through B197-bound
+LDC and executes wrapping IADD plus AND/OR/XOR. Guest values exercise actual carry
+overflow, sign-bit boundaries and nontrivial masks. Literal expected RGBA outputs
+are [128,64,191,255], [64,64,96,128], [64,0,96,128], [0,0,128,128]. Constants-only
+updates preserve modules, pipelines and decode count. Replacing the guest OR with
+AND changes blue from 191 to zero and increments the binary decode count.
+An independent VS fixture applies bit operations to real guest XY attributes;
+chosen normal finite values produce X*=2 and Y=-Y, including partially clipped
+geometry. Scalar barycentrics verify changed coverage, untouched background and
+warm pipeline/vertex-upload reuse. No host geometry or replacement shader is used.
+
+Six CPU tests check independently assembled fields and negatives, RZ source/dest,
+uninitialized/pending operands and destination, stage identity, unsupported LOP
+predicate outputs, special-provenance clearing and conservative FMUL taint through
+both integer sources. Both new GPU scenarios passed on GL, native D3D12 and Vulkan.
+The complete package passed 82 CPU tests in each feature configuration, formatting
+and strict Clippy. All 42 GPU scenarios passed explicitly per backend, 126 unique
+backend/scenario executions. Startup-only interop failures were retried. A faithful
+source snapshot of fadb9bc plus integer changes, exact Cargo.lock and no unfinished
+peer files passed strict workspace Clippy and 286 CPU tests; its 42 GPU tests were
+ignored in ordinary execution and covered by the explicit backend runs.
+
+The five-draw PS workload measured 100 constant guest-read bytes, 96 constant upload
+bytes, two pixel decodes/416 binary bytes, 72 vertex upload bytes, eight index upload
+bytes, one color target allocation/four reuses, ten queue submissions and five
+explicit readbacks/waits (37,200 staging bytes; 30,160 guest framebuffer bytes).
+Constant edits do not specialize shader code. These are small correctness fixtures,
+not an instruction-coverage percentage or game-performance benchmark.

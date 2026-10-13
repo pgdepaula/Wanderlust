@@ -869,3 +869,22 @@ MUFU implementation. Exceptional values, subnormals and exact reciprocal roundin
 remain unverified. The executable evidence uses finite positive unequal clip W
 and texture samples separated from quantization boundaries. This subset establishes
 perspective-dependent sampling, not general MUFU compatibility.
+
+## Integer arithmetic and bit logic
+
+The straight-line VS/PS decoder additionally accepts GPR/GPR IADD wrapping modulo
+2^32 and LOP AND/OR/XOR, with unconditional execution, default modifiers, no carry
+input/output or CC writes, and LOP predicate output discarded to PT. Operands
+remain raw u32 bits in WGSL. Both sources must be initialized and ready; RZ is
+zero and cannot be a destination. Six-cycle stalls and ALU write-barrier seven
+are required. Immediate/constant operand variants, saturation, negation/inversion,
+additional predicate results, extended carry and PASS_B remain unsupported.
+
+Integer results clear constant-handle, PositionW and reciprocal provenance. Even
+identity arithmetic does not authorize an altered TEX handle or perspective
+multiplier. FMUL rounding-hazard taint is conservatively retained from either
+integer source, including in-place destinations: an optimizer could erase integer
+identities and expose an otherwise prohibited multiply-to-add contraction. This
+policy preserves the existing floating subset's rejection contract; it is not a
+new general floating-point accuracy guarantee. Integer bit operations themselves
+use exact wrapping/bitwise semantics.

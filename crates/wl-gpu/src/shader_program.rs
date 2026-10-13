@@ -13,7 +13,20 @@ pub enum FloatOperator {
     Multiply,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegerOperator {
+    Add,
+    And,
+    Or,
+    Xor,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
+    Integer {
+        dst: u8,
+        left: u8,
+        right: u8,
+        operator: IntegerOperator,
+    },
     Float {
         dst: u8,
         left: u8,
@@ -262,6 +275,33 @@ impl Program {
                             FloatOperator::Multiply
                         },
                     }
+                } else if matches!(
+                    word & !(255 | (255u64 << 8) | (255u64 << 20)),
+                    0x5c10000000070000
+                        | 0x5c47000000070000
+                        | 0x5c47020000070000
+                        | 0x5c47040000070000
+                ) {
+                    let left = ((word >> 8) & 255) as u8;
+                    let right = ((word >> 20) & 255) as u8;
+                    if write_barrier != 7
+                        || [left, right]
+                            .iter()
+                            .any(|r| !initialized[*r as usize] || pending[*r as usize])
+                    {
+                        return Err(fail("unready integer ALU operand or unsupported schedule"));
+                    }
+                    Operation::Integer {
+                        dst,
+                        left,
+                        right,
+                        operator: match word & !(255 | (255u64 << 8) | (255u64 << 20)) {
+                            0x5c10000000070000 => IntegerOperator::Add,
+                            0x5c47000000070000 => IntegerOperator::And,
+                            0x5c47020000070000 => IntegerOperator::Or,
+                            _ => IntegerOperator::Xor,
+                        },
+                    }
                 } else if !vertex && word & !ldc_mask == 0xef9400000007ff00 {
                     if write_barrier != 0 || pending.iter().any(|v| *v) {
                         return Err(fail("LDC requires an unused write barrier zero"));
@@ -389,6 +429,11 @@ impl Program {
                     return Err(fail("write to pending register"));
                 }
                 multiply_result[dst as usize] = match op {
+                    // Integer identities can disappear in host optimization.
+                    // Retain the unfused-rounding hazard even across bit operations.
+                    Operation::Integer { left, right, .. } => {
+                        multiply_result[left as usize] || multiply_result[right as usize]
+                    }
                     Operation::Float {
                         operator: FloatOperator::Multiply,
                         ..
@@ -444,7 +489,10 @@ impl Program {
                 } => {
                     largest = largest.max(u16::from(dst)).max(u16::from(multiplier));
                 }
-                Operation::Float {
+                Operation::Integer {
+                    dst, left, right, ..
+                }
+                | Operation::Float {
                     dst, left, right, ..
                 } => {
                     largest = largest.max(u16::from(dst));
@@ -529,6 +577,10 @@ impl Program {
                         FloatOperator::Multiply => "*",
                     };
                     writeln!(s,"r[{dst}]=bitcast<u32>(bitcast<f32>(r[{left}]) {symbol} bitcast<f32>(r[{right}]));").unwrap();
+                }
+                Operation::Integer { dst, left, right, operator } => {
+                    let symbol = match operator { IntegerOperator::Add => "+", IntegerOperator::And => "&", IntegerOperator::Or => "|", IntegerOperator::Xor => "^" };
+                    writeln!(s,"r[{dst}]=r[{left}] {symbol} r[{right}];").unwrap();
                 }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
@@ -646,6 +698,20 @@ impl VertexProgram {
                         FloatOperator::Multiply => "*",
                     };
                     writeln!(s,"r[{dst}]=bitcast<u32>(bitcast<f32>(r[{left}]) {symbol} bitcast<f32>(r[{right}]));").unwrap();
+                }
+                Operation::Integer {
+                    dst,
+                    left,
+                    right,
+                    operator,
+                } => {
+                    let symbol = match operator {
+                        IntegerOperator::Add => "+",
+                        IntegerOperator::And => "&",
+                        IntegerOperator::Or => "|",
+                        IntegerOperator::Xor => "^",
+                    };
+                    writeln!(s, "r[{dst}]=r[{left}] {symbol} r[{right}];").unwrap();
                 }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
