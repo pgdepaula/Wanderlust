@@ -28,6 +28,7 @@ pub enum MethodEffect {
     SamplersInvalidated(Option<u32>),
     Draw { first: u32, count: u32 },
     DrawIndices { first: u32, count: u32 },
+    Clear { color: bool, depth: bool },
 }
 #[derive(Debug, Clone, Copy, Default)]
 struct Pool {
@@ -384,6 +385,15 @@ impl Maxwell3d {
                 }
                 return Ok(MethodEffect::Draw { first, count });
             }
+            0x19d0 => {
+                if !matches!(value, 0x01 | 0x3c | 0x3d) {
+                    return Err(bad());
+                }
+                return Ok(MethodEffect::Clear {
+                    color: value & 0x3c != 0,
+                    depth: value & 1 != 0,
+                });
+            }
             _ => {
                 if let Some(effect) = self.indices.apply(method, value)? {
                     return Ok(effect);
@@ -398,6 +408,9 @@ impl Maxwell3d {
     /// Counts attempted method writes, including rejected writes; saturates at u64::MAX.
     pub fn method_writes(&self) -> u64 {
         self.method_writes
+    }
+    pub fn clear_surface(&self, color: bool, depth: bool) -> Result<crate::raster::ClearSurface> {
+        self.raster.resolve_clear(color, depth)
     }
     /// Pixel pipeline index five explicitly selects its constant-binding group.
     pub fn fragment_program(&self) -> Result<FragmentSource> {

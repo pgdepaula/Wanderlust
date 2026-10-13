@@ -64,7 +64,9 @@ impl Renderer {
                                 channel.push_word(u32::from_le_bytes(word.try_into().unwrap()))?;
                             if matches!(
                                 effect,
-                                MethodEffect::Draw { .. } | MethodEffect::DrawIndices { .. }
+                                MethodEffect::Draw { .. }
+                                    | MethodEffect::DrawIndices { .. }
+                                    | MethodEffect::Clear { .. }
                             ) {
                                 draw = Some(effect);
                                 break;
@@ -72,7 +74,7 @@ impl Renderer {
                         }
                     } // No guest borrow survives a mutable draw or conditional barrier.
                     if let Some(effect) = draw {
-                        self.guest_draw(&channel.engine, effect, map, memory, changes, false)?;
+                        self.guest_effect(&channel.engine, effect, map, memory, changes, false)?;
                     }
                     phase = FaultPhase::Fetch;
                 }

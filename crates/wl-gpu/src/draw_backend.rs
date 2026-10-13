@@ -106,9 +106,11 @@ impl Renderer {
                     let effect = channel.push_word(*word)?;
                     if matches!(
                         effect,
-                        MethodEffect::Draw { .. } | MethodEffect::DrawIndices { .. }
+                        MethodEffect::Draw { .. }
+                            | MethodEffect::DrawIndices { .. }
+                            | MethodEffect::Clear { .. }
                     ) {
-                        last = self.guest_draw(
+                        last = self.guest_effect(
                             &channel.engine,
                             effect,
                             map,
@@ -313,6 +315,183 @@ impl Renderer {
             self.synchronize_target(memory, changes)?;
         }
         Ok(())
+    }
+    pub(crate) fn guest_effect(
+        &mut self,
+        engine: &Maxwell3d,
+        effect: MethodEffect,
+        map: &AddressMap,
+        memory: &mut impl GuestMemoryWrite,
+        changes: &mut TextureChanges,
+        synchronous: bool,
+    ) -> Result<Option<Frame>> {
+        match effect {
+            MethodEffect::Clear { color, depth } => self.guest_clear(
+                engine.clear_surface(color, depth)?,
+                map,
+                memory,
+                changes,
+                synchronous,
+            ),
+            _ => self.guest_draw(engine, effect, map, memory, changes, synchronous),
+        }
+    }
+    fn guest_clear(
+        &mut self,
+        clear: crate::raster::ClearSurface,
+        map: &AddressMap,
+        memory: &mut impl GuestMemoryWrite,
+        changes: &mut TextureChanges,
+        synchronous: bool,
+    ) -> Result<Option<Frame>> {
+        self.vertex_ready = false;
+        self.hardware_raster = None;
+        if self.poisoned {
+            return Err(invalid("renderer unavailable after backend failure"));
+        }
+        let resolve = |surface: crate::raster::ColorTarget| -> Result<GuestTargetStamp> {
+            let size = surface.size()?;
+            let guest = map.resolve(surface.address, size)?;
+            memory.validate_write(guest, size)?;
+            Ok(GuestTargetStamp {
+                guest,
+                size,
+                surface,
+                version: changes.stamp(guest.0..guest.0 + size as u64),
+            })
+        };
+        let mut color_stamp = clear.color.map(|v| resolve(v.0)).transpose()?;
+        let mut depth_stamp = clear.depth.map(|v| resolve(v.0.storage())).transpose()?;
+        let overlap = |a: GuestTargetStamp, b: GuestTargetStamp| {
+            a.guest.0 < b.guest.0 + b.size as u64 && b.guest.0 < a.guest.0 + a.size as u64
+        };
+        let effective_color = color_stamp.or(self.guest_target.filter(|_| self.color_pending));
+        let effective_depth = depth_stamp.or(self.guest_depth.filter(|_| self.depth_pending));
+        if effective_color
+            .zip(effective_depth)
+            .is_some_and(|(a, b)| overlap(a, b))
+        {
+            return Err(invalid("overlapping clear color/depth backing unsupported"));
+        }
+        // A full clear supersedes earlier logical pixels, not a process/mapping epoch.
+        for old in [
+            self.guest_target.filter(|_| self.color_pending),
+            self.guest_depth.filter(|_| self.depth_pending),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if old.version.0 != changes.stamp(old.guest.0..old.guest.0 + old.size as u64).0 {
+                return Err(invalid("pending clear backing epoch changed"));
+            }
+        }
+        let replaced = color_stamp.is_some_and(|new| {
+            self.color_pending && self.guest_target.is_none_or(|old| !old.same_backing(new))
+        }) || depth_stamp.is_some_and(|new| {
+            self.depth_pending && self.guest_depth.is_none_or(|old| !old.same_backing(new))
+        });
+        if replaced {
+            self.counters.coherence_barriers += 1;
+            self.synchronize_target(memory, changes)?;
+            for stamp in [&mut color_stamp, &mut depth_stamp].into_iter().flatten() {
+                stamp.version = changes.stamp(stamp.guest.0..stamp.guest.0 + stamp.size as u64);
+            }
+        }
+        // Coalesce unchanged pending clears, but invalidate caches again after CPU writes.
+        let mark_color =
+            color_stamp.is_some_and(|s| !self.color_pending || self.guest_target != Some(s));
+        let mark_depth =
+            depth_stamp.is_some_and(|s| !self.depth_pending || self.guest_depth != Some(s));
+        changes.can_mark_writes(u64::from(mark_color) + u64::from(mark_depth))?;
+        self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let prepared: Result<wgpu::CommandBuffer> = (|| {
+            if let Some((target, _)) = clear.color {
+                let before = self.counters.texture_allocations;
+                self.ensure_target(target.width, target.height)?;
+                if before != self.counters.texture_allocations {
+                    self.counters.render_target_allocations += 1;
+                } else {
+                    self.counters.render_target_reuses += 1;
+                }
+            }
+            if let Some((target, _)) = clear.depth {
+                self.prepare_depth(target.width, target.height, None)?;
+            }
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("B197 full attachment clear"),
+                });
+            let attachments = [clear.color.map(|(_, v)| wgpu::RenderPassColorAttachment {
+                view: &self.target.as_ref().unwrap().view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: f64::from(v[0]),
+                        g: f64::from(v[1]),
+                        b: f64::from(v[2]),
+                        a: f64::from(v[3]),
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })];
+            {
+                let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("guest CLEAR_SURFACE"),
+                    color_attachments: if clear.color.is_some() {
+                        &attachments
+                    } else {
+                        &[]
+                    },
+                    depth_stencil_attachment: clear.depth.map(|(_, v)| {
+                        wgpu::RenderPassDepthStencilAttachment {
+                            view: &self.depth.as_ref().unwrap().view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(v),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+            }
+            Ok(encoder.finish())
+        })();
+        let validation = pollster::block_on(self.device.pop_error_scope());
+        let allocation = pollster::block_on(self.device.pop_error_scope());
+        if let Some(error) = validation.or(allocation) {
+            self.poisoned = true;
+            return Err(crate::Error(error.to_string()));
+        }
+        self.last_submission = Some(self.queue.submit([prepared?]));
+        self.counters.submissions += 1;
+        self.counters.clear_commands += 1;
+        if let Some(mut stamp) = color_stamp {
+            if mark_color {
+                changes.mark_write(stamp.guest, stamp.size)?;
+            }
+            stamp.version = changes.stamp(stamp.guest.0..stamp.guest.0 + stamp.size as u64);
+            self.guest_target = Some(stamp);
+            self.color_pending = true;
+        }
+        if let Some(mut stamp) = depth_stamp {
+            if mark_depth {
+                changes.mark_write(stamp.guest, stamp.size)?;
+            }
+            stamp.version = changes.stamp(stamp.guest.0..stamp.guest.0 + stamp.size as u64);
+            self.guest_depth = Some(stamp);
+            self.depth_pending = true;
+        }
+        self.target_pending = self.color_pending || self.depth_pending;
+        if synchronous {
+            self.synchronize_target(memory, changes)
+        } else {
+            Ok(None)
+        }
     }
     pub(crate) fn guest_draw(
         &mut self,

@@ -432,3 +432,23 @@ addition on u32 bit patterns. WGSL concrete integer arithmetic wraps modulo the
 bit width, so raw-u32 lowering preserves the supported addition semantics.
 Independent unmodified envyas/envydis fixtures corroborate the encodings and
 canonical six-stall scheduling; no source implementation was copied.
+
+## Hardware attachment clearing
+
+Pinned NVIDIA `clb197.h` at revision `9fdf5c4` defines COLOR_CLEAR_VALUE components
+at `0x0d80..0x0d8c`, Z_CLEAR_VALUE at `0x0d90`, CLEAR_SURFACE_CONTROL at `0x10f8`
+and CLEAR_SURFACE at `0x19d0`. Trigger bits are Z=0, stencil=1, RGBA=2..5,
+MRT=9:6 and layer=25:10. Clear control bits select stencil mask (0), rectangle
+(4), scissor0 (8) and viewport clip0 (12). Surface clip is independently defined
+at `0x0ff4/0x0ff8` with origin in low16 and extent in high16.
+
+Pinned MIT Mesa
+[`nvc0_surface.c`](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nvc0/nvc0_surface.c#L695)
+explicitly excludes blend validation because draw color masks do not affect clear.
+Its color/depth paths program surface clipping and target geometry independently
+of shaders, viewport transforms and depth-test/write state. The same revision's
+[`nvc0_screen.c`](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nvc0/nvc0_screen.c#L1136)
+sets clear controls to zero so draw scissors, viewport and stencil masks do not
+constrain clears. These independently corroborate the selected bounded subset;
+no implementation code was copied. Normalized-value and full-clip requirements
+are Wanderlust limits, not asserted universal hardware restrictions.

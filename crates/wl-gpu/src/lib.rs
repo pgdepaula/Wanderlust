@@ -96,6 +96,7 @@ pub struct Counters {
     pub shader_binary_bytes: u64,
     pub descriptor_reads: u64,
     pub draw_commands: u64,
+    pub clear_commands: u64,
     pub index_guest_bytes: u64,
     pub index_upload_bytes: u64,
     pub index_cache_hits: u64,

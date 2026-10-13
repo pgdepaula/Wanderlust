@@ -135,6 +135,11 @@ impl Default for ColorState {
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClearSurface {
+    pub color: Option<(ColorTarget, [f32; 4])>,
+    pub depth: Option<(DepthTarget, f32)>,
+}
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rasterization {
     pub viewport: [f32; 6],
     pub scissor: [u32; 4],
@@ -216,6 +221,9 @@ pub(crate) struct RasterRegisters {
     depth_select: bool,
     depth_func: Option<DepthCompare>,
     zt: [Option<u32>; 9],
+    clear_control: Option<u32>,
+    clear_color: [Option<u32>; 4],
+    clear_depth: Option<u32>,
 }
 impl RasterRegisters {
     pub fn apply(&mut self, method: u16, value: u32) -> std::result::Result<bool, MethodError> {
@@ -263,6 +271,14 @@ impl RasterRegisters {
             return Ok(true);
         }
         match method {
+            0x0d80..=0x0d8c => self.clear_color[((method - 0xd80) / 4) as usize] = Some(value),
+            0x0d90 => self.clear_depth = Some(value),
+            0x10f8 => {
+                if value != 0 {
+                    return Err(bad());
+                }
+                self.clear_control = Some(value);
+            }
             0x130c => self.depth_func = Some(depth_compare(value).ok_or_else(bad)?),
             0x0fe0..=0x0ff0 | 0x1228..=0x1230 | 0x179c => {
                 let n = match method {
@@ -362,6 +378,9 @@ impl RasterRegisters {
         if self.depth_state()?.is_none() {
             return Ok(None);
         }
+        self.raw_depth_target().map(Some)
+    }
+    fn raw_depth_target(&self) -> Result<DepthTarget> {
         let mut z = [0; 9];
         for (out, v) in z.iter_mut().zip(self.zt) {
             *out = v.ok_or_else(|| invalid("incomplete ZF32 target"))?;
@@ -376,7 +395,7 @@ impl RasterRegisters {
         if z[4] != 0 && u64::from(z[4]) * 4 != size as u64 {
             return Err(invalid("unsupported depth array pitch"));
         }
-        Ok(Some(target))
+        Ok(target)
     }
     pub fn resolve(&self) -> Result<(ColorTarget, Rasterization)> {
         if self.fixed != (1u32 << FIXED_RASTER_STATE.len()) - 1 || self.scissor_enable != Some(1) {
@@ -404,42 +423,7 @@ impl RasterRegisters {
             blend,
             write_mask: self.write_mask,
         };
-        let mut c = [0u32; 9];
-        for (out, v) in c.iter_mut().zip(self.color) {
-            *out = v.ok_or_else(|| invalid("incomplete color target"))?;
-        }
-        let address = (u64::from(c[0]) << 32) | u64::from(c[1]);
-        // WIDTH is byte pitch for PITCH, pixels for BLOCKLINEAR (Mesa FB setup).
-        let (width, layout) = if c[5] == 0x1000 {
-            if c[2] % 4 != 0 {
-                return Err(invalid("RGBA8 pitch is not pixel aligned"));
-            }
-            (
-                c[2] / 4,
-                ColorLayout::Pitch {
-                    bytes_per_row: c[2],
-                },
-            )
-        } else {
-            (
-                c[2],
-                ColorLayout::BlockLinear {
-                    block_height_log2: (c[5] >> 4) as u8,
-                },
-            )
-        };
-        let target = ColorTarget {
-            address: GpuAddress(address),
-            width,
-            height: c[3],
-            layout,
-        };
-        let size = target.size()?;
-        if c[7] != 0
-            && (matches!(layout, ColorLayout::Pitch { .. }) || u64::from(c[7]) * 4 != size as u64)
-        {
-            return Err(invalid("unsupported single-layer array pitch"));
-        }
+        let target = self.color_target()?;
         let mut v = [0f32; 6];
         for (out, word) in v.iter_mut().zip(self.viewport) {
             *out = f32::from_bits(word.ok_or_else(|| invalid("incomplete viewport"))?);
@@ -491,6 +475,120 @@ impl RasterRegisters {
                 depth: self.depth_state()?,
             },
         ))
+    }
+    fn color_target(&self) -> Result<ColorTarget> {
+        let mut c = [0u32; 9];
+        for (out, v) in c.iter_mut().zip(self.color) {
+            *out = v.ok_or_else(|| invalid("incomplete color target"))?;
+        }
+        let address = (u64::from(c[0]) << 32) | u64::from(c[1]);
+        // WIDTH is byte pitch for PITCH, pixels for BLOCKLINEAR (Mesa FB setup).
+        let (width, layout) = if c[5] == 0x1000 {
+            if c[2] % 4 != 0 {
+                return Err(invalid("RGBA8 pitch is not pixel aligned"));
+            }
+            (
+                c[2] / 4,
+                ColorLayout::Pitch {
+                    bytes_per_row: c[2],
+                },
+            )
+        } else {
+            (
+                c[2],
+                ColorLayout::BlockLinear {
+                    block_height_log2: (c[5] >> 4) as u8,
+                },
+            )
+        };
+        let target = ColorTarget {
+            address: GpuAddress(address),
+            width,
+            height: c[3],
+            layout,
+        };
+        let size = target.size()?;
+        if c[7] != 0
+            && (matches!(layout, ColorLayout::Pitch { .. }) || u64::from(c[7]) * 4 != size as u64)
+        {
+            return Err(invalid("unsupported single-layer array pitch"));
+        }
+        Ok(target)
+    }
+    pub fn resolve_clear(&self, color: bool, depth: bool) -> Result<ClearSurface> {
+        for method in [0x0138, 0x15d0] {
+            let n = FIXED_RASTER_STATE
+                .iter()
+                .position(|v| v.0 == method)
+                .unwrap();
+            if self.fixed & (1 << n) == 0 {
+                return Err(invalid(
+                    "clear requires explicit unconditional single-sample state",
+                ));
+            }
+        }
+        if self.clear_control != Some(0) || !color && !depth {
+            return Err(invalid("unsupported or incomplete clear controls"));
+        }
+        let color = if color {
+            let n = FIXED_RASTER_STATE
+                .iter()
+                .position(|v| v.0 == 0x121c)
+                .unwrap();
+            if self.fixed & (1 << n) == 0 {
+                return Err(invalid("clear requires explicit target-zero selection"));
+            }
+            let target = self.color_target()?;
+            let mut values = [0.; 4];
+            for (out, word) in values.iter_mut().zip(self.clear_color) {
+                *out =
+                    f32::from_bits(word.ok_or_else(|| invalid("incomplete color clear values"))?);
+                if !out.is_finite() || !(0.0..=1.0).contains(out) {
+                    return Err(invalid("unsupported UNORM clear value"));
+                }
+            }
+            Some((target, values))
+        } else {
+            None
+        };
+        let depth = if depth {
+            let n = FIXED_RASTER_STATE
+                .iter()
+                .position(|v| v.0 == 0x1538)
+                .unwrap();
+            if self.fixed & (1 << n) == 0 || !self.depth_select {
+                return Err(invalid("clear requires selected depth target"));
+            }
+            let target = self.raw_depth_target()?;
+            let bits = self
+                .clear_depth
+                .ok_or_else(|| invalid("incomplete depth clear value"))?;
+            let value = f32::from_bits(bits);
+            if !value.is_finite()
+                || !(0.0..=1.0).contains(&value)
+                || value.is_subnormal()
+                || bits == 0x80000000
+            {
+                return Err(invalid("unsupported ZF32 clear value"));
+            }
+            Some((target, value))
+        } else {
+            None
+        };
+        let extent = color
+            .map(|v| (v.0.width, v.0.height))
+            .or_else(|| depth.map(|v| (v.0.width, v.0.height)))
+            .unwrap();
+        if depth.is_some_and(|v| (v.0.width, v.0.height) != extent) {
+            return Err(invalid("clear attachment dimensions differ"));
+        }
+        if extent.0 > 65535
+            || extent.1 > 65535
+            || self.surface != [Some(extent.0 << 16), Some(extent.1 << 16)]
+        {
+            return Err(invalid("only full surface-clip clear is implemented"));
+        }
+        Ok(ClearSurface { color, depth })
     }
 }
 

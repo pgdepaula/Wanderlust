@@ -888,3 +888,43 @@ identities and expose an otherwise prohibited multiply-to-add contraction. This
 policy preserves the existing floating subset's rejection contract; it is not a
 new general floating-point accuracy guarantee. Integer bit operations themselves
 use exact wrapping/bitwise semantics.
+
+## B197 attachment clears
+
+`CLEAR_SURFACE` at byte method `0x19d0` executes full target-zero/layer-zero RGBA
+(`0x3c`), ZF32 depth (`0x01`) or both (`0x3d`). Color values come from
+`0x0d80..0x0d8c`; depth from `0x0d90`. The supported subset requires explicit
+unconditional rendering `0x0138=1`, single sample `0x15d0=0`, clear controls
+`0x10f8=0` and full surface clip `0x0ff4/0x0ff8`. Selected color/depth descriptors
+and corresponding target selection must be complete. Color supports the same
+pitch/block-linear RGBA8 layouts; depth uses block-linear ZF32. Normalized finite
+clear values are supported, with the existing ZF32 zero/normal restrictions.
+Stencil, partial component masks, additional targets/layers, partial clips and
+optional scissor/viewport/rectangle/stencil-mask controls remain unsupported.
+
+Clears resolve raw attachment geometry independently of draw state. They require
+no guest shader, vertex/index buffer, viewport transform, blend coefficients or
+depth comparison/write enable. Draw color write masks and blending do not affect
+hardware clears; explicit clear control zero also excludes draw scissors/viewport
+clipping. Surface clipping still applies, hence the full-clip validation.
+Execution uses actual attachment `LoadOp::Clear`/`Store` operations, not RAM fills
+or a synthetic draw. Full clears require no old-pixel upload. ZF32 publication
+still uses the existing portable GPU depth export path.
+
+Both FIFO and GPFIFO dispatch clears in order. A clear ends the scoped command
+borrow just as a draw does, so an unread suffix overlapping GPU-newer storage is
+published and reacquired. GPFIFO `draws_submitted` remains a draw count;
+`Counters::clear_commands` separately counts accepted clears, while queue submit
+tracking establishes real completion even for a submission containing no draw.
+Completion waits do not implicitly publish RAM. A depth-only publication returns
+no color Frame, but counts as a successful visibility barrier.
+
+A full clear supersedes prior logical attachment contents and CPU writes before
+it. Its new stamp excludes those earlier writes from the later CPU patch overlay;
+CPU writes after clear still win by exact canonical byte range. Block-linear
+padding remains sourced from current guest storage. Unchanged pending clears
+coalesce journal invalidation; CPU writes advance the stamp and cause fresh
+invalidation. Untouched pending attachments retain their own stamps and contents.
+Incompatible selected-target rebinding drains earlier pending output first;
+attachment overlaps and changed process/journal epochs fail before execution.
+Atomic publication failure retains pending output for retry without re-clearing.

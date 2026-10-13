@@ -41,6 +41,7 @@ pub struct DriverCounters {
     pub rejected: u64,
     pub completion_queries: u64,
     pub completion_waits: u64,
+    /// Successful explicit publications that had GPU-newer attachments pending.
     pub visibility_barriers: u64,
 }
 #[derive(Clone)]
@@ -331,6 +332,7 @@ impl GpuDriver {
         if self.renderer.target_pending && self.active != Some(channel) {
             return Err(invalid("publication channel does not own pending output"));
         }
+        let pending = self.renderer.target_pending;
         let frame = if self.active == Some(channel) {
             self.renderer
                 .synchronize_target(memory, &mut self.changes)?
@@ -343,7 +345,7 @@ impl GpuDriver {
             }
         }
         self.pending_cpu_writes = 0;
-        self.counters.visibility_barriers += u64::from(frame.is_some());
+        self.counters.visibility_barriers += u64::from(pending);
         Ok(frame)
     }
     pub fn retire(&mut self, token: SubmissionToken) -> Result<()> {

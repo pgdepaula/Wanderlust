@@ -970,3 +970,58 @@ bytes, one color target allocation/four reuses, ten queue submissions and five
 explicit readbacks/waits (37,200 staging bytes; 30,160 guest framebuffer bytes).
 Constant edits do not specialize shader code. These are small correctness fixtures,
 not an instruction-coverage percentage or game-performance benchmark.
+
+## Hardware clear validation
+
+Four CPU tests validate minimal color/depth descriptors independently of draw
+state, strict clear controls/trigger values, selected clear-value limits and a
+literal incrementing B06F packet split across chunks. Six GPU scenarios enter
+through GpuDriver/KickoffPb/GPFIFO and execute actual attachment clears:
+
+- Pitch 7x9 and block-linear 7x9/BH1 and 52x29/BH2 produce exact RGBA
+  [64,128,191,255] without shader/vertex selection or old-pixel uploads.
+  Draw write mask zero and incomplete enabled blending do not suppress clears.
+  Independent scalar GOB addresses check every logical byte and padded byte.
+- CPU writes before clear are superseded; exact raw CPU patches after clear win,
+  including padding. Atomic write failure leaves RAM unchanged and retry does
+  not execute another clear. The initial warm test hit the driver's bounded
+  pending-CPU-write budget by rewriting command RAM on every iteration; warming
+  now reuses one explicitly uploaded command buffer, preserving that guard.
+- Depth-only, color-only and combined clears preserve the untouched pending
+  attachment. Partial depth-success/color-failure publication retires only the
+  successful attachment; retry does not republish it. A depth-only visibility
+  call returns no color Frame and increments the corrected visibility counter;
+  a no-op visibility call does not. Waiting completes host work without RAM
+  publication or readback.
+- Clear-depth-before-draw rejects farther Z=.5 geometry with LESS against .25.
+  ALWAYS writes .5 before a color-only clear; depth remains .5 at a known covered
+  point. A later depth-only clear to .75 preserves independently checked red
+  triangle coverage over blue. No target/depth initialization upload occurs.
+- Later invalid clear commands latch the channel while preserving earlier output
+  for close/publication. Invalid controls/values/mappings and missing final padded
+  GOBs produce no clear. A 52x65/BH2 allocation needs 20,480 bytes and cannot use a
+  16,384-byte mapping merely because its logical pixels fit.
+- Rebinding a pending target drains the old backing before clearing the new one;
+  aliases reuse compatible residency. Pending color/depth overlap rejects without
+  discarding prior output. A clear overwriting its unread GPFIFO suffix publishes
+  and reacquires zeros; the old invalid suffix is never executed.
+
+The complete package passed formatting, strict Clippy and 94 CPU tests with each
+feature configuration. All 48 GPU scenarios passed explicitly on WSL OpenGL,
+native Windows D3D12 and native Windows Vulkan: 144 distinct backend/scenario
+passes, zero GPU skips. Startup-only WSL launches were retried. An ordinary
+faithful snapshot of dc367b7 plus the clear implementation, exact Cargo.lock and
+excluding unfinished compiler/CLI and conformance revisions passed strict workspace
+Clippy and 298 CPU tests; 48 ordinary GPU ignores are covered by the explicit runs.
+This does not validate unfinished runtime changes or original-game GPU commands.
+
+At 52x29/BH2, 33 clears use one target allocation/32 reuses, zero target uploads,
+zero guest shader reads/decodes and no new shader/pipeline during the warm 32-clear
+interval. That interval adds 32 queue submissions and zero conversions, readbacks or
+waits. Injected publication failure plus retry adds two readbacks/waits: 14,880
+staging bytes, 16,384 storage-read bytes and 8,192 successful guest-write bytes.
+The raw five-byte CPU patch/padding overlay is acquired twice, without re-clearing.
+One debug warm32 observation recorded 6.22 ms/1,269 allocations/38 reallocations on
+GL, 23.02 ms/1,094/2 on D3D12 and 13.87 ms/1,259/2 on Vulkan. Process-wide allocator
+traffic and CPU timings remain; these are not zero-copy, GPU-duration or game
+performance claims. Each clear still submits separately to the host queue.

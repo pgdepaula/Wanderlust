@@ -55,7 +55,7 @@ impl Frame {
 pub(crate) struct Target {
     extent: (u32, u32),
     pub(crate) texture: wgpu::Texture,
-    view: wgpu::TextureView,
+    pub(crate) view: wgpu::TextureView,
     readback: wgpu::Buffer,
     pitch: u32,
     image_size: u64,
