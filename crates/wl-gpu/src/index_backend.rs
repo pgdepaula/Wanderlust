@@ -36,9 +36,17 @@ impl Renderer {
             guest,
             size: source.bytes,
             width: source.width,
-            version: changes.stamp(guest.0..guest.0 + source.bytes as u64),
+            version: changes.observation(),
         };
-        let cached = self.indices.as_ref().filter(|r| r.stamp == stamp);
+        let mut cached = self.indices.as_mut().filter(|r| {
+            r.stamp.guest == guest
+                && r.stamp.size == source.bytes
+                && r.stamp.width == source.width
+                && changes.unchanged_since(guest.0..guest.0 + source.bytes as u64, r.stamp.version)
+        });
+        if let Some(r) = cached.as_deref_mut() {
+            r.stamp.version = changes.observation();
+        }
         let bytes = if cached.is_none() {
             let bytes = memory.read(guest, source.bytes)?;
             if bytes.len() != source.bytes {
@@ -49,7 +57,7 @@ impl Renderer {
         } else {
             None
         };
-        let (min, max) = if let Some(r) = cached {
+        let (min, max) = if let Some(r) = cached.as_ref() {
             self.counters.index_cache_hits += 1;
             (r.min, r.max)
         } else {

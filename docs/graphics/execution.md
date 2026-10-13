@@ -456,7 +456,7 @@ wgpu-hal 26.0.6 GLES truncates viewport coordinates/extents to integers. Empty o
 out-of-bounds viewport/clip intersections are also explicitly unsupported.
 
 `raster::FIXED_RASTER_STATE` enumerates required explicit baseline state writes;
-color masks, global blending and ZF32 depth additionally accept the validated
+color masks, global blending, ZF32 depth and face culling additionally accept the validated
 states described below. The explicit disabled-depth baseline uses:
 unconditional rendering, rasterization enabled, one color attachment, single sample,
 RGBA baseline writes, fill mode, no depth/stencil/cull/alpha test/logic op/sample mask,
@@ -928,3 +928,34 @@ invalidation. Untouched pending attachments retain their own stamps and contents
 Incompatible selected-target rebinding drains earlier pending output first;
 attachment overlaps and changed process/journal epochs fail before execution.
 Atomic publication failure retains pending output for retry without re-clearing.
+
+
+## B197 face culling and source observations
+
+Byte methods `OGL_SET_CULL` (`0x1918`, strict 0/1), `OGL_SET_FRONT_FACE`
+(`0x191c`, CW=`0x900`, CCW=`0x901`) and `OGL_SET_CULL_FACE`
+(`0x1920`, FRONT=`0x404`, BACK=`0x405`) configure triangle-list culling.
+Enabled culling requires both orientation and face to have been explicitly set.
+Disabled culling normalizes those irrelevant fields out of pipeline identity.
+FRONT_AND_BACK, the separate D3D cull mode, alternate window origins and other
+raster modes remain unsupported. Invalid method values preserve existing register
+state; incomplete enabled state cannot execute a previously selected pipeline.
+Attachment clears remain independent of draw culling.
+
+For the supported upper-left window origin, guest CW/CCW maps directly to host
+CW/CCW. The translated vertex Y adjustment already implements signed guest
+viewport scale; changing scale Y changes actual winding without an additional
+front-face inversion. Culling participates in paired pipeline identity, while a
+compatible vertex module is reused across front/back/orientation changes.
+
+Vertex-program, vertex-buffer and index-buffer caches retain the global dirty
+journal revision last observed. On a hit, checked canonical range resolution and
+retained journal history must prove no overlapping writes since that revision.
+The observation then advances without rereading or uploading unchanged bytes.
+This avoids repeated invalidation when unrelated writes evict older journal
+records. A new epoch, future cursor, missing history, changed canonical range,
+changed size/format or overlapping write requires a fresh read. Index min/max
+and signed base/vertex bounds are still validated for each draw. Other resource
+caches retain their existing conservative range-stamp policy. Observations are
+not content identities or GPU fences and do not replace pending-output stamps:
+publication still requires exact retained CPU patch history and atomic writes.

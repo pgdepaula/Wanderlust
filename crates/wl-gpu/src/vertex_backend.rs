@@ -16,13 +16,19 @@ struct BackingStamp {
     version: (u64, u64),
 }
 impl BackingStamp {
-    fn matches(&self, address: GpuAddress, map: &AddressMap, changes: &TextureChanges) -> bool {
-        address
+    fn matches(&mut self, address: GpuAddress, map: &AddressMap, changes: &TextureChanges) -> bool {
+        if address
             .0
             .checked_add(self.size as u64)
             .is_some_and(|e| e <= 1 << 40)
             && map.resolve(address, self.size).ok() == Some(self.guest)
-            && changes.stamp(self.guest.0..self.guest.0 + self.size as u64) == self.version
+            && changes.unchanged_since(self.guest.0..self.guest.0 + self.size as u64, self.version)
+        {
+            self.version = changes.observation();
+            true
+        } else {
+            false
+        }
     }
     fn new(
         address: GpuAddress,
@@ -34,7 +40,7 @@ impl BackingStamp {
         Ok(Self {
             guest,
             size,
-            version: changes.stamp(guest.0..guest.0 + size as u64),
+            version: changes.observation(),
         })
     }
 }
@@ -55,6 +61,7 @@ pub(crate) struct ResidentVertex {
     flip_y: bool,
     color: crate::raster::ColorState,
     depth: Option<crate::raster::DepthState>,
+    cull: crate::raster::Culling,
     shader: wgpu::ShaderModule,
 }
 impl Renderer {
@@ -66,17 +73,19 @@ impl Renderer {
         stride: u64,
         offsets: [u64; 2],
     ) -> Result<()> {
-        self.set_vertex_program_raster(program, stride, offsets, false, Default::default(), None)
+        self.set_vertex_program_raster(program, stride, offsets, None)
     }
     fn set_vertex_program_raster(
         &mut self,
         program: &VertexProgram,
         stride: u64,
         offsets: [u64; 2],
-        flip_y: bool,
-        color: crate::raster::ColorState,
-        depth: Option<crate::raster::DepthState>,
+        raster: Option<crate::raster::Rasterization>,
     ) -> Result<()> {
+        let flip_y = raster.is_some_and(|r| r.flip_y);
+        let color = raster.map_or_else(Default::default, |r| r.color);
+        let depth = raster.and_then(|r| r.depth);
+        let cull = raster.map_or_else(Default::default, |r| r.cull);
         self.vertex_ready = false;
         if self.poisoned {
             self.vertex = None;
@@ -109,6 +118,7 @@ impl Renderer {
                 && v.flip_y == flip_y
                 && v.color == color
                 && v.depth == depth
+                && v.cull == cull
         }) {
             self.counters.shader_cache_hits += 1;
             return Ok(());
@@ -186,7 +196,7 @@ impl Renderer {
                         )),
                     })],
                 }),
-                primitive: Default::default(),
+                primitive: host_primitive(cull),
                 depth_stencil: depth.map(crate::depth_backend::host_depth),
                 multisample: Default::default(),
                 multiview: None,
@@ -209,6 +219,7 @@ impl Renderer {
             flip_y,
             color,
             depth,
+            cull,
             shader,
         });
         if new_shader {
@@ -300,7 +311,7 @@ impl Renderer {
         let size = array.span(first, count)?;
         if self
             .selected_vertex
-            .as_ref()
+            .as_mut()
             .is_none_or(|s| !s.stamp.matches(source.address, map, changes))
         {
             self.selected_vertex = None;
@@ -333,8 +344,12 @@ impl Renderer {
             .hardware_raster
             .map_or_else(Default::default, |r| r.color);
         let depth = self.hardware_raster.and_then(|r| r.depth);
+        let cull = self
+            .hardware_raster
+            .map_or_else(Default::default, |r| r.cull);
         if self.vertex.as_ref().is_none_or(|v| {
             v.depth != depth
+                || v.cull != cull
                 || v.color != color
                 || v.flip_y != flip_y
                 || v.program != selected.program
@@ -343,10 +358,17 @@ impl Renderer {
                 || v.offsets != offsets
         }) {
             let program = selected.program.clone();
-            self.set_vertex_program_raster(&program, stride, offsets, flip_y, color, depth)?;
+            self.set_vertex_program_raster(&program, stride, offsets, self.hardware_raster)?;
         }
-        let stamp = BackingStamp::new(array.address, size, map, changes)?;
-        if self.vertex.as_ref().unwrap().stamp != Some(stamp) {
+        let cached = self
+            .vertex
+            .as_mut()
+            .unwrap()
+            .stamp
+            .as_mut()
+            .is_some_and(|s| s.size == size && s.matches(array.address, map, changes));
+        if !cached {
+            let stamp = BackingStamp::new(array.address, size, map, changes)?;
             let bytes = map.read(memory, array.address, size)?;
             if bytes.len() != size {
                 return Err(invalid("short guest vertex read"));
@@ -377,5 +399,29 @@ fn host_blend(state: crate::raster::BlendState) -> wgpu::BlendState {
     wgpu::BlendState {
         color: component(state.color),
         alpha: component(state.alpha),
+    }
+}
+
+fn host_primitive(cull: crate::raster::Culling) -> wgpu::PrimitiveState {
+    use crate::raster::{CullFace, Culling, FrontFace};
+    let (cull_mode, front_face) = match cull {
+        Culling::Disabled => (None, wgpu::FrontFace::Ccw),
+        Culling::Enabled { face, front } => (
+            Some(match face {
+                CullFace::Front => wgpu::Face::Front,
+                CullFace::Back => wgpu::Face::Back,
+            }),
+            match front {
+                FrontFace::Clockwise => wgpu::FrontFace::Cw,
+                FrontFace::CounterClockwise => wgpu::FrontFace::Ccw,
+            },
+        ),
+    };
+    // Supported B197 WINDOW_ORIGIN=UPPER_LEFT. The existing vertex Y adjustment
+    // already realizes guest viewport orientation; do not invert front_face again.
+    wgpu::PrimitiveState {
+        cull_mode,
+        front_face,
+        ..Default::default()
     }
 }

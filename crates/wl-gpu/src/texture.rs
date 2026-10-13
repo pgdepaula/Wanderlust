@@ -172,6 +172,24 @@ impl TextureChanges {
         }
         Ok(dirty.ranges().to_vec())
     }
+    /// Global observation cursor for caches checked frequently enough to retain history.
+    /// This is not a content identity and must not replace pending-output patch stamps.
+    #[cfg(any(feature = "wgpu-backend", test))]
+    pub(crate) fn observation(&self) -> (u64, u64) {
+        (self.epoch, self.revision)
+    }
+    /// Prove that a source has not changed since a prior observation without allocating.
+    /// Missing history, a new epoch, and a future cursor all require a fresh source read.
+    #[cfg(any(feature = "wgpu-backend", test))]
+    pub(crate) fn unchanged_since(&self, range: Range<u64>, observed: (u64, u64)) -> bool {
+        observed.0 == self.epoch
+            && self.floor <= observed.1
+            && observed.1 <= self.revision
+            && !self
+                .writes
+                .iter()
+                .any(|(v, r)| *v > observed.1 && r.start < range.end && range.start < r.end)
+    }
     /// A floor advance conservatively invalidates older resources after journal eviction.
     pub fn stamp(&self, range: Range<u64>) -> (u64, u64) {
         let revision = self
@@ -189,6 +207,34 @@ impl TextureChanges {
 #[cfg(test)]
 mod journal_tests {
     use super::*;
+    #[test]
+    fn frequently_observed_sources_survive_unrelated_history_eviction() {
+        let mut c = TextureChanges::new(4);
+        let mut observed = c.observation();
+        for n in 0..1024 {
+            c.mark_write(GuestAddress(1000 + n), 1).unwrap();
+            assert!(c.unchanged_since(100..200, observed));
+            observed = c.observation();
+        }
+        c.mark_write(GuestAddress(200), 1).unwrap();
+        c.mark_write(GuestAddress(99), 1).unwrap();
+        assert!(c.unchanged_since(100..200, observed));
+        c.mark_write(GuestAddress(199), 2).unwrap();
+        assert!(!c.unchanged_since(100..200, observed));
+        // An overlapping write remains a change even if later writes are unrelated.
+        c.mark_write(GuestAddress(1000), 1).unwrap();
+        assert!(!c.unchanged_since(100..200, observed));
+        let current = c.observation();
+        assert!(c.unchanged_since(100..200, current));
+        assert!(!c.unchanged_since(100..200, (5, current.1)));
+        assert!(!c.unchanged_since(100..200, (4, current.1 + 1)));
+        for _ in 0..65 {
+            c.mark_write(GuestAddress(1000), 1).unwrap();
+        }
+        assert!(!c.unchanged_since(100..200, current));
+        // Exact pending-output patch retrieval still rejects evicted history.
+        assert!(c.writes_since(100..200, current).is_err());
+    }
     #[test]
     fn exact_patch_union_and_history_bounds() {
         let mut c = TextureChanges::new(4);

@@ -139,6 +139,25 @@ pub struct ClearSurface {
     pub color: Option<(ColorTarget, [f32; 4])>,
     pub depth: Option<(DepthTarget, f32)>,
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrontFace {
+    Clockwise,
+    CounterClockwise,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CullFace {
+    Front,
+    Back,
+}
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Culling {
+    #[default]
+    Disabled,
+    Enabled {
+        face: CullFace,
+        front: FrontFace,
+    },
+}
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rasterization {
     pub viewport: [f32; 6],
@@ -146,6 +165,7 @@ pub struct Rasterization {
     pub flip_y: bool,
     pub color: ColorState,
     pub depth: Option<DepthState>,
+    pub cull: Culling,
 }
 /// B197 comparison identity, independent of host API enum values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,6 +244,9 @@ pub(crate) struct RasterRegisters {
     clear_control: Option<u32>,
     clear_color: [Option<u32>; 4],
     clear_depth: Option<u32>,
+    cull_enabled: bool,
+    front_face: Option<FrontFace>,
+    cull_face: Option<CullFace>,
 }
 impl RasterRegisters {
     pub fn apply(&mut self, method: u16, value: u32) -> std::result::Result<bool, MethodError> {
@@ -254,6 +277,11 @@ impl RasterRegisters {
                     0x12e8 => self.depth_write = value != 0,
                     _ => self.depth_select = value != 0,
                 }
+            } else if method == 0x1918 {
+                if value > 1 {
+                    return Err(bad());
+                }
+                self.cull_enabled = value != 0;
             } else if method == 0x1360 {
                 if value > 1 {
                     return Err(bad());
@@ -271,6 +299,20 @@ impl RasterRegisters {
             return Ok(true);
         }
         match method {
+            0x191c => {
+                self.front_face = Some(match value {
+                    0x900 => FrontFace::Clockwise,
+                    0x901 => FrontFace::CounterClockwise,
+                    _ => return Err(bad()),
+                })
+            }
+            0x1920 => {
+                self.cull_face = Some(match value {
+                    0x404 => CullFace::Front,
+                    0x405 => CullFace::Back,
+                    _ => return Err(bad()),
+                })
+            }
             0x0d80..=0x0d8c => self.clear_color[((method - 0xd80) / 4) as usize] = Some(value),
             0x0d90 => self.clear_depth = Some(value),
             0x10f8 => {
@@ -473,6 +515,18 @@ impl RasterRegisters {
                 flip_y: sy > 0.,
                 color,
                 depth: self.depth_state()?,
+                cull: if self.cull_enabled {
+                    Culling::Enabled {
+                        face: self
+                            .cull_face
+                            .ok_or_else(|| invalid("incomplete cull face"))?,
+                        front: self
+                            .front_face
+                            .ok_or_else(|| invalid("incomplete front face"))?,
+                    }
+                } else {
+                    Culling::Disabled
+                },
             },
         ))
     }

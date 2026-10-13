@@ -452,3 +452,22 @@ sets clear controls to zero so draw scissors, viewport and stencil masks do not
 constrain clears. These independently corroborate the selected bounded subset;
 no implementation code was copied. Normalized-value and full-clip requirements
 are Wanderlust limits, not asserted universal hardware restrictions.
+
+
+## Face orientation and culling
+
+Pinned NVIDIA [`clb197.h`](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/3d/clb197.h#L3346)
+defines the OGL cull enable, front orientation and cull-face byte methods at
+`0x1918/0x191c/0x1920`, including CW/CCW and FRONT/BACK/BOTH enum values.
+BOTH is a documented hardware mode but remains outside the implemented subset.
+
+Pinned MIT Mesa [`nvc0_state.c`](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nvc0/nvc0_state.c#L260)
+programs these orientation/cull fields directly.
+[`st_atom_viewport.c`](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/mesa/state_tracker/st_atom_viewport.c#L61)
+reverses viewport Y for top-origin surfaces, while
+[`st_atom_rasterizer.c`](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/mesa/state_tracker/st_atom_rasterizer.c#L77)
+preserves front orientation for that origin. The same revision initializes
+SCREEN_Y_CONTROL to zero. These establish why the existing vertex Y adjustment
+must not be followed by another front-face inversion. Independent framebuffer
+signed-area tests use guest viewport equations, not the host culling conversion.
+No source implementation was copied.

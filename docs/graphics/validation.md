@@ -1025,3 +1025,56 @@ One debug warm32 observation recorded 6.22 ms/1,269 allocations/38 reallocations
 GL, 23.02 ms/1,094/2 on D3D12 and 13.87 ms/1,259/2 on Vulkan. Process-wide allocator
 traffic and CPU timings remain; these are not zero-copy, GPU-duration or game
 performance claims. Each clear still submits separately to the host queue.
+
+
+## Guest face culling and bounded source observations
+
+The literal GpuDriver/KickoffPb/GPFIFO fixture exercises 24 combinations of
+positive/negative viewport Y, both guest index windings, CW/CCW front orientation,
+and disabled/front/back culling. An independent signed-area/barycentric oracle
+checks strict interior/exterior pixels of asymmetric geometry on a 52x29 target.
+Edges within the stated barycentric tolerance are excluded; no pixel expectation
+comes from host cull state or prior output. Degenerate triangles produce only the
+cleared background. Incomplete enabled state faults without a new draw/pipeline,
+and earlier pending output remains publishable without replay.
+
+After this matrix, 32 unchanged deferred draws produce zero new vertex/index or
+other uploads, pipelines, modules, readbacks and blocking waits. They still issue
+32 queue submissions. Process-wide Rust allocation instrumentation, excluding
+native-driver allocations, measured the following single debug observations:
+
+| Backend | CPU submission interval | Rust allocations / reallocations |
+|---|---:|---:|
+| WSL OpenGL / llvmpipe | 21.65 ms | 1576 / 131 |
+| Native Windows D3D12 / Intel UHD | 23.41 ms | 1413 / 34 |
+| Native Windows Vulkan / Intel UHD | 45.44 ms | 1573 / 34 |
+
+These are noisy small-workload observations, not frame-rate or speedup claims.
+The token vector is reserved before measurement; host/runtime bookkeeping remains
+allocated and neither command submission nor GPU transfers are claimed zero-copy.
+
+A separate 128-draw sequence rolls over the 64-entry journal using disjoint
+command writes and explicit publication. Vertex/index upload bytes and vertex
+shader decodes remain unchanged. A real index mutation changes visible coverage
+and uploads eight padded bytes. An overlapping index write followed by 65 other
+writes forces a fresh index/vertex read and uploads eight/72 bytes respectively;
+the newly selected winding is verified. A vertex write then degenerates geometry
+and uploads exactly 72 bytes. The allocation-free journal model test independently
+checks 1024 advancing observations, interval boundaries, overlapping writes,
+epoch mismatch, future cursors and lost history. Exact pending-output patch
+retrieval still rejects lost history.
+
+All three new GPU scenarios actually executed on WSL OpenGL and native Windows
+D3D12/Vulkan. The full package has 98 CPU tests in each feature configuration;
+ordinary default-feature testing leaves 51 GPU scenarios explicitly ignored.
+Strict package Clippy and workspace formatting checks passed.
+
+The complete explicit matrix passed 51/51 scenarios on each backend (153 GPU
+executions, zero skips). A faithful ordinary source snapshot based on
+`4a54cac4924ca456c98237d09e23196aaf6ed2b9` plus the owned graphics edits and exact
+Cargo.lock passed strict workspace Clippy and 302 CPU tests; its 51 GPU scenarios
+were ignored there and executed separately above. The snapshot excludes unfinished
+analysis/CLI/IDE changes and is not a live-runtime integration result. Two native
+process launches failed with WSL UtilAcceptVsock before tests began; bounded
+startup-only retries executed and passed the actual binaries. No GPU assertion
+failure was retried as a startup error.
