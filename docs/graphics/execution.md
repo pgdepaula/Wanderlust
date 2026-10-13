@@ -1010,3 +1010,25 @@ mutable guest data. SEL clears special constant-handle/PositionW/reciprocal
 provenance and conservatively retains FMUL rounding-hazard taint from either
 candidate and the predicate's comparison inputs. Existing programs retain their
 previous WGSL shape and scheduling acceptance.
+
+
+## Paired constant-buffer loads
+
+Fragment programs accept LDC.B64 with RZ addressing, default mode, unconditional
+PT execution, an even destination through R252 and nonnegative eight-byte-aligned
+immediate byte offsets. Destination lanes receive successive little-endian B32
+words. The existing scalar IR preserves each lane's own constant reference and
+handle provenance; deduplicated inputs need not have consecutive packed indices.
+One write barrier zero covers both lanes, and the next consumer/load must wait
+for the complete pair. Repeated writes erase both lanes' previous arithmetic and
+interpolation metadata. The 64-word constant budget counts distinct words.
+
+The program retains paired access metadata independently of its scalar lowering.
+Resource preflight validates the full bound CB range, effective GPU address
+alignment, 40-bit end and a single contiguous eight-byte mapping before any scalar
+uploads. Short backing reads still fail before execution; failure clears readiness
+rather than drawing a prior resource binding. Even destinations, positive/aligned
+offsets, aligned effective addresses and contiguous mappings are conservative
+Wanderlust subset limits, not universal hardware invalidity rules. Vertex LDC,
+negative/register-relative addressing, other modes and LDC.B128 remain unsupported.
+No additional driver-facing API or GPU uniform layout is introduced.

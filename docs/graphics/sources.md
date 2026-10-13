@@ -538,3 +538,23 @@ use conservative stall 13; adjacent ISETP→SEL at stall six is rejected. Neithe
 model establishes the exact original-hardware minimum latency. Independently
 assembled/disassembled conservative fixtures verify encoding; host execution
 validates translation, not original Maxwell timing. No source code was copied.
+
+
+## LDC.B64 paired words
+
+Pinned envytools GM107 `tabef90_0`/`tabef90sz` fields and the existing pinned UAM
+`emitLDC` establish size5 for B64 (size4 for B32), destination7:0, address GPR15:8,
+signed byte offset35:20, CB slot40:36 and mode45:44. The accepted RZ/default-mode
+base is `0xef9500000007ff00` before destination, offset and slot are inserted.
+Pinned MIT Mesa NAK
+[`OpLdc::encode`](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs)
+corroborates the operand fields and size encoding. Pinned MIT Ryujinx
+[`Ldc`](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Shader/Instructions/InstEmitMemory.cs)
+corroborates successive destination words at base offset and base+4. No reference
+implementation source was copied. Original unmodified envyas/envydis independently
+assemble the paired color fixture; TEX uses the already documented grammar alias.
+
+A generic emitter's size encoder is insufficient evidence for LDC.B128. The
+pinned envytools LDC table has no B128 form and independent assembly rejects it;
+that form remains unsupported. Hardware behavior outside the accepted alignment,
+positive-offset, even-register and contiguous-mapping subset is not claimed.

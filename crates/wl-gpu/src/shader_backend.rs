@@ -229,6 +229,27 @@ impl Renderer {
             .as_mut()
             .ok_or_else(|| invalid("no translated fragment"))?;
         f.ready = false;
+        // Scalar lowering must not accidentally implement a fragmented or
+        // effectively unaligned B64 gather. These are supported-subset limits.
+        for reference in f.program.constant_pairs() {
+            let cb = engine.constant_buffer(group, reference.slot)?;
+            if reference
+                .offset
+                .checked_add(8)
+                .is_none_or(|end| end > cb.size)
+            {
+                return Err(invalid("constant pair exceeds bound size"));
+            }
+            let address = cb
+                .address
+                .0
+                .checked_add(u64::from(reference.offset))
+                .ok_or_else(|| invalid("constant pair address overflow"))?;
+            if address % 8 != 0 || address.checked_add(8).is_none_or(|end| end > 1 << 40) {
+                return Err(invalid("unsupported constant pair address or alignment"));
+            }
+            map.resolve(GpuAddress(address), 8)?;
+        }
         let mut data = f.data;
         let mut stamps = f.stamps;
         for (n, reference) in f.program.constants().iter().enumerate() {

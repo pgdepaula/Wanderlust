@@ -1214,3 +1214,50 @@ plus the owned predicate changes and exact Cargo.lock passed strict workspace
 Clippy and 320 CPU tests; its 57 GPU scenarios were ignored there and explicitly
 executed above. It excludes unfinished peer analysis/CLI/IDE changes and does not
 establish live Horizon GPU-service execution.
+
+
+## LDC.B64 word pairs and upper-lane texture handles
+
+`ldc64.rs` adds seven CPU cases for independent pair encodings and Naga output,
+full-pair scheduling/readiness, pending overwrites, stage/mode/alignment limits,
+nonconsecutive deduplicated inputs, the 63/64-word budget, upper-lane handle
+provenance and clearing previous interpolation/arithmetic metadata. The previous
+scalar-load mutation test now distinguishes verified B64 from unsupported size6.
+
+`ldc64_gpu.rs` adds three explicitly executed scenarios. Real GpuDriver→GPFIFO→
+B197 indexed draws export runtime CB colors `[64,128,191,255]`, `[255,0,128,64]`
+and `[0,255,64,191]`, using an analytic triangle-coverage oracle and literal colors.
+A second program samples using R7 from B64 R6/R7, with an invalid lower-lane
+handle. Two actual TIC entries select asymmetric 37×19 images; changed handle and
+texture bytes change independently predicted barycentric/nearest-sampled pixels
+without shader/pipeline recreation. A binding safety case rejects fragmented
+mappings, missing final bytes and short backing, disables stale execution and
+recovers using a valid binding. Hardware tests additionally reject short CB range
+and an effective address aligned only to four bytes without another accepted draw.
+
+Package CPU tests passed 123/123 with default features and 123/123 without them.
+Strict package Clippy and whole-workspace rustfmt check passed. All 60 explicit
+GPU scenarios passed separately on WSL OpenGL/llvmpipe, native Windows D3D12 and
+native Windows Vulkan: 180 actual passes, no skips. Ordinary package execution
+correctly reports 60 GPU scenarios ignored. A faithful ordinary source snapshot
+of the committed base plus exact owned changes passed 327 CPU tests (60 GPU tests
+ignored) and strict workspace Clippy; peer-owned unfinished analysis/CLI/IDE
+changes were excluded. This is snapshot validation, not live runtime integration.
+
+After three color publications, 32 identical deferred hardware submissions add
+32 draws/queue submissions, 1024 consumed command bytes and 1280 borrowed command
+bytes (suffix reacquisition is counted), with no new CB/geometry uploads, shader
+reads/decodes, descriptors, modules, pipelines, target allocations, readbacks or
+blocking visibility waits. One final explicit publication follows. This remains
+one queue submission per draw. A representative debug observation measured
+17.86 ms / 1570 allocations/128 reallocations on GL,10.63 ms / 1415 / 34 on D3D12 and
+19.84 ms / 1571 / 33 on Vulkan. Process-wide allocator traffic includes driver/wgpu
+bookkeeping and is not zero; timings are noisy synthetic CPU observations, not
+GPU execution durations or game-performance predictions. The three cold/changed
+color draws read/upload 48 CB bytes, decode the 112-byte PS once and upload 72 vertex
+bytes plus 8 padded index bytes. The four textured draws retain one PS decode and
+four shader modules/pipelines while changing resource data; they perform four
+explicit readbacks (29,760 staging bytes) and four waits as requested by the test.
+
+These are independently assembled synthetic Maxwell programs. Original-game GPU
+submission, full LDC forms and universal Maxwell scheduling remain unproven.

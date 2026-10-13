@@ -52,7 +52,7 @@ fn rejected_resource_instruction_and_scoreboard_matrix() {
     for (offset, bit) in [
         (0, 1),
         (88, 1 << 16),
-        (88, 1u64 << 48),
+        (88, 1u64 << 49), // size4 B32 -> unverified size6 B128
         (88, 1u64 << 8),
         (88, 1u64 << 20),
         (88, 1u64 << 35),
@@ -76,6 +76,23 @@ fn rejected_resource_instruction_and_scoreboard_matrix() {
     let ctrl = u64::from_le_bytes(b[112..120].try_into().unwrap()) & !(1u64 << 32);
     b[112..120].copy_from_slice(&ctrl.to_le_bytes());
     assert!(FragmentProgram::decode(&b).is_err());
+    // Size4->size5 is now a verified B64 pair, not an unsupported mutation.
+    // The later scalar R1 load intentionally overwrites its ready upper lane.
+    let mut paired = LDC.to_vec();
+    let word = u64::from_le_bytes(paired[88..96].try_into().unwrap()) ^ (1u64 << 48);
+    paired[88..96].copy_from_slice(&word.to_le_bytes());
+    let decoded = FragmentProgram::decode(&paired).unwrap();
+    assert_eq!(
+        decoded.constant_pairs(),
+        &[ConstantRef {
+            slot: 0,
+            offset: 16
+        }]
+    );
+    assert_eq!(
+        decoded.constants(),
+        FragmentProgram::decode(LDC).unwrap().constants()
+    );
 }
 #[test]
 fn fifo_constant_binding_snapshot_and_checked_access() {

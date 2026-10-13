@@ -153,3 +153,17 @@ and UV exports. For the finite normal fixture inputs, negative X becomes zero
 and other components are preserved. The 176-byte VTG fixture uses the existing
 vertex SPH. SHA-256:
 `83fbaa26cd8b5e71b6ba3bd3310ce9c550557c8906b0e390419d5ebc0b7b4154`.
+
+
+`ldc64.asm` uses two independently assembled LDC.B64 instructions, loading
+R0/R1 from c0[0x10]/c0[0x14] and R2/R3 from c0[0x18]/c0[0x1c]. One write barrier
+covers each complete pair. The same PS header as ldc.bin precedes 32 code bytes.
+Unmodified pinned envyas/envydis assemble and disassemble this fixture.
+112-byte SHA-256: `75b133d0ab6537c16e72ebf6f96c32b484e4572c86ccd0b92230e521b0e7aeb2`.
+
+`tex-ldc64.asm` replaces the scalar handle load with LDC.B64 R6,c0[0] and samples
+using its upper word R7. Its 144-byte binary uses the existing screen-linear PS
+header and documented TEX dummy-token grammar alias; unmodified envydis confirms
+all operands. The runtime test places an invalid handle in the lower word, so
+using the wrong lane cannot accidentally sample a valid default descriptor.
+SHA-256: `452733ff473615459aad93d19cff1ef5e797ce8f63043bd35c3988b98a8a43aa`.

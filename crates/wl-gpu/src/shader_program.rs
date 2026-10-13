@@ -107,6 +107,7 @@ pub enum Operation {
 struct Program {
     operations: Vec<Operation>,
     constants: Vec<ConstantRef>,
+    constant_pairs: Vec<ConstantRef>,
     texture_input: Option<u8>,
     perspective: bool,
 }
@@ -140,6 +141,7 @@ impl Program {
         let mut out = Self {
             operations: Vec::new(),
             constants: Vec::new(),
+            constant_pairs: Vec::new(),
             texture_input: None,
             perspective,
         };
@@ -272,6 +274,47 @@ impl Program {
                 let immediate_mask = (u64::from(u32::MAX) << 20) | 255;
                 let move_mask = (255u64 << 20) | 255;
                 let ldc_mask = (31u64 << 36) | (0xffffu64 << 20) | 255;
+                if !vertex && word & !ldc_mask == 0xef9500000007ff00 {
+                    if write_barrier != 0 || pending.iter().any(|v| *v) {
+                        return Err(fail("LDC.B64 requires an unused write barrier zero"));
+                    }
+                    let offset = ((word >> 20) & 0xffff) as u32;
+                    if offset & 0x8007 != 0 || dst & 1 != 0 || dst > 252 {
+                        return Err(fail("unsupported LDC.B64 offset or register pair"));
+                    }
+                    let slot = ((word >> 36) & 31) as u8;
+                    let pair = ConstantRef { slot, offset };
+                    if !out.constant_pairs.contains(&pair) {
+                        out.constant_pairs.push(pair);
+                    }
+                    let mut inputs = [0; 2];
+                    for (lane, input) in inputs.iter_mut().enumerate() {
+                        *input = constant_input(
+                            &mut out.constants,
+                            ConstantRef {
+                                slot,
+                                offset: offset + lane as u32 * 4,
+                            },
+                        )
+                        .ok_or_else(|| fail("too many constant references"))?;
+                    }
+                    // One binary load and one barrier cover the complete pair.
+                    // Lower to two scalar values only after validating the group.
+                    for (lane, input) in inputs.into_iter().enumerate() {
+                        let register = dst + lane as u8;
+                        initialized[register as usize] = true;
+                        pending[register as usize] = true;
+                        provenance[register as usize] = Some(input);
+                        multiply_result[register as usize] = false;
+                        position_w[register as usize] = false;
+                        reciprocal_w[register as usize] = false;
+                        out.operations.push(Operation::Constant {
+                            dst: register,
+                            input,
+                        });
+                    }
+                    continue;
+                }
                 let op = if vertex && word & !attribute_mask == 0xefd87f800007ff00 {
                     let attribute = ((word >> 20) & 0x3ff) as u16;
                     let words = (((word >> 47) & 3) + 1) as u8;
@@ -412,21 +455,10 @@ impl Program {
                         slot: ((word >> 36) & 31) as u8,
                         offset,
                     };
-                    let index = match out.constants.iter().position(|r| *r == reference) {
-                        Some(n) => n,
-                        None => {
-                            if out.constants.len() == 64 {
-                                return Err(fail("too many constant references"));
-                            }
-                            out.constants.push(reference);
-                            out.constants.len() - 1
-                        }
-                    };
+                    let index = constant_input(&mut out.constants, reference)
+                        .ok_or_else(|| fail("too many constant references"))?;
                     pending[dst as usize] = true;
-                    Operation::Constant {
-                        dst,
-                        input: index as u8,
-                    }
+                    Operation::Constant { dst, input: index }
                 } else if perspective && word & !255 == 0xe003ff87cff7ff00 {
                     if write_barrier != 0 || pending.iter().any(|v| *v) {
                         return Err(fail("PositionW requires unused barrier zero"));
@@ -490,8 +522,9 @@ impl Program {
                     {
                         return Err(fail("unsupported TEX register group or scoreboard"));
                     }
-                    let input = provenance[handle as usize]
-                        .ok_or_else(|| fail("TEX handle must originate in scalar LDC"))?;
+                    let input = provenance[handle as usize].ok_or_else(|| {
+                        fail("TEX handle must originate in a constant-buffer load")
+                    })?;
                     if out.texture_input.is_some() {
                         return Err(fail("only one TEX operation supported"));
                     }
@@ -741,6 +774,11 @@ impl FragmentProgram {
     pub fn constants(&self) -> &[ConstantRef] {
         self.0.constants()
     }
+    /// B64 base references retained for full-pair binding validation before the
+    /// scalar micro-ops execute. Each requires an aligned contiguous eight bytes.
+    pub fn constant_pairs(&self) -> &[ConstantRef] {
+        &self.0.constant_pairs
+    }
     pub fn operations(&self) -> &[Operation] {
         self.0.operations()
     }
@@ -912,4 +950,16 @@ fn emit_comparison(s: &mut String, left: u8, right: u8, comparison: UnsignedComp
         UnsignedComparison::GreaterEqual => ">=",
     };
     writeln!(s, "p0=r[{left}] {symbol} r[{right}];").unwrap();
+}
+
+fn constant_input(constants: &mut Vec<ConstantRef>, reference: ConstantRef) -> Option<u8> {
+    if let Some(index) = constants.iter().position(|r| *r == reference) {
+        return Some(index as u8);
+    }
+    if constants.len() == 64 {
+        return None;
+    }
+    let index = constants.len() as u8;
+    constants.push(reference);
+    Some(index)
 }
