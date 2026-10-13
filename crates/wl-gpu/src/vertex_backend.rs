@@ -118,14 +118,22 @@ impl Renderer {
         self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         let cached_shader = previous
             .as_ref()
-            .filter(|v| v.program == *program && v.flip_y == flip_y)
+            .filter(|v| {
+                v.program == *program
+                    && v.flip_y == flip_y
+                    && v.fragment.perspective() == fragment.program.perspective()
+            })
             .map(|v| v.shader.clone());
         let new_shader = cached_shader.is_none();
         let shader = cached_shader.unwrap_or_else(|| {
             self.device
                 .create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("translated Maxwell vertex"),
-                    source: wgpu::ShaderSource::Wgsl(program.wgsl_for_raster(flip_y).into()),
+                    source: wgpu::ShaderSource::Wgsl(
+                        program
+                            .wgsl_for_raster(flip_y, fragment.program.perspective())
+                            .into(),
+                    ),
                 })
         });
         let mut groups = vec![&fragment.layout];

@@ -891,3 +891,51 @@ one target allocation/three reuses, eight queue submissions and four explicit
 publication readbacks/waits. Constant-only updates created no new shader modules
 or pipelines. Coverage uses exact binary fractions and UNORM quantization; no
 claim of general Maxwell floating-point equivalence or game performance follows.
+
+## Perspective IPA validation
+
+The independent 176-byte fragment fixture selects PositionW and perspective xy
+in its SPH, reads the LDC handle and executes IPA.PASS W, MUFU.RCP, perspective
+IPA xy and TEX.B.LZ. Its guest channel draws indexed asymmetric geometry with
+clip W=(1,2,4) into the existing guest target. Scalar f64 pixel-center barycentrics
+and rational homogeneous interpolation specify the texture samples independently.
+At (19,16), (18,11), (24,12), perspective UV selects 4x4 texels (1,0), (0,1), (1,1),
+while affine interpolation selects (1,1), (0,2), (1,2). Exact RGBA expectations are
+[67,11,40,255], [7,61,36,255], [67,61,45,255]. Uncovered pixels retain guest RAM
+background. A known covered pixel remains old RAM until explicit publication.
+
+The same scenario switches between guest affine/perspective pixel programs,
+checking qualifier-dependent VS module creation, and then changes only guest
+clip W/XY to (4,1,2), checking changed samples with no shader/pipeline creation.
+The 32-draw warm interval asserts zero new uploads, shader reads, descriptor
+reads, shader modules, pipelines, readbacks or waits, with 32 queue submissions.
+CPU tests independently verify strict masks, header modes, register count,
+scoreboard waits and MOV-preserved provenance followed by actual overwrite.
+
+An initial test retired deferred tokens before publication; the driver correctly
+rejected that request. Tokens are now retired after the single explicit warm
+publication. An intermediate D3D12 sample at (13,12) differed from ideal f64
+nearest addressing: scaled V=0.998845 lies within a 16.8 fractional sampling step
+of the texel boundary. The oracle now excludes this documented precision region
+on every backend, retaining exact assertions elsewhere and all literal samples.
+No expected color or production shader was changed to accommodate that sample.
+
+Final perspective gates passed 76 CPU tests with default features and 76 without,
+strict package Clippy and formatting. All 40 GPU scenarios ran explicitly on WSL
+OpenGL/llvmpipe, native Windows D3D12/Intel UHD and native Windows Vulkan/Intel UHD:
+120 distinct scenario/backend passes. Startup-only interop launches were retried.
+A faithful source snapshot of arithmetic commit 639f068 plus perspective production
+and test changes, retaining Cargo.lock and excluding unfinished peer files, passed
+strict workspace Clippy and 280 CPU tests; its 40 GPU scenarios were ignored by
+ordinary execution and validated separately as above.
+
+The controlled 36-draw perspective workload measured one target allocation/35
+reuses, 144 vertex upload bytes, eight index upload bytes, 41 queue submissions
+and five explicit publication readbacks/waits (37,200 staging readback bytes,
+30,160 guest framebuffer bytes). Shader-interface switches rebuild compatible
+stage modules/pipelines; vertex-data-only mutation does not. A single debug warm32
+observation measured 22.10 ms and 1,640 allocations/131 reallocations on GL,
+20.28 ms and 1,477/36 on D3D12, 12.40 ms and 1,647/36 on Vulkan. Allocator counters
+are process-wide and timings are CPU observations under concurrent builds, not
+GPU duration, throughput claims or a game benchmark. No zero-copy/zero-allocation
+claim or original-game graphics execution is established.

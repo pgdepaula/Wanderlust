@@ -84,3 +84,12 @@ c0[.14], c0[.18], adds the first two, multiplies the latter two, adds RZ and
 squares the third. `vertex-alu` loads real attributes, halves X and adds .5 to Y,
 then exports position and UV. These fixtures use exact binary fractions; they
 do not establish general IEEE/Maxwell arithmetic equivalence.
+
+`perspective.asm` has three scheduled bundles and a 176-byte SPH+code fixture.
+The header adds PositionW (word five 0x80000000) and generic-zero xy Perspective
+(word six 0x0a) to the PS header. The program loads its texture handle, reads
+PositionW, computes its reciprocal, applies perspective IPA xy and executes TEX.B.LZ.
+It was independently assembled with pinned envytools plus the already documented
+TEX dummy-token grammar alias, and decoded with unmodified envydis. SHA-256:
+`b80062812d98f5b98152e154b5921704d5f7910405f7262504635069c1d5ac52`.
+This is synthetic original-format shader evidence, not a commercial game shader.

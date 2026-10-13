@@ -46,6 +46,18 @@ pub enum Operation {
         dst: u8,
         component: u8,
     },
+    PositionW {
+        dst: u8,
+    },
+    Reciprocal {
+        dst: u8,
+        src: u8,
+    },
+    Perspective {
+        dst: u8,
+        component: u8,
+        multiplier: u8,
+    },
     Sample2d {
         dst: u8,
         coordinates: u8,
@@ -57,13 +69,16 @@ struct Program {
     operations: Vec<Operation>,
     constants: Vec<ConstantRef>,
     texture_input: Option<u8>,
+    perspective: bool,
 }
 impl Program {
     fn decode(input: &[u8], vertex: bool) -> Result<Self> {
         if input.len() < 112 || input.len() > 0x50 + 4096 || (input.len() - 0x50) % 32 != 0 {
             return Err(invalid("invalid Maxwell fragment length"));
         }
-        let interpolated = !vertex && u32::from_le_bytes(input[24..28].try_into().unwrap()) == 15;
+        let input_mode = u32::from_le_bytes(input[24..28].try_into().unwrap());
+        let interpolated = !vertex && input_mode == 15;
+        let perspective = !vertex && input_mode == 10;
         let mut header = [0u8; 80];
         header[..4].copy_from_slice(&if vertex { 0x60461u32 } else { 0x61462u32 }.to_le_bytes());
         header[16..20].copy_from_slice(&0xff000u32.to_le_bytes());
@@ -75,6 +90,9 @@ impl Program {
             header[72..76].copy_from_slice(&15u32.to_le_bytes());
             if interpolated {
                 header[24] = 15;
+            } else if perspective {
+                header[20..24].copy_from_slice(&0x80000000u32.to_le_bytes());
+                header[24] = 10;
             }
         }
         if input[..80] != header {
@@ -84,12 +102,17 @@ impl Program {
             operations: Vec::new(),
             constants: Vec::new(),
             texture_input: None,
+            perspective,
         };
         let mut initialized = [false; 256];
         initialized[255] = true; // RZ
         let mut pending = [false; 256];
         let mut provenance = [None; 256];
         let mut multiply_result = [false; 256];
+        // Only the canonical position-W reciprocal used for perspective IPA is
+        // supported. This is not a general approximate MUFU implementation.
+        let mut position_w = [false; 256];
+        let mut reciprocal_w = [false; 256];
         let mut exited = false;
         let mut exports = 0u8;
         for (bundle_index, bundle) in input[0x50..].chunks_exact(32).enumerate() {
@@ -189,6 +212,8 @@ impl Program {
                         pending[r as usize] = true;
                         provenance[r as usize] = None;
                         multiply_result[r as usize] = false;
+                        position_w[r as usize] = false;
+                        reciprocal_w[r as usize] = false;
                     }
                     Operation::AttributeRead {
                         dst,
@@ -264,6 +289,40 @@ impl Program {
                         dst,
                         input: index as u8,
                     }
+                } else if perspective && word & !255 == 0xe003ff87cff7ff00 {
+                    if write_barrier != 0 || pending.iter().any(|v| *v) {
+                        return Err(fail("PositionW requires unused barrier zero"));
+                    }
+                    pending[dst as usize] = true;
+                    Operation::PositionW { dst }
+                } else if perspective && word & !(255 | (255u64 << 8)) == 0x5080000000470000 {
+                    let src = ((word >> 8) & 255) as u8;
+                    if write_barrier != 0 || pending.iter().any(|v| *v) || !position_w[src as usize]
+                    {
+                        return Err(fail(
+                            "MUFU.RCP requires ready PositionW provenance and barrier zero",
+                        ));
+                    }
+                    pending[dst as usize] = true;
+                    Operation::Reciprocal { dst, src }
+                } else if perspective
+                    && word & !(255 | (255u64 << 20) | (0x3ffu64 << 28)) == 0xe043ff800007ff00
+                {
+                    let attribute = ((word >> 28) & 0x3ff) as u16;
+                    let multiplier = ((word >> 20) & 255) as u8;
+                    if !matches!(attribute, 0x80 | 0x84)
+                        || write_barrier != 0
+                        || pending.iter().any(|v| *v)
+                        || !reciprocal_w[multiplier as usize]
+                    {
+                        return Err(fail("perspective IPA requires ready PositionW reciprocal"));
+                    }
+                    pending[dst as usize] = true;
+                    Operation::Perspective {
+                        dst,
+                        component: ((attribute - 0x80) / 4) as u8,
+                        multiplier,
+                    }
                 } else if !vertex && word & !(255 | (0x3ffu64 << 28)) == 0xe003ff800ff7ff00 {
                     let attribute = ((word >> 28) & 0x3ff) as u32;
                     if !interpolated
@@ -304,6 +363,8 @@ impl Program {
                         pending[r as usize] = true;
                         provenance[r as usize] = None;
                         multiply_result[r as usize] = false;
+                        position_w[r as usize] = false;
+                        reciprocal_w[r as usize] = false;
                     }
                     Operation::Sample2d {
                         dst,
@@ -319,6 +380,9 @@ impl Program {
                         Operation::Constant { .. }
                             | Operation::AttributeRead { .. }
                             | Operation::Interpolate { .. }
+                            | Operation::PositionW { .. }
+                            | Operation::Reciprocal { .. }
+                            | Operation::Perspective { .. }
                             | Operation::Sample2d { .. }
                     )
                 {
@@ -330,6 +394,16 @@ impl Program {
                         ..
                     } => true,
                     Operation::Move { src, .. } => multiply_result[src as usize],
+                    _ => false,
+                };
+                position_w[dst as usize] = match op {
+                    Operation::PositionW { .. } => true,
+                    Operation::Move { src, .. } => position_w[src as usize],
+                    _ => false,
+                };
+                reciprocal_w[dst as usize] = match op {
+                    Operation::Reciprocal { .. } => true,
+                    Operation::Move { src, .. } => reciprocal_w[src as usize],
                     _ => false,
                 };
                 provenance[dst as usize] = match op {
@@ -360,7 +434,16 @@ impl Program {
                 }
                 Operation::Immediate { dst, .. }
                 | Operation::Constant { dst, .. }
+                | Operation::PositionW { dst }
                 | Operation::Interpolate { dst, .. } => largest = largest.max(u16::from(dst)),
+                Operation::Reciprocal { dst, src } => {
+                    largest = largest.max(u16::from(dst)).max(u16::from(src));
+                }
+                Operation::Perspective {
+                    dst, multiplier, ..
+                } => {
+                    largest = largest.max(u16::from(dst)).max(u16::from(multiplier));
+                }
                 Operation::Float {
                     dst, left, right, ..
                 } => {
@@ -417,6 +500,15 @@ impl Program {
                 Operation::Interpolate { dst, component } => {
                     writeln!(s, "r[{dst}]=bitcast<u32>(v.uv[{component}]);").unwrap()
                 }
+                Operation::PositionW { dst } => {
+                    writeln!(s, "r[{dst}]=bitcast<u32>(v.position.w);").unwrap()
+                }
+                Operation::Reciprocal { dst, src } => {
+                    writeln!(s, "r[{dst}]=bitcast<u32>(1.0 / bitcast<f32>(r[{src}]));").unwrap()
+                }
+                Operation::Perspective { dst, component, multiplier } => {
+                    writeln!(s, "r[{dst}]=bitcast<u32>(v.uv[{component}] * v.position.w * bitcast<f32>(r[{multiplier}]));").unwrap()
+                }
                 Operation::Sample2d {
                     dst, coordinates, ..
                 } => {
@@ -446,6 +538,9 @@ impl Program {
             }
         }
         s.push_str("return vec4(bitcast<f32>(r[0]),bitcast<f32>(r[1]),bitcast<f32>(r[2]),bitcast<f32>(r[3]));}");
+        if self.perspective {
+            s = s.replace("@interpolate(linear)", "@interpolate(perspective,center)");
+        }
         s
     }
 }
@@ -454,6 +549,9 @@ impl Program {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FragmentProgram(Program);
 impl FragmentProgram {
+    pub fn perspective(&self) -> bool {
+        self.0.perspective
+    }
     pub fn decode(input: &[u8]) -> Result<Self> {
         Ok(Self(Program::decode(input, false)?))
     }
@@ -488,9 +586,9 @@ impl VertexProgram {
         self.0.operations()
     }
     pub fn wgsl(&self) -> String {
-        self.wgsl_for_raster(false)
+        self.wgsl_for_raster(false, false)
     }
-    pub(crate) fn wgsl_for_raster(&self, flip_y: bool) -> String {
+    pub(crate) fn wgsl_for_raster(&self, flip_y: bool, perspective: bool) -> String {
         use std::fmt::Write;
         let mut s = String::from(
             "struct Vertex { @builtin(position) position:vec4<f32>, @location(0) @interpolate(linear) uv:vec2<f32> };\n@vertex fn vs_main(@location(0) a0:vec4<f32>,@location(1) a1:vec2<f32>)->Vertex {var r:array<u32,256>;var v:Vertex;\n",
@@ -558,6 +656,9 @@ impl VertexProgram {
             s.push_str("v.position.y = -v.position.y;\n");
         }
         s.push_str("return v;}");
+        if perspective {
+            s = s.replace("@interpolate(linear)", "@interpolate(perspective,center)");
+        }
         s
     }
 }

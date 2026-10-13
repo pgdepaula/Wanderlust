@@ -462,8 +462,9 @@ unconditional rendering, rasterization enabled, one color attachment, single sam
 RGBA baseline writes, fill mode, no depth/stencil/cull/alpha test/logic op/sample mask,
 no polygon smoothing/offset/stipple, and the supported viewport controls. Missing
 state or unsupported values fail. No undocumented power-on values are substituted.
-No instancing, additional shader stages, perspective IPA, arbitrary
-formats or guest semaphore operations are implemented by this slice.
+No instancing, additional shader stages, arbitrary formats or guest semaphore
+operations are implemented by this slice. Perspective IPA has the bounded
+canonical subset described below.
 
 ## Framebuffer visibility and ownership
 
@@ -842,3 +843,29 @@ denormal, signed-zero, overflow/underflow or rounding behavior. Current executab
 numeric evidence covers exactly representable finite fixtures, including
 independent addition/multiplication, chained addition and RZ. General precise
 floating shader compatibility remains unproven.
+
+## Perspective interpolation subset
+
+A PS header with PositionW at word five bit 31 and generic-zero xy interpolation
+modes Perspective=2 (word six `0x0a`) selects a perspective interface. Screen-linear
+xy (`0x0f`) retains its existing behavior. Both stages declare matching WGSL
+interpolation qualifiers; the selected fragment interface participates in vertex
+module reuse as well as paired pipeline identity.
+
+The decoder accepts IPA.PASS `a[0x7c]` into a GPR, MUFU.RCP of that ready PositionW
+value, and perspective IPA `a[0x80/0x84]` with the ready reciprocal GPR multiplier.
+These variable-latency instructions serialize write barrier zero with actual
+wait-one controls. MOV preserves position/reciprocal provenance; overwrites,
+including all ALD/TEX destination lanes, clear it. Arbitrary reciprocal sources,
+unproven multipliers, mixed interpolation headers, flat/centroid/offset/indexed
+forms, predicates and modifiers are unsupported.
+
+For fragment position W `q=sum(lambda_i/W_i)`, the guest IPA plane is
+`sum(lambda_i*a_i/W_i)` times its explicit GPR multiplier. WGSL perspective UV
+already divides that plane by q, so lowering multiplies WGSL UV by position.w
+and the decoded multiplier. It does not discard the guest multiplier. The narrow
+reciprocal lowers to host f32 `1/q`; this is not a bit-exact Maxwell approximate
+MUFU implementation. Exceptional values, subnormals and exact reciprocal rounding
+remain unverified. The executable evidence uses finite positive unequal clip W
+and texture samples separated from quantization boundaries. This subset establishes
+perspective-dependent sampling, not general MUFU compatibility.

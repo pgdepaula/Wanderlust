@@ -392,3 +392,28 @@ stall-six fixtures. Newly retained assembly/binaries were produced by the same
 pinned envyas and disassembled with unmodified envydis. The portable host f32
 lowering is a bounded implementation, not evidence of exact Maxwell exceptional
 arithmetic; WGSL offers no per-operation unfused-rounding control here.
+
+## Perspective IPA and reciprocal
+
+The pinned NVIDIA Shader-Program-Header specification at revision `9fdf5c4`
+(linked above) defines PS PositionW at word five bit 31 and two-bit generic input
+interpolation values Perspective=2 and ScreenLinear=3. Pinned MIT UAM/Mesa
+`nv50_ir_emit_gm107.cpp::emitIPA` emits interpolation mode at bit 54, sample mode
+at bit 52, generic byte attribute at bit 28 and OP_PINTERP multiplier GPR at bit
+20. `emitMUFU` emits opcode 0x50800000, reciprocal function four at bit 20 and
+source GPR at bit eight. Strict full-word masks exclude other fields.
+
+Pinned Mesa `nv50_ir_from_nir.cpp` loads SV_POSITION.w, computes OP_RCP and passes
+that register to OP_PINTERP. This corroborates the canonical sequence independently
+of the envytools GM107 table. The WGSL position builtin defines fragment W as
+interpolated reciprocal clip W; both stages use perspective interpolation with
+center sampling. The explicit multiplier remains represented in the lowering.
+No source implementation was copied. Host division does not establish exact
+Maxwell MUFU approximation/exceptional behavior.
+
+The [Direct3D functional specification, 7.18.7 Point Sample Addressing](https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm#PointSampleAddressing)
+scales normalized coordinates to texel space and snaps to at least 16.8 fixed
+point before choosing a texel; raster positions also undergo fixed-point snapping.
+The perspective pixel oracle excludes one 1/256 texel fractional step around
+nearest-sampling boundaries. Its three literal distinguishing samples are well
+outside this uncertainty region. No backend-specific shader change is introduced.
