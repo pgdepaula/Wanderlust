@@ -167,3 +167,17 @@ header and documented TEX dummy-token grammar alias; unmodified envydis confirms
 all operands. The runtime test places an invalid handle in the lower word, so
 using the wrong lane cannot accidentally sample a valid default descriptor.
 SHA-256: `452733ff473615459aad93d19cff1ef5e797ce8f63043bd35c3988b98a8a43aa`.
+
+
+`signed-minmax.asm` is independently assembled with unmodified pinned envytools.
+The 304-byte PS loads two runtime words through LDC.B64 and evaluates signed min/max,
+including RZ. It maps each selected sign bit to exactly 0.5 or 1.0 using supported
+integer shifts/OR, avoiding NaN/subnormal floating exports for integer extrema.
+GPU output observes sign selection, not every bit of each selected payload.
+SHA-256: `cc0dca6d65a971fcb793de5beb65fd1b65538888d1fb0fb37f811c19c91308fb`.
+
+`vertex-signed-minmax.asm` uses signed min(X,RZ) and max(Y,RZ) on input bits, then
+exports position and UV. For the finite coordinate fixture this clamps X above
+zero and Y below zero; it is not a general floating min/max implementation.
+The 176-byte VS uses the existing vertex SPH.
+SHA-256: `a432fcaab574f0d6e95a5974c6e9b5c1ca623755ab4d3cc13ca0427899aa3001`.

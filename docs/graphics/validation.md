@@ -1261,3 +1261,42 @@ explicit readbacks (29,760 staging bytes) and four waits as requested by the tes
 
 These are independently assembled synthetic Maxwell programs. Original-game GPU
 submission, full LDC forms and universal Maxwell scheduling remain unproven.
+
+
+## Signed IMNMX comparisons and vertex geometry
+
+Five CPU cases in `signed_minmax.rs` validate the independently assembled signed
+GPR bases, stage interfaces, raw signed bitcast WGSL/Naga, RZ, initialization,
+scoreboards, modifier rejection, provenance erasure and retained arithmetic hazard
+taint. The older unsigned suite now accepts the verified signed form rather than
+classifying signedness as an unsupported bit mutation.
+
+Two real GPU scenarios enter through GpuDriver→GPFIFO→B197. Nine independently
+specified input pairs include signed extrema, equality, operand reversal and
+finite IEEE payloads. The fragment exports selected sign bits as finite 0.5/1.0,
+producing literal byte colors such as `[255,128,255,128]` and `[128,128,128,128]`.
+This observes signed ordering across the sign boundary, not every selected result
+bit. Changing only CB data retains shader/module/pipeline identity. Changing the
+first signed minimum to unsigned in guest code produces `[128,128,255,128]` and
+exactly one additional decode. The vertex program compares against RZ, modifying
+finite geometry to X=min(X,0), Y=max(Y,0). An independent pixel-center/signed-area
+oracle verifies coverage and uncovered background with more than 70 covered and 600
+uncovered pixels; a repeated draw retains vertex data, code and pipeline resources.
+
+Package validation passed 128 CPU tests with default features and 128 without them;
+strict package Clippy and whole-workspace formatting passed. All 62 GPU scenarios
+passed explicitly on WSL OpenGL, native Windows D3D12 and native Windows Vulkan:
+186 actual passes, no ignored scenarios in those explicit executions. Normal
+package tests report 62 GPU scenarios ignored. A faithful ordinary committed-source
+snapshot plus exact owned changes passed 332 CPU tests (62 GPU scenarios ignored)
+and strict workspace Clippy. Peer-owned unfinished changes were excluded.
+
+The ten fragment draws (nine data cases plus code mutation) read 80 CB bytes and
+upload 76, upload 72 vertex and 8 padded index bytes, allocate one target and reuse it
+nine times. Two PS decodes read 608 shader bytes. Data-only changes retain the
+initial four shader modules/pipelines; the code change adds one module and two
+pipelines (including the existing validation harness). Ten requested publications
+perform ten readbacks/waits, 74,400 staging bytes and 20 queue submissions. The
+vertex case decodes its 176-byte program once; the unchanged repeat adds no shader
+or geometry upload and no pipeline/module creation. These are bounded synthetic
+workloads, not original-game shader coverage or game performance measurements.

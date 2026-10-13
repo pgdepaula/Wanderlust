@@ -65,9 +65,9 @@ fn independent_imnmx_fields_and_unsigned_stage_lowering() {
     assert!(FragmentProgram::decode(bin).is_err());
 }
 #[test]
-fn imnmx_rejects_dynamic_predicates_signedness_extended_and_cc() {
-    // Independently assembled signed, XLO and CC forms.
-    for word in [0x5c21038000570402, 0x5c200b8000570403, 0x5c20838000570406] {
+fn imnmx_rejects_dynamic_predicates_extended_and_cc() {
+    // Independently assembled XLO and CC forms. Signed forms are tested separately.
+    for word in [0x5c200b8000570403, 0x5c20838000570406] {
         let mut b = BIN.to_vec();
         change(&mut b, 0x68, |_| word);
         assert!(

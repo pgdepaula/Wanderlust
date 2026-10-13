@@ -558,3 +558,16 @@ A generic emitter's size encoder is insufficient evidence for LDC.B128. The
 pinned envytools LDC table has no B128 form and independent assembly rejects it;
 that form remains unsupported. Hardware behavior outside the accepted alignment,
 positive-offset, even-register and contiguous-mapping subset is not claimed.
+
+
+## Signed GPR IMNMX
+
+The same pinned envytools GM107 table, UAM
+[`emitIMNMX`](https://github.com/devkitPro/uam/blob/5a5afc2bae8b55409ab36ba45be63fcb73f68993/mesa-imported/codegen/nv50_ir_emit_gm107.cpp)
+and maintained NAK `OpIMnMx::encode` establish signedness bit 48. The signed bases
+are `0x5c21038000070000` (PT/minimum) and `0x5c21078000070000` (!PT/maximum).
+In envytools spelling, absence of the `u32` qualifier means signed comparison.
+NAK `OpIMnMx::fold` compares signed i32 values and returns the selected raw u32
+payload. Original envyas/envydis corroborate the fixtures; no source implementation
+was copied. This preserves the previously verified static predicate, operand,
+modifier and six-stall scheduling subset.

@@ -20,6 +20,8 @@ pub enum IntegerOperator {
     Xor,
     MinUnsigned,
     MaxUnsigned,
+    MinSigned,
+    MaxSigned,
     ShiftLeft { wrap: bool },
     ShiftRight { wrap: bool },
 }
@@ -416,6 +418,8 @@ impl Program {
                         | 0x5c28008000070000
                         | 0x5c20038000070000
                         | 0x5c20078000070000
+                        | 0x5c21038000070000
+                        | 0x5c21078000070000
                 ) {
                     let left = ((word >> 8) & 255) as u8;
                     let right = ((word >> 20) & 255) as u8;
@@ -440,7 +444,9 @@ impl Program {
                             0x5c28000000070000 => IntegerOperator::ShiftRight { wrap: false },
                             0x5c28008000070000 => IntegerOperator::ShiftRight { wrap: true },
                             0x5c20038000070000 => IntegerOperator::MinUnsigned,
-                            _ => IntegerOperator::MaxUnsigned,
+                            0x5c20078000070000 => IntegerOperator::MaxUnsigned,
+                            0x5c21038000070000 => IntegerOperator::MinSigned,
+                            _ => IntegerOperator::MaxSigned,
                         },
                     }
                 } else if !vertex && word & !ldc_mask == 0xef9400000007ff00 {
@@ -921,6 +927,15 @@ fn emit_integer(s: &mut String, dst: u8, left: u8, right: u8, operator: IntegerO
         }
         IntegerOperator::MaxUnsigned => {
             writeln!(s, "r[{dst}]=max(r[{left}],r[{right}]);").unwrap();
+            return;
+        }
+        IntegerOperator::MinSigned | IntegerOperator::MaxSigned => {
+            let function = if operator == IntegerOperator::MinSigned {
+                "min"
+            } else {
+                "max"
+            };
+            writeln!(s, "r[{dst}]=bitcast<u32>({function}(bitcast<i32>(r[{left}]),bitcast<i32>(r[{right}])));").unwrap();
             return;
         }
         IntegerOperator::ShiftLeft { wrap } => ("<<", Some(wrap)),

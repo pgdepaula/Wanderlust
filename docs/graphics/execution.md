@@ -979,7 +979,7 @@ immediate/constant operand forms and other modifiers remain unsupported.
 Both stages accept GPR IMNMX with unsigned 32-bit comparison and static selection
 PT (minimum) or !PT (maximum). The selection predicate is distinct from the outer
 execution predicate, which remains unconditional PT. Exact masks exclude dynamic
-selection P0..P6, signed comparison, extended modes, CC and alternate operand forms.
+selection P0..P6, extended modes, CC and alternate operand forms.
 The existing binary-integer IR lowers to WGSL min/max on raw u32, retaining
 initialization/readiness, six-stall scheduling and provenance/rounding-hazard rules.
 This does not introduce general predicate registers or conditional execution.
@@ -1032,3 +1032,15 @@ offsets, aligned effective addresses and contiguous mappings are conservative
 Wanderlust subset limits, not universal hardware invalidity rules. Vertex LDC,
 negative/register-relative addressing, other modes and LDC.B128 remain unsupported.
 No additional driver-facing API or GPU uniform layout is introduced.
+
+
+## Signed integer minimum and maximum
+
+Both stages additionally accept signed GPR IMNMX with static PT minimum or !PT
+maximum. Raw operands are bitcast to i32 solely for comparison; the selected result
+is bitcast back to u32. No numeric conversion, subtraction-based comparison or
+floating min/max is substituted. Initialization, RZ, in-place writes, six-stall
+scheduling, resource provenance erasure and arithmetic hazard taint follow the
+existing integer path. Signed comparison changes only bit 48 of the accepted
+unsigned encodings. Dynamic selection predicates, CC, extended modes, alternate
+operand forms and general predicated execution remain unsupported.
