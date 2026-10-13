@@ -18,6 +18,8 @@ pub enum IntegerOperator {
     And,
     Or,
     Xor,
+    ShiftLeft { wrap: bool },
+    ShiftRight { wrap: bool },
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
@@ -281,6 +283,10 @@ impl Program {
                         | 0x5c47000000070000
                         | 0x5c47020000070000
                         | 0x5c47040000070000
+                        | 0x5c48000000070000
+                        | 0x5c48008000070000
+                        | 0x5c28000000070000
+                        | 0x5c28008000070000
                 ) {
                     let left = ((word >> 8) & 255) as u8;
                     let right = ((word >> 20) & 255) as u8;
@@ -299,7 +305,11 @@ impl Program {
                             0x5c10000000070000 => IntegerOperator::Add,
                             0x5c47000000070000 => IntegerOperator::And,
                             0x5c47020000070000 => IntegerOperator::Or,
-                            _ => IntegerOperator::Xor,
+                            0x5c47040000070000 => IntegerOperator::Xor,
+                            0x5c48000000070000 => IntegerOperator::ShiftLeft { wrap: false },
+                            0x5c48008000070000 => IntegerOperator::ShiftLeft { wrap: true },
+                            0x5c28000000070000 => IntegerOperator::ShiftRight { wrap: false },
+                            _ => IntegerOperator::ShiftRight { wrap: true },
                         },
                     }
                 } else if !vertex && word & !ldc_mask == 0xef9400000007ff00 {
@@ -579,8 +589,7 @@ impl Program {
                     writeln!(s,"r[{dst}]=bitcast<u32>(bitcast<f32>(r[{left}]) {symbol} bitcast<f32>(r[{right}]));").unwrap();
                 }
                 Operation::Integer { dst, left, right, operator } => {
-                    let symbol = match operator { IntegerOperator::Add => "+", IntegerOperator::And => "&", IntegerOperator::Or => "|", IntegerOperator::Xor => "^" };
-                    writeln!(s,"r[{dst}]=r[{left}] {symbol} r[{right}];").unwrap();
+                    emit_integer(&mut s, dst, left, right, operator);
                 }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
@@ -705,13 +714,7 @@ impl VertexProgram {
                     right,
                     operator,
                 } => {
-                    let symbol = match operator {
-                        IntegerOperator::Add => "+",
-                        IntegerOperator::And => "&",
-                        IntegerOperator::Or => "|",
-                        IntegerOperator::Xor => "^",
-                    };
-                    writeln!(s, "r[{dst}]=r[{left}] {symbol} r[{right}];").unwrap();
+                    emit_integer(&mut s, dst, left, right, operator);
                 }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
@@ -727,4 +730,27 @@ impl VertexProgram {
         }
         s
     }
+}
+
+fn emit_integer(s: &mut String, dst: u8, left: u8, right: u8, operator: IntegerOperator) {
+    use std::fmt::Write;
+    let (symbol, wrap) = match operator {
+        IntegerOperator::Add => ("+", None),
+        IntegerOperator::And => ("&", None),
+        IntegerOperator::Or => ("|", None),
+        IntegerOperator::Xor => ("^", None),
+        IntegerOperator::ShiftLeft { wrap } => ("<<", Some(wrap)),
+        IntegerOperator::ShiftRight { wrap } => (">>", Some(wrap)),
+    };
+    match wrap {
+        None => writeln!(s, "r[{dst}]=r[{left}] {symbol} r[{right}];"),
+        Some(true) => writeln!(s, "r[{dst}]=r[{left}] {symbol} (r[{right}] & 31u);"),
+        // WGSL shifts mask their count. Mask even the unselected expression,
+        // then test the complete unsigned guest count to implement clamping.
+        Some(false) => writeln!(
+            s,
+            "r[{dst}]=select(0u,r[{left}] {symbol} (r[{right}] & 31u),r[{right}] < 32u);"
+        ),
+    }
+    .unwrap();
 }

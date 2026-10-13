@@ -471,3 +471,27 @@ SCREEN_Y_CONTROL to zero. These establish why the existing vertex Y adjustment
 must not be followed by another front-face inversion. Independent framebuffer
 signed-area tests use guest viewport equations, not the host culling conversion.
 No source implementation was copied.
+
+
+## Unsigned SHL and SHR
+
+The pinned MIT envytools GM107 table (`f102b82381f3f11cee113d16374c87091db039d9`)
+and MIT UAM/Mesa emitter (`5a5afc2bae8b55409ab36ba45be63fcb73f68993`,
+`emitSHL/emitSHR`) independently establish GPR operands at bits 7:0, 15:8, 27:20,
+SHL base `0x5c48000000070000`, unsigned SHR base `0x5c28000000070000`, and wrap
+bit 39. SHR signedness is bit 48; `.X`, CC and reverse-bit modifiers are excluded
+by exact masks. The target's fixed non-F64 shift latency is six cycles.
+
+Pinned MIT Ryujinx
+[`InstEmitShift.cs`](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Shader/Instructions/InstEmitShift.cs#L164)
+independently corroborates unsigned full-count clamp-to-zero and optional low-five-
+bit wrapping. This is source-level semantic corroboration, not an experiment on
+original Maxwell hardware. Mesa C++ constant-folding native shifts are not used
+as an oracle for out-of-range counts. Unmodified pinned envyas/envydis assembled
+and disassembled complete VS/PS fixtures. No source implementation was copied.
+
+Pinned MIT Mesa NAK
+[`OpShl::fold` and `OpShr::fold`](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/ir.rs)
+also independently define checked unsigned shifts: wrapping masks the count to
+five bits, and nonwrapping out-of-range shifts produce zero. This corroborates
+the high-count semantics beyond the archived Switch translator.

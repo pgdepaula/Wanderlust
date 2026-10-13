@@ -1,0 +1,12 @@
+sched (st 0x6 wr 0x0) (st 0x6 wr 0x0 wt 0x1) (st 0x6 wt 0x1);
+ld b32 $r4 c0[0x10];
+ld b32 $r5 c0[0x14];
+shl $r0 $r4 $r5;
+sched (st 0x6) (st 0x6) (st 0x6);
+shl w $r1 $r4 $r5;
+shr u32 $r2 $r4 $r5;
+shr u32 w $r3 $r4 $r5;
+sched (st 0x6) (st 0x6) (st 0x6);
+exit;
+nop 0;
+nop 0;

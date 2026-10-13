@@ -106,3 +106,20 @@ X*=2 and Y=-Y; these are integer bit operations, not a claimed general float
 transform identity. Its 208-byte file includes one trailing canonical NOP bundle;
 the selected-program fetch stops at the earlier EXIT bundle. SHA-256
 `8f580ea90431a7e879aeee774cb219219a28b6b4202316a5f00e74140cfd47de`.
+
+
+`shift.asm`/`shift.bin` use two scalar LDC inputs and unsigned GPR SHL, SHL.W,
+SHR.U32 and SHR.U32.W. They were assembled and disassembled with the same
+unmodified pinned envytools. The 176-byte PS fixture prepends the existing LDC
+80-byte SPH. Its runtime count distinguishes clamp-to-zero for counts >=32 from
+`.W` low-five-bit wrapping. Explicit `u32` is required: envyas plain `shr` is
+signed and is not accepted by this subset. SHA-256:
+`06def1ebc5b3d222a824c84be68321f89dc805e1ff2a44b49f44fb4fb5a09c82`.
+
+`vertex-shift.asm`/`vertex-shift.bin` use the existing 80-byte VTG SPH and four
+scheduled bundles (208 bytes total). SHL by one followed by unsigned SHR by one
+removes the clip-X sign bit; SHL.W and SHR.U32.W by 32 preserve clip-Y. For the
+fixture's finite normal positions this yields X=abs(X), Y unchanged; this is a
+raw-bit transformation, not a general floating arithmetic identity. Position/UV
+are exported by genuine AST. SHA-256:
+`66952bdeb0ee615ffa71e91f44c1282bc5b31ab35f6beb52afa4c5d6a7b48183`.

@@ -1078,3 +1078,49 @@ analysis/CLI/IDE changes and is not a live-runtime integration result. Two nativ
 process launches failed with WSL UtilAcceptVsock before tests began; bounded
 startup-only retries executed and passed the actual binaries. No GPU assertion
 failure was retried as a startup error.
+
+
+## Unsigned Maxwell shifts
+
+Independently assembled VS/PS fixtures add strict GPR SHL/SHR.U32 with clamp and
+`.W` count modes. Five CPU tests check exact opcode/operand decoding, WGSL/Naga
+validation, stage identity, rejected signed/reverse/extended/CC/predicate forms,
+register readiness and RZ, plus special-resource provenance and FMUL rounding-
+hazard retention. Source-level masks remain strict; this is not general shader
+predication or every Maxwell shift variant.
+
+The first actual GpuDriver/GPFIFO GPU scenario loads mutable value/count words
+through B197 constant bindings and produces four exports: left clamp, left wrap,
+right clamp and right wrap. Twelve independently specified RGBA expectations
+include counts 0, 1, 31, 32, 33, 63, 64, `0x80000000`, `0xffffffff`.
+For raw value `0x3f800001`, count 32 yields `[0,255,0,255]` and count 33 yields
+`[0,255,0,0]`. Raw value `0x7e000000` shifted right by one is float .5, producing
+`[0,0,128,128]`; count 33 gives `[0,0,0,128]`. These distinguish unsigned high-count
+clamping from bare host wrapping. Inputs deliberately avoid NaN/infinity output
+expectations. Quantized colors do not prove every result bit for all operands.
+
+All twelve draws retain one PS decode (176 shader bytes), one VS decode (144
+bytes), one target allocation and eleven reuses. Guest constant reads total 96
+bytes and changed constant uploads total 56 bytes. Vertex/index uploads are
+72/eight bytes initially, with no repeat uploads. There are twelve explicit
+publications/readbacks/waits (89,280 staging readback bytes) and 24 queue submissions;
+this correctness workload intentionally requests visibility after each result.
+
+The second scenario executes guest VS shifts that clear clip-X's sign bit and
+preserve Y using wrapped count 32. A separate barycentric oracle uses abs(X) for
+the fixture's finite normal positions and checks asymmetric inside/outside pixels.
+An unchanged repeat creates no module/pipeline or upload and does not decode VS
+again. No host-selected substitute geometry or fragment code is used.
+
+All 53 GPU scenarios passed on WSL OpenGL, native Windows D3D12 and native Windows
+Vulkan (159 actual passes, zero GPU skips). The package passed 103 CPU tests in
+both feature configurations; strict package Clippy and workspace formatting passed.
+Native runs encountered WSL UtilAcceptVsock startup failures before tests; retained
+logs and bounded startup-only retries, including verification of the active
+interop socket, distinguish those failures from the successful GPU executions.
+
+A faithful ordinary source snapshot based on `52e0447b488c3675b69053a5f78ea3fd4d40da0e`
+plus the owned shader changes and exact lockfile passed strict workspace Clippy
+and 307 CPU tests; its 53 GPU scenarios were ignored there and executed explicitly
+above. Unfinished peer analysis/CLI/IDE changes remain excluded and preserved.
+This does not establish live Horizon GPU-service integration.

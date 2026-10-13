@@ -959,3 +959,16 @@ and signed base/vertex bounds are still validated for each draw. Other resource
 caches retain their existing conservative range-stamp policy. Observations are
 not content identities or GPU fences and do not replace pending-output stamps:
 publication still requires exact retained CPU patch history and atomic writes.
+
+
+## Unsigned integer shifts
+
+Both stages accept GPR SHL and unsigned SHR with default modifiers and optional
+`.W`. Without `.W`, the complete unsigned count >=32 produces zero. With `.W`,
+counts reduce modulo 32. WGSL lowering masks every evaluated host shift count;
+clamp forms separately select zero using the original count. A bare host shift
+would incorrectly wrap the clamp forms. In-place destinations read the prior
+operand bits, and RZ is zero. Initialization, readiness, six-cycle scheduling,
+no variable-latency write barrier and existing integer provenance/rounding-hazard
+rules remain enforced. Signed SHR, carry/CC, `.X`, `.BREV`, execution predicates,
+immediate/constant operand forms and other modifiers remain unsupported.
