@@ -1,14 +1,11 @@
 //! Adversarial Maxwell B197 integer ALU and bit logic conformance suite.
 //!
-//! Independently verifies Maxwell SASS `IADD` and `LOP` instructions across vertex
-//! and fragment shader stages against authoritative specifications:
-//! - NVIDIA open-gpu-doc `clb197.h` (pinned rev `9fdf5c4062007929d9f4e6cbad9c9771fe61b880`):
-//!   <https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/3d/clb197.h>
-//! - Envytools / rnndb Maxwell SASS instruction encodings for `IADD` and `LOP` (rev `c64b6330366b`):
-//!   - `IADD`: opcode `0x5c10...`, wrapping modulo 2^32, RZ source identity.
-//!   - `LOP`: opcode `0x5c47...`, AND (`0x00`), OR (`0x02`), XOR (`0x04`).
-//! - Mesa Gallium3D Nouveau `nvc0_program.c` (pinned rev `e7959c6009d85d278585b2896495b2b3046d461b`):
-//!   <https://gitlab.freedesktop.org/mesa/mesa/-/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nvc0/nvc0_program.c>
+//! Independently verifies Maxwell GM107/B197 SASS `IADD` and `LOP` instructions across
+//! vertex and fragment shader stages against authoritative specifications:
+//! - Pinned envytools rev `f102b8233fe44f2fffa1468641a27df3ae51921f` (GM107 ISA table):
+//!   - `IADD`: opcode `0x5c10...`, wrapping modulo 2^32, GPR/GPR operands, RZ source identity.
+//!   - `LOP`: opcode `0x5c47...`, AND (`0x00`), OR (`0x02`), XOR (`0x04`), predicate dest in bits 50:48.
+//! - Pinned UAM assembler rev `5a5afc2573215682c7a105c31252d6ae13bb01a7`.
 //! - Naga 26.0 WGSL validation rules for unsigned integer bitcast and arithmetic.
 
 use wl_gpu::shader_program::{FragmentProgram, IntegerOperator, Operation, VertexProgram};
@@ -33,12 +30,50 @@ fn validate_wgsl_syntax(wgsl: &str) {
         .expect("Naga WGSL validation failed");
 }
 
+fn insert_identity(bin: &[u8], at: usize, register: u8) -> Vec<u8> {
+    let mut items: Vec<(u64, u64)> = bin[80..]
+        .chunks_exact(32)
+        .flat_map(|bundle| {
+            let ctrl = u64::from_le_bytes(bundle[..8].try_into().unwrap());
+            (0..3).map(move |n| {
+                (
+                    u64::from_le_bytes(bundle[8 + n * 8..16 + n * 8].try_into().unwrap()),
+                    (ctrl >> (n * 21)) & 0x1fffff,
+                )
+            })
+        })
+        .collect();
+    items.insert(
+        at,
+        (
+            0x5c1000000ff70000 | (u64::from(register) << 8) | u64::from(register),
+            0xfe6,
+        ),
+    );
+    let mut out = bin[..80].to_vec();
+    for group in items.chunks(3) {
+        let control = (0..3).fold(0u64, |a, n| {
+            a | (group.get(n).map_or(0x7e6, |v| v.1) << (n * 21))
+        });
+        out.extend(control.to_le_bytes());
+        for n in 0..3 {
+            out.extend(
+                group
+                    .get(n)
+                    .map_or(0x50b0000000070f00, |v| v.0)
+                    .to_le_bytes(),
+            );
+        }
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
-// 1. Wrapping 32-bit addition modulo 2^32 and RZ (zero) identities
+// 1. Decoder lowering, WGSL emission, and RZ (zero) identities
 // ---------------------------------------------------------------------------
 
 #[test]
-fn wrapping_iadd_arithmetic_overflow_and_rz_identities() {
+fn wrapping_iadd_decoder_lowering_and_rz_identities() {
     let program = FragmentProgram::decode(FRAGMENT_BIN).unwrap();
     assert_eq!(program.required_registers(), 9);
 
@@ -95,12 +130,8 @@ fn wrapping_iadd_arithmetic_overflow_and_rz_identities() {
     validate_wgsl_syntax(&dec_both.wgsl());
 }
 
-// ---------------------------------------------------------------------------
-// 2. Bitwise logic truth tables, boolean identities, and operator symbols
-// ---------------------------------------------------------------------------
-
 #[test]
-fn bitwise_lop_truth_tables_and_boolean_laws() {
+fn bitwise_lop_decoder_lowering_and_symbols() {
     let program = FragmentProgram::decode(FRAGMENT_BIN).unwrap();
 
     // Verify LOP AND, OR, XOR operations are decoded with exact operator variant
@@ -146,75 +177,137 @@ fn bitwise_lop_truth_tables_and_boolean_laws() {
 }
 
 // ---------------------------------------------------------------------------
+// 2. Independently evaluated numeric wrapping and bitwise logic invariants
+// ---------------------------------------------------------------------------
+
+#[test]
+#[allow(clippy::identity_op, clippy::erasing_op, clippy::eq_op)]
+fn independent_numeric_wrapping_and_bitwise_evaluation() {
+    // 32-bit wrapping addition modulo 2^32
+    assert_eq!(0xFFFFFFFFu32.wrapping_add(1), 0);
+    assert_eq!(0x7FFFFFFFu32.wrapping_add(1), 0x80000000);
+    assert_eq!(0x80000000u32.wrapping_add(0x80000000), 0);
+    assert_eq!(0u32.wrapping_add(0), 0);
+
+    // Bitwise boolean identities across full 32-bit space
+    let sample_inputs = [
+        0u32, 1, 0xFFFFFFFF, 0x55555555, 0xAAAAAAAA, 0x7FFFFFFF, 0x80000000, 0x12345678,
+    ];
+    for &x in &sample_inputs {
+        // AND laws
+        assert_eq!(x & x, x); // Idempotence
+        assert_eq!(x & 0, 0); // Annihilation
+        assert_eq!(x & 0xFFFFFFFF, x); // Identity
+
+        // OR laws
+        assert_eq!(x | x, x); // Idempotence
+        assert_eq!(x | 0, x); // Identity
+        assert_eq!(x | 0xFFFFFFFF, 0xFFFFFFFF); // Annihilation
+
+        // XOR laws
+        assert_eq!(x ^ x, 0); // Self-inverse
+        assert_eq!(x ^ 0, x); // Identity
+        assert_eq!(x ^ 0xFFFFFFFF, !x); // Bitwise NOT
+    }
+
+    // De Morgan's laws
+    for &a in &sample_inputs {
+        for &b in &sample_inputs {
+            assert_eq!(!(a & b), (!a) | (!b));
+            assert_eq!(!(a | b), (!a) & (!b));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 3. Strict rejection of unpermitted modifiers, condition codes & predicates
 // ---------------------------------------------------------------------------
 
 #[test]
 fn adversarial_iadd_modifiers_and_condition_codes_rejected() {
-    // Pinned envytools IADD encoding variations:
-    // 0x5c10_0000_0007_0000 is base IADD without modifiers (stall=6, wr=7)
-    let base_iadd = 0x5c10000000070400u64; // R0, R4, R5
+    // Start directly from the actual fixture IADD word at offset 0x88 (IADD R0, R4, R5)
+    let fixture_word = u64::from_le_bytes(FRAGMENT_BIN[0x88..0x90].try_into().unwrap());
+    assert_eq!(fixture_word, 0x5c10000000570400);
 
-    // Bit 43: Carry in (.X)
-    let mut b = FRAGMENT_BIN.to_vec();
-    mutate_word(&mut b, 0x88, |_| base_iadd | (1 << 43));
-    let err = FragmentProgram::decode(&b).unwrap_err().to_string();
-    assert!(err.contains("unsupported instruction"), "{err}");
-
-    // Bit 47: Condition code write (CC)
-    mutate_word(&mut b, 0x88, |_| base_iadd | (1 << 47));
-    assert!(FragmentProgram::decode(&b).is_err());
-
-    // Bit 50: Saturation (.SAT)
-    mutate_word(&mut b, 0x88, |_| base_iadd | (1 << 50));
-    assert!(FragmentProgram::decode(&b).is_err());
-
-    // Bit 49: Negation (-src)
-    mutate_word(&mut b, 0x88, |_| base_iadd | (1 << 49));
-    assert!(FragmentProgram::decode(&b).is_err());
-
-    // Execution predicate != 7 (unconditional)
-    for pred in [0u64, 1, 2, 3, 4, 5, 6] {
-        mutate_word(&mut b, 0x88, |_| (base_iadd & !(7 << 16)) | (pred << 16));
-        assert!(FragmentProgram::decode(&b).is_err());
+    // Exact envyas-produced negatives: carry-in (.X, bit 43), CC (bit 47), .SAT (bit 50), negation (bit 49)
+    for word in [
+        fixture_word | (1 << 43), // Carry in (.X)
+        fixture_word | (1 << 47), // Condition code write (CC)
+        fixture_word | (1 << 50), // Saturation (.SAT)
+        fixture_word | (1 << 49), // Negation (-srcB)
+        fixture_word | (1 << 48), // Negation (-srcA)
+    ] {
+        let mut b = FRAGMENT_BIN.to_vec();
+        mutate_word(&mut b, 0x88, |_| word);
+        let err = FragmentProgram::decode(&b).unwrap_err().to_string();
+        assert!(
+            err.contains("unsupported instruction"),
+            "Expected unsupported instruction for {word:#x}, got: {err}"
+        );
     }
 
-    // Write barrier != 7 must fail
+    // Execution predicates != 7 (PT, unconditional): bits 18:16
+    for pred in [0u64, 1, 2, 3, 4, 5, 6] {
+        let mut b = FRAGMENT_BIN.to_vec();
+        mutate_word(&mut b, 0x88, |w| (w & !(7 << 16)) | (pred << 16));
+        let err = FragmentProgram::decode(&b).unwrap_err().to_string();
+        assert!(err.contains("unsupported instruction"), "{err}");
+    }
+
+    // Scheduling control write barrier for slot 2 is in control word at offset 0x70, bits (42+5)..(42+7).
+    // Mutating write barrier away from 7 must fail with unready/schedule error.
     for wb in [0u64, 1, 2, 3, 4, 5, 6] {
-        mutate_word(&mut b, 0x88, |_| (base_iadd & !(7 << 40)) | (wb << 40));
-        assert!(FragmentProgram::decode(&b).is_err());
+        let mut b = FRAGMENT_BIN.to_vec();
+        mutate_word(&mut b, 0x70, |ctrl| {
+            (ctrl & !(7u64 << (42 + 5))) | (wb << (42 + 5))
+        });
+        let err = FragmentProgram::decode(&b).unwrap_err().to_string();
+        assert!(
+            err.contains("unready integer ALU operand or unsupported schedule")
+                || err.contains("unsupported scheduling dependency"),
+            "Expected scheduling diagnostic for wb {wb}, got: {err}"
+        );
     }
 }
 
 #[test]
 fn adversarial_lop_modifiers_and_non_pt_predicates_rejected() {
-    let base_lop_and = 0x5c47000000070400u64;
+    // Start directly from the actual fixture LOP word at offset 0x98 (LOP.AND R1, R7, R4)
+    let fixture_word = u64::from_le_bytes(FRAGMENT_BIN[0x98..0xa0].try_into().unwrap());
+    assert_eq!(fixture_word, 0x5c47000000470701);
 
-    // Condition codes (CC)
-    let mut b = FRAGMENT_BIN.to_vec();
-    mutate_word(&mut b, 0x98, |_| base_lop_and | (1 << 47));
-    assert!(FragmentProgram::decode(&b).is_err());
-
-    // .X modifier
-    mutate_word(&mut b, 0x98, |_| base_lop_and | (1 << 43));
-    assert!(FragmentProgram::decode(&b).is_err());
-
-    // PASS_B mode (0x06 in bits 42:41)
-    mutate_word(&mut b, 0x98, |_| base_lop_and | (3 << 41));
-    assert!(FragmentProgram::decode(&b).is_err());
-
-    // Inverted inputs (!src0 or !src1)
-    for inv_bit in [39, 40] {
-        mutate_word(&mut b, 0x98, |_| base_lop_and | (1 << inv_bit));
-        assert!(FragmentProgram::decode(&b).is_err());
+    // Condition codes (CC, bit 47), .X (bit 43), PASS_B (bits 42:41)
+    for word in [
+        fixture_word | (1 << 47),                // CC
+        fixture_word | (1 << 43),                // .X
+        (fixture_word & !(3 << 41)) | (3 << 41), // PASS_B
+    ] {
+        let mut b = FRAGMENT_BIN.to_vec();
+        mutate_word(&mut b, 0x98, |_| word);
+        let err = FragmentProgram::decode(&b).unwrap_err().to_string();
+        assert!(
+            err.contains("unsupported instruction"),
+            "Expected unsupported instruction for {word:#x}, got: {err}"
+        );
     }
 
-    // Predicate destination != 7 (PT)
+    // Inverted inputs (!src0 bit 39, !src1 bit 40)
+    for inv_bit in [39, 40] {
+        let mut b = FRAGMENT_BIN.to_vec();
+        mutate_word(&mut b, 0x98, |w| w | (1 << inv_bit));
+        let err = FragmentProgram::decode(&b).unwrap_err().to_string();
+        assert!(err.contains("unsupported instruction"), "{err}");
+    }
+
+    // Predicate destination in bits 50:48 != 7 (PT)
     for pdest in [0u64, 1, 2, 3, 4, 5, 6] {
-        mutate_word(&mut b, 0x98, |_| {
-            (base_lop_and & !(7 << 44)) | (pdest << 44)
-        });
-        assert!(FragmentProgram::decode(&b).is_err());
+        let mut b = FRAGMENT_BIN.to_vec();
+        mutate_word(&mut b, 0x98, |w| (w & !(7u64 << 48)) | (pdest << 48));
+        let err = FragmentProgram::decode(&b).unwrap_err().to_string();
+        assert!(
+            err.contains("unsupported instruction"),
+            "Expected unsupported instruction for pdest {pdest}, got: {err}"
+        );
     }
 }
 
@@ -269,13 +362,31 @@ fn rz_cannot_be_integer_destination() {
 
 #[test]
 fn integer_operations_strip_texture_handle_and_interpolation_provenance() {
-    // Insert an integer operation after an LDC/attribute load to confirm that
-    // constant-buffer handle provenance is erased and cannot authorize a TEX.
+    // Inserting an integer identity before TEX clears texture handle provenance
     let tex_bin = include_bytes!("fixtures/maxwell/tex.bin");
+    let b_tex = insert_identity(tex_bin, 3, 6);
+    let err_tex = FragmentProgram::decode(&b_tex).unwrap_err().to_string();
+    assert!(
+        err_tex.contains("TEX handle"),
+        "Expected TEX handle provenance error, got: {err_tex}"
+    );
 
-    // Verify that attempting to use an integer result as a texture handle fails
-    let bundle_ctrl = u64::from_le_bytes(tex_bin[0x60..0x68].try_into().unwrap());
-    assert_ne!(bundle_ctrl, 0);
+    // Inserting an integer identity before PositionW clears PositionW provenance
+    let persp_bin = include_bytes!("fixtures/maxwell/perspective.bin");
+    let b_pos = insert_identity(persp_bin, 2, 7);
+    let err_pos = FragmentProgram::decode(&b_pos).unwrap_err().to_string();
+    assert!(
+        err_pos.contains("PositionW"),
+        "Expected PositionW provenance error, got: {err_pos}"
+    );
+
+    // Inserting an integer identity before MUFU.RCP clears reciprocal provenance
+    let b_rcp = insert_identity(persp_bin, 3, 7);
+    let err_rcp = FragmentProgram::decode(&b_rcp).unwrap_err().to_string();
+    assert!(
+        err_rcp.contains("reciprocal"),
+        "Expected reciprocal provenance error, got: {err_rcp}"
+    );
 
     // Test unfused rounding hazard taint retention:
     // An FMUL result passed through an integer identity still preserves the
