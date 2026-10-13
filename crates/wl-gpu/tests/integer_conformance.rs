@@ -2,10 +2,10 @@
 //!
 //! Independently verifies Maxwell GM107/B197 SASS `IADD` and `LOP` instructions across
 //! vertex and fragment shader stages against authoritative specifications:
-//! - Pinned envytools rev `f102b8233fe44f2fffa1468641a27df3ae51921f` (GM107 ISA table):
+//! - Pinned envytools rev `f102b82381f3f11cee113d16374c87091db039d9` (GM107 ISA table):
 //!   - `IADD`: opcode `0x5c10...`, wrapping modulo 2^32, GPR/GPR operands, RZ source identity.
 //!   - `LOP`: opcode `0x5c47...`, AND (`0x00`), OR (`0x02`), XOR (`0x04`), predicate dest in bits 50:48.
-//! - Pinned UAM assembler rev `5a5afc2573215682c7a105c31252d6ae13bb01a7`.
+//! - Pinned UAM assembler rev `5a5afc2bae8b55409ab36ba45be63fcb73f68993`.
 //! - Naga 26.0 WGSL validation rules for unsigned integer bitcast and arithmetic.
 
 use wl_gpu::shader_program::{FragmentProgram, IntegerOperator, Operation, VertexProgram};
@@ -177,50 +177,7 @@ fn bitwise_lop_decoder_lowering_and_symbols() {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Independently evaluated numeric wrapping and bitwise logic invariants
-// ---------------------------------------------------------------------------
-
-#[test]
-#[allow(clippy::identity_op, clippy::erasing_op, clippy::eq_op)]
-fn independent_numeric_wrapping_and_bitwise_evaluation() {
-    // 32-bit wrapping addition modulo 2^32
-    assert_eq!(0xFFFFFFFFu32.wrapping_add(1), 0);
-    assert_eq!(0x7FFFFFFFu32.wrapping_add(1), 0x80000000);
-    assert_eq!(0x80000000u32.wrapping_add(0x80000000), 0);
-    assert_eq!(0u32.wrapping_add(0), 0);
-
-    // Bitwise boolean identities across full 32-bit space
-    let sample_inputs = [
-        0u32, 1, 0xFFFFFFFF, 0x55555555, 0xAAAAAAAA, 0x7FFFFFFF, 0x80000000, 0x12345678,
-    ];
-    for &x in &sample_inputs {
-        // AND laws
-        assert_eq!(x & x, x); // Idempotence
-        assert_eq!(x & 0, 0); // Annihilation
-        assert_eq!(x & 0xFFFFFFFF, x); // Identity
-
-        // OR laws
-        assert_eq!(x | x, x); // Idempotence
-        assert_eq!(x | 0, x); // Identity
-        assert_eq!(x | 0xFFFFFFFF, 0xFFFFFFFF); // Annihilation
-
-        // XOR laws
-        assert_eq!(x ^ x, 0); // Self-inverse
-        assert_eq!(x ^ 0, x); // Identity
-        assert_eq!(x ^ 0xFFFFFFFF, !x); // Bitwise NOT
-    }
-
-    // De Morgan's laws
-    for &a in &sample_inputs {
-        for &b in &sample_inputs {
-            assert_eq!(!(a & b), (!a) | (!b));
-            assert_eq!(!(a | b), (!a) & (!b));
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 3. Strict rejection of unpermitted modifiers, condition codes & predicates
+// 2. Strict rejection of unpermitted modifiers, condition codes & predicates
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -234,8 +191,8 @@ fn adversarial_iadd_modifiers_and_condition_codes_rejected() {
         fixture_word | (1 << 43), // Carry in (.X)
         fixture_word | (1 << 47), // Condition code write (CC)
         fixture_word | (1 << 50), // Saturation (.SAT)
-        fixture_word | (1 << 49), // Negation (-srcB)
-        fixture_word | (1 << 48), // Negation (-srcA)
+        fixture_word | (1 << 49), // Negation (-srcA)
+        fixture_word | (1 << 48), // Negation (-srcB)
     ] {
         let mut b = FRAGMENT_BIN.to_vec();
         mutate_word(&mut b, 0x88, |_| word);
@@ -312,7 +269,7 @@ fn adversarial_lop_modifiers_and_non_pt_predicates_rejected() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Scoreboard tracking, register initialization, and RZ destination rejection
+// 3. Scoreboard tracking, register initialization, and RZ destination rejection
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -357,7 +314,7 @@ fn rz_cannot_be_integer_destination() {
 }
 
 // ---------------------------------------------------------------------------
-// 5. Special resource provenance erasure & unfused rounding hazard retention
+// 4. Special resource provenance erasure & unfused rounding hazard retention
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -371,7 +328,7 @@ fn integer_operations_strip_texture_handle_and_interpolation_provenance() {
         "Expected TEX handle provenance error, got: {err_tex}"
     );
 
-    // Inserting an integer identity before PositionW clears PositionW provenance
+    // Inserting an integer identity at index 2 (after PositionW, before MUFU.RCP) clears PositionW provenance
     let persp_bin = include_bytes!("fixtures/maxwell/perspective.bin");
     let b_pos = insert_identity(persp_bin, 2, 7);
     let err_pos = FragmentProgram::decode(&b_pos).unwrap_err().to_string();
@@ -380,7 +337,7 @@ fn integer_operations_strip_texture_handle_and_interpolation_provenance() {
         "Expected PositionW provenance error, got: {err_pos}"
     );
 
-    // Inserting an integer identity before MUFU.RCP clears reciprocal provenance
+    // Inserting an integer identity at index 3 (after MUFU.RCP, before perspective IPA) clears reciprocal provenance
     let b_rcp = insert_identity(persp_bin, 3, 7);
     let err_rcp = FragmentProgram::decode(&b_rcp).unwrap_err().to_string();
     assert!(
@@ -411,7 +368,7 @@ fn integer_operations_strip_texture_handle_and_interpolation_provenance() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. Vertex stage integer translation and stage isolation
+// 5. Vertex stage integer translation and stage isolation
 // ---------------------------------------------------------------------------
 
 #[test]
