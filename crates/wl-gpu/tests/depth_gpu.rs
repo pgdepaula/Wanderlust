@@ -625,3 +625,261 @@ fn driver_depth_normalized_bit_transfers() {
     assert_eq!(&data[RT..RT + SIZE], &BG.repeat(W * H));
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+// Analytic homogeneous-depth oracle, independent of host clipping/raster code.
+// Dedicated binary-exact NDC positions project through the guest 32x16 viewport
+// to [(2,15),(31,13),(8,1)]. Near/far clipping below intersects edge midpoints,
+// also exactly on the raster subpixel grid. D3D snaps post-clipped XY to n.8
+// before interpolator setup (D3D11.3 spec 3.4.1); this fixture avoids attributing
+// legitimate snapping error to the guest depth translation. Keep the original
+// 47x29/POS depth regressions above unchanged.
+const CLIP_POS: [[f32; 2]; 3] = [[-0.875, -0.875], [0.9375, -0.625], [-0.5, 0.875]];
+fn clip_weights(x: usize, y: usize) -> [f64; 3] {
+    // Independently authored window coordinates, not production viewport math.
+    let v = [[2., 15.], [31., 13.], [8., 1.]];
+    let p = [x as f64 + 0.5, y as f64 + 0.5];
+    let a = edge(v[0], v[1], v[2]);
+    [
+        edge(v[1], v[2], p) / a,
+        edge(v[2], v[0], p) / a,
+        edge(v[0], v[1], p) / a,
+    ]
+}
+fn clip_vertices(z: [f32; 3], w: [f32; 3]) -> Vec<u8> {
+    (0..3)
+        .flat_map(|n| {
+            [
+                CLIP_POS[n][0] * w[n],
+                CLIP_POS[n][1] * w[n],
+                z[n] * w[n],
+                w[n],
+                UV[n][0],
+                UV[n][1],
+            ]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+        })
+        .collect()
+}
+fn verify_clip_depth(data: &[u8], initial: &[u8], z: [f32; 3], textured: bool) {
+    let mut checked = 0;
+    let mut covered = 0;
+    let mut rejected_inside = 0;
+    for y in 0..H {
+        for x in 0..W {
+            let b = clip_weights(x, y);
+            let ndc_z = if z[0] == z[1] && z[1] == z[2] {
+                f64::from(z[0])
+            } else {
+                (0..3).map(|n| b[n] * f64::from(z[n])).sum::<f64>()
+            };
+            let inside = x < 32 && y < 16 && b.iter().all(|v| *v > 0.);
+            if b.iter().any(|v| v.abs() < 0.005)
+                || (z[0] != z[1] || z[1] != z[2])
+                    && (ndc_z.abs() < 0.003 || (ndc_z - 1.).abs() < 0.003)
+            {
+                continue;
+            }
+            let pass = inside && (0.0..=1.0).contains(&ndc_z);
+            let off = gob::address(x * 4, y, W, 1);
+            let expected_color = if pass && textured {
+                // NoPerspective clipping preserves the original screen-affine
+                // UV plane, even when homogeneous W differs across vertices.
+                let u = (0..3).map(|n| b[n] * f64::from(UV[n][0])).sum::<f64>() * 37.;
+                let v = (0..3).map(|n| b[n] * f64::from(UV[n][1])).sum::<f64>() * 19.;
+                if (u - u.round()).abs() < 0.02 || (v - v.round()).abs() < 0.02 {
+                    continue;
+                }
+                let x = u.floor().clamp(0., 36.) as usize;
+                let y = v.floor().clamp(0., 18.) as usize;
+                [
+                    (x * 17 + y * 3) as u8,
+                    (y * 29 + 7) as u8,
+                    (x * 5 + y * 11 + 41) as u8,
+                    (64 + (x * 3 + y * 7) % 192) as u8,
+                ]
+            } else if pass {
+                [255, 0, 0, 255]
+            } else {
+                BG
+            };
+            assert_eq!(
+                &data[RT + (y * W + x) * 4..RT + (y * W + x + 1) * 4],
+                expected_color,
+                "color {x},{y} z={z:?}, interpolated={ndc_z}"
+            );
+            if pass {
+                covered += 1;
+                let actual = f32::from_le_bytes(data[Z + off..Z + off + 4].try_into().unwrap());
+                if z[0] == z[1] && z[1] == z[2] {
+                    assert_eq!(actual.to_bits(), z[0].to_bits());
+                } else {
+                    assert!(
+                        (f64::from(actual) - ndc_z).abs() <= 0.000002,
+                        "depth {x},{y} actual={actual}, expected={ndc_z}"
+                    );
+                }
+            } else {
+                assert_eq!(&data[Z + off..Z + off + 4], &initial[off..off + 4]);
+                rejected_inside += usize::from(inside);
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked > 1300, "{checked}");
+    if z[0] == z[1] && z[1] == z[2] && !(0.0..=1.0).contains(&z[0]) {
+        assert_eq!(covered, 0);
+        assert!(rejected_inside > 150);
+        assert_eq!(&data[Z..Z + initial.len()], initial);
+        assert!(data[RT..RT + SIZE].chunks_exact(4).all(|p| p == BG));
+    } else {
+        assert!(covered > 20);
+        if z[0] != z[1] || z[1] != z[2] {
+            assert!(rejected_inside > 20);
+        }
+    }
+    let mut used = vec![false; initial.len()];
+    for y in 0..H {
+        for x in 0..W * 4 {
+            used[gob::address(x, y, W, 1)] = true;
+        }
+    }
+    for (i, used) in used.into_iter().enumerate() {
+        if !used {
+            assert_eq!(data[Z + i], initial[i], "depth padding {i}");
+        }
+    }
+}
+#[test]
+#[ignore = "requires actual GPU; explicit homogeneous zero-to-W clipping and depth publication"]
+fn driver_explicit_z_clip_planes_partial_geometry_and_unequal_w() {
+    let (mut data, mut setup, _) = fixture();
+    let (mut d, c, space, backing, _) = driver();
+    let initial = initial_depth();
+    data[Z..Z + initial.len()].copy_from_slice(&initial);
+    let end = setup.split_off(setup.len() - 8);
+    method(&mut setup, 0x2144, 0x400); // Guest-selected independently assembled red PS.
+    // Explicit guest viewport, surface clip, viewport clip and scissor.
+    for (m, v) in [
+        (0x0a00, 16f32.to_bits()),
+        (0x0a04, (-8f32).to_bits()),
+        (0x0a0c, 16f32.to_bits()),
+        (0x0a10, 8f32.to_bits()),
+        (0x0ff4, 32 << 16),
+        (0x0ff8, 16 << 16),
+        (0x0c00, 32 << 16),
+        (0x0c04, 16 << 16),
+        (0x0e04, 32 << 16),
+        (0x0e08, 16 << 16),
+    ] {
+        method(&mut setup, m, v);
+    }
+    setup.extend(end);
+    depth_setup(&mut setup, 0x207, true); // ALWAYS must not bypass homogeneous clipping.
+    let mut missing = setup.clone();
+    let at = missing.iter().position(|w| *w == 0x2001035f).unwrap();
+    assert_eq!(missing[at + 1], 1);
+    missing.drain(at..at + 2);
+    let r = submit(&mut d, c, backing, &mut data, &missing);
+    assert!(
+        r.fault.as_ref().is_some_and(|e| e
+            .to_string()
+            .contains("incomplete or unsupported fixed raster state")),
+        "{:?}",
+        r.fault
+    );
+    assert_eq!(d.graphics_counters().draw_commands, 0);
+    assert_eq!(d.graphics_counters().submissions, 0);
+    assert!(data[RT..RT + SIZE].chunks_exact(4).all(|p| p == BG));
+    d.close(c, &mut mem(&mut data)).unwrap();
+    let c = d.create_channel(space).unwrap();
+    let cases = [
+        ([-0.25; 3], [1.; 3]),
+        ([0.; 3], [1.; 3]),
+        ([0.25; 3], [1.; 3]),
+        ([0.5; 3], [1.; 3]),
+        ([0.75; 3], [1.; 3]),
+        ([1.; 3], [1.; 3]),
+        ([1.25; 3], [1.; 3]),
+        ([-0.5, 0.5, 0.5], [1.; 3]),
+        ([0.5, 1.5, 0.5], [1.; 3]),
+        ([-0.5, 0.5, 0.5], [0.5, 1., 2.]),
+        ([0.5, 1.5, 0.5], [0.5, 1., 2.]),
+        ([-0.5, 0.5, 0.5], [0.5, 1., 2.]),
+        ([0.5, 1.5, 0.5], [0.5, 1., 2.]),
+    ];
+    let mut program_identity = None;
+    for (case, (z, w)) in cases.into_iter().enumerate() {
+        let textured = case >= 11;
+        d.write_backing(backing, RT as u64, &BG.repeat(W * H), &mut mem(&mut data))
+            .unwrap();
+        d.write_backing(backing, Z as u64, &initial, &mut mem(&mut data))
+            .unwrap();
+        d.write_backing(backing, 0x3000, &clip_vertices(z, w), &mut mem(&mut data))
+            .unwrap();
+        let mut commands = setup.clone();
+        if textured {
+            let end = commands.split_off(commands.len() - 8);
+            method(&mut commands, 0x2144, 0); // Real guest TEX/IPA pixel program.
+            commands.extend(end);
+        }
+        let r = submit(&mut d, c, backing, &mut data, &commands);
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert!(data[RT..RT + SIZE].chunks_exact(4).all(|p| p == BG));
+        assert_eq!(&data[Z..Z + initial.len()], initial);
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        verify_clip_depth(&data, &initial, z, textured);
+        d.retire(r.token).unwrap();
+        let n = d.graphics_counters();
+        let identity = (
+            n.shader_decodes,
+            n.vertex_shader_decodes,
+            n.shader_module_allocations,
+            n.pipeline_allocations,
+        );
+        if let Some((old_mode, old)) = program_identity {
+            if old_mode == textured {
+                assert_eq!(identity, old);
+            }
+        }
+        program_identity = Some((textured, identity));
+    }
+    // Changing to an unsupported clip interval faults without replay or an
+    // implicit publication of the already accepted last image.
+    d.write_backing(backing, RT as u64, &BG.repeat(W * H), &mut mem(&mut data))
+        .unwrap();
+    d.write_backing(backing, Z as u64, &initial, &mut mem(&mut data))
+        .unwrap();
+    d.write_backing(
+        backing,
+        0x3000,
+        &clip_vertices([0.5; 3], [1.; 3]),
+        &mut mem(&mut data),
+    )
+    .unwrap();
+    let mut commands = Vec::new();
+    method(&mut commands, 0x2144, 0x400);
+    commands.extend(draw());
+    assert!(
+        submit(&mut d, c, backing, &mut data, &commands)
+            .fault
+            .is_none()
+    );
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, backing, &mut data, &[0x2001035f, 0]);
+    assert!(
+        r.fault.as_ref().is_some_and(|e| e
+            .to_string()
+            .contains("UnsupportedValue { method: 3452, value: 0 }")),
+        "{:?}",
+        r.fault
+    );
+    assert_eq!(d.graphics_counters().draw_commands, before.draw_commands);
+    assert_eq!(d.graphics_counters().submissions, before.submissions);
+    assert!(data[RT..RT + SIZE].chunks_exact(4).all(|p| p == BG));
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    verify_clip_depth(&data, &initial, [0.5; 3], false);
+    assert_eq!(d.graphics_counters().draw_commands, before.draw_commands);
+    eprintln!("explicit Z clipping counters {:?}", d.graphics_counters());
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

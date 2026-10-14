@@ -1211,3 +1211,23 @@ comparisons; compatible shader modules and raw vertex buffers can remain residen
 when only the attribute interpretation changes. The intermediate public
 set_vertex_program API retains its existing FLOAT4 behavior. GpuDriver submission,
 completion and publication APIs are unchanged.
+
+
+## Explicit homogeneous depth clipping
+
+Draws require B197 SET_VIEWPORT_Z_CLIP at byte method 0x0d7c with range value1
+(zero through positive W). Missing state and negative-W-to-positive-W value0
+fail explicitly. This selector is independent of the existing 0x193c=0x1801
+viewport clip control; the latter does not select the homogeneous Z interval.
+No undocumented reset value is inferred. The fixed-state presence mask is u64
+to represent all 32 required entries safely. Clear operations retain their own
+state requirements and do not require draw-only homogeneous clipping state.
+
+The bounded draw path retains identity viewport depth scale/offset, no depth
+bias/clamping, and the supported shaders without fragment-depth export. Host
+fixed-function clipping rejects primitives outside zero through W, even when
+the depth comparison is ALWAYS. Mixed-depth primitives are clipped before
+rasterization; unequal positive W and screen-linear varyings remain supported.
+Alternate homogeneous ranges, nonidentity viewport Z transforms and other
+guardband configurations remain unsupported. Submission, completion and
+publication interfaces are unchanged.

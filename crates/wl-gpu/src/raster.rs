@@ -34,6 +34,7 @@ pub const FIXED_RASTER_STATE: &[(u16, u32)] = &[
     (0x168c, 0),
     (0x0c08, 0),
     (0x0c0c, 0x3f800000),
+    (0x0d7c, 1), // homogeneous Z interval is zero through positive W
 ];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorLayout {
@@ -259,7 +260,7 @@ pub(crate) struct RasterRegisters {
     clip: [Option<u32>; 2],
     scissor: [Option<u32>; 2],
     scissor_enable: Option<u32>,
-    fixed: u32,
+    fixed: u64,
     blend_enabled: bool,
     blend_separate: Option<bool>,
     blend: [Option<u32>; 6],
@@ -468,7 +469,7 @@ impl RasterRegisters {
         Ok(target)
     }
     pub fn resolve(&self) -> Result<(ColorTarget, Rasterization)> {
-        if self.fixed != (1u32 << FIXED_RASTER_STATE.len()) - 1 || self.scissor_enable != Some(1) {
+        if self.fixed != (1u64 << FIXED_RASTER_STATE.len()) - 1 || self.scissor_enable != Some(1) {
             return Err(invalid("incomplete or unsupported fixed raster state"));
         }
         let blend = if self.blend_enabled {

@@ -115,7 +115,7 @@ pub fn setup() -> Vec<u32> {
     ]);
     words.extend_from_slice(&[
         0x2001004e, 1, 0x200100df, 1, 0x20010286, 0x6420, 0x2002037e, 0, 0, 0x200104bb, 0,
-        0x200103e9, 0,
+        0x200103e9, 0, 0x2001035f, 1, // explicit SET_VIEWPORT_Z_CLIP: zero..W
     ]);
     words
 }

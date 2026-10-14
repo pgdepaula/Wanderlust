@@ -759,3 +759,32 @@ ALD B128 loads position, ALD B64 loads UV, MOV R4,R3 exports fetched W as UV.x,
 then AST exports position/UV and EXIT terminates. Barrier/wait forms are unchanged.
 The instruction bytes were independently reassembled exactly. No commercial data
 or restrictive-license implementation source is included.
+
+
+## Homogeneous Z clipping and raster precision
+
+Pinned NVIDIA [clb197.h](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/3d/clb197.h)
+defines SET_VIEWPORT_Z_CLIP at byte0x0d7c, range bit0: negative-W-to-positive-W=0
+and zero-to-positive-W=1. SET_VIEWPORT_CLIP_CONTROL at0x193c independently
+defines pixel depth range, clamp modes, geometric clipping and guardbands.
+Value1801 selects pixel zero-to-one and XYZ geometric clipping; its Z guardband
+uses the XY setting. These fields must not be conflated with the 0x0d7c range.
+Pinned Mesa [nvc0_state.c](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nvc0/nvc0_state.c)
+emits the clip-halfz-dependent selector separately. Nonidentity viewport depth
+transforms require further guardband interpretation and are not accepted here.
+
+[OpenGL4.6 section13.7.1](https://registry.khronos.org/OpenGL/specs/gl/glspec46.core.pdf)
+and [Vulkan clipping outputs](https://docs.vulkan.org/spec/latest/chapters/vertexpostproc.html#vertexpostproc-clipping-shader-outputs)
+define NoPerspective interpolation at generated clip vertices. A homogeneous
+edge parameter t corresponds to screen parameter t*W1/((1-t)*W0+t*W1). Thus
+the original affine screen UV plane is preserved under clipping with unequal W.
+This is a source-and-mathematics inference, not an original-Tegra experiment.
+
+Microsoft's [Direct3D functional specification, section3.4.1](https://github.com/microsoft/DirectX-Specs/blob/a610933eac2103cd502bacfb5193ae7f02c6fa54/d3d/archive/D3D11_3_FunctionalSpec.htm)
+requires post-clipping viewport XY to snap to eight fractional bits before
+interpolator setup; section15.16.2 includes depth. D3D12 retains these baseline
+rendering rules. The depth-clipping fixture deliberately uses binary-exact
+positions and a 32x16 viewport with all clipping intersections on the subpixel
+grid, so an independent analytic plane remains a valid cross-backend oracle.
+This avoids assuming that unsnapped decimal geometry must have identical depth
+on every host rasterizer. No backend-specific production workaround is applied.

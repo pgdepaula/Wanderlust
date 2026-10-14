@@ -1704,3 +1704,55 @@ artifact snapshot counts above are retained as reported observations, not exact
 source-isolation proof. The GPU backend executions and their explicit pixel
 assertions are recorded separately. No original-game GPU submission or frame is
 established by these synthetic fixtures.
+
+
+## Explicit homogeneous Z interval
+
+Six CPU tests distinguish 0x0d7c from viewport clip control, require every bit of
+the 32-entry presence mask, reject alternate/reserved/unaligned selectors without
+mutation, preserve literal packet fault prefixes and verify clear independence.
+The GPU scenario enters through GpuDriver and mapped GPFIFO indexed draws with
+an actual translated vertex program and red or TEX/IPA pixel programs. Missing
+0x0d7c faults before any draw or queue submission. A fresh channel then tests
+uniform normalized depth -0.25,0,0.25,0.5,0.75,1,1.25 and four mixed-depth
+near/far crossings with unit or unequal clip W. Two more crossings use textured
+screen-linear inputs with an independently specified asymmetric image.
+
+The color/depth storage stays non-square 52x29, while guest viewport, surface
+clip, viewport clip and scissor explicitly select 32x16. Binary-exact authored
+positions project to window vertices (2,15),(31,13),(8,1). Near/far intersections
+are edge midpoints on the raster subpixel grid. Independent window-space
+barycentrics determine coverage, affine UV and interpolated Z/W. Uniform accepted
+depths compare bit-exactly; nonuniform depths use the existing 2e-6 bound. Pixels
+near geometry/clip/sample-quantization boundaries are excluded from ambiguous
+comparisons. Uncovered color, rejected depth and tiled padding remain unchanged.
+
+The initial decimal-geometry oracle failed D3D12 at (18,5): observed0.68851227
+versus unsnapped0.68846403846. Independently snapping projected vertices to the
+documented 1/256-pixel grid gives0.68851224456. The final fixture corrects that
+oracle premise without increasing tolerance or changing production translation.
+The earlier failure is not counted as a passing run.
+
+Fourteen accepted draws remain deferred until each explicit validation boundary.
+The scenario intentionally resets/publishes attachments for individual checks:
+28 readbacks/waits, 56 queue submissions including portable depth initialization,
+1008 vertex upload bytes, one color and one depth allocation, 13 color-target
+reuses, 114688 depth guest-write bytes and 84448 color guest-write bytes. Changing
+only depth/vertex data reuses shader modules/pipelines within each program mode.
+Switching red/TEX/red deliberately translates three pixel program selections.
+An unsupported interval after an accepted draw faults without queue submission,
+implicit publication or replay; the earlier color/depth remain publishable.
+These oracle-driven synchronization counts are not a per-draw runtime policy.
+
+Final validation passed 174 graphics CPU tests in both feature configurations,
+strict workspace Clippy and whole-workspace formatting. A faithful ordinary
+snapshot of 229ca1d plus the exact four clipping implementation/test files, with
+unchanged Cargo.lock and a dedicated artifact directory, passed 393 workspace
+CPU tests (84 GPU scenarios ignored). All 84 GPU scenarios actually passed on
+each WSL OpenGL, native Windows D3D12 and native Windows Vulkan: 252 passes,
+zero failures or explicit skips in the final matrix. Both native depth
+executables separately passed their seven scenarios after the oracle correction.
+A WSL interop startup110 occurred before the full native run launched GPU work;
+a functioning broker then ran the full matrix. Neither startup failure nor the
+earlier depth-oracle failure is disguised as a passing or skipped GPU scenario.
+Concurrent unfinished runtime changes were excluded and preserved.
