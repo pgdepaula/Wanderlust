@@ -13,6 +13,13 @@ pub enum FloatOperator {
     Multiply,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogicalOperator {
+    And,
+    Or,
+    Xor,
+    PassB,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntegerOperator {
     Add,
     Multiply,
@@ -20,13 +27,24 @@ pub enum IntegerOperator {
     And,
     Or,
     Xor,
+    Logical {
+        operator: LogicalOperator,
+        invert_left: bool,
+        invert_right: bool,
+    },
     MinUnsigned,
     MaxUnsigned,
     MinSigned,
     MaxSigned,
-    ShiftLeft { wrap: bool },
-    ShiftRight { wrap: bool },
-    ShiftRightSigned { wrap: bool },
+    ShiftLeft {
+        wrap: bool,
+    },
+    ShiftRight {
+        wrap: bool,
+    },
+    ShiftRightSigned {
+        wrap: bool,
+    },
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntegerComparison {
@@ -396,6 +414,57 @@ impl Program {
                         right,
                         invert: word & (1 << 42) != 0,
                     }
+                } else if word & !0x000007800ff0ffff == 0x5c47000000070000 {
+                    let left = ((word >> 8) & 255) as u8;
+                    let right = ((word >> 20) & 255) as u8;
+                    let invert_left = word & (1 << 39) != 0;
+                    let invert_right = word & (1 << 40) != 0;
+                    let operator = match (word >> 41) & 3 {
+                        0 => LogicalOperator::And,
+                        1 => LogicalOperator::Or,
+                        2 => LogicalOperator::Xor,
+                        _ => LogicalOperator::PassB,
+                    };
+                    // PASS_B ignores A in hardware. Accept only the independently
+                    // assembled canonical RZ form, including NOT through ~B.
+                    if operator == LogicalOperator::PassB && (left != 255 || invert_left) {
+                        return Err(fail("unsupported instruction: noncanonical LOP PASS_B"));
+                    }
+                    if write_barrier != 7
+                        || !initialized[left as usize]
+                        || !initialized[right as usize]
+                        || pending[left as usize]
+                        || pending[right as usize]
+                    {
+                        return Err(fail("unready integer operand/control"));
+                    }
+                    // Preserve the original public IR for plain binary forms.
+                    // All forms use common Integer metadata, so identities and
+                    // complements retain float hazards and erase resource proof.
+                    let operator = if !invert_left && !invert_right {
+                        match operator {
+                            LogicalOperator::And => IntegerOperator::And,
+                            LogicalOperator::Or => IntegerOperator::Or,
+                            LogicalOperator::Xor => IntegerOperator::Xor,
+                            LogicalOperator::PassB => IntegerOperator::Logical {
+                                operator,
+                                invert_left,
+                                invert_right,
+                            },
+                        }
+                    } else {
+                        IntegerOperator::Logical {
+                            operator,
+                            invert_left,
+                            invert_right,
+                        }
+                    };
+                    Operation::Integer {
+                        dst,
+                        left,
+                        right,
+                        operator,
+                    }
                 } else if matches!(
                     word & !(255 | (255u64 << 8) | (255u64 << 20)),
                     0x5c58000000070000 | 0x5c68000000070000
@@ -453,9 +522,6 @@ impl Program {
                     0x5c10000000070000
                         | 0x5c11000000070000
                         | 0x5c12000000070000
-                        | 0x5c47000000070000
-                        | 0x5c47020000070000
-                        | 0x5c47040000070000
                         | 0x5c48000000070000
                         | 0x5c48008000070000
                         | 0x5c28000000070000
@@ -488,9 +554,6 @@ impl Program {
                         operator: match word & !(255 | (255u64 << 8) | (255u64 << 20)) {
                             0x5c10000000070000 => IntegerOperator::Add,
                             0x5c11000000070000 | 0x5c12000000070000 => IntegerOperator::Subtract,
-                            0x5c47000000070000 => IntegerOperator::And,
-                            0x5c47020000070000 => IntegerOperator::Or,
-                            0x5c47040000070000 => IntegerOperator::Xor,
                             0x5c48000000070000 => IntegerOperator::ShiftLeft { wrap: false },
                             0x5c48008000070000 => IntegerOperator::ShiftLeft { wrap: true },
                             0x5c28000000070000 => IntegerOperator::ShiftRight { wrap: false },
@@ -981,6 +1044,25 @@ fn emit_integer(s: &mut String, dst: u8, left: u8, right: u8, operator: IntegerO
         IntegerOperator::And => ("&", None),
         IntegerOperator::Or => ("|", None),
         IntegerOperator::Xor => ("^", None),
+        IntegerOperator::Logical {
+            operator,
+            invert_left,
+            invert_right,
+        } => {
+            let left = format!("{}r[{left}]", if invert_left { "~" } else { "" });
+            let right = format!("{}r[{right}]", if invert_right { "~" } else { "" });
+            let symbol = match operator {
+                LogicalOperator::And => "&",
+                LogicalOperator::Or => "|",
+                LogicalOperator::Xor => "^",
+                LogicalOperator::PassB => {
+                    writeln!(s, "r[{dst}]={right};").unwrap();
+                    return;
+                }
+            };
+            writeln!(s, "r[{dst}]=({left}) {symbol} ({right});").unwrap();
+            return;
+        }
         IntegerOperator::MinUnsigned => {
             writeln!(s, "r[{dst}]=min(r[{left}],r[{right}]);").unwrap();
             return;

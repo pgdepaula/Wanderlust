@@ -1808,3 +1808,51 @@ and native Windows Vulkan backend: 258 passes, zero failures or explicit skips.
 The focused GL run separately passed five blend GPU scenarios and eleven CPU
 tests. Source-grounded independent review covered production mappings and the
 math/visibility oracle. No original-game GPU submission or frame is established.
+
+
+## Register logical complements and canonical PASS_B
+
+Six CPU tests validate fourteen literal GPR forms in both shader stages,
+register readiness, in-place writes, RZ, strict scheduling/modifier rejection,
+resource/proof erasure and retained FMUL hazards. Existing negative suites now
+accept only the independently verified complement bits; CC, predicate results,
+X, unsupported operand families and noncanonical PASS_B remain rejected.
+Three original assembly fixtures were independently reassembled byte-for-byte.
+
+Two GPU scenarios enter through GpuDriver, guest GPFIFO and indexed B197 draws.
+Fourteen forms times 28 input pairs exercise every output bit through a finite
+RGBA8 byte observer. The independent oracle evaluates a per-bit Boolean truth
+table; it does not evaluate production IR or use GPU output as expectations.
+A later unsupported CC form faults with an earlier draw still pending, without
+submission, publication or replay; publication yields [135,169,203,237], the
+bytes of ~0x12345678. A vertex XOR of ~0x7fffffff mirrors guest positions; an
+independent analytic coverage oracle distinguishes the result from a NOP.
+
+The full-word workload executes 393 draws, 786 queue submissions, 393 intentional
+validation readbacks/waits, 2923920 readback bytes and 2370576 guest framebuffer
+write bytes. It observes fifteen decode attempts (fourteen valid plus one fault),
+6960 shader bytes, 30 pipelines, 17 modules, 3144 constant guest bytes and 2864
+constant upload bytes, 72 vertex upload bytes and eight index upload bytes.
+One target allocation is reused 392 times. Per-case publication is oracle policy,
+not an unconditional runtime draw policy.
+
+Thirty-two warm vertex draws add no resource reads/uploads, shader decodes,
+modules, pipelines, readbacks or waits; they add 32 queue submissions before
+one explicit final publication. Debug CPU observations were 58.220ms with1568
+allocations/128 reallocations on isolated GL, 26.403ms with1408/32 on D3D12 and
+22.047ms with1568/32 on Vulkan. Counts are process-wide and include backend work;
+they are not GPU durations, zero-copy measurements or game benchmarks.
+
+A faithful ordinary snapshot of 267d6d2 plus the exact eleven source/test/fixture
+files, unchanged Cargo.lock and a dedicated artifact directory passed workspace
+formatting, strict workspace Clippy, 186 graphics CPU tests in each feature
+configuration and 405 workspace CPU tests (88 GPU scenarios ignored). All 88
+GPU scenarios actually passed on each WSL OpenGL, native Windows D3D12 and
+native Windows Vulkan: 264 passes, zero failures or explicit skips in the final
+matrix. Native execution used Intel UHD; GL used llvmpipe. Earlier Windows
+interop startup110 failures occurred before GPU execution and are not passes.
+An initial CPU scheduling test incorrectly expected a ready-register operation
+to fault before the first pending UV read; the corrected test asserts the real
+AST failure and separately tests a LOP reading that pending register. Production
+validation was not weakened. Unfinished peer runtime edits were excluded and
+preserved. No original-game GPU command or frame is established.

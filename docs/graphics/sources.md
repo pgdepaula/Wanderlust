@@ -809,3 +809,38 @@ lowering the alpha blend component. This respects
 without changing guest semantics or patching the dependency. These factors need
 no additional feature beyond the existing blendable Rgba8Unorm attachment.
 Constant, saturation and dual-source forms are not inferred from this subset.
+
+
+## Maxwell LOP source complements
+
+Pinned MIT [envytools GM107 tables](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/gm107.c)
+define AND/OR/XOR/PASS_B in bits42:41, source complements39/40, extended43,
+predicate condition45:44, CC47 and predicate output50:48. The accepted
+full-word variable mask is000007800ff0ffff against base5c47000000070000.
+Unmasked fields retain their independently assembled values; this is not a
+general opcode-prefix match. Pinned MIT Mesa
+[SM50 OpLop2 encoding](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs)
+and [logic folding](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/ir.rs)
+corroborate field positions and raw-bit semantics.
+
+Pinned UAM [NOT emission](https://github.com/devkitPro/uam/blob/5a5afc2bae8b55409ab36ba45be63fcb73f68993/mesa-imported/codegen/nv50_ir_emit_gm107.cpp)
+uses canonical PASS_B(RZ,complementedB). Its
+[latency model](https://github.com/devkitPro/uam/blob/5a5afc2bae8b55409ab36ba45be63fcb73f68993/mesa-imported/codegen/nv50_ir_target_gm107.cpp)
+assigns six cycles to these bit operations, retained as the conservative existing
+scheduling subset. This does not establish complete Maxwell timing/scoreboards.
+No implementation source is copied.
+
+Three original synthetic assembly files were independently assembled and
+disassembled twice with unmodified pinned envytools. Validated existing 80-byte
+SPH variants are retained; instruction bytes reproduce exactly:
+
+| Fixture | Bytes | SHA-256 |
+| --- | ---: | --- |
+| lop-invert.bin |144|a73cce06e2a4b926ae48e6e84f8a7f0cbd0997c30c207a737df586d9d1cf438d|
+| lop-bytes.bin |464|e15579ecf3646f5044be1182ede93fea63676a0df56abb548e9a5e6fdd919496|
+| vertex-lop.bin |176|8bc6a5e6087b4924b734f00ca1473e9cfdf5603e16f8ce3ef9845f38d4d836b9|
+
+The byte observer uses the existing validated finite byte-to-UNORM sequence, not
+raw floating export of arbitrary NaN bit patterns. The vertex fixture XORs clip X
+with the complement of7fffffff, toggling its sign bit. No original-game or
+original-Maxwell-hardware execution is claimed for these fixtures.

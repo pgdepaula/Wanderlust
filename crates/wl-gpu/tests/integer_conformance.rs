@@ -8,7 +8,9 @@
 //! - Pinned UAM assembler rev `5a5afc2bae8b55409ab36ba45be63fcb73f68993`.
 //! - Naga 26.0 WGSL validation rules for unsigned integer bitcast and arithmetic.
 
-use wl_gpu::shader_program::{FragmentProgram, IntegerOperator, Operation, VertexProgram};
+use wl_gpu::shader_program::{
+    FragmentProgram, IntegerOperator, LogicalOperator, Operation, VertexProgram,
+};
 
 const FRAGMENT_BIN: &[u8] = include_bytes!("fixtures/maxwell/integer.bin");
 const VERTEX_BIN: &[u8] = include_bytes!("fixtures/maxwell/vertex-integer.bin");
@@ -232,7 +234,7 @@ fn adversarial_lop_modifiers_and_non_pt_predicates_rejected() {
     let fixture_word = u64::from_le_bytes(FRAGMENT_BIN[0x98..0xa0].try_into().unwrap());
     assert_eq!(fixture_word, 0x5c47000000470701);
 
-    // Condition codes (CC, bit 47), .X (bit 43), PASS_B (bits 42:41)
+    // Condition codes (CC, bit 47), .X (bit 43), noncanonical PASS_B (bits 42:41)
     for word in [
         fixture_word | (1 << 47),                // CC
         fixture_word | (1 << 43),                // .X
@@ -247,12 +249,23 @@ fn adversarial_lop_modifiers_and_non_pt_predicates_rejected() {
         );
     }
 
-    // Inverted inputs (!src0 bit 39, !src1 bit 40)
+    // Independently documented source complements are now implemented. Keep
+    // the old literal AND fixture and check both exact modifier positions.
     for inv_bit in [39, 40] {
         let mut b = FRAGMENT_BIN.to_vec();
         mutate_word(&mut b, 0x98, |w| w | (1 << inv_bit));
-        let err = FragmentProgram::decode(&b).unwrap_err().to_string();
-        assert!(err.contains("unsupported instruction"), "{err}");
+        let decoded = FragmentProgram::decode(&b).unwrap();
+        assert!(decoded.operations().contains(&Operation::Integer {
+            dst: 1,
+            left: 7,
+            right: 4,
+            operator: IntegerOperator::Logical {
+                operator: LogicalOperator::And,
+                invert_left: inv_bit == 39,
+                invert_right: inv_bit == 40,
+            },
+        }));
+        validate_wgsl_syntax(&decoded.wgsl());
     }
 
     // Predicate destination in bits 50:48 != 7 (PT)

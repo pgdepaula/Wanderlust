@@ -879,8 +879,9 @@ The straight-line VS/PS decoder additionally accepts GPR/GPR IADD wrapping modul
 input/output or CC writes, and LOP predicate output discarded to PT. Operands
 remain raw u32 bits in WGSL. Both sources must be initialized and ready; RZ is
 zero and cannot be a destination. Six-cycle stalls and ALU write-barrier seven
-are required. Immediate/constant operand variants, saturation, negation/inversion,
-additional predicate results, extended carry and PASS_B remain unsupported.
+are required. Immediate/constant operand variants, saturation, IADD operand modifiers,
+additional predicate results and extended carry remain unsupported. The bounded
+LOP complement/PASS_B forms below extend the original bit-logic subset.
 
 Integer results clear constant-handle, PositionW and reciprocal provenance. Even
 identity arithmetic does not authorize an altered TEX handle or perspective
@@ -1255,3 +1256,28 @@ alpha-slot conversion for color factors. No extra device feature, shader
 translation, framebuffer publication or driver-facing API is introduced. Pipeline
 identity includes the typed factors. Constants, saturation, dual-source factors
 and compact BOTH_SRC_ALPHA forms remain unsupported.
+
+
+## LOP operand complements and canonical PASS_B
+
+Both shader stages accept GPR/GPR AND, OR and XOR with independent bitwise
+complements on their two 32-bit sources. The supported canonical PASS_B has
+unmodified source A=RZ and either ordinary B or complemented B (NOT). An unused
+noncanonical A is explicitly unsupported; its hardware readiness behavior is not
+inferred. Register-zero, initialization, pending-source/destination, fixed-six
+stall and write-barrier-seven requirements remain enforced.
+
+The complete instruction match varies only destination7:0, sourceA15:8,
+sourceB27:20, invertA39, invertB40 and operation42:41. Execution is unconditional,
+predicate output is discarded to PT and condition mode is default. CC, extended
+operations, predicate results, execution predicates and immediate/constant-source
+families remain rejected. Bitwise complement lowers to WGSL u32 complement; it
+is neither floating numeric negation nor Boolean inversion.
+
+Existing plain AND/OR/XOR IR variants remain stable. Complemented and PASS_B
+forms use typed LogicalOperator data within the common Integer operation, sharing
+register validation and both-stage lowering. In-place sources are read before
+destination assignment. Identities/complements clear resource-handle, PositionW
+and reciprocal proofs; they cannot bypass the restricted resource/interpolation
+contracts. FMUL hazards follow both sources and only an actual untainted overwrite
+clears an older hazard. No new host waits or guest-memory interface is introduced.

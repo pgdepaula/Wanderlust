@@ -53,7 +53,7 @@ fn independently_assembled_integer_modifiers_and_predicate_outputs_reject() {
         let e = FragmentProgram::decode(&b).unwrap_err().to_string();
         assert!(e.contains("unsupported instruction"), "{e}");
     }
-    // LOP CC, X, non-PT predicate destinations/modes, input inversion and PASS_B.
+    // LOP CC, X, non-PT predicate destinations/modes and noncanonical PASS_B.
     for word in [
         0x5c47800000570400,
         0x5c47080000570400,
@@ -61,8 +61,6 @@ fn independently_assembled_integer_modifiers_and_predicate_outputs_reject() {
         0x5c47100000570400,
         0x5c47200000570400,
         0x5c47300000570400,
-        0x5c47008000570400,
-        0x5c47010000570400,
         0x5c47060000570400,
     ] {
         let mut b = BIN.to_vec();
