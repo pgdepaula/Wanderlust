@@ -658,3 +658,41 @@ finite float construction. The vertex fixture computes the sign mask of raw X
 with SHR by 31, ANDs X with that mask and exports position/UV. For independently
 specified finite positions this preserves negative X and zeros nonnegative X.
 No execution on original Maxwell hardware or general shader coverage is claimed.
+
+## Low-result IMUL and variable-latency dependencies
+
+The pinned MIT envytools GM107 tables and
+[MIT NAK `OpIMul::encode`](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs)
+establish GPR opcode 5c38, destination 7:0, sources 15:8 and 27:20, HI bit 39,
+source signedness at 40/41 and CC at 47. Independent assembly gives low-product
+fixed bases `5c38000000070000`, `5c38010000070000`, `5c38020000070000` and
+`5c38030000070000`, excluding GPR fields. Low signed/unsigned products agree
+modulo 2^32; the supported lowering uses raw u32 multiplication.
+
+[UAM `TargetGM107::isBarrierRequired`](https://github.com/devkitPro/uam/blob/5a5afc2bae8b55409ab36ba45be63fcb73f68993/mesa-imported/codegen/nv50_ir_target_gm107.cpp)
+explicitly requires a barrier for integer MUL/MAD. Pinned
+[NAK's fixed-latency classification](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/ir.rs)
+likewise classifies IMUL as variable before SM70, and its builder selects low IMUL
+for that backend family. The accepted six-stall spelling therefore accompanies
+WB0 and a consumer wait; it is never treated as proof of result readiness.
+No source implementation was copied, and no Maxwell hardware latency measurement
+is claimed.
+
+Original unmodified pinned envyas/envydis independently assemble/disassemble the
+retained synthetic fixtures. Use the reproduction commands above and the existing
+LDC PS or VTG 80-byte header:
+
+| Fixture | SPH+code bytes | SHA-256 |
+|---|---:|---|
+| imul | 144 | `711888a75025204d4c74246e00b67a93e9fe9a9eaaf68cd310a49d99cbb32a07` |
+| imul-bytes | 464 | `4e289b8c9d5d49c929f995a72cb1718c854d8a22e7dbaabf52706a11332dec8a` |
+| vertex-imul | 208 | `bf71689a0823593ff7ebdbd0a406d981af137b701671012c8b7e9fd07ce2a1ea` |
+
+The direct fragment program exports product bits as a float: ffffffff×c0800000
+produces 3f800000 (red 1.0), distinguishing integer arithmetic from numeric float
+multiplication. The byte observer exports every raw result bit through the already
+validated finite conversion sequence. The vertex program constructs a 0/1 sign
+mask and multiplies raw X bits by it, waiting before AST exports. Independently
+specified finite input geometry retains negative X and zeros nonnegative X.
+These binaries contain no commercial shader data and have not executed on original
+Maxwell hardware.

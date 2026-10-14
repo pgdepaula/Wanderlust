@@ -1140,3 +1140,28 @@ encodings. Readiness, RZ, in-place operands, six-stall scheduling, provenance
 erasure and conservative FMUL taint from either operand retain the shared integer
 path. .X, .BREV, CC, immediate/constant operands and execution predicates remain
 unsupported. No wide shift, funnel shift or integer conversion is implied.
+
+## Variable-latency integer multiplication
+
+Both stages accept low-result GPR IMUL with unconditional PT execution, full
+32-bit operands and all four verified U32/S32 source interpretations. Low product
+bits are identical modulo 2^32, so these forms normalize to raw-u32 multiplication.
+The two source signedness flags do not imply signed high-result support. HI, CC,
+immediate/constant operands, execution predicates and unknown fields remain
+unsupported. No XMAD halfword or integer multiply-add behavior is introduced.
+
+IMUL is a variable-latency producer in the supported SM50 model. It requires
+ready initialized operands, unused write barrier zero and no other outstanding
+variable-latency result. Its destination remains pending until a wait on barrier
+zero. Six stalls alone do not make the result ready. Independent ordinary register
+writes can occur while it is pending; consumers, destination overwrites and barrier
+reuse must still pass the existing dependency checks. An in-place product reads
+old source values before assignment. The common metadata path clears resource,
+PositionW and reciprocal provenance and retains any FMUL hazard from either source.
+A genuine overwrite using untainted sources clears an older float hazard.
+
+The pending-destination exemption is limited to a successfully validated IMUL
+producer. It cannot overwrite an existing pending register because the producer
+preflight rejects any outstanding result before marking its own destination.
+These are conservative accepted barrier/scheduling combinations, not calibrated
+Maxwell timing or general scoreboard emulation. No CPU/GPU wait is added per draw.

@@ -15,6 +15,7 @@ pub enum FloatOperator {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntegerOperator {
     Add,
+    Multiply,
     Subtract,
     And,
     Or,
@@ -423,6 +424,30 @@ impl Program {
                             FloatOperator::Multiply
                         },
                     }
+                } else if word & !(255 | (255u64 << 8) | (255u64 << 20) | (3u64 << 40))
+                    == 0x5c38000000070000
+                {
+                    let left = ((word >> 8) & 255) as u8;
+                    let right = ((word >> 20) & 255) as u8;
+                    // SM50 integer multiplication has variable latency. Six
+                    // stalls never replace assigning and waiting on barrier zero.
+                    if write_barrier != 0
+                        || pending.iter().any(|v| *v)
+                        || [left, right].iter().any(|r| !initialized[*r as usize])
+                    {
+                        return Err(fail(
+                            "IMUL requires ready operands and unused write barrier zero",
+                        ));
+                    }
+                    pending[dst as usize] = true;
+                    // Signed/unsigned source interpretations have identical low
+                    //32 product bits. HI and all other modes remain rejected.
+                    Operation::Integer {
+                        dst,
+                        left,
+                        right,
+                        operator: IntegerOperator::Multiply,
+                    }
                 } else if matches!(
                     word & !(255 | (255u64 << 8) | (255u64 << 20)),
                     0x5c10000000070000
@@ -584,6 +609,10 @@ impl Program {
                     && !matches!(
                         op,
                         Operation::Constant { .. }
+                            | Operation::Integer {
+                                operator: IntegerOperator::Multiply,
+                                ..
+                            }
                             | Operation::AttributeRead { .. }
                             | Operation::Interpolate { .. }
                             | Operation::PositionW { .. }
@@ -947,6 +976,7 @@ fn emit_integer(s: &mut String, dst: u8, left: u8, right: u8, operator: IntegerO
     use std::fmt::Write;
     let (symbol, wrap) = match operator {
         IntegerOperator::Add => ("+", None),
+        IntegerOperator::Multiply => ("*", None),
         IntegerOperator::Subtract => ("-", None),
         IntegerOperator::And => ("&", None),
         IntegerOperator::Or => ("|", None),

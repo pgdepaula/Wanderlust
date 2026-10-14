@@ -1554,3 +1554,45 @@ A faithful ordinary source snapshot passed 352 CPU tests (75 GPU cases ignored)
 and strict workspace Clippy; the final strengthened test also passed package
 Clippy in that snapshot. No production code or peer-owned runtime files changed
 for this regression, and no original-game GPU workload is established.
+
+## Variable-latency low-word integer multiplication
+
+Seven CPU tests cover the four GPR IMUL signedness encodings, both shader stages,
+barrier-zero production and consumption, unavailable registers, RZ, in-place
+destinations, unsupported HI/CC/predicate forms, provenance erasure and retention
+of unfused floating-point hazards. The independently assembled fragment, byte
+observer and vertex fixtures retain the original assembler instruction bytes.
+
+Three actual driver/GPFIFO GPU scenarios validate integer multiplication. The
+byte observer checks 78 boundary/random operand pairs under all four low-result
+signedness encodings: 312 complete 32-bit products, with expectations calculated
+using an independent 16-bit-limb oracle. A later accepted draw followed by an
+unsupported HI program fault remains publishable without replay; the expected
+product 5621ca08 appears as RGBA bytes `[8,202,33,86]`. A second scenario checks
+four finite float-bit exports, distinguishing integer multiplication from numeric
+floating-point multiplication. The vertex scenario changes asymmetric raster
+coverage according to independently specified min(X,0) positions.
+
+The word workload performs 313 successful draws and one fault, 314 GPFIFO requests,
+five pixel-program decode attempts and 2320 shader bytes acquired. Four valid
+signedness encodings normalize to the same low-result semantics and reuse the
+compatible pipeline. It reads 2504 CB bytes and uploads 2432, with one target
+allocation and 312 reuses. Its per-case oracle intentionally performs 313
+readbacks/waits, transferring 2328720 staging bytes over 626 queue submissions.
+These per-case checks are separate from deferred rendering measurements.
+
+Thirty-two warm vertex draws add no resource uploads, shader bytes, modules,
+pipelines, intermediate readbacks or waits. They still add 32 queue submissions;
+one explicit publication provides final visibility. Representative debug CPU
+observations were 30.208ms and 1574 allocations/129 reallocations on GL, 10.802ms
+and 1417/34 on D3D12, and 11.172ms and 1568/32 on Vulkan. Process-wide allocator
+traffic includes backend activity. These are neither GPU durations nor game
+performance estimates, and the conversion/upload paths do not become zero-copy.
+
+Validation passed 155 CPU tests in each feature configuration, strict package
+Clippy and whole-workspace formatting. All 78 GPU scenarios actually passed on
+each WSL OpenGL, native Windows D3D12 and native Windows Vulkan backend: 234
+passes, zero failures or explicit skips. Ordinary default tests ignore those
+78 GPU cases. A faithful ordinary source snapshot passed 359 CPU tests and strict
+workspace Clippy, excluding unfinished peer-owned runtime/compiler changes.
+No original-game GPU execution is established by these synthetic fixtures.
