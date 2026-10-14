@@ -146,8 +146,8 @@ fn p0_initialization_and_gpr_metadata_are_independent() {
     );
 }
 #[test]
-fn unsupported_predicate_boolean_signed_and_execution_forms_reject() {
-    for bit in [3, 39, 42, 43, 45, 48] {
+fn unsupported_predicate_boolean_and_execution_forms_reject() {
+    for bit in [3, 39, 42, 43, 45] {
         let mut b = BIN.to_vec();
         change(&mut b, 0x80, |w| w ^ (1 << bit));
         error(&b, "unsupported instruction");

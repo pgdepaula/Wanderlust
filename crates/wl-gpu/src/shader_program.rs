@@ -27,21 +27,29 @@ pub enum IntegerOperator {
     ShiftRight { wrap: bool },
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnsignedComparison {
+pub enum IntegerComparison {
     Less,
     Equal,
     LessEqual,
     Greater,
     NotEqual,
     GreaterEqual,
+    LessSigned,
+    EqualSigned,
+    LessEqualSigned,
+    GreaterSigned,
+    NotEqualSigned,
+    GreaterEqualSigned,
 }
+/// Compatibility name for the original unsigned comparison variants.
+pub type UnsignedComparison = IntegerComparison;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
     /// Compare into P0; the complementary predicate output is discarded to PT.
     PredicateCompare {
         left: u8,
         right: u8,
-        comparison: UnsignedComparison,
+        comparison: IntegerComparison,
     },
     /// Unconditionally select GPR bits using initialized P0 or its inversion.
     Select {
@@ -238,16 +246,23 @@ impl Program {
                     });
                     continue;
                 }
-                let compare_mask = (7u64 << 49) | (255u64 << 8) | (255u64 << 20);
+                let compare_mask = (15u64 << 48) | (255u64 << 8) | (255u64 << 20);
                 if word & !compare_mask == 0x5b60038000070007 {
-                    let comparison = match (word >> 49) & 7 {
-                        1 => UnsignedComparison::Less,
-                        2 => UnsignedComparison::Equal,
-                        3 => UnsignedComparison::LessEqual,
-                        4 => UnsignedComparison::Greater,
-                        5 => UnsignedComparison::NotEqual,
-                        6 => UnsignedComparison::GreaterEqual,
-                        _ => return Err(fail("unsupported unsigned comparison mode")),
+                    let comparison = match ((word >> 49) & 7, (word >> 48) & 1) {
+                        (1, 0) => IntegerComparison::Less,
+                        (2, 0) => IntegerComparison::Equal,
+                        (3, 0) => IntegerComparison::LessEqual,
+                        (4, 0) => IntegerComparison::Greater,
+                        (5, 0) => IntegerComparison::NotEqual,
+                        (6, 0) => IntegerComparison::GreaterEqual,
+                        (1, 1) => IntegerComparison::LessSigned,
+                        (2, 1) => IntegerComparison::EqualSigned,
+                        (3, 1) => IntegerComparison::LessEqualSigned,
+                        (4, 1) => IntegerComparison::GreaterSigned,
+                        (5, 1) => IntegerComparison::NotEqualSigned,
+                        (6, 1) => IntegerComparison::GreaterEqualSigned,
+                        (_, 0) => return Err(fail("unsupported unsigned comparison mode")),
+                        _ => return Err(fail("unsupported signed comparison mode")),
                     };
                     let left = ((word >> 8) & 255) as u8;
                     let right = ((word >> 20) & 255) as u8;
@@ -964,17 +979,31 @@ fn emit_integer(s: &mut String, dst: u8, left: u8, right: u8, operator: IntegerO
     .unwrap();
 }
 
-fn emit_comparison(s: &mut String, left: u8, right: u8, comparison: UnsignedComparison) {
+fn emit_comparison(s: &mut String, left: u8, right: u8, comparison: IntegerComparison) {
     use std::fmt::Write;
-    let symbol = match comparison {
-        UnsignedComparison::Less => "<",
-        UnsignedComparison::Equal => "==",
-        UnsignedComparison::LessEqual => "<=",
-        UnsignedComparison::Greater => ">",
-        UnsignedComparison::NotEqual => "!=",
-        UnsignedComparison::GreaterEqual => ">=",
+    let (symbol, signed) = match comparison {
+        IntegerComparison::Less => ("<", false),
+        IntegerComparison::Equal => ("==", false),
+        IntegerComparison::LessEqual => ("<=", false),
+        IntegerComparison::Greater => (">", false),
+        IntegerComparison::NotEqual => ("!=", false),
+        IntegerComparison::GreaterEqual => (">=", false),
+        IntegerComparison::LessSigned => ("<", true),
+        IntegerComparison::EqualSigned => ("==", true),
+        IntegerComparison::LessEqualSigned => ("<=", true),
+        IntegerComparison::GreaterSigned => (">", true),
+        IntegerComparison::NotEqualSigned => ("!=", true),
+        IntegerComparison::GreaterEqualSigned => (">=", true),
     };
-    writeln!(s, "p0=r[{left}] {symbol} r[{right}];").unwrap();
+    if signed {
+        writeln!(
+            s,
+            "p0=bitcast<i32>(r[{left}]) {symbol} bitcast<i32>(r[{right}]);"
+        )
+        .unwrap();
+    } else {
+        writeln!(s, "p0=r[{left}] {symbol} r[{right}];").unwrap();
+    }
 }
 
 fn constant_input(constants: &mut Vec<ConstantRef>, reference: ConstantRef) -> Option<u8> {

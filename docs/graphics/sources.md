@@ -593,3 +593,39 @@ The bounded byte domain is verified exhaustively; it is not a general float/int
 conversion instruction implementation. The vertex fixture subtracts exponent bit
 `0x00800000`; its half-coordinate oracle is limited to the chosen finite nonzero
 normal values with biased exponent >=2, not general floating division.
+
+
+## Signed ISETP and bit-preserving selection
+
+The existing pinned MIT envytools GM107 ISETP tables, UAM/Mesa `emitISETP` and
+[MIT NAK `OpISetP::encode`](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs)
+independently establish signedness at bit 48 (I32=1, U32=0), comparison at 51:49,
+and the same register/predicate fields. NAK's
+[`OpISetP` fold](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/ir.rs)
+interprets raw operands as signed i32 before the six comparisons. Its encoder
+explicitly rejects pre-Volta .X because the accumulator interaction is unresolved;
+Wanderlust retains rejection. The conservative accepted scheduling subset is
+unchanged, not an assertion of calibrated Maxwell hardware latency. No source
+implementation was copied.
+
+Unmodified pinned envyas/envydis produced the retained synthetic fixtures, using
+existing exact LDC PS or VTG SPH bytes followed by scheduled assembly. Reproduce
+with `envyas -m gm107 -i -o NAME.code.bin < NAME.asm`, prepend the existing
+`ldc.bin` or `vertex.bin` first 80 bytes, and disassemble code with
+`envydis -m gm107 -i NAME.code.bin`. None was run on original Maxwell hardware;
+translated execution is independently checked on host graphics backends.
+
+| Fixture | SPH+code bytes | SHA-256 |
+|---|---:|---|
+| signed-predicate | 208 | `e139c9fed0db779acec531a7516c47697d50ae7424f2b78bdad318dd717c2fd4` |
+| signed-select-bytes | 496 | `fd98f550efd9a9ec919d72aaf6ba519482eac74938445e4deb11a9ab4565bf10` |
+| vertex-signed-predicate | 176 | `c59ca583a96115015680b8a0bdb12231077d04cdfd6c6d64280b433167d1b4a3` |
+
+Independent single-instruction assembly for P0,PT,R4,R5,AND PT produced LT/EQ/LE/
+GT/NE/GE words `5b63038000570407`, `5b65038000570407`, `5b67038000570407`,
+`5b69038000570407`, `5b6b038000570407`, `5b6d038000570407`. Their unsigned
+counterparts differ only in bit 48. The byte-observation fixture uses the already
+validated finite float byte construction to observe every bit of runtime SEL
+candidates through RGBA8. The vertex fixture retains negative X by signed X<0
+and otherwise selects RZ. Mutating only signedness to unsigned makes X<0 always
+false, collapsing the independently specified triangle to zero-area geometry.

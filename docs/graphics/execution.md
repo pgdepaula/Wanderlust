@@ -993,7 +993,7 @@ output P0 and complementary output discarded to PT. SEL accepts two ready GPRs
 and initialized P0 or !P0, writing the left value when its condition is true and
 the right otherwise. Both candidates require initialization even if one is not
 selected at runtime. Outer execution remains unconditional PT. Other predicates,
-signed/extended comparisons, Boolean combinations, alternate operands, general
+extended comparisons, Boolean combinations, alternate operands, general
 predicated instructions and branches remain unsupported.
 
 Predicate initialization is tracked separately from GPR dataflow. ISETP bypasses
@@ -1103,3 +1103,23 @@ and color remains retryable, including later CPU patches and disjoint writes.
 Retry may repeat readback/conversion, but never replays the draw. Mapping mutation,
 channel switching and direct source guards retain their existing restrictions.
 No guest syncpoint, Horizon memory hookup or automatic per-draw wait is added.
+
+
+## Signed predicate comparisons
+
+Both stages additionally accept signed GPR ISETP LT/EQ/LE/GT/NE/GE with the same
+P0/PT outputs, AND PT accumulator and unconditional execution restriction.
+Instruction bit 48 selects signed interpretation independently for each operation;
+mixed signed and unsigned comparisons in one shader retain their own semantics.
+Signed operands are bitcast to i32 for comparison, preserving two's-complement
+extrema without float conversion or overflow-prone subtraction. SEL still selects
+raw u32 candidates under P0 or !P0. Comparison variants carry their interpretation
+in `IntegerComparison`; the original `UnsignedComparison` name remains a type
+alias for existing callers of the unsigned variants.
+
+Predicate initialization, separate GPR metadata, conservative 13-stall scheduling,
+LDC/ALD waits, provenance clearing and FMUL-hazard taint remain unchanged. The
+extension admits only the signedness bit in the previously verified instruction
+mask. Extended .X comparisons, other Boolean operations/accumulators/predicate
+outputs, immediate/constant operands and predicated execution remain unsupported.
+This adds conditional data selection, not branches or general control flow.

@@ -1410,3 +1410,54 @@ zero failures/skips in explicit runs. Ordinary default-feature tests report thos
 69 GPU cases ignored. A faithful ordinary committed-source snapshot plus the exact
 owned patch passed 342 CPU tests (69 GPU cases ignored) and strict workspace
 Clippy; unfinished peer-owned analysis/CLI/IDE changes were excluded. No original-game GPU submission or TOTK rendering is established.
+
+## Signed ISETP and complete selected-word observation
+
+Five additional CPU cases verify independent six-mode signed encodings in VS/PS,
+per-operation signedness in mixed programs, unchanged unsigned WGSL, paired CB
+inputs, raw-i32 bitcasts, readiness/RZ/predicate scheduling, special provenance
+erasure and rejection of unsupported extended/Boolean/predicate/operand forms.
+Alternate immediate/constant negatives pass the ordinary scheduling gate before
+asserting opcode rejection. Reserved F/T comparison modes remain unsupported.
+
+Three actual GPU scenarios enter through GpuDriver→GPFIFO→B197. The full-word
+observer tests 43 input pairs for each of LT/EQ/LE/GT/NE/GE: signed extrema,
+negative/positive ordering, equality and 32 deterministically generated pairs.
+An independent i64 sign-extension oracle selects between two runtime CB words;
+the candidates are complements, making every bit of a wrong selection observable.
+The verified byte-observation shader exports all 32 selected bits as four RGBA8
+bytes, rather than interpreting arbitrary integer words as floating colors. All
+258 cases check analytic covered/uncovered pixels and retain shader/pipeline
+identity under data-only changes. One additional accepted draw followed by an
+unsupported .X code mutation remains unpublished until explicit visibility;
+publication returns `[152,186,220,254]` without replaying either submission.
+
+The mixed shader tests signed −1<0 alongside independently unsigned −1>=0:
+changing only the second instruction's signedness changes `[64,191,191,255]`
+to `[64,191,64,255]`. Thirty-two unchanged draws add zero uploads, shader/CB reads,
+modules, pipelines, intermediate readbacks or waits, while retaining 32 ordered
+host queue submissions. One final publication adds one readback/wait. The vertex
+fixture applies signed X<0 then SEL to guest positions, producing asymmetric
+coverage. After a genuine B197 background clear, changing only vertex instruction
+signedness to unsigned collapses all X positions to zero and produces no covered
+pixels. Expected geometry is independently specified; neither generated WGSL nor
+previous readback supplies the oracle.
+
+Representative debug warm32 CPU submission observations were 17.14ms with
+1581 allocations/133 reallocations on GL, 9.87ms with 1414/36 on D3D12 and 20.09ms
+with 1571/33 on Vulkan. These process-wide Rust counts include backend/channel
+bookkeeping and do not establish GPU durations or game performance. The word
+scenario executed 259 successful draws and one later fault, with 259 intentional
+readbacks/waits, 4144 CB guest bytes, 4000 CB upload bytes, one target allocation
+and 258 reuses. Seven PS decode attempts include six valid comparison programs
+and the rejected .X program; changing CB values did not recreate their pipelines.
+
+Validation passed 143 CPU tests under each feature configuration, strict package
+Clippy and whole-workspace formatting. All 72 GPU scenarios passed on each actual
+WSL OpenGL, native Windows D3D12 and native Windows Vulkan backend: 216 passes,
+zero explicit skips/failures. Normal default-feature tests ignore those 72 GPU
+cases. A faithful ordinary source snapshot passed 347 CPU tests and strict
+workspace Clippy, excluding unfinished peer-owned work. The strengthened alternate
+opcode negative tests were additionally rerun in both feature configurations and
+in the snapshot after source review. These synthetic guest shaders and command
+streams do not establish original-game GPU execution or general ISA coverage.
