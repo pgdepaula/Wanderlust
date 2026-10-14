@@ -1355,9 +1355,58 @@ passes, no skips in explicit execution. Normal package tests report 65 GPU cases
 ignored. A faithful ordinary source snapshot passed 337 CPU tests (65 GPU tests
 ignored) and strict workspace Clippy, excluding peer-owned unfinished files.
 
-The driver still bounds pending CPU write notifications to 32 before publication
-and outstanding completion records to 64. The endurance request respects these
-limits using immutable commands and one completion record. No guard was relaxed;
-more general disjoint-write publication remains a separate coherence limitation.
+That endurance request uses immutable commands and one completion record,
+respecting the 64-record limit and the then-global 32-write guard. Protected
+attachment histories below subsequently replace the global write-notification
+limit with per-attachment overlap limits.
 Original-game GPU submissions and general Maxwell shader compatibility remain
 unproven.
+
+
+## Pending attachment history under unrelated write pressure
+
+Five CPU model tests cover exact clipped patch unions, stable pending content
+stamps through 4096 disjoint notifications, unprotected cache-history eviction,
+32-overlap preflight failure, stale/future baselines, ranges/epochs/revision
+overflow, clear rebasing and independent attachment retirement.
+
+Four actual GPU scenarios in `pending_history_gpu.rs` enter through
+GpuDriver→guest GPFIFO→B197 and render an indexed asymmetric triangle into a
+52×29 block-linear RGBA8 target with 8192 bytes of storage. Independent scalar
+GOB addresses verify padding and CPU patches; analytic pixel-center barycentrics
+verify more than 1400 unambiguous covered/uncovered pixels. Edge-adjacent pixels
+are excluded from coverage expectations, not used to derive expected output.
+A ZF32 ALWAYS/write scene independently checks depth bytes and padding.
+
+The scenarios verify: pending output surviving 4096 disjoint writes and 32 more
+unchanged draws; 32 actual overlapping notifications followed by rejection of the
+33rd before RAM changes; failed atomic color publication and successful retry
+through another 4096 disjoint writes; depth-first partial publication without
+repeating depth on color retry; later CPU color patches; canonical target aliases
+and close-time publication; and a full color clear superseding old visible patches
+while preserving padding and pending depth patches. Existing pitch-linear retry
+coverage now expects successful protected publication after disjoint global
+history eviction, retaining its independent multilayer pixel oracle. Ordinary
+unprotected history-loss rejection remains covered by CPU model tests.
+
+An isolated instrumented region measures only 4096 synchronous disjoint RAM and
+journal writes, after host completion and before further GPU activity/logging.
+It observed zero Rust allocations/reallocations on GL, D3D12 and Vulkan, taking
+approximately 3.66ms, 4.70ms and 1.59ms respectively in representative debug runs.
+These are CPU adapter observations, excluding native driver allocation, not GPU
+execution timings or a claim that drawing/conversion is allocation-free.
+Global source proof eviction legitimately causes reacquisition on the first later
+draw, but does not cause target upload/publication. After that prime draw, 32 warm
+draws add exactly 32 target reuses/queue submissions and zero uploads, shader reads,
+pipelines, readbacks or waits. One final publication adds one readback/wait and
+7440 staging bytes including optional timestamps. No host submission batching or
+zero-copy framebuffer transfer is claimed.
+
+
+Validation passed 138 CPU tests with default features and 138 without them,
+strict package Clippy and workspace formatting. All 69 GPU scenarios passed on
+WSL OpenGL, native Windows D3D12 and native Windows Vulkan: 207 actual passes,
+zero failures/skips in explicit runs. Ordinary default-feature tests report those
+69 GPU cases ignored. A faithful ordinary committed-source snapshot plus the exact
+owned patch passed 342 CPU tests (69 GPU cases ignored) and strict workspace
+Clippy; unfinished peer-owned analysis/CLI/IDE changes were excluded. No original-game GPU submission or TOTK rendering is established.

@@ -74,7 +74,6 @@ pub struct GpuDriver {
     records: Vec<Record>,
     active: Option<ChannelId>,
     last_host: Option<HostFence>,
-    pending_cpu_writes: u32,
     pub counters: DriverCounters,
 }
 impl GpuDriver {
@@ -90,7 +89,6 @@ impl GpuDriver {
             records: Vec::with_capacity(MAX_COMPLETIONS),
             active: None,
             last_host: None,
-            pending_cpu_writes: 0,
             counters: DriverCounters::default(),
         })
     }
@@ -261,9 +259,6 @@ impl GpuDriver {
             Err(e) => (e.progress, Some(e)),
         };
         let visible = !self.renderer.target_pending;
-        if visible {
-            self.pending_cpu_writes = 0;
-        }
         self.records.push(Record {
             token,
             status: CompletionStatus {
@@ -344,7 +339,6 @@ impl GpuDriver {
                 r.status.guest_visible = true;
             }
         }
-        self.pending_cpu_writes = 0;
         self.counters.visibility_barriers += u64::from(pending);
         Ok(frame)
     }
@@ -358,8 +352,8 @@ impl GpuDriver {
         Ok(())
     }
     /// Performs and records an atomic CPU write, preserving CPU-after-GPU patches
-    /// through the existing journal. Bounded pending history must be published
-    /// before excessive writes; dropping dirty history is never silently allowed.
+    /// through the existing journal. Pending attachments retain bounded exact
+    /// overlap histories; unrelated writes may rotate the global cache journal.
     pub fn write_backing(
         &mut self,
         backing: BackingId,
@@ -368,16 +362,10 @@ impl GpuDriver {
         memory: &mut impl GuestMemoryWrite,
     ) -> Result<()> {
         let address = self.memory.backing_range(backing, offset, bytes.len())?;
-        if self.renderer.target_pending && self.pending_cpu_writes >= 32 {
-            return Err(invalid("publish before pending CPU write budget exhausted"));
-        }
-        self.changes.can_mark_write()?;
+        self.changes.can_mark_write_at(address, bytes.len())?;
         memory.validate_write(address, bytes.len())?;
         memory.write(address, bytes)?;
         self.changes.mark_write(address, bytes.len())?;
-        if self.renderer.target_pending {
-            self.pending_cpu_writes += 1;
-        }
         Ok(())
     }
     /// Close is drain + publish, not cancellation. Failure keeps the channel and

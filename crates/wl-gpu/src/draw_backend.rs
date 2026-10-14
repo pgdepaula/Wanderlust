@@ -6,7 +6,7 @@ use crate::{
     invalid,
     maxwell::{Channel, Maxwell3d, MethodEffect},
     memory::*,
-    texture::TextureChanges,
+    texture::{PendingAttachment, TextureChanges},
 };
 use std::cell::Cell;
 #[derive(Clone, Copy)]
@@ -159,6 +159,12 @@ impl Renderer {
             .guest_target
             .ok_or_else(|| invalid("missing pending target backing"))?;
         memory.validate_write(stamp.guest, stamp.size)?;
+        changes.preflight_publication(
+            PendingAttachment::Color,
+            stamp.guest,
+            stamp.size,
+            stamp.version,
+        )?;
         let dirty = changes.writes_since(
             stamp.guest.0..stamp.guest.0 + stamp.size as u64,
             stamp.version,
@@ -218,7 +224,12 @@ impl Renderer {
             memory.write(stamp.guest, &frame.rgba)?;
         }
         // Failed atomic writes retain the original pending GPU image and journal.
-        changes.mark_write(stamp.guest, stamp.size)?;
+        changes.commit_publication(
+            PendingAttachment::Color,
+            stamp.guest,
+            stamp.size,
+            stamp.version,
+        )?;
         self.counters.guest_framebuffer_write_bytes += stamp.size as u64;
         // If patches changed the GPU readback, RAM is now newer than the resident
         // image: clear the stamp to force initialization on the next draw.
@@ -246,6 +257,12 @@ impl Renderer {
             .guest_depth
             .ok_or_else(|| invalid("missing pending depth backing"))?;
         memory.validate_write(stamp.guest, stamp.size)?;
+        changes.preflight_publication(
+            PendingAttachment::Depth,
+            stamp.guest,
+            stamp.size,
+            stamp.version,
+        )?;
         let dirty = changes.writes_since(
             stamp.guest.0..stamp.guest.0 + stamp.size as u64,
             stamp.version,
@@ -277,7 +294,12 @@ impl Renderer {
             self.counters.target_patch_bytes += (end - start) as u64;
         }
         memory.write(stamp.guest, &tiled)?;
-        changes.mark_write(stamp.guest, stamp.size)?;
+        changes.commit_publication(
+            PendingAttachment::Depth,
+            stamp.guest,
+            stamp.size,
+            stamp.version,
+        )?;
         self.counters.depth_write_bytes += stamp.size as u64;
         self.guest_depth = if patched {
             None
@@ -403,6 +425,12 @@ impl Renderer {
         let mark_depth =
             depth_stamp.is_some_and(|s| !self.depth_pending || self.guest_depth != Some(s));
         changes.can_mark_writes(u64::from(mark_color) + u64::from(mark_depth))?;
+        if let Some(s) = color_stamp.filter(|_| mark_color) {
+            changes.preflight_gpu_write(PendingAttachment::Color, s.guest, s.size)?;
+        }
+        if let Some(s) = depth_stamp.filter(|_| mark_depth) {
+            changes.preflight_gpu_write(PendingAttachment::Depth, s.guest, s.size)?;
+        }
         self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
         self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let prepared: Result<wgpu::CommandBuffer> = (|| {
@@ -472,7 +500,7 @@ impl Renderer {
         self.counters.clear_commands += 1;
         if let Some(mut stamp) = color_stamp {
             if mark_color {
-                changes.mark_write(stamp.guest, stamp.size)?;
+                changes.commit_gpu_write(PendingAttachment::Color, stamp.guest, stamp.size)?;
             }
             stamp.version = changes.stamp(stamp.guest.0..stamp.guest.0 + stamp.size as u64);
             self.guest_target = Some(stamp);
@@ -480,7 +508,7 @@ impl Renderer {
         }
         if let Some(mut stamp) = depth_stamp {
             if mark_depth {
-                changes.mark_write(stamp.guest, stamp.size)?;
+                changes.commit_gpu_write(PendingAttachment::Depth, stamp.guest, stamp.size)?;
             }
             stamp.version = changes.stamp(stamp.guest.0..stamp.guest.0 + stamp.size as u64);
             self.guest_depth = Some(stamp);
@@ -698,17 +726,25 @@ impl Renderer {
                             && !self.depth_pending,
                     ),
             )?;
+            if !self.color_pending {
+                changes.preflight_gpu_write(PendingAttachment::Color, guest, size)?;
+            }
+            if let Some(d) =
+                depth_stamp.filter(|_| raster.depth.is_some_and(|s| s.write) && !self.depth_pending)
+            {
+                changes.preflight_gpu_write(PendingAttachment::Depth, d.guest, d.size)?;
+            }
             self.execute_mode(target.width, target.height, &[command], false)?;
             // Invalidate overlapping source caches once per pending interval.
             // Further GPU writes are ordered and still unreadable through the
             // guard; do not consume the bounded CPU journal on every draw.
             if !self.color_pending {
-                changes.mark_write(guest, size)?;
+                changes.commit_gpu_write(PendingAttachment::Color, guest, size)?;
             }
             if let Some(mut d) = depth_stamp {
                 if raster.depth.is_some_and(|s| s.write) {
                     if !self.depth_pending {
-                        changes.mark_write(d.guest, d.size)?;
+                        changes.commit_gpu_write(PendingAttachment::Depth, d.guest, d.size)?;
                     }
                     self.depth_pending = true;
                 }

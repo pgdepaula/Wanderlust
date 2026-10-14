@@ -556,8 +556,8 @@ CPU bytes saved. Those patches override the corresponding GPU output bytes at
 atomic publication; unchanged pixels retain the GPU result. A patched target is
 initialized from merged RAM before the next draw. Overlapping writes therefore
 preserve CPU-after-GPU ordering without interpreting tiled dirty offsets as linear
-texels. A changed epoch or evicted patch history fails before writeback; the caller
-must synchronize before such a transition. Failure of an atomic guest write leaves
+texels. A changed epoch or missing protected attachment history fails before writeback;
+the caller must synchronize before such a transition. Failure of an atomic guest write leaves
 pending output and journal version retryable. Channel faults preserve earlier
 submitted work for explicit synchronization. Dropping a renderer does not publish
 pending output. These are GPU test-adapter contracts, not Horizon fences, syncpoints,
@@ -691,8 +691,9 @@ and channels closed. Canonical-address reuse marks the whole newly registered
 backing dirty, invalidating existing guest resource stamps. Changes between
 submissions must use `write_backing` (or a future equivalent runtime notification
 contract); unreported external writes and recycled canonical storage are invalid.
-While output is pending, at most 32 CPU writes are accepted before publication,
-preserving enough bounded journal history for exact CPU-after-GPU patch merging.
+While output is pending, each color/depth attachment retains at most 32 overlapping
+CPU write notifications before publication. Disjoint canonical writes do not use
+that budget, even when they rotate the global cache journal.
 
 `submit(channel, code, payload, extra, memory)` decodes the libnx submission wire
 layout. Legacy SubmitGpfifo is IOWR('H', 0x08, 24+8*n), with up to 512 inline
@@ -1065,3 +1066,40 @@ change forces acquisition. CB staging observations commit only after the entire
 resource synchronization succeeds. These cursors do not replace pending-output
 publication stamps or erase CPU patch history. GPU-newer aliases still require
 the guarded source acquisition/publication path before reuse.
+
+
+## Protected pending attachment histories
+
+The shared dirty journal retains 64 global entries for conservative source-cache
+proofs. Independently, its two fixed pending slots retain up to 32 exact canonical
+CPU-write intersections for color and depth. Each slot records the complete guest
+storage range, epoch, GPU-write baseline and latest overlapping write revision.
+Block-linear padding belongs to the protected storage footprint. Unrelated writes
+can rotate the global journal without losing CPU-after-GPU patches or changing a
+pending target's content stamp. Source observation cursors remain separate and
+still require reacquisition when their global proof history is missing.
+
+`GpuDriver::write_backing` calls the additive `TextureChanges::can_mark_write_at`
+preflight before validating/writing RAM. An overlapping write at a full patch
+budget fails before either RAM or journal changes; a disjoint write remains valid.
+Recording a successful write uses fixed interval storage and the preallocated
+journal. The caller must exclusively own memory and journal through the atomic
+write and notification. This is a scoped GPU-adapter contract, not an asynchronous
+reservation or a production runtime memory transaction guarantee.
+
+The first accepted GPU write begins a protected interval. Ordinary repeated draws
+retain its baseline and CPU history. A supported full clear after CPU changes
+rebases only the cleared attachment, superseding older logical texel patches;
+publication still obtains padding from current RAM. Unchanged repeated clears
+coalesce invalidation. Complete color/depth range and revision-capacity preflight
+precedes submission, with overlapping attachment storage rejected.
+
+Publication requires the exact protected range, epoch and baseline. Conversion
+and raw CPU-byte merging precede one checked atomic write per attachment. Only a
+successful write retires that slot and records the global publication revision;
+this GPU-originated publication bypasses the retiring slot's CPU-patch budget.
+Depth publishes first. If color publication then fails, depth is already retired
+and color remains retryable, including later CPU patches and disjoint writes.
+Retry may repeat readback/conversion, but never replays the draw. Mapping mutation,
+channel switching and direct source guards retain their existing restrictions.
+No guest syncpoint, Horizon memory hookup or automatic per-draw wait is added.

@@ -479,7 +479,7 @@ fn failed_atomic_writeback_keeps_pending_output_retryable() {
     assert!(r.execute(52, 29, &[]).is_err());
     let frame = sync(&mut r, &mut data, &mut changes);
     check(&frame.rgba, &image);
-    // Eviction loses the exact CPU patch history; reject instead of overwriting it.
+    // Pending attachment history survives disjoint global journal eviction.
     deferred(
         &mut r,
         &mut c,
@@ -491,16 +491,13 @@ fn failed_atomic_writeback_keeps_pending_output_retryable() {
     for _ in 0..66 {
         changes.mark_write(GuestAddress(0xd000), 4).unwrap();
     }
-    let before = data[RT..RT + SIZE].to_vec();
-    assert!(
-        r.synchronize_target(
-            &mut SliceMemoryMut {
-                base: GuestAddress(0),
-                bytes: &mut data
-            },
-            &mut changes
-        )
-        .is_err()
+    let before = r.counters;
+    let frame = sync(&mut r, &mut data, &mut changes);
+    check(&frame.rgba, &image);
+    assert_eq!(&data[RT..RT + SIZE], frame.rgba);
+    assert_eq!(r.counters.draw_commands, before.draw_commands);
+    assert_eq!(
+        r.counters.readback_operations,
+        before.readback_operations + 1
     );
-    assert_eq!(&data[RT..RT + SIZE], before);
 }

@@ -105,15 +105,49 @@ impl TextureDesc {
     }
 }
 
-/// Bounded write journal in canonical guest addresses, shared by all aliased views.
-/// The runtime adapter must report every CPU/GPU write and use a fresh epoch when
-/// backing/process identity changes. This is testable bookkeeping, not runtime wiring.
+#[cfg(any(feature = "wgpu-backend", test))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PendingAttachment {
+    Color,
+    Depth,
+}
+#[cfg(any(feature = "wgpu-backend", test))]
+impl PendingAttachment {
+    fn index(self) -> usize {
+        match self {
+            Self::Color => 0,
+            Self::Depth => 1,
+        }
+    }
+}
+#[cfg(any(feature = "wgpu-backend", test))]
+#[derive(Clone, Copy)]
+struct PendingWrite {
+    start: u64,
+    end: u64,
+}
+#[cfg(any(feature = "wgpu-backend", test))]
+struct PendingHistory {
+    range: Range<u64>,
+    baseline: (u64, u64),
+    latest: u64,
+    writes: [PendingWrite; 32],
+    count: usize,
+}
+
+/// Bounded canonical write journal shared by aliases. Pending color/depth output
+/// retains exact overlapping RAM writes independently of global cache eviction.
+/// All writes must be reported; backing/process replacement requires a fresh
+/// epoch after pending output is published. This is not runtime memory wiring.
 pub struct TextureChanges {
     epoch: u64,
     revision: u64,
     floor: u64,
     writes: VecDeque<(u64, Range<u64>)>,
+    #[cfg(any(feature = "wgpu-backend", test))]
+    pending: [Option<PendingHistory>; 2],
 }
+
 impl TextureChanges {
     pub fn new(epoch: u64) -> Self {
         Self {
@@ -121,6 +155,8 @@ impl TextureChanges {
             revision: 0,
             floor: 0,
             writes: VecDeque::with_capacity(64),
+            #[cfg(any(feature = "wgpu-backend", test))]
+            pending: [None, None],
         }
     }
     #[cfg(feature = "wgpu-backend")]
@@ -133,7 +169,7 @@ impl TextureChanges {
             .ok_or_else(|| invalid("dirty revision overflow"))?;
         Ok(())
     }
-    pub fn mark_write(&mut self, address: GuestAddress, size: usize) -> Result<()> {
+    fn checked_range(address: GuestAddress, size: usize) -> Result<Range<u64>> {
         let end = address
             .0
             .checked_add(size as u64)
@@ -141,14 +177,137 @@ impl TextureChanges {
         if size == 0 {
             return Err(invalid("empty texture write"));
         }
+        Ok(address.0..end)
+    }
+    /// Preflight journal capacity before an atomic CPU memory write. The caller
+    /// must retain exclusive memory/journal ownership through mark_write; this
+    /// is not an asynchronous reservation or a guest-memory transaction itself.
+    pub fn can_mark_write_at(&self, address: GuestAddress, size: usize) -> Result<()> {
+        let range = Self::checked_range(address, size)?;
+        self.can_mark_writes(1)?;
+        #[cfg(any(feature = "wgpu-backend", test))]
+        for history in self.pending.iter().flatten() {
+            if history.baseline.0 != self.epoch {
+                return Err(invalid("pending attachment epoch changed"));
+            }
+            if range.start < history.range.end
+                && history.range.start < range.end
+                && history.count == 32
+            {
+                return Err(invalid(
+                    "publish before pending attachment patch budget exhausted",
+                ));
+            }
+        }
+        #[cfg(not(any(feature = "wgpu-backend", test)))]
+        let _ = range;
+        Ok(())
+    }
+    fn record_global(&mut self, range: Range<u64>) {
         self.revision = self
             .revision
             .checked_add(1)
-            .ok_or_else(|| invalid("dirty revision overflow"))?;
+            .expect("preflighted dirty revision");
         if self.writes.len() == 64 {
             self.floor = self.writes.pop_front().expect("full journal").0;
         }
-        self.writes.push_back((self.revision, address.0..end));
+        self.writes.push_back((self.revision, range));
+    }
+    pub fn mark_write(&mut self, address: GuestAddress, size: usize) -> Result<()> {
+        self.can_mark_write_at(address, size)?;
+        let range = Self::checked_range(address, size)?;
+        self.record_global(range.clone());
+        #[cfg(any(feature = "wgpu-backend", test))]
+        for history in self.pending.iter_mut().flatten() {
+            if range.start < history.range.end && history.range.start < range.end {
+                history.writes[history.count] = PendingWrite {
+                    start: range.start.max(history.range.start),
+                    end: range.end.min(history.range.end),
+                };
+                history.count += 1;
+                history.latest = self.revision;
+            }
+        }
+        Ok(())
+    }
+    #[cfg(any(feature = "wgpu-backend", test))]
+    pub(crate) fn preflight_gpu_write(
+        &self,
+        slot: PendingAttachment,
+        address: GuestAddress,
+        size: usize,
+    ) -> Result<()> {
+        let range = Self::checked_range(address, size)?;
+        self.can_mark_writes(1)?;
+        for (n, history) in self.pending.iter().enumerate() {
+            if let Some(h) = history {
+                if h.baseline.0 != self.epoch {
+                    return Err(invalid("pending attachment epoch changed"));
+                }
+                if n == slot.index() {
+                    if h.range != range {
+                        return Err(invalid("publish before replacing protected attachment"));
+                    }
+                } else if range.start < h.range.end && h.range.start < range.end {
+                    return Err(invalid("pending attachment storage overlaps"));
+                }
+            }
+        }
+        Ok(())
+    }
+    /// A first GPU write or full clear starts/rebases one attachment. Repeated
+    /// ordinary draws must not call this: they retain its CPU-after-GPU patches.
+    #[cfg(any(feature = "wgpu-backend", test))]
+    pub(crate) fn commit_gpu_write(
+        &mut self,
+        slot: PendingAttachment,
+        address: GuestAddress,
+        size: usize,
+    ) -> Result<()> {
+        self.preflight_gpu_write(slot, address, size)?;
+        let range = Self::checked_range(address, size)?;
+        self.record_global(range.clone());
+        self.pending[slot.index()] = Some(PendingHistory {
+            range,
+            baseline: (self.epoch, self.revision),
+            latest: self.revision,
+            writes: [PendingWrite { start: 0, end: 0 }; 32],
+            count: 0,
+        });
+        Ok(())
+    }
+    #[cfg(any(feature = "wgpu-backend", test))]
+    pub(crate) fn preflight_publication(
+        &self,
+        slot: PendingAttachment,
+        address: GuestAddress,
+        size: usize,
+        baseline: (u64, u64),
+    ) -> Result<()> {
+        let range = Self::checked_range(address, size)?;
+        self.can_mark_writes(1)?;
+        let h = self.pending[slot.index()]
+            .as_ref()
+            .ok_or_else(|| invalid("missing protected attachment history"))?;
+        if h.range != range || h.baseline != baseline || baseline.0 != self.epoch {
+            return Err(invalid("stale protected attachment baseline"));
+        }
+        Ok(())
+    }
+    /// Called only after successful atomic RAM publication. Bypasses this slot's
+    /// CPU patch budget and cannot consume another attachment's patch records.
+    #[cfg(any(feature = "wgpu-backend", test))]
+    pub(crate) fn commit_publication(
+        &mut self,
+        slot: PendingAttachment,
+        address: GuestAddress,
+        size: usize,
+        baseline: (u64, u64),
+    ) -> Result<()> {
+        self.preflight_publication(slot, address, size, baseline)?;
+        let range = Self::checked_range(address, size)?;
+        self.pending[slot.index()] = None;
+        self.record_global(range);
         Ok(())
     }
     /// Exact subsequent writes for preserving CPU changes over pending GPU output.
@@ -159,7 +318,20 @@ impl TextureChanges {
         range: Range<u64>,
         version: (u64, u64),
     ) -> Result<Vec<Range<u64>>> {
-        if self.epoch != version.0 || self.floor > version.1 {
+        if self.epoch != version.0 {
+            return Err(invalid("pending target backing epoch changed"));
+        }
+        if let Some(h) = self.pending.iter().flatten().find(|h| h.range == range) {
+            if h.baseline != version {
+                return Err(invalid("stale protected attachment baseline"));
+            }
+            let mut dirty = crate::memory::DirtyRanges::default();
+            for r in &h.writes[..h.count] {
+                dirty.insert(r.start..r.end)?;
+            }
+            return Ok(dirty.ranges().to_vec());
+        }
+        if self.floor > version.1 {
             return Err(invalid(
                 "pending target dirty history unavailable; synchronize before epoch change or journal eviction",
             ));
@@ -192,6 +364,15 @@ impl TextureChanges {
     }
     /// A floor advance conservatively invalidates older resources after journal eviction.
     pub fn stamp(&self, range: Range<u64>) -> (u64, u64) {
+        #[cfg(any(feature = "wgpu-backend", test))]
+        if let Some(h) = self
+            .pending
+            .iter()
+            .flatten()
+            .find(|h| h.range == range && h.baseline.0 == self.epoch)
+        {
+            return (self.epoch, h.latest);
+        }
         let revision = self
             .writes
             .iter()
@@ -253,5 +434,159 @@ mod journal_tests {
             c.mark_write(GuestAddress(1000), 4).unwrap();
         }
         assert!(c.writes_since(100..200, version).is_err());
+    }
+}
+
+#[cfg(test)]
+mod pending_history_tests {
+    use super::*;
+    use PendingAttachment::{Color, Depth};
+    fn begin(c: &mut TextureChanges, slot: PendingAttachment, start: u64) -> (u64, u64) {
+        c.commit_gpu_write(slot, GuestAddress(start), 100).unwrap();
+        c.stamp(start..start + 100)
+    }
+    #[test]
+    fn exact_patches_and_content_identity_survive_unrelated_eviction() {
+        let mut c = TextureChanges::new(7);
+        let baseline = begin(&mut c, Color, 100);
+        let unprotected = c.stamp(500..600);
+        c.mark_write(GuestAddress(90), 20).unwrap();
+        c.mark_write(GuestAddress(195), 20).unwrap();
+        let latest = c.stamp(100..200);
+        for n in 0..4096 {
+            c.mark_write(GuestAddress(1000 + n * 4), 4).unwrap();
+        }
+        assert_eq!(c.stamp(100..200), latest);
+        assert_eq!(
+            c.writes_since(100..200, baseline).unwrap(),
+            vec![100..110, 195..200]
+        );
+        assert!(c.writes_since(500..600, unprotected).is_err());
+        assert!(!c.unchanged_since(500..600, unprotected));
+        assert!(c.writes_since(100..200, latest).is_err()); // not the protected baseline
+    }
+    #[test]
+    fn overlap_limit_preflights_before_ram_or_journal_mutation() {
+        let mut c = TextureChanges::new(7);
+        let baseline = begin(&mut c, Color, 100);
+        let mut ram = [0u8; 100];
+        for n in 0..32 {
+            c.can_mark_write_at(GuestAddress(100 + n), 1).unwrap();
+            ram[n as usize] = n as u8;
+            c.mark_write(GuestAddress(100 + n), 1).unwrap();
+        }
+        let before = c.observation();
+        let original = ram;
+        assert!(c.can_mark_write_at(GuestAddress(150), 1).is_err());
+        assert!(c.mark_write(GuestAddress(150), 1).is_err());
+        assert_eq!(c.observation(), before);
+        assert_eq!(ram, original);
+        for _ in 0..4096 {
+            c.mark_write(GuestAddress(1000), 4).unwrap();
+        }
+        // Publication bypasses a full CPU patch budget, then retires protection.
+        c.preflight_publication(Color, GuestAddress(100), 100, baseline)
+            .unwrap();
+        c.commit_publication(Color, GuestAddress(100), 100, baseline)
+            .unwrap();
+        assert!(c.pending[0].is_none());
+        assert_eq!(c.observation().1, before.1 + 4097);
+        c.mark_write(GuestAddress(150), 1).unwrap();
+        assert!(
+            c.preflight_publication(Color, GuestAddress(100), 100, baseline)
+                .is_err()
+        );
+    }
+    #[test]
+    fn clear_rebases_only_its_attachment_and_rejects_stale_baselines() {
+        let mut c = TextureChanges::new(7);
+        let old = begin(&mut c, Color, 100);
+        let depth = begin(&mut c, Depth, 300);
+        c.mark_write(GuestAddress(105), 4).unwrap();
+        c.mark_write(GuestAddress(305), 4).unwrap();
+        let new = begin(&mut c, Color, 100);
+        assert_ne!(new, old);
+        assert!(c.writes_since(100..200, old).is_err());
+        assert!(
+            c.preflight_publication(Color, GuestAddress(100), 100, old)
+                .is_err()
+        );
+        assert!(c.writes_since(100..200, new).unwrap().is_empty());
+        assert_eq!(c.writes_since(300..400, depth).unwrap(), vec![305..309]);
+        c.mark_write(GuestAddress(110), 4).unwrap();
+        assert_eq!(c.writes_since(100..200, new).unwrap(), vec![110..114]);
+        let before = c.observation();
+        assert!(
+            c.preflight_gpu_write(Color, GuestAddress(500), 100)
+                .is_err()
+        );
+        assert!(
+            c.preflight_gpu_write(Depth, GuestAddress(150), 100)
+                .is_err()
+        );
+        assert_eq!(c.observation(), before);
+    }
+    #[test]
+    fn partial_publication_keeps_other_history_and_can_retry() {
+        let mut c = TextureChanges::new(7);
+        let color = begin(&mut c, Color, 100);
+        let depth = begin(&mut c, Depth, 300);
+        c.mark_write(GuestAddress(110), 4).unwrap();
+        c.mark_write(GuestAddress(310), 4).unwrap();
+        c.commit_publication(Depth, GuestAddress(300), 100, depth)
+            .unwrap();
+        assert!(c.pending[1].is_none());
+        // A failed atomic color write must not call commit_publication.
+        c.preflight_publication(Color, GuestAddress(100), 100, color)
+            .unwrap();
+        for _ in 0..4096 {
+            c.mark_write(GuestAddress(1000), 4).unwrap();
+        }
+        c.mark_write(GuestAddress(120), 4).unwrap();
+        assert_eq!(
+            c.writes_since(100..200, color).unwrap(),
+            vec![110..114, 120..124]
+        );
+        assert!(
+            c.commit_publication(Color, GuestAddress(100), 100, depth)
+                .is_err()
+        );
+        assert!(c.pending[0].is_some());
+        c.commit_publication(Color, GuestAddress(100), 100, color)
+            .unwrap();
+        assert!(c.pending.iter().all(Option::is_none));
+    }
+    #[test]
+    fn invalid_ranges_epochs_and_revision_overflow_cannot_change_history() {
+        let mut c = TextureChanges::new(7);
+        let baseline = begin(&mut c, Color, 100);
+        let before = c.observation();
+        for (address, size) in [(GuestAddress(100), 0), (GuestAddress(u64::MAX), 2)] {
+            assert!(c.can_mark_write_at(address, size).is_err());
+            assert!(c.preflight_gpu_write(Depth, address, size).is_err());
+            assert!(
+                c.preflight_publication(Color, address, size, baseline)
+                    .is_err()
+            );
+        }
+        assert_eq!(c.observation(), before);
+        assert!(c.writes_since(100..200, (7, baseline.1 + 1)).is_err());
+        c.epoch = 8;
+        assert!(c.mark_write(GuestAddress(1000), 4).is_err());
+        assert!(c.writes_since(100..200, baseline).is_err());
+        assert!(
+            c.preflight_publication(Color, GuestAddress(100), 100, baseline)
+                .is_err()
+        );
+        c.epoch = 7;
+        c.revision = u64::MAX;
+        assert!(c.mark_write(GuestAddress(1000), 4).is_err());
+        assert!(c.commit_gpu_write(Depth, GuestAddress(300), 100).is_err());
+        assert!(
+            c.commit_publication(Color, GuestAddress(100), 100, baseline)
+                .is_err()
+        );
+        assert_eq!(c.pending[0].as_ref().unwrap().baseline, baseline);
+        assert!(c.pending[1].is_none());
     }
 }
