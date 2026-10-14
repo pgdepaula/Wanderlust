@@ -69,6 +69,7 @@ fn speculative_roots_are_rolled_back_on_structural_failure() {
         required: vec![GuestAddr(0x10000)],
         speculative: vec![GuestAddr(0x10004), GuestAddr(0x1000c), GuestAddr(0x10002)],
         allow_unsupported: false,
+        instruction_limit: None,
     };
     let p = discover_roots(&i, &roots).unwrap();
     assert_eq!(p.speculative_roots_accepted, 1);
@@ -86,6 +87,7 @@ fn unsupported_sites_terminate_blocks_when_allowed() {
     let roots = Roots {
         required: vec![GuestAddr(0x10000)],
         allow_unsupported: true,
+        instruction_limit: None,
         ..Roots::default()
     };
     let p = discover_roots(&i, &roots).unwrap();
@@ -119,6 +121,7 @@ fn switches(entries: &[u64]) -> wl_analysis::Program {
         required: entries.iter().map(|&e| GuestAddr(e)).collect(),
         speculative: vec![],
         allow_unsupported: true,
+        instruction_limit: None,
     };
     wl_analysis::discover_roots(&image(&SWITCHES), &roots).unwrap()
 }
@@ -158,9 +161,31 @@ fn duplicate_roots_are_counted_without_underflow() {
         required: vec![GuestAddr(0x10000), GuestAddr(0x10054)],
         speculative: vec![GuestAddr(0x10000), GuestAddr(0x10054), GuestAddr(0x10054)],
         allow_unsupported: true,
+        instruction_limit: None,
     };
     let p = wl_analysis::discover_roots(&image(&SWITCHES), &roots).unwrap();
     assert_eq!(p.required_roots, 2);
     assert_eq!(p.speculative_roots_accepted, 3);
     assert!(p.roots.len() >= 2);
+}
+#[test]
+fn entry_flow_is_resolved_before_speculative_roots_under_the_limit() {
+    // With exactly the budget the entry and its own jump table need, a speculative root must
+    // not consume it first: the table resolves completely and the speculative root is rejected.
+    let base = switches(&[0x10000]);
+    let roots = wl_analysis::Roots {
+        required: vec![GuestAddr(0x10000)],
+        speculative: vec![GuestAddr(0x1005c)],
+        allow_unsupported: true,
+        instruction_limit: Some(base.instruction_count),
+    };
+    let p = wl_analysis::discover_roots(&image(&SWITCHES), &roots).unwrap();
+    assert_eq!(p.jump_tables.get(&GuestAddr(0x1002c)), Some(&3));
+    let starts: Vec<u64> = p.blocks.iter().map(|b| b.start.0).collect();
+    for case in [0x10030, 0x10038, 0x10040] {
+        assert!(starts.contains(&case));
+    }
+    assert_eq!(p.instruction_count, base.instruction_count);
+    assert_eq!(p.rejected_roots.len(), 1);
+    assert!(p.rejected_roots[0].reason.contains("limit"));
 }

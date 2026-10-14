@@ -212,6 +212,9 @@ pub struct Roots {
     pub speculative: Vec<GuestAddr>,
     /// Record unsupported instructions as fault sites instead of failing.
     pub allow_unsupported: bool,
+    /// Maximum decoded instructions (default `MAX_INSTRUCTIONS`). Roots that would exceed it
+    /// are rejected; required roots and the flow resolution of their code come first.
+    pub instruction_limit: Option<usize>,
 }
 #[derive(Clone, Debug)]
 enum Site {
@@ -267,15 +270,16 @@ fn walk(
     known: &BTreeMap<GuestAddr, Site>,
     out: &mut BTreeMap<GuestAddr, Site>,
     allow_unsupported: bool,
+    limit: usize,
 ) -> Result<()> {
     let mut queue = VecDeque::from([root]);
     while let Some(pc) = queue.pop_front() {
         if known.contains_key(&pc) || out.contains_key(&pc) {
             continue;
         }
-        if known.len() + out.len() >= MAX_INSTRUCTIONS {
+        if known.len() + out.len() >= limit {
             return Err(format!(
-                "analysis exceeds {MAX_INSTRUCTIONS} reachable-instruction limit"
+                "analysis exceeds {limit} reachable-instruction limit"
             ));
         }
         let word = image.word(pc)?;
@@ -352,17 +356,32 @@ fn build_blocks(
 
 pub fn discover_roots(image: &Image, roots: &Roots) -> Result<Program> {
     let entry = *roots.required.first().ok_or("analysis requires an entry")?;
+    let limit = roots.instruction_limit.unwrap_or(MAX_INSTRUCTIONS);
     let mut decoded = BTreeMap::new();
     for &root in &roots.required {
         let mut found = BTreeMap::new();
-        walk(image, root, &decoded, &mut found, roots.allow_unsupported)?;
+        walk(
+            image,
+            root,
+            &decoded,
+            &mut found,
+            roots.allow_unsupported,
+            limit,
+        )?;
         decoded.append(&mut found);
     }
     let mut accepted = Vec::new();
     let mut rejected_roots = Vec::new();
     let mut try_root = |root: GuestAddr, decoded: &mut BTreeMap<GuestAddr, Site>| {
         let mut found = BTreeMap::new();
-        match walk(image, root, decoded, &mut found, roots.allow_unsupported) {
+        match walk(
+            image,
+            root,
+            decoded,
+            &mut found,
+            roots.allow_unsupported,
+            limit,
+        ) {
             Ok(()) => {
                 decoded.append(&mut found);
                 true
@@ -376,46 +395,53 @@ pub fn discover_roots(image: &Image, roots: &Roots) -> Result<Program> {
             }
         }
     };
-    for &root in &roots.speculative {
-        if try_root(root, &mut decoded) {
-            accepted.push(root);
-        }
-    }
-    let speculative_roots_accepted = accepted.len();
-    // Resolve jump tables and constant code pointers until no new code appears.
+    // Resolve jump tables and constant code pointers until no new code appears: first for
+    // code reachable from the required roots, then again after the speculative roots, so a
+    // large speculative set cannot exhaust the instruction limit before the entry's own
+    // indirect control flow is resolved.
     let mut entries: BTreeSet<GuestAddr> = roots.required.iter().copied().collect();
-    entries.extend(accepted.iter().copied());
     let mut tables = BTreeMap::new();
     let mut tried = BTreeSet::new();
     let mut flow_roots = 0;
-    loop {
-        let blocks = build_blocks(&decoded, &leaders(&decoded, &entries, &tables)?)?;
-        let found = flow::propagate(image, &blocks, &entries, &tables);
-        let mut changed = false;
-        // Constant code pointers are function entries; jump-table targets are only block
-        // leaders inside the function that owns the table.
-        let mut candidates: Vec<(GuestAddr, bool)> =
-            found.pointers.into_iter().map(|p| (p, true)).collect();
-        for (branch, targets) in found.tables {
-            if tables.get(&branch) != Some(&targets) {
-                candidates.extend(targets.iter().map(|&t| (t, false)));
-                tables.insert(branch, targets);
-                changed = true;
-            }
-        }
-        for (root, function) in candidates {
-            if tried.insert(root) && try_root(root, &mut decoded) {
-                flow_roots += 1;
-                if function {
+    for phase in 0..2 {
+        if phase == 1 {
+            for &root in &roots.speculative {
+                if try_root(root, &mut decoded) {
+                    accepted.push(root);
                     entries.insert(root);
                 }
-                changed = true;
             }
         }
-        if !changed {
-            break;
+        loop {
+            let blocks = build_blocks(&decoded, &leaders(&decoded, &entries, &tables)?)?;
+            let found = flow::propagate(image, &blocks, &entries, &tables);
+            let mut changed = false;
+            // Constant code pointers are function entries; jump-table targets are only block
+            // leaders inside the function that owns the table.
+            let mut candidates: Vec<(GuestAddr, bool)> =
+                found.pointers.into_iter().map(|p| (p, true)).collect();
+            for (branch, targets) in found.tables {
+                if tables.get(&branch) != Some(&targets) {
+                    candidates.extend(targets.iter().map(|&t| (t, false)));
+                    tables.insert(branch, targets);
+                    changed = true;
+                }
+            }
+            for (root, function) in candidates {
+                if tried.insert(root) && try_root(root, &mut decoded) {
+                    flow_roots += 1;
+                    if function {
+                        entries.insert(root);
+                    }
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
         }
     }
+    let speculative_roots_accepted = accepted.len();
     let mut indirect_sites = Vec::new();
     let mut instruction_count = 0;
     let mut unsupported_count = 0;

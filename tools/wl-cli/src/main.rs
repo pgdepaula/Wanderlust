@@ -569,6 +569,7 @@ fn run(args: &[OsString]) -> Result<()> {
             .collect(),
         speculative,
         allow_unsupported: o.allow_unsupported,
+        instruction_limit: None,
     };
     let started = Instant::now();
     let program = discover_roots(&image, &roots)?;
