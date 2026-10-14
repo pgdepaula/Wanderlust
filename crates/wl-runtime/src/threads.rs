@@ -111,6 +111,99 @@ impl Wait {
     }
 }
 
+/// A KEvent: its readable half is signalled until cleared or reset; the writable half
+/// signals it. `references` count the handles to each half.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Event {
+    pub signaled: bool,
+    pub readable_references: u32,
+    pub writable_references: u32,
+}
+
+/// svcCreateEvent (0x45) -> (writable handle, readable handle).
+pub fn create_event(k: &mut Kernel) -> Result<(u32, u32), u32> {
+    let e = k.events.len();
+    k.events.push(Event::default());
+    let writable = k.handles.add(Object::WritableEvent(e)).inspect_err(|_| {
+        k.events.pop();
+    })?;
+    let readable = match k.handles.add(Object::ReadableEvent(e)) {
+        Ok(h) => h,
+        Err(code) => {
+            k.handles.close(writable);
+            k.events.pop();
+            return Err(code);
+        }
+    };
+    k.events[e].writable_references = 1;
+    k.events[e].readable_references = 1;
+    Ok((writable, readable))
+}
+
+/// A readable-event handle for event `e`, as given to the guest by a hosted service.
+pub fn readable_event_handle(k: &mut Kernel, e: usize) -> Result<u32, u32> {
+    let h = k.handles.add(Object::ReadableEvent(e))?;
+    k.events[e].readable_references += 1;
+    Ok(h)
+}
+
+/// KReadableEvent::Signal: the event becomes signalled and its waiters wake.
+pub fn signal_event(k: &mut Kernel, e: usize) {
+    if k.events[e].signaled {
+        return;
+    }
+    k.events[e].signaled = true;
+    let waiters: Vec<(usize, i32)> = k
+        .threads
+        .iter()
+        .enumerate()
+        .filter_map(|(w, th)| match &th.wait {
+            Some(Wait::Objects { objects, .. }) if th.state == ThreadState::Waiting => objects
+                .iter()
+                .position(|o| *o == Object::ReadableEvent(e))
+                .map(|i| (w, i as i32)),
+            _ => None,
+        })
+        .collect();
+    for (w, i) in waiters {
+        end_wait(k, w, result::SUCCESS, Some(i));
+    }
+}
+
+/// svcSignalEvent (0x11): W0 writable-event handle.
+pub fn signal_event_handle(k: &mut Kernel, handle: u32) -> u32 {
+    match k.handles.get(handle) {
+        Some(Object::WritableEvent(e)) => {
+            signal_event(k, e);
+            result::SUCCESS
+        }
+        _ => result::INVALID_HANDLE,
+    }
+}
+
+/// svcClearEvent (0x12): W0 handle to either half; the event stops being signalled.
+pub fn clear_event(k: &mut Kernel, handle: u32) -> u32 {
+    match k.handles.get(handle) {
+        Some(Object::WritableEvent(e) | Object::ReadableEvent(e)) => {
+            k.events[e].signaled = false;
+            result::SUCCESS
+        }
+        _ => result::INVALID_HANDLE,
+    }
+}
+
+/// svcResetSignal (0x17): W0 readable-event handle; InvalidState unless signalled.
+pub fn reset_signal(k: &mut Kernel, handle: u32) -> u32 {
+    match k.handles.get(handle) {
+        Some(Object::ReadableEvent(e)) if k.events[e].signaled => {
+            k.events[e].signaled = false;
+            result::SUCCESS
+        }
+        Some(Object::ReadableEvent(_)) => result::INVALID_STATE,
+        _ => result::INVALID_HANDLE,
+    }
+}
+
 /// Scheduler counters reported by the launcher.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SchedulerStats {
@@ -232,6 +325,8 @@ pub fn close_handle(memory: &mut Memory, k: &mut Kernel, handle: u32) -> bool {
             k.threads[t].references -= 1;
             destroy_if_unreferenced(memory, k, t);
         }
+        Object::ReadableEvent(e) => k.events[e].readable_references -= 1,
+        Object::WritableEvent(e) => k.events[e].writable_references -= 1,
         other => crate::ipc::close_handle(k, other),
     }
     true
@@ -486,6 +581,7 @@ pub fn wait_synchronization(
             .flatten()
         {
             Some(Object::Thread(t)) => objects.push(Object::Thread(t)),
+            Some(Object::ReadableEvent(e)) => objects.push(Object::ReadableEvent(e)),
             Some(Object::Port(_)) => {
                 return Err(
                     "unsupported Horizon SVC 0x18 (WaitSynchronization) on a server port".into(),
@@ -494,8 +590,11 @@ pub fn wait_synchronization(
             _ => return Ok(Err(result::INVALID_HANDLE)),
         }
     }
-    let signalled =
-        |o: &Object| matches!(o, Object::Thread(t) if k.threads[*t].state == ThreadState::Exited);
+    let signalled = |o: &Object| match *o {
+        Object::Thread(t) => k.threads[t].state == ThreadState::Exited,
+        Object::ReadableEvent(e) => k.events[e].signaled,
+        _ => false,
+    };
     if let Some(i) = objects.iter().position(signalled) {
         return Ok(Ok((i as u32, None)));
     }

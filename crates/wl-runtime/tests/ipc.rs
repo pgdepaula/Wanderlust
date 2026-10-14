@@ -710,3 +710,83 @@ fn lm_through_a_cmif_domain() {
     assert_eq!(send(&mut p, &mut c, lm).0, result::SESSION_CLOSED);
     assert_eq!(send(&mut p, &mut c, lm).0, result::SESSION_CLOSED);
 }
+
+fn service(p: &mut Process, c: &mut Cpu, sm: u32, service: &str) -> u32 {
+    tipc_request(p, 1, false, &name(service));
+    send(p, c, sm);
+    let w = words(p, 5);
+    assert_eq!(w[4], result::SUCCESS);
+    w[3]
+}
+fn reply_u32(p: &Process, at: usize) -> u32 {
+    u32::from_le_bytes(reply(p)[at..at + 4].try_into().unwrap())
+}
+
+#[test]
+fn apm_performance_mode_and_configuration() {
+    let (mut p, mut c) = process(&[(false, "*")]);
+    let sm = connect(&mut p, &mut c);
+    tipc_register_client(&mut p, &mut c, sm);
+    let apm = service(&mut p, &mut c, sm, "apm");
+    // GetPerformanceMode: docked, Boost.
+    request(&mut p, 1, false, &[]);
+    send(&mut p, &mut c, apm);
+    assert_eq!((reply_result(&p), reply_u32(&p, 0x20)), (0, 1));
+    // OpenSession, then a configuration set and read back.
+    request(&mut p, 0, false, &[]);
+    send(&mut p, &mut c, apm);
+    let session = reply_handle(&p);
+    let mut set = 1u32.to_le_bytes().to_vec();
+    set.extend(0x0001_0000u32.to_le_bytes());
+    request(&mut p, 0, false, &set);
+    send(&mut p, &mut c, session);
+    assert_eq!(reply_result(&p), 0);
+    request(&mut p, 1, false, &1u32.to_le_bytes());
+    send(&mut p, &mut c, session);
+    assert_eq!((reply_result(&p), reply_u32(&p, 0x20)), (0, 0x0001_0000));
+    // Undocumented outcomes are explicit faults.
+    for (command, data) in [
+        (1u32, 0u32.to_le_bytes().to_vec()),
+        (
+            0,
+            [2u32.to_le_bytes(), 0x0001_0000u32.to_le_bytes()].concat(),
+        ),
+        (
+            0,
+            [0u32.to_le_bytes(), 0x0001_0002u32.to_le_bytes()].concat(),
+        ),
+    ] {
+        request(&mut p, command, false, &data);
+        c.x[0] = u64::from(session);
+        assert!(dispatch(&mut c, &mut p, 0x21).is_err());
+    }
+    control(&mut p, 3, &[]);
+    c.x[0] = u64::from(apm);
+    assert!(
+        dispatch(&mut c, &mut p, 0x21)
+            .unwrap_err()
+            .contains("pointer-buffer size")
+    );
+}
+
+#[test]
+fn domain_ids_are_allocated_per_server() {
+    let (mut p, mut c) = process(&[(false, "*")]);
+    let sm = connect(&mut p, &mut c);
+    tipc_register_client(&mut p, &mut c, sm);
+    let lm = service(&mut p, &mut c, sm, "lm");
+    control(&mut p, 0, &[]);
+    send(&mut p, &mut c, lm);
+    assert_eq!(reply_u32(&p, 0x20), 1);
+    domain_request(&mut p, 1, 1, 0, true, &[0; 8]);
+    send(&mut p, &mut c, lm);
+    assert_eq!(reply_u32(&p, 0x30), 2);
+    // apm's server issues its own IDs from 1.
+    let apm = service(&mut p, &mut c, sm, "apm");
+    control(&mut p, 0, &[]);
+    send(&mut p, &mut c, apm);
+    assert_eq!(reply_u32(&p, 0x20), 1);
+    domain_request(&mut p, 1, 1, 0, false, &[]);
+    send(&mut p, &mut c, apm);
+    assert_eq!((reply_u32(&p, 0x10), reply_u32(&p, 0x30)), (1, 2));
+}

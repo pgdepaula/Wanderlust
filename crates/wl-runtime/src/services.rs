@@ -30,6 +30,17 @@ pub enum HostObject {
     LogService,
     /// ILogger opened by `process_id`.
     Logger { process_id: u64 },
+    /// `apm` IManager (ptm process).
+    ApmManager,
+    /// apm ISession.
+    ApmSession,
+}
+
+/// The process serving a hosted object; domain object IDs are allocated per server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Server {
+    Lm,
+    Ptm,
 }
 
 /// Size of `lm`'s pointer buffer (`lm_ipc_server.cpp`, `PointerBufferSize`).
@@ -49,24 +60,68 @@ pub struct HostState {
     pub log_packets: u64,
     /// CMIF domains, indexed by `Session::domain`.
     pub domains: Vec<Domain>,
-    /// Domain object IDs of the `lm` server.
+    /// Domain object IDs of each server.
     pub lm_domain_ids: DomainIds,
+    pub ptm_domain_ids: DomainIds,
+    /// apm PerformanceConfiguration set through ISession, for Normal and Boost.
+    pub performance_configuration: [Option<u32>; 2],
 }
+
+/// The console operating mode the runtime presents: docked *(deterministic choice)*. apm
+/// reports it as PerformanceMode Boost (1); handheld is Normal (0).
+pub const DOCKED: bool = true;
+
+/// apm PerformanceConfiguration values documented for retail units (SwitchBrew, PTM
+/// services); 0x00010002 and 0x00020002 exist only on SDEV units.
+const PERFORMANCE_CONFIGURATIONS: [u32; 14] = [
+    0x0001_0000,
+    0x0001_0001,
+    0x0002_0000,
+    0x0002_0001,
+    0x0002_0003,
+    0x0002_0004,
+    0x0002_0005,
+    0x0002_0006,
+    0x9222_0007,
+    0x9222_0008,
+    0x9222_0009,
+    0x9222_000A,
+    0x9222_000B,
+    0x9222_000C,
+];
 
 /// The hosted service registered under `name`.
 pub fn lookup(name: &[u8; 8]) -> Option<HostObject> {
-    (name == b"lm\0\0\0\0\0\0").then_some(HostObject::LogService)
+    match name {
+        b"lm\0\0\0\0\0\0" => Some(HostObject::LogService),
+        b"apm\0\0\0\0\0" => Some(HostObject::ApmManager),
+        _ => None,
+    }
 }
 
 impl HostObject {
+    /// Name and the interface ID written in the reply's out header: Atmosphère's for the
+    /// services it implements, 0 otherwise.
     fn interface(&self) -> (&'static str, u32) {
         match self {
             HostObject::LogService => ("lm ILogService", 0xE1D7_F748),
             HostObject::Logger { .. } => ("lm ILogger", 0x3E81_DAD2),
+            HostObject::ApmManager => ("apm IManager", 0),
+            HostObject::ApmSession => ("apm ISession", 0),
         }
     }
-    fn pointer_buffer_size(&self) -> u16 {
-        LM_POINTER_BUFFER_SIZE
+    fn server(&self) -> Server {
+        match self {
+            HostObject::LogService | HostObject::Logger { .. } => Server::Lm,
+            HostObject::ApmManager | HostObject::ApmSession => Server::Ptm,
+        }
+    }
+    /// The server's pointer-buffer size, where a source documents it.
+    fn pointer_buffer_size(&self) -> Option<u16> {
+        match self.server() {
+            Server::Lm => Some(LM_POINTER_BUFFER_SIZE),
+            Server::Ptm => None,
+        }
     }
 }
 
@@ -83,7 +138,7 @@ pub struct Domain {
     pub objects: Vec<(u32, HostObject)>,
 }
 /// `lm`'s `MaxDomainObjects`.
-const MAX_DOMAIN_OBJECTS: u32 = 61;
+const LM_MAX_DOMAIN_OBJECTS: u32 = 61;
 
 /// The domain object IDs of one server (`ServerDomainManager::EntryManager`): entries in
 /// order from ID 1, and freed IDs reused most recently freed first.
@@ -93,11 +148,11 @@ pub struct DomainIds {
     freed: Vec<u32>,
 }
 impl DomainIds {
-    fn allocate(&mut self) -> Result<u32, String> {
+    fn allocate(&mut self, limit: Option<u32>) -> Result<u32, String> {
         if let Some(id) = self.freed.pop() {
             return Ok(id);
         }
-        if self.next >= MAX_DOMAIN_OBJECTS {
+        if limit.is_some_and(|limit| self.next >= limit) {
             return Err("unsupported Horizon IPC: CMIF domain entries exhausted".into());
         }
         self.next += 1;
@@ -112,8 +167,18 @@ impl Domain {
 }
 impl HostState {
     /// Registers `object` in domain `d` under a newly allocated ID.
+    fn ids(&mut self, server: Server) -> &mut DomainIds {
+        match server {
+            Server::Lm => &mut self.lm_domain_ids,
+            Server::Ptm => &mut self.ptm_domain_ids,
+        }
+    }
+    /// Registers `object` in domain `d` under a newly allocated ID of its server (`lm`
+    /// allows 61 entries; ptm's limit is not documented and not enforced).
     fn add(&mut self, d: usize, object: HostObject) -> Result<u32, String> {
-        let id = self.lm_domain_ids.allocate()?;
+        let server = object.server();
+        let limit = (server == Server::Lm).then_some(LM_MAX_DOMAIN_OBJECTS);
+        let id = self.ids(server).allocate(limit)?;
         self.domains[d].objects.push((id, object));
         Ok(id)
     }
@@ -121,8 +186,8 @@ impl HostState {
     fn remove(&mut self, d: usize, id: u32) {
         let objects = &mut self.domains[d].objects;
         if let Some(i) = objects.iter().position(|(o, _)| *o == id) {
-            objects.remove(i);
-            self.lm_domain_ids.freed.push(id);
+            let (_, object) = objects.remove(i);
+            self.ids(object.server()).freed.push(id);
         }
     }
 }
@@ -305,7 +370,10 @@ pub(crate) fn request(
             // QueryPointerBufferSize: out u16.
             3 => {
                 check(no_arguments)?;
-                let size = object.pointer_buffer_size().to_le_bytes();
+                let Some(size) = object.pointer_buffer_size() else {
+                    return unsupported("the pointer-buffer size of this server");
+                };
+                let size = size.to_le_bytes();
                 Ok(Outcome::Reply(reply(0, result::SUCCESS, &size, &[], None)))
             }
             // ConvertCurrentObjectToDomain: out the object's ID in the new domain.
@@ -412,6 +480,59 @@ pub(crate) fn request(
             })?;
             k.host.log_destination = Some(ipc::read_u32(args, 0));
             Done::ok()
+        }
+        (HostObject::ApmManager, 0) => {
+            check(no_arguments)?;
+            Done {
+                objects: vec![HostObject::ApmSession],
+                ..Done::ok()
+            }
+        }
+        (HostObject::ApmManager, 1) => {
+            // GetPerformanceMode: the operating mode.
+            check(no_arguments)?;
+            Done {
+                data: u32::from(DOCKED).to_le_bytes().to_vec(),
+                ..Done::ok()
+            }
+        }
+        (HostObject::ApmSession, 0) => {
+            // SetPerformanceConfiguration(PerformanceMode, PerformanceConfiguration).
+            check(Shape {
+                in_data: 8,
+                ..no_arguments
+            })?;
+            let (mode, configuration) = (ipc::read_u32(args, 0), ipc::read_u32(args, 4));
+            if mode > 1 || !PERFORMANCE_CONFIGURATIONS.contains(&configuration) {
+                return unsupported(&format!(
+                    "the result of PerformanceMode {mode:#x} with configuration {configuration:#x}"
+                ));
+            }
+            k.host.performance_configuration[mode as usize] = Some(configuration);
+            Done::ok()
+        }
+        (HostObject::ApmSession, 1) => {
+            // GetPerformanceConfiguration(PerformanceMode).
+            check(Shape {
+                in_data: 4,
+                ..no_arguments
+            })?;
+            let mode = ipc::read_u32(args, 0);
+            let Some(configuration) = k
+                .host
+                .performance_configuration
+                .get(mode as usize)
+                .copied()
+                .flatten()
+            else {
+                return unsupported(&format!(
+                    "the configuration of PerformanceMode {mode:#x} before one is set"
+                ));
+            };
+            Done {
+                data: configuration.to_le_bytes().to_vec(),
+                ..Done::ok()
+            }
         }
         _ => return unsupported("an unknown command"),
     };

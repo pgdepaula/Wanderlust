@@ -224,6 +224,9 @@ pub enum Object {
     Session(usize),
     /// Server port of a service registered with sm (`ipc::Port`).
     Port(usize),
+    /// The readable and writable halves of a KEvent (`threads::Event`).
+    ReadableEvent(usize),
+    WritableEvent(usize),
 }
 /// Handle table with the Mesosphere encoding: `index | linear_id << 15`; linear ids start at
 /// 1 and free indices are handed out from the top of the table down.
@@ -354,6 +357,7 @@ pub struct Kernel {
     pub order: u64,
     pub stats: SchedulerStats,
     pub sessions: Vec<ipc::Session>,
+    pub events: Vec<threads::Event>,
     pub ports: Vec<ipc::Port>,
     pub services: Vec<ipc::Service>,
     /// IPC replies to write into other threads' message buffers.
@@ -461,6 +465,7 @@ impl Process {
             order: 0,
             stats: SchedulerStats::default(),
             sessions: Vec::new(),
+            events: Vec::new(),
             ports: Vec::new(),
             services: Vec::new(),
             pending_replies: Vec::new(),
@@ -829,6 +834,7 @@ pub fn used_memory(memory: &Memory) -> u64 {
 fn outputs(id: u16) -> (bool, usize) {
     match id {
         0x01 | 0x06 | 0x08 | 0x0C | 0x18 | 0x1F | 0x24 | 0x25 | 0x29 => (true, 1),
+        0x45 => (true, 2),
         0x0B | 0x1D => (false, 0),
         _ => (true, 0),
     }
@@ -963,6 +969,29 @@ pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<S
         }
         0x10 => {
             c.x[0] = u64::from(k.threads[k.current].core);
+            None
+        }
+        0x11 => {
+            set_result(c, threads::signal_event_handle(k, c.x[0] as u32));
+            None
+        }
+        0x12 => {
+            set_result(c, threads::clear_event(k, c.x[0] as u32));
+            None
+        }
+        0x17 => {
+            set_result(c, threads::reset_signal(k, c.x[0] as u32));
+            None
+        }
+        0x45 => {
+            match threads::create_event(k) {
+                Ok((writable, readable)) => {
+                    set_result(c, result::SUCCESS);
+                    c.x[1] = u64::from(writable);
+                    c.x[2] = u64::from(readable);
+                }
+                Err(code) => set_result(c, code),
+            }
             None
         }
         0x16 => {

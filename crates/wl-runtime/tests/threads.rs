@@ -660,3 +660,72 @@ fn waiting_forever_is_reported_as_deadlock() {
     let run = threads::run(&mut p, &UNITS, 1_000_000, 1000);
     assert!(run.result.unwrap_err().contains("guest deadlock"));
 }
+
+#[test]
+fn events_signal_clear_reset_and_wake_waiters() {
+    let (mut p, mut c) = process();
+    let (r, _) = svc(&mut p, &mut c, 0x45, &[]);
+    assert_eq!(r, result::SUCCESS);
+    let (writable, readable) = (c.x[1] as u32, c.x[2] as u32);
+    assert!(c.x[3..8].iter().all(|&x| x == 0));
+    // Unsignalled: a zero-timeout wait times out; ResetSignal is InvalidState.
+    let list = c.sp - 0x40;
+    p.write_bytes(list, &readable.to_le_bytes()).unwrap();
+    assert_eq!(
+        svc(&mut p, &mut c, 0x18, &[0, list, 1, 0]).0,
+        result::TIMED_OUT
+    );
+    assert_eq!(
+        svc(&mut p, &mut c, 0x17, &[u64::from(readable)]).0,
+        result::INVALID_STATE
+    );
+    // Only the writable half signals; only the readable half is waitable or reset.
+    assert_eq!(
+        svc(&mut p, &mut c, 0x11, &[u64::from(readable)]).0,
+        result::INVALID_HANDLE
+    );
+    assert_eq!(
+        svc(&mut p, &mut c, 0x17, &[u64::from(writable)]).0,
+        result::INVALID_HANDLE
+    );
+    p.write_bytes(list, &writable.to_le_bytes()).unwrap();
+    assert_eq!(
+        svc(&mut p, &mut c, 0x18, &[0, list, 1, 0]).0,
+        result::INVALID_HANDLE
+    );
+    // A worker waits; signalling wakes it with its index and the event stays signalled.
+    let (worker, _) = spawn(&mut p, &mut c, 44, 1);
+    switch(&mut p, &mut c, worker);
+    p.write_bytes(list, &readable.to_le_bytes()).unwrap();
+    assert_eq!(
+        svc(&mut p, &mut c, 0x18, &[0, list, 1, u64::MAX]).1,
+        Some(Stop::Reschedule)
+    );
+    switch(&mut p, &mut c, 0);
+    assert_eq!(
+        svc(&mut p, &mut c, 0x11, &[u64::from(writable)]),
+        (result::SUCCESS, Some(Stop::Reschedule))
+    );
+    let w = &k(&mut p).threads[worker];
+    assert_eq!(w.state, ThreadState::Runnable);
+    assert_eq!(w.context.as_ref().unwrap().x[..2], [0, 0]);
+    assert_eq!(svc(&mut p, &mut c, 0x18, &[0, list, 1, 0]), (0, None));
+    // ResetSignal clears once; ClearEvent works on either half.
+    assert_eq!(svc(&mut p, &mut c, 0x17, &[u64::from(readable)]).0, 0);
+    assert_eq!(
+        svc(&mut p, &mut c, 0x18, &[0, list, 1, 0]).0,
+        result::TIMED_OUT
+    );
+    svc(&mut p, &mut c, 0x11, &[u64::from(writable)]);
+    assert_eq!(svc(&mut p, &mut c, 0x12, &[u64::from(writable)]).0, 0);
+    assert_eq!(
+        svc(&mut p, &mut c, 0x18, &[0, list, 1, 0]).0,
+        result::TIMED_OUT
+    );
+    assert_eq!(svc(&mut p, &mut c, 0x12, &[u64::from(readable)]).0, 0);
+    // Closing both halves.
+    assert_eq!(svc(&mut p, &mut c, 0x16, &[u64::from(writable)]).0, 0);
+    assert_eq!(svc(&mut p, &mut c, 0x16, &[u64::from(readable)]).0, 0);
+    let e = &k(&mut p).events[0];
+    assert_eq!((e.readable_references, e.writable_references), (0, 0));
+}

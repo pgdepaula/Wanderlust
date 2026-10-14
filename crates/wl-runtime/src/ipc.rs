@@ -152,7 +152,7 @@ pub fn close_handle(k: &mut Kernel, object: Object) {
                 port.server_closed = true;
             }
         }
-        Object::Thread(_) => {}
+        Object::Thread(_) | Object::ReadableEvent(_) | Object::WritableEvent(_) => {}
     }
 }
 
