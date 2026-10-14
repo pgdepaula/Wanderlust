@@ -446,3 +446,267 @@ fn tipc_malformed_unknown_and_close_end_the_session() {
     p.write_bytes(t, &[15, 0, 0, 0, 0, 0, 0, 0]).unwrap();
     assert_eq!(send(&mut p, &mut c, sm).0, result::SESSION_CLOSED);
 }
+
+const PACKET: u64 = NAME + 0x200;
+
+/// Opens `lm` through TIPC sm and its ILogger through ILogService::OpenLogger.
+fn open_logger(p: &mut Process, c: &mut Cpu) -> u32 {
+    let sm = connect(p, c);
+    tipc_register_client(p, c, sm);
+    tipc_request(p, 1, false, &name("lm"));
+    send(p, c, sm);
+    let w = words(p, 5);
+    assert_eq!(w[4], result::SUCCESS);
+    let lm = w[3];
+    // OpenLogger: the process ID placeholder in the data, the real one from the kernel.
+    request(p, 0, true, &[0; 8]);
+    assert_eq!(send(p, c, lm), (result::SUCCESS, None));
+    let r = reply(p);
+    assert_eq!(&r[0x10..0x14], b"SFCO");
+    assert_eq!(reply_result(p), result::SUCCESS);
+    let logger = reply_handle(p);
+    let k = p.kernel.as_ref().unwrap();
+    let Some(Object::Session(session)) = k.handles.get(logger) else {
+        panic!("OpenLogger moved no session handle");
+    };
+    assert!(matches!(
+        k.sessions[session].endpoint,
+        wl_runtime::ipc::Endpoint::Host(wl_runtime::services::HostObject::Logger {
+            process_id: 0x51
+        })
+    ));
+    logger
+}
+/// A log packet: header, then a text chunk (key 2).
+fn packet(flags: u8, text: &str) -> Vec<u8> {
+    let mut body = vec![2, text.len() as u8];
+    body.extend(text.as_bytes());
+    let mut m = vec![0u8; 0x18];
+    m[8..16].copy_from_slice(&7u64.to_le_bytes());
+    m[0x10] = flags | 4;
+    m[0x14..0x18].copy_from_slice(&(body.len() as u32).to_le_bytes());
+    m.extend(body);
+    m
+}
+/// ILogger::Log with an In|AutoSelect buffer: a pointer (X) descriptor carrying the data and
+/// an empty map (A) descriptor, or the reverse when `mapped`.
+fn log(p: &mut Process, c: &mut Cpu, logger: u32, bytes: &[u8], mapped: bool) -> u32 {
+    p.write_bytes(PACKET, bytes).unwrap();
+    let (x, a) = if mapped {
+        ((0, 0), (PACKET, bytes.len() as u32))
+    } else {
+        ((PACKET, bytes.len() as u32), (0, 0))
+    };
+    let mut m = vec![0u8; 0x100];
+    m[0..4].copy_from_slice(&(4u32 | 1 << 16 | 1 << 20).to_le_bytes());
+    m[4..8].copy_from_slice(&8u32.to_le_bytes());
+    let xw0 = (x.1 << 16) | (((x.0 >> 32) as u32 & 0xf) << 12);
+    m[8..12].copy_from_slice(&xw0.to_le_bytes());
+    m[12..16].copy_from_slice(&(x.0 as u32).to_le_bytes());
+    m[16..20].copy_from_slice(&a.1.to_le_bytes());
+    m[20..24].copy_from_slice(&(a.0 as u32).to_le_bytes());
+    m[24..28].copy_from_slice(&((((a.0 >> 32) as u32) & 0xf) << 28).to_le_bytes());
+    m[32..36].copy_from_slice(b"SFCI");
+    let t = tls(p);
+    p.write_bytes(t, &m).unwrap();
+    assert_eq!(send(p, c, logger), (result::SUCCESS, None));
+    reply_result(p)
+}
+
+#[test]
+fn lm_logger_records_log_packets() {
+    let (mut p, mut c) = process(&[(false, "*")]);
+    let logger = open_logger(&mut p, &mut c);
+    assert_eq!(log(&mut p, &mut c, logger, &packet(3, "hello\n"), false), 0);
+    // A message split over a head and a tail packet, the second through a mapped buffer.
+    assert_eq!(
+        log(&mut p, &mut c, logger, &packet(1, "part one, "), false),
+        0
+    );
+    assert_eq!(log(&mut p, &mut c, logger, &packet(2, "part two"), true), 0);
+    // A packet whose size disagrees with its header succeeds and is dropped.
+    let mut bad = packet(3, "dropped");
+    bad.push(0);
+    assert_eq!(log(&mut p, &mut c, logger, &bad, false), 0);
+    let k = p.kernel.as_ref().unwrap();
+    assert_eq!(k.debug_output, ["hello", "part one, part two"]);
+    assert_eq!(k.host.log_packets, 3);
+    // SetDestination(u32).
+    request(&mut p, 1, false, &2u32.to_le_bytes());
+    send(&mut p, &mut c, logger);
+    assert_eq!(reply_result(&p), result::SUCCESS);
+    assert_eq!(p.kernel.as_ref().unwrap().host.log_destination, Some(2));
+}
+
+#[test]
+fn hosted_service_control_requests_and_limits() {
+    let (mut p, mut c) = process(&[(false, "*"), (true, "*")]);
+    let logger = open_logger(&mut p, &mut c);
+    let t = tls(&p);
+    // QueryPointerBufferSize: lm's 0x400-byte pointer buffer.
+    let mut m = [0u8; 0x30];
+    m[0] = 5;
+    m[4] = 8;
+    m[0x10..0x14].copy_from_slice(b"SFCI");
+    m[0x18] = 3;
+    p.write_bytes(t, &m).unwrap();
+    assert_eq!(send(&mut p, &mut c, logger), (result::SUCCESS, None));
+    let r = reply(&p);
+    assert_eq!(
+        (&r[0x10..0x14], r[0x18], &r[0x20..0x22]),
+        (&b"SFCO"[..], 0, &[0, 4][..])
+    );
+    // CloneCurrentObject: another session to the same logger.
+    m[0x18] = 2;
+    p.write_bytes(t, &m).unwrap();
+    send(&mut p, &mut c, logger);
+    let clone = reply_handle(&p);
+    assert_eq!(
+        log(&mut p, &mut c, clone, &packet(3, "from the clone"), false),
+        0
+    );
+    // Converting twice and unknown commands are not modelled: explicit faults.
+    m[0x18] = 0;
+    p.write_bytes(t, &m).unwrap();
+    assert_eq!(send(&mut p, &mut c, logger), (result::SUCCESS, None));
+    p.write_bytes(t, &m).unwrap();
+    c.x[0] = u64::from(logger);
+    assert!(
+        dispatch(&mut c, &mut p, 0x21)
+            .unwrap_err()
+            .contains("converting a domain session")
+    );
+    request(&mut p, 9, false, &[]);
+    c.x[0] = u64::from(clone);
+    assert!(
+        dispatch(&mut c, &mut p, 0x21)
+            .unwrap_err()
+            .contains("unknown command")
+    );
+    // The name cannot be registered by the guest; CMIF Close ends the session.
+    let sm = connect(&mut p, &mut c);
+    tipc_register_client(&mut p, &mut c, sm);
+    let mut register = name("lm").to_vec();
+    register.extend([1, 0, 0, 0, 0]);
+    tipc_request(&mut p, 2, false, &register);
+    send(&mut p, &mut c, sm);
+    assert_eq!(words(&p, 5)[4], sm_result::ALREADY_REGISTERED);
+    p.write_bytes(t, &[2, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+    assert_eq!(send(&mut p, &mut c, clone).0, result::SESSION_CLOSED);
+    assert_eq!(p.kernel.as_ref().unwrap().debug_output, ["from the clone"]);
+}
+
+#[test]
+fn hosted_services_obey_access_control() {
+    let (mut p, mut c) = process(&[(false, "fsp-srv")]);
+    let sm = connect(&mut p, &mut c);
+    tipc_register_client(&mut p, &mut c, sm);
+    tipc_request(&mut p, 1, false, &name("lm"));
+    send(&mut p, &mut c, sm);
+    assert_eq!(words(&p, 5)[3..], [0, sm_result::NOT_ALLOWED]);
+}
+
+/// A CMIF request to object `id` of a domain, laid out as libnx's cmifMakeRequest: the domain
+/// header (SendMessage, no input objects, message size, object ID) before `SFCI`.
+fn domain_request(p: &mut Process, kind: u8, id: u32, command: u32, send_pid: bool, data: &[u8]) {
+    let mut m = vec![0u8; 0x100];
+    let words = (16 + 16 + 16 + data.len()).div_ceil(4) as u32;
+    m[0..4].copy_from_slice(&4u32.to_le_bytes());
+    m[4..8].copy_from_slice(&(words | if send_pid { 1 << 31 } else { 0 }).to_le_bytes());
+    let mut at = 8;
+    if send_pid {
+        m[8..12].copy_from_slice(&1u32.to_le_bytes());
+        at = 20;
+    }
+    let start = (at + 15) & !15;
+    m[start] = kind;
+    m[start + 2..start + 4].copy_from_slice(&((16 + data.len()) as u16).to_le_bytes());
+    m[start + 4..start + 8].copy_from_slice(&id.to_le_bytes());
+    m[start + 16..start + 20].copy_from_slice(b"SFCI");
+    m[start + 24..start + 28].copy_from_slice(&command.to_le_bytes());
+    m[start + 32..start + 32 + data.len()].copy_from_slice(data);
+    let t = tls(p);
+    p.write_bytes(t, &m).unwrap();
+}
+fn control(p: &mut Process, command: u32, data: &[u8]) {
+    let mut m = [0u8; 0x40];
+    m[0] = 5;
+    m[4] = ((32 + data.len()).div_ceil(4)) as u8;
+    m[0x10..0x14].copy_from_slice(b"SFCI");
+    m[0x18..0x1C].copy_from_slice(&command.to_le_bytes());
+    m[0x20..0x20 + data.len()].copy_from_slice(data);
+    let t = tls(p);
+    p.write_bytes(t, &m).unwrap();
+}
+
+#[test]
+fn lm_through_a_cmif_domain() {
+    let (mut p, mut c) = process(&[(false, "*")]);
+    let sm = connect(&mut p, &mut c);
+    tipc_register_client(&mut p, &mut c, sm);
+    tipc_request(&mut p, 1, false, &name("lm"));
+    send(&mut p, &mut c, sm);
+    let lm = words(&p, 5)[3];
+    // ConvertCurrentObjectToDomain: the service object becomes object 1.
+    control(&mut p, 0, &[]);
+    assert_eq!(send(&mut p, &mut c, lm), (result::SUCCESS, None));
+    let r = reply(&p);
+    assert_eq!(
+        (&r[0x10..0x14], reply_result(&p), &r[0x20..0x24]),
+        (&b"SFCO"[..], 0, &[1, 0, 0, 0][..])
+    );
+    // OpenLogger in the domain: one output object, ID 2, after the (empty) output data.
+    domain_request(&mut p, 1, 1, 0, true, &[0; 8]);
+    assert_eq!(send(&mut p, &mut c, lm), (result::SUCCESS, None));
+    let r = reply(&p);
+    let w = |at: usize| u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
+    // Header: no special header; raw data = domain header, SFCO header, one ID, padding.
+    assert_eq!((w(0), w(4)), (0, (16 + 16 + 4 + 3 + 16) / 4));
+    assert_eq!(
+        (w(0x10), &r[0x20..0x24], w(0x28), w(0x30)),
+        (1, &b"SFCO"[..], 0, 2)
+    );
+    // Log to object 2 through the domain.
+    let bytes = packet(3, "domain log");
+    p.write_bytes(PACKET, &bytes).unwrap();
+    let mut m = vec![0u8; 0x100];
+    m[0..4].copy_from_slice(&(4u32 | 1 << 16 | 1 << 20).to_le_bytes());
+    m[4..8].copy_from_slice(&12u32.to_le_bytes());
+    m[8..12].copy_from_slice(&((bytes.len() as u32) << 16).to_le_bytes());
+    m[12..16].copy_from_slice(&(PACKET as u32).to_le_bytes());
+    m[32] = 1;
+    m[34] = 16;
+    m[36] = 2;
+    m[48..52].copy_from_slice(b"SFCI");
+    let t = tls(&p);
+    p.write_bytes(t, &m).unwrap();
+    assert_eq!(send(&mut p, &mut c, lm), (result::SUCCESS, None));
+    assert_eq!(&reply(&p)[0x20..0x24], b"SFCO");
+    assert_eq!(p.kernel.as_ref().unwrap().debug_output, ["domain log"]);
+    // CopyFromCurrentDomain(2): a plain session to the logger.
+    control(&mut p, 1, &2u32.to_le_bytes());
+    send(&mut p, &mut c, lm);
+    let copy = reply_handle(&p);
+    assert_eq!(log(&mut p, &mut c, copy, &packet(3, "copied"), false), 0);
+    control(&mut p, 1, &9u32.to_le_bytes());
+    send(&mut p, &mut c, lm);
+    assert_eq!(
+        u32::from_le_bytes(reply(&p)[0x18..0x1C].try_into().unwrap()),
+        11 | 492 << 9
+    );
+    // Domain Close of object 2: no reply is written; later messages to it close the session.
+    domain_request(&mut p, 2, 2, 0, false, &[]);
+    let before = reply(&p);
+    assert_eq!(send(&mut p, &mut c, lm), (result::SUCCESS, None));
+    assert_eq!(reply(&p), before);
+    // The freed ID 2 is reused by the next object.
+    domain_request(&mut p, 1, 1, 0, true, &[0; 8]);
+    send(&mut p, &mut c, lm);
+    assert_eq!(&reply(&p)[0x30..0x34], &[2, 0, 0, 0]);
+    domain_request(&mut p, 2, 2, 0, false, &[]);
+    send(&mut p, &mut c, lm);
+    // A message to the closed object: TargetNotFound closes the session.
+    domain_request(&mut p, 1, 2, 1, false, &[0; 4]);
+    assert_eq!(send(&mut p, &mut c, lm).0, result::SESSION_CLOSED);
+    assert_eq!(send(&mut p, &mut c, lm).0, result::SESSION_CLOSED);
+}

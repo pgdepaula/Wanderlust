@@ -16,6 +16,7 @@
 //! blocked until the service is registered, and then receives the reply in the protocol of
 //! its request.
 use crate::horizon::{Kernel, Object, result};
+use crate::services::{self, HostObject, Outcome};
 use crate::threads::{self, Wait};
 use crate::{Cpu, Memory, Stop};
 
@@ -44,10 +45,14 @@ pub enum Endpoint {
     Sm { client: Option<u64> },
     /// A port registered through sm:RegisterService, served by the guest itself.
     Port(usize),
+    /// An object of a service hosted by the runtime.
+    Host(HostObject),
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Session {
     pub endpoint: Endpoint,
+    /// The session was converted to a CMIF domain (index into `HostState::domains`).
+    pub domain: Option<usize>,
     /// The server side closed the session (SessionClosed for every further request).
     pub closed: bool,
     pub references: u32,
@@ -80,7 +85,7 @@ pub struct IpcStats {
     pub deferred: u64,
 }
 
-fn read_u32(b: &[u8], at: usize) -> u32 {
+pub(crate) fn read_u32(b: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(b[at..at + 4].try_into().unwrap_or_default())
 }
 fn name_text(name: &[u8; 8]) -> String {
@@ -115,10 +120,11 @@ pub fn connect_to_named_port(memory: &Memory, k: &mut Kernel, address: u64) -> R
     open_session(k, Endpoint::Sm { client: None })
 }
 
-fn open_session(k: &mut Kernel, endpoint: Endpoint) -> Result<u32, u32> {
+pub(crate) fn open_session(k: &mut Kernel, endpoint: Endpoint) -> Result<u32, u32> {
     let s = k.sessions.len();
     k.sessions.push(Session {
         endpoint,
+        domain: None,
         closed: false,
         references: 1,
     });
@@ -207,6 +213,81 @@ fn allowed(k: &Kernel, name: &[u8; 8], host: bool) -> bool {
     })
 }
 
+/// A HIPC request as `hipcParseRequest` reads it: the header, the special header, the
+/// descriptors (address, size) and the raw data words.
+#[derive(Clone, Debug, Default)]
+pub struct Request {
+    pub kind: u16,
+    /// The process ID the kernel placed in the special header.
+    pub pid: Option<u64>,
+    pid_offset: Option<usize>,
+    pub copy_handles: u32,
+    pub move_handles: u32,
+    /// Send statics (X), send (A), receive (B) and the count of exchange (W) buffers.
+    pub statics: Vec<(u64, u64)>,
+    pub sends: Vec<(u64, u64)>,
+    pub recvs: Vec<(u64, u64)>,
+    pub exchanges: u32,
+    /// Byte offset and length in words of the raw data.
+    pub data: usize,
+    pub data_words: usize,
+    pub recv_static_mode: u32,
+    /// Bytes up to the end of the raw data.
+    pub size: usize,
+}
+
+fn parse_request(m: &[u8; MESSAGE_BUFFER_SIZE]) -> Request {
+    let (w0, w1) = (read_u32(m, 0), read_u32(m, 4));
+    let mut r = Request {
+        kind: w0 as u16,
+        exchanges: w0 >> 28,
+        data_words: (w1 & 0x3ff) as usize,
+        recv_static_mode: (w1 >> 10) & 0xf,
+        ..Request::default()
+    };
+    let (statics, sends, recvs) = ((w0 >> 16) & 0xf, (w0 >> 20) & 0xf, (w0 >> 24) & 0xf);
+    let mut at = 8;
+    if w1 >> 31 != 0 {
+        let special = read_u32(m, 8);
+        at += 4;
+        if special & 1 != 0 {
+            r.pid_offset = Some(at);
+            at += 8;
+        }
+        r.copy_handles = (special >> 1) & 0xf;
+        r.move_handles = (special >> 5) & 0xf;
+        at += 4 * (r.copy_handles + r.move_handles) as usize;
+    }
+    let descriptors = at;
+    at += 8 * statics as usize + 12 * (sends + recvs + r.exchanges) as usize;
+    r.data = at;
+    r.size = at + 4 * r.data_words;
+    if r.size > MESSAGE_BUFFER_SIZE {
+        return r;
+    }
+    let mut d = descriptors;
+    for _ in 0..statics {
+        let (a, b) = (read_u32(m, d), read_u32(m, d + 4));
+        let address =
+            u64::from(b) | u64::from((a >> 12) & 0xf) << 32 | u64::from((a >> 6) & 0x3f) << 36;
+        r.statics.push((address, u64::from(a >> 16)));
+        d += 8;
+    }
+    let buffer = |d: &mut usize| {
+        let (size, low, c) = (read_u32(m, *d), read_u32(m, *d + 4), read_u32(m, *d + 8));
+        *d += 12;
+        let address = u64::from(low) | u64::from(c >> 28) << 32 | u64::from((c >> 2) & 7) << 36;
+        (address, u64::from(size) | u64::from((c >> 24) & 0xf) << 32)
+    };
+    for _ in 0..sends {
+        r.sends.push(buffer(&mut d));
+    }
+    for _ in 0..recvs {
+        r.recvs.push(buffer(&mut d));
+    }
+    r
+}
+
 /// Result of a request: a reply to write (bytes, optional new handle object to place at
 /// offset 0x0C), the server closing the session, or a deferral.
 enum Reply {
@@ -236,54 +317,56 @@ pub fn send_sync_request(
         c.x[0] = u64::from(result::SESSION_CLOSED);
         return Ok(None);
     }
-    let client = match k.sessions[s].endpoint {
-        Endpoint::Sm { client } => client,
-        Endpoint::Port(p) => {
-            return Err(format!(
-                "unsupported Horizon IPC: request to {:?}, a service hosted by the guest (svcAcceptSession/svcReplyAndReceive are not implemented)",
-                name_text(&k.ports[p].name)
-            ));
-        }
-    };
+    let endpoint = k.sessions[s].endpoint;
+    if let Endpoint::Port(p) = endpoint {
+        return Err(format!(
+            "unsupported Horizon IPC: request to {:?}, a service hosted by the guest (svcAcceptSession/svcReplyAndReceive are not implemented)",
+            name_text(&k.ports[p].name)
+        ));
+    }
     let tls = k.threads[k.current].tls;
     let mut message = [0u8; MESSAGE_BUFFER_SIZE];
     memory
         .read_into(tls, &mut message)
         .map_err(|e| format!("IPC message buffer unreadable: {e}"))?;
-    let header = read_u32(&message, 4);
-    let has_special = header >> 31 != 0;
-    let words0 = read_u32(&message, 0);
-    let descriptors = (words0 >> 16) & 0xffff;
-    let data_words = header & 0x3ff;
-    let (mut size, mut pid_offset, mut handles) = (8usize, None, 0u32);
-    if has_special {
-        let special = read_u32(&message, 8);
-        size += 4;
-        if special & 1 != 0 {
-            pid_offset = Some(size);
-            size += 8;
-        }
-        handles = (special >> 1 & 0xf) + (special >> 5 & 0xf);
-        size += 4 * handles as usize;
-    }
     // Kernel-side message validation: everything must fit the 0x100-byte buffer.
-    let statics = (descriptors >> 4) & 0xf;
-    let buffers = (descriptors >> 8 & 0xf) + (descriptors >> 12 & 0xf) + (descriptors >> 16 & 0xf);
-    size += 8 * statics as usize + 12 * buffers as usize + 4 * data_words as usize;
-    if size > MESSAGE_BUFFER_SIZE {
+    let mut req = parse_request(&message);
+    if req.size > MESSAGE_BUFFER_SIZE {
         c.x[0] = u64::from(result::MESSAGE_TOO_LARGE);
         return Ok(None);
     }
-    if handles != 0 || descriptors >> 4 != 0 || (header >> 10) & 0xf != 0 {
-        return Err(
-            "unsupported Horizon IPC: handles or buffer descriptors in a request to sm:".into(),
-        );
-    }
     // The kernel supplies the sender's process ID in the special header.
-    if let Some(at) = pid_offset {
+    if let Some(at) = req.pid_offset {
         message[at..at + 8].copy_from_slice(&k.config.process_id.to_le_bytes());
+        req.pid = Some(k.config.process_id);
     }
-    let reply = sm_request(k, s, client, &mut message);
+    let reply = match endpoint {
+        Endpoint::Sm { client } => {
+            if req.copy_handles + req.move_handles != 0
+                || !(req.statics.is_empty() && req.sends.is_empty() && req.recvs.is_empty())
+                || req.exchanges != 0
+                || req.recv_static_mode != 0
+            {
+                return Err(
+                    "unsupported Horizon IPC: handles or buffer descriptors in a request to sm:"
+                        .into(),
+                );
+            }
+            sm_request(k, s, client, &mut message)
+        }
+        Endpoint::Host(object) => {
+            if req.copy_handles + req.move_handles != 0 {
+                return Err(format!(
+                    "unsupported Horizon IPC: handles sent to a hosted service ({object:?})"
+                ));
+            }
+            match services::request(memory, k, s, object, &req, &message)? {
+                Outcome::Reply(bytes) => Reply::Bytes(bytes),
+                Outcome::Close => Reply::Close,
+            }
+        }
+        Endpoint::Port(_) => unreachable!("rejected above"),
+    };
     // Replies completed for other threads by this request (deferred lookups).
     for (address, bytes) in std::mem::take(&mut k.pending_replies) {
         memory
@@ -489,12 +572,12 @@ fn get_service_handle(
     if !allowed(k, name, false) {
         return Ok(Err(sm_result::NOT_ALLOWED));
     }
-    let service = k
-        .services
-        .iter()
-        .find(|s| s.name == *name)
-        .copied()
-        .ok_or(Deferred)?;
+    let Some(service) = k.services.iter().find(|s| s.name == *name).copied() else {
+        return match services::lookup(name) {
+            Some(object) => Ok(open_session(k, Endpoint::Host(object))),
+            None => Err(Deferred),
+        };
+    };
     let port = &mut k.ports[service.port];
     if port.server_closed {
         return Ok(Err(result::PORT_CLOSED));
@@ -520,7 +603,7 @@ fn register_service(
     if !allowed(k, name, true) {
         return Err(sm_result::NOT_ALLOWED);
     }
-    if k.services.iter().any(|s| s.name == *name) {
+    if k.services.iter().any(|s| s.name == *name) || services::lookup(name).is_some() {
         return Err(sm_result::ALREADY_REGISTERED);
     }
     let p = k.ports.len();

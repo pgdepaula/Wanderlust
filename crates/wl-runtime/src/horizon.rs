@@ -359,6 +359,8 @@ pub struct Kernel {
     /// IPC replies to write into other threads' message buffers.
     pub pending_replies: Vec<(u64, Vec<u8>)>,
     pub ipc: ipc::IpcStats,
+    /// State of the services hosted by the runtime.
+    pub host: crate::services::HostState,
     /// Process-local region (TLS slot 0 of the first ThreadLocal page).
     pub process_local_region: u64,
     pub heap_size: u64,
@@ -463,6 +465,7 @@ impl Process {
             services: Vec::new(),
             pending_replies: Vec::new(),
             ipc: ipc::IpcStats::default(),
+            host: crate::services::HostState::default(),
             process_local_region: 0,
             heap_size: 0,
             svc_counts: BTreeMap::new(),

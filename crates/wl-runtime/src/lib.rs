@@ -4,6 +4,7 @@ pub mod crypto;
 pub mod fp;
 pub mod horizon;
 pub mod ipc;
+pub mod services;
 pub mod simd;
 pub mod threads;
 use std::io::Write;
