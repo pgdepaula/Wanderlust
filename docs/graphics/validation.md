@@ -1593,8 +1593,10 @@ Validation passed 155 CPU tests in each feature configuration, strict package
 Clippy and whole-workspace formatting. All 78 GPU scenarios actually passed on
 each WSL OpenGL, native Windows D3D12 and native Windows Vulkan backend: 234
 passes, zero failures or explicit skips. Ordinary default tests ignore those
-78 GPU cases. A faithful ordinary source snapshot passed 359 CPU tests and strict
-workspace Clippy, excluding unfinished peer-owned runtime/compiler changes.
+78 GPU cases. The historical ordinary source snapshot reported 359 CPU tests and strict
+workspace Clippy, but shared its Cargo artifact directory with the live checkout.
+It is not independent proof of executing that exact source snapshot; the isolated
+artifact validation below supersedes that evidence.
 No original-game GPU execution is established by these synthetic fixtures.
 
 
@@ -1651,6 +1653,54 @@ The live workspace attempt encountered concurrent peer-owned CLI/analysis edits:
 E0560 for an instruction_limit field in Roots, followed by formatting differences
 in unfinished analysis source. Those files were preserved. An ordinary faithful
 snapshot of committed d4eb09c plus the exact GPU candidate, with identical
-Cargo.lock, passed 369 CPU tests (81 GPU tests ignored), strict workspace Clippy
-and whole-workspace formatting. This is snapshot validation, not a claim that
-unfinished live peer changes passed. Original-game GPU execution remains unproven.
+Cargo.lock, reported 369 CPU tests (81 GPU tests ignored), strict workspace Clippy
+and whole-workspace formatting. That run shared Cargo artifacts with the live
+checkout, so it cannot establish exact snapshot execution independently. The
+isolated artifact validation below supersedes that evidence. It does not claim
+that unfinished live peer changes passed. Original-game GPU execution remains unproven.
+
+
+## Native FLOAT3 vertex fetch
+
+Seven CPU tests validate B197 FLOAT3 position descriptors, 12-byte position
+footprints, tight/reordered/padded attributes, limits, invalid descriptor atomicity,
+aliases and remaps. An independently assembled ALD/MOV/AST vertex fixture exports
+the fetched position W through UV.x. Missing FLOAT3 W must become 1, even when
+adjacent guest bytes contain 0.25 or 0.5. The actual translated vertex program,
+GPFIFO channel and B197 indexed draw determine both coverage and texture samples.
+
+Two GPU scenarios verify tight 20-byte, reordered 32-byte and padded 24-byte
+strides against analytic coverage and an independently specified asymmetric
+texture. FLOAT3 samples column 36 of the 37-column texture; FLOAT4 with explicit
+W=0.5 samples column 18 and changes coverage. Switching formats rebuilds the
+pipeline without decoding shaders or uploading unchanged vertex bytes. Aliases
+reuse resources; CPU writes and backing remaps each upload the required 72 bytes.
+A legal FLOAT4 declaration whose offset exceeds the stride faults before drawing
+with stale state, retaining earlier accepted output for explicit publication.
+
+The three packing cases upload their actual 60, 96 and 72 guest bytes: 228 bytes
+total, with no CPU expansion of FLOAT3 to FLOAT4. Thirty-two warm draws add no
+resource reads/uploads, conversions, shader modules, pipelines, readbacks or waits.
+They still add 32 queue submissions and require one final visibility boundary.
+Representative debug CPU observations were 49.568ms and 1568 allocations/128
+reallocations on GL, 9.264ms and 1417/32 on D3D12, and 21.288ms and 1569/32 on
+Vulkan. Process-wide allocation traffic includes backend work; these observations
+are not GPU durations, game performance estimates or zero-copy claims.
+
+The exact six implementation/test/fixture files were compared byte-for-byte
+against an ordinary source snapshot based on d27d44b, retaining identical
+Cargo.lock. Its dedicated Cargo artifact directory was separate from both the
+live checkout and other source snapshots. Whole-workspace formatting and strict
+workspace Clippy passed; workspace tests passed 380 CPU tests with 83 GPU cases
+ignored. Graphics tests without default features passed 168 CPU tests. All 83
+GPU scenarios actually passed on isolated WSL OpenGL, native Windows D3D12 and
+native Windows Vulkan: 249 passes, zero failures or explicit skips. Windows
+executables included the final strengthened invalid-layout case. These results
+do not validate concurrent unfinished runtime edits.
+
+The isolated artifact directory is essential: Cargo executable names may collide
+across ordinary source snapshots sharing one target directory. Historical shared
+artifact snapshot counts above are retained as reported observations, not exact
+source-isolation proof. The GPU backend executions and their explicit pixel
+assertions are recorded separately. No original-game GPU submission or frame is
+established by these synthetic fixtures.

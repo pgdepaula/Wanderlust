@@ -362,7 +362,7 @@ separately. Nvhost service integration is not implemented.
 
 The bounded straight-line decoder shares scheduling and MOV handling across
 strict stage wrappers. Fragment SPH acceptance remains unchanged. Vertex VTG SPH
-accepts exactly generic-zero float4/generic-one float2 input, position xyzw and
+accepts generic-zero position/generic-one float2 input, position xyzw and
 generic-zero xy output. ALD B32/B64/B96/B128 accepts direct aligned attributes
 within those input vectors, RZ addressing, no output/per-patch/indirect modifiers,
 and the existing conservative barrier-zero/wait-one subset. AST accepts direct
@@ -373,7 +373,7 @@ vertex resources, built-ins and control flow, are unsupported.
 The translated vertex entry exports actual decoded clip-space position and
 screen-linear UV to the existing translated fragment stage. Typed stage wrappers
 prevent reuse of fragment header acceptance for vertex binaries. Pipelines pair
-vertex/fragment semantics, float4/float2 formats, stride and offsets; changing
+vertex/fragment semantics, position format, stride and offsets; changing
 geometry bytes does not change program identity. The resident fragment retains its
 shader module and binding layout for paired pipelines. Wgpu owns resource lifetimes
 across submitted work; no raw guest borrow is retained.
@@ -1191,3 +1191,23 @@ aliases and ignored-factor changes reuse the current pipeline. GpuDriver request
 completion and publication APIs are unchanged. Weighted MIN/MAX, logic operations,
 independent MRT blending and other factors remain unsupported. The inactive
 color-key register at 0x1354 and direct method-alignment validation are retained.
+
+
+## Native FLOAT3 vertex position fetching
+
+B197 SET_VERTEX_ATTRIBUTE_A(0), byte method 0x1160, now accepts FLOAT R32_G32_B32
+(component-width value 2) alongside R32_G32_B32_A32 (value 1). Stream zero,
+active source, no R/B swap and checked four-byte-aligned offsets remain required.
+Attribute one remains FLOAT2 UV. PositionFormat in the public VertexArray preserves
+the distinction: position spans 12 or 16 bytes, while the selected stream stride
+and inclusive limit bound the complete acquisition. Tight XYZ/UV vertices occupy
+20 bytes; padded or reordered fields also work when both fit the checked stride.
+
+The host vertex format is Float32x3 or Float32x4. The existing translated vec4
+input and guest ALD B128 instruction remain unchanged: native vertex fetch fills
+missing FLOAT3 W with 1. No CPU vertex repacking or synthetic shader constant
+replaces the fetched attribute. Format participates in both resident pipeline
+comparisons; compatible shader modules and raw vertex buffers can remain resident
+when only the attribute interpretation changes. The intermediate public
+set_vertex_program API retains its existing FLOAT4 behavior. GpuDriver submission,
+completion and publication APIs are unchanged.

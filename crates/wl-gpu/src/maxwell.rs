@@ -105,12 +105,28 @@ pub struct ProgramSource {
 }
 /// Backward-compatible name for the pixel-stage source descriptor.
 pub type FragmentSource = ProgramSource;
+/// Supported attribute-zero float component widths. Missing FLOAT3 W is filled
+/// with one by native vertex fetch; guest storage is never expanded on the CPU.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PositionFormat {
+    Float32x3,
+    Float32x4,
+}
+impl PositionFormat {
+    pub fn byte_size(self) -> u16 {
+        match self {
+            Self::Float32x3 => 12,
+            Self::Float32x4 => 16,
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VertexArray {
     pub address: GpuAddress,
     pub limit: GpuAddress,
     pub stride: u16,
     pub offsets: [u16; 2],
+    pub position_format: PositionFormat,
 }
 impl VertexArray {
     pub fn size(&self, first: u32, count: u32) -> Result<usize> {
@@ -258,8 +274,13 @@ impl Maxwell3d {
                 self.vertex_instance = Some(value);
             }
             0x1160 | 0x1164 => {
-                let size = if method == 0x1160 { 1 } else { 4 };
-                if value & !(0x3fffu32 << 7) != (7 << 27) | (size << 21) {
+                let fields = value & !(0x3fffu32 << 7);
+                let valid = if method == 0x1160 {
+                    matches!(fields, 0x38200000 | 0x38400000)
+                } else {
+                    fields == 0x38800000
+                };
+                if !valid {
                     return Err(bad());
                 }
                 self.vertex_attributes[((method - 0x1160) / 4) as usize] = Some(value);
@@ -497,13 +518,18 @@ impl Maxwell3d {
         };
         let stride = (format & 4095) as u16;
         let offsets = [((a0 >> 7) & 0x3fff) as u16, ((a1 >> 7) & 0x3fff) as u16];
+        let position_format = if (a0 >> 21) & 0x3f == 2 {
+            PositionFormat::Float32x3
+        } else {
+            PositionFormat::Float32x4
+        };
         let address = (u64::from(hi) << 32) | u64::from(lo);
         let limit = (u64::from(lhi) << 32) | u64::from(llo);
         if format & 0x1000 == 0
             || stride == 0
             || stride % 4 != 0
             || offsets.iter().any(|v| v % 4 != 0)
-            || u32::from(offsets[0]) + 16 > u32::from(stride)
+            || u32::from(offsets[0]) + u32::from(position_format.byte_size()) > u32::from(stride)
             || u32::from(offsets[1]) + 8 > u32::from(stride)
             || address % 4 != 0
             || limit < address
@@ -515,6 +541,7 @@ impl Maxwell3d {
             limit: GpuAddress(limit),
             stride,
             offsets,
+            position_format,
         })
     }
     pub fn constant_buffer(&self, group: u8, slot: u8) -> Result<ConstantBuffer> {

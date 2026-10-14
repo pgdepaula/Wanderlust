@@ -3,7 +3,7 @@ use crate::{
     Result,
     backend::Renderer,
     invalid,
-    maxwell::Maxwell3d,
+    maxwell::{Maxwell3d, PositionFormat},
     memory::*,
     shader_program::{FragmentProgram, VertexProgram},
     texture::TextureChanges,
@@ -57,6 +57,7 @@ pub(crate) struct ResidentVertex {
     size: u64,
     stride: u64,
     offsets: [u64; 2],
+    position_format: PositionFormat,
     stamp: Option<BackingStamp>,
     flip_y: bool,
     color: crate::raster::ColorState,
@@ -73,13 +74,14 @@ impl Renderer {
         stride: u64,
         offsets: [u64; 2],
     ) -> Result<()> {
-        self.set_vertex_program_raster(program, stride, offsets, None)
+        self.set_vertex_program_raster(program, stride, offsets, PositionFormat::Float32x4, None)
     }
     fn set_vertex_program_raster(
         &mut self,
         program: &VertexProgram,
         stride: u64,
         offsets: [u64; 2],
+        position_format: PositionFormat,
         raster: Option<crate::raster::Rasterization>,
     ) -> Result<()> {
         let flip_y = raster.is_some_and(|r| r.flip_y);
@@ -104,7 +106,9 @@ impl Renderer {
                         .max_vertex_buffer_array_stride,
                 )
             || offsets.iter().any(|v| v % 4 != 0)
-            || offsets[0].checked_add(16).is_none_or(|n| n > stride)
+            || offsets[0]
+                .checked_add(u64::from(position_format.byte_size()))
+                .is_none_or(|n| n > stride)
             || offsets[1].checked_add(8).is_none_or(|n| n > stride)
         {
             self.vertex = None;
@@ -115,6 +119,7 @@ impl Renderer {
                 && v.fragment == fragment.program
                 && v.stride == stride
                 && v.offsets == offsets
+                && v.position_format == position_format
                 && v.flip_y == flip_y
                 && v.color == color
                 && v.depth == depth
@@ -159,7 +164,10 @@ impl Renderer {
             });
         let attributes = [
             wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
+                format: match position_format {
+                    PositionFormat::Float32x3 => wgpu::VertexFormat::Float32x3,
+                    PositionFormat::Float32x4 => wgpu::VertexFormat::Float32x4,
+                },
                 offset: offsets[0],
                 shader_location: 0,
             },
@@ -216,6 +224,7 @@ impl Renderer {
             stamp: previous.as_ref().and_then(|v| v.stamp),
             stride,
             offsets,
+            position_format,
             flip_y,
             color,
             depth,
@@ -356,9 +365,16 @@ impl Renderer {
                 || v.fragment != fragment.program
                 || v.stride != stride
                 || v.offsets != offsets
+                || v.position_format != array.position_format
         }) {
             let program = selected.program.clone();
-            self.set_vertex_program_raster(&program, stride, offsets, self.hardware_raster)?;
+            self.set_vertex_program_raster(
+                &program,
+                stride,
+                offsets,
+                array.position_format,
+                self.hardware_raster,
+            )?;
         }
         let cached = self
             .vertex

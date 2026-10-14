@@ -726,3 +726,36 @@ support all five equations for the existing Rgba8Unorm attachment. Pinned
 checks blendability and relevant features; that version does not itself require
 MIN/MAX factors to be ONE. Canonicalization follows the guest equation semantics,
 not a claimed wgpu 26 validation error. No additional host feature is enabled.
+
+
+## Native three-component vertex position
+
+Pinned NVIDIA [SET_VERTEX_ATTRIBUTE_A](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/3d/clb197.h)
+defines stream bits4:0, active/inactive bit6, offset20:7, component widths26:21,
+numerical type29:27 and swap31. FLOAT is type7; R32_G32_B32 is width value2.
+Thus attribute-zero offset0 is 38400000, FLOAT2 UV offset12 is 38800600, and a
+20-byte stream is 1014 at SET_VERTEX_STREAM_A_FORMAT(0). These are byte method
+registers; only FIFO packet method addresses are divided by four.
+
+Pinned Mesa [nv50_formats.c](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nv50/nv50_formats.c)
+maps R32G32B32_FLOAT directly to native FLOAT/32_32_32.
+[nvc0_vertex_state_create](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nvc0/nvc0_vbo.c)
+uses the 12-byte element footprint rather than expanding storage. The default-W
+interpretation follows this driver mapping and [OpenGL 4.6 section10.2](https://registry.khronos.org/OpenGL/specs/gl/glspec46.core.pdf)
+missing-component rules. This is source-grounded evidence, not an original-Tegra
+hardware experiment.
+
+Pinned [wgpu-core26 vertex validation](https://github.com/gfx-rs/wgpu/blob/0c978d0d46c7eaf68f6d1ecf2ea1bd03a96b7c47/wgpu-core/src/validation.rs)
+accepts matching scalar kinds across vertex vector widths because the driver fills
+missing components. [Vulkan vertex input extraction](https://docs.vulkan.org/spec/latest/chapters/fxvertex.html#fxvertex-input-extraction)
+also specifies default components. Wanderlust therefore retains its vec4 WGSL
+input and selects native Float32x3; no translator special case is necessary.
+
+The original synthetic vertex-float3-w.asm was assembled and disassembled with
+unmodified envytools f102b82381f3f11cee113d16374c87091db039d9. Its existing
+80-byte vertex SPH and two instruction bundles total144 bytes, SHA-256
+cb440c7538b54c661d0f63ac9e2aad48393c3c27e87fa1467c67faa1bb263efb.
+ALD B128 loads position, ALD B64 loads UV, MOV R4,R3 exports fetched W as UV.x,
+then AST exports position/UV and EXIT terminates. Barrier/wait forms are unchanged.
+The instruction bytes were independently reassembled exactly. No commercial data
+or restrictive-license implementation source is included.
