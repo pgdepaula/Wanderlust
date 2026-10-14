@@ -15,6 +15,7 @@ pub enum FloatOperator {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntegerOperator {
     Add,
+    Subtract,
     And,
     Or,
     Xor,
@@ -409,6 +410,8 @@ impl Program {
                 } else if matches!(
                     word & !(255 | (255u64 << 8) | (255u64 << 20)),
                     0x5c10000000070000
+                        | 0x5c11000000070000
+                        | 0x5c12000000070000
                         | 0x5c47000000070000
                         | 0x5c47020000070000
                         | 0x5c47040000070000
@@ -421,8 +424,8 @@ impl Program {
                         | 0x5c21038000070000
                         | 0x5c21078000070000
                 ) {
-                    let left = ((word >> 8) & 255) as u8;
-                    let right = ((word >> 20) & 255) as u8;
+                    let mut left = ((word >> 8) & 255) as u8;
+                    let mut right = ((word >> 20) & 255) as u8;
                     if write_barrier != 7
                         || [left, right]
                             .iter()
@@ -430,12 +433,18 @@ impl Program {
                     {
                         return Err(fail("unready integer ALU operand or unsupported schedule"));
                     }
+                    // Negating source A computes B-A, source B computes A-B.
+                    // Both bits encode the distinct, unsupported IADD.PO form.
+                    if word & !(255 | (255u64 << 8) | (255u64 << 20)) == 0x5c12000000070000 {
+                        std::mem::swap(&mut left, &mut right);
+                    }
                     Operation::Integer {
                         dst,
                         left,
                         right,
                         operator: match word & !(255 | (255u64 << 8) | (255u64 << 20)) {
                             0x5c10000000070000 => IntegerOperator::Add,
+                            0x5c11000000070000 | 0x5c12000000070000 => IntegerOperator::Subtract,
                             0x5c47000000070000 => IntegerOperator::And,
                             0x5c47020000070000 => IntegerOperator::Or,
                             0x5c47040000070000 => IntegerOperator::Xor,
@@ -918,6 +927,7 @@ fn emit_integer(s: &mut String, dst: u8, left: u8, right: u8, operator: IntegerO
     use std::fmt::Write;
     let (symbol, wrap) = match operator {
         IntegerOperator::Add => ("+", None),
+        IntegerOperator::Subtract => ("-", None),
         IntegerOperator::And => ("&", None),
         IntegerOperator::Or => ("|", None),
         IntegerOperator::Xor => ("^", None),

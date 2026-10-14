@@ -7,7 +7,7 @@ use crate::{
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Stamp {
     address: GuestAddress,
-    version: (u64, u64),
+    observed: (u64, u64),
 }
 pub(crate) struct ResidentFragment {
     pub shader: wgpu::ShaderModule,
@@ -27,7 +27,7 @@ pub(crate) struct ResidentFragment {
 pub(crate) struct SelectedShader {
     guest: GuestAddress,
     size: usize,
-    version: (u64, u64),
+    observed: (u64, u64),
 }
 impl Renderer {
     /// Select/load the guest binary using actual B197 pixel-program state. This
@@ -62,9 +62,16 @@ impl Renderer {
                 .checked_add(cache.size as u64)
                 .is_some_and(|end| end <= 1 << 40)
                 && map.resolve(source.address, cache.size).ok() == Some(cache.guest)
-                && changes.stamp(cache.guest.0..cache.guest.0 + cache.size as u64) == cache.version
+                && changes.unchanged_since(
+                    cache.guest.0..cache.guest.0 + cache.size as u64,
+                    cache.observed,
+                )
         });
         if cached.is_some() {
+            self.selected_shader
+                .as_mut()
+                .expect("cached shader")
+                .observed = changes.observation();
             self.counters.shader_cache_hits += 1;
         } else {
             self.selected_shader = None;
@@ -79,7 +86,7 @@ impl Renderer {
             self.selected_shader = Some(SelectedShader {
                 guest,
                 size: binary.len(),
-                version: changes.stamp(guest.0..guest.0 + binary.len() as u64),
+                observed: changes.observation(),
             });
         }
         if self
@@ -269,15 +276,19 @@ impl Renderer {
             let guest = map.resolve(GpuAddress(gpu), 4)?;
             let stamp = Stamp {
                 address: guest,
-                version: changes.stamp(guest.0..guest.0 + 4),
+                observed: changes.observation(),
             };
-            if stamps[n] != Some(stamp) {
+            if !stamps[n].is_some_and(|old| {
+                old.address == guest && changes.unchanged_since(guest.0..guest.0 + 4, old.observed)
+            }) {
                 let word = cb.read_word(reference.offset, map, memory)?;
                 data[n * 4..n * 4 + 4].copy_from_slice(&word.to_le_bytes());
-                stamps[n] = Some(stamp);
                 self.counters.constant_guest_bytes += 4;
                 self.counters.guest_to_host_bytes += 4;
             }
+            // Advance only after a proved hit or a successful acquisition.
+            // Missing journal history still forces a conservative reread.
+            stamps[n] = Some(stamp);
         }
         // Resolve the uniform handle through actual descriptor pools before uploads.
         let texture = if let Some(input) = f.program.texture_input() {

@@ -1300,3 +1300,64 @@ perform ten readbacks/waits, 74,400 staging bytes and 20 queue submissions. The
 vertex case decodes its 176-byte program once; the unchanged repeat adds no shader
 or geometry upload and no pipeline/module creation. These are bounded synthetic
 workloads, not original-game shader coverage or game performance measurements.
+
+
+## IADD subtraction, byte observation and fragment-cache endurance
+
+`subtract.rs` adds five CPU cases for independent source-negation encodings,
+operand normalization, WGSL/Naga validation, RZ/readiness, source/destination
+aliasing, strict modifier/PO rejection, provenance clearing and arithmetic hazard
+taint. The existing integer suites now distinguish supported single-negation
+forms from the independently assembled, unsupported both-bit PO encoding.
+
+Three real GPU scenarios enter through GpuDriver→GPFIFO→B197. The word oracle
+checks 39 input pairs for each subtraction form (78 accepted draws), including
+wraparound, signed-bit boundaries and a deterministic 32-pair generator. Expected
+RGBA is the separately calculated low 32-bit result in little-endian byte order;
+`0x89abcdef−0x01020304` must produce `[235,202,169,136]`. A separate sweep checks
+all 256 possible output-byte values on all four RGBA channels. The observation
+fixture uses bounded exact float construction rather than exporting arbitrary
+integer bits as NaNs. The vertex shader uses both encodings and an independent
+half-coordinate coverage oracle for the explicitly normal finite geometry.
+
+A reproduced regression showed an unchanged fragment being decoded again when
+unrelated writes rotated the global journal, despite unchanged shader modules and
+pipelines. PS/CB observations now retain no-write proofs across frequent accesses.
+The 256 data-changing cases retain one PS decode through journal rotation. A code
+write followed by 65 unrelated writes still forces acquisition and rejects PO;
+missing history cannot validate an old shader. Another case submits a valid draw,
+then faults on PO before publication. RAM stays unchanged until explicit publish,
+which returns the earlier accepted pixels `[67,51,34,17]` without draw replay.
+
+A warm endurance request carries 128 identical draws in 4096 consumed command bytes.
+It adds one GPFIFO request, two entry decodes (preflight/execution), 129 borrow calls,
+265,216 borrowed-span bytes (suffix reacquisition), 128 host queue submissions and
+128 target reuses. It adds no shader/CB reads, uploads, modules, pipelines,
+readbacks or explicit completion waits. The final publication adds exactly one
+readback and one wait. Identical output plus counters proves reuse/endurance;
+differentiated ordering remains covered by the existing multi-draw scenarios.
+This does not claim host submission batching or copied command payloads.
+
+Representative debug CPU observations for this 128-draw request were 56.64ms with
+6056 allocations/520 reallocations on GL, 32.64ms with 5379/128 on D3D12 and 69.93ms
+with 6019/128 on Vulkan. Process-wide allocator traffic includes wgpu and channel
+bookkeeping; these are not GPU durations, zero-copy claims or game benchmarks.
+The 256 byte cases read 2048 CB bytes and upload 1020, with one 464-byte PS decode.
+They intentionally request one publication/readback per observed byte result.
+The normal 78-draw word case reads 624 CB bytes/uploads 600; its final PO fault adds
+an unsuccessful decode attempt, giving three attempts/1392 shader bytes including
+two valid programs. One target allocation and 77 reuses precede that fault.
+
+Validation passed 133 CPU tests with default features and 133 without them, strict
+package Clippy and whole-workspace formatting. All 65 GPU scenarios passed on each
+WSL OpenGL, native Windows D3D12 and native Windows Vulkan backend: 195 actual
+passes, no skips in explicit execution. Normal package tests report 65 GPU cases
+ignored. A faithful ordinary source snapshot passed 337 CPU tests (65 GPU tests
+ignored) and strict workspace Clippy, excluding peer-owned unfinished files.
+
+The driver still bounds pending CPU write notifications to 32 before publication
+and outstanding completion records to 64. The endurance request respects these
+limits using immutable commands and one completion record. No guard was relaxed;
+more general disjoint-write publication remains a separate coherence limitation.
+Original-game GPU submissions and general Maxwell shader compatibility remain
+unproven.

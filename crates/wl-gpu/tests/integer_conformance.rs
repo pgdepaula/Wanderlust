@@ -186,13 +186,12 @@ fn adversarial_iadd_modifiers_and_condition_codes_rejected() {
     let fixture_word = u64::from_le_bytes(FRAGMENT_BIN[0x88..0x90].try_into().unwrap());
     assert_eq!(fixture_word, 0x5c10000000570400);
 
-    // Exact envyas-produced negatives: carry-in (.X, bit 43), CC (bit 47), .SAT (bit 50), negation (bit 49)
+    // Exact envyas-produced negatives: carry-in (.X, bit 43), CC (bit 47), .SAT (bit 50), PO (both bits49/48)
     for word in [
         fixture_word | (1 << 43), // Carry in (.X)
         fixture_word | (1 << 47), // Condition code write (CC)
         fixture_word | (1 << 50), // Saturation (.SAT)
-        fixture_word | (1 << 49), // Negation (-srcA)
-        fixture_word | (1 << 48), // Negation (-srcB)
+        fixture_word | (3 << 48), // IADD.PO, not ordinary double negation
     ] {
         let mut b = FRAGMENT_BIN.to_vec();
         mutate_word(&mut b, 0x88, |_| word);

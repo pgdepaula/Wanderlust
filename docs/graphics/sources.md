@@ -571,3 +571,25 @@ NAK `OpIMnMx::fold` compares signed i32 values and returns the selected raw u32
 payload. Original envyas/envydis corroborate the fixtures; no source implementation
 was copied. This preserves the previously verified static predicate, operand,
 modifier and six-stall scheduling subset.
+
+
+## Single-negation IADD and the distinct PO encoding
+
+Pinned envytools GM107 and UAM `emitIADD` establish source A negation bit 49 and
+source B negation bit 48. Supported bases are `0x5c12000000070000` (B−A) and
+`0x5c11000000070000` (A−B). The maintained MIT NAK
+[`OpIAdd2::encode` and legalizer](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs)
+explicitly distinguish both bits together as IADD.PO; that encoding must not be
+interpreted as ordinary double negation. The IR fold for ordinary IAdd2 does not
+establish PO behavior. Its hardware semantics remain unsupported here. Original
+unmodified envyas/envydis assemble both supported forms and the negative PO fixture.
+No reference implementation code was copied.
+
+The byte-observation fixture extracts each result byte, constructs the exact
+finite float 0.5+byte/512, subtracts 0.5 and multiplies by rounded f32(512/255), bits
+`0x40008081`. This permits independent integer oracles to verify raw arithmetic
+through an RGBA8 target without NaN exports or a new guest conversion instruction.
+The bounded byte domain is verified exhaustively; it is not a general float/int
+conversion instruction implementation. The vertex fixture subtracts exponent bit
+`0x00800000`; its half-coordinate oracle is limited to the chosen finite nonzero
+normal values with biased exponent >=2, not general floating division.

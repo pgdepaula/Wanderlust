@@ -39,13 +39,12 @@ fn independent_integer_fields_and_raw_u32_lowering() {
 }
 #[test]
 fn independently_assembled_integer_modifiers_and_predicate_outputs_reject() {
-    // Exact envyas-produced negatives: carry, CC, saturation, negation, execution predicates.
+    // Exact envyas-produced negatives: carry, CC, saturation, PO, execution predicates.
     for word in [
         0x5c10080000570400,
         0x5c10800000570400,
         0x5c14000000570400,
-        0x5c12000000570400,
-        0x5c11000000570400,
+        0x5c13000000570400, // both negation bits select unsupported IADD.PO
         0x5c10000000500400,
         0x5c10000000580400,
     ] {

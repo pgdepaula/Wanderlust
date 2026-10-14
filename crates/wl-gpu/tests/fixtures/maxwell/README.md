@@ -181,3 +181,22 @@ exports position and UV. For the finite coordinate fixture this clamps X above
 zero and Y below zero; it is not a general floating min/max implementation.
 The 176-byte VS uses the existing vertex SPH.
 SHA-256: `a432fcaab574f0d6e95a5974c6e9b5c1ca623755ab4d3cc13ca0427899aa3001`.
+
+
+The following IADD fixtures use original unmodified pinned envyas/envydis and the
+existing exact PS/VS headers. No game content is included.
+
+| Fixture | Bytes | SHA-256 |
+|---|---:|---|
+| iadd-bytes.bin (A−B) | 464 | `52a32d2dc8a06ac7b17dc8b8e6e4fae0d1edbd11fdbaa5fd87003c4d8ec629c1` |
+| iadd-bytes-left.bin (B−A) | 464 | `8cb20ef54416cdc4b106b71566fde160a14b2d61b2083ff694ff449ac788344b` |
+| iadd-bytes-po-negative.bin (reject) | 464 | `7253e0d2c4e3fe9dc925ba77ccf59f6ca97fb2c29c399f5c031d3b6652e6c1dd` |
+| vertex-iadd.bin | 176 | `ed6d5383bd5bf3ff65a4df27f9219ff0d858e3d0aeba617f9760d14f5073b881` |
+
+Each PS has 36 instructions and 13 GPRs. B64 loads R4/R5; IADD writes R9 at full
+PC 0x98. The byte observer exports the low-to-high result bytes as RGBA using
+unsigned shifts/masks and finite float arithmetic. Both-negation spelling in the
+assembler produces the PO negative fixture; it is never executed as subtraction.
+The VS has 7 GPRs and uses both legal negation forms to modify X/Y raw bits before
+position/UV export. Half-coordinate expectations apply only to the explicitly
+specified normal finite input geometry.

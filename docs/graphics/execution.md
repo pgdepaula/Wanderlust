@@ -1044,3 +1044,24 @@ scheduling, resource provenance erasure and arithmetic hazard taint follow the
 existing integer path. Signed comparison changes only bit 48 of the accepted
 unsigned encodings. Dynamic selection predicates, CC, extended modes, alternate
 operand forms and general predicated execution remain unsupported.
+
+
+## IADD subtraction and fragment source observations
+
+Both shader stages accept the two GPR IADD forms with exactly one source negated.
+Negated source A computes B−A, and negated source B computes A−B, modulo 2^32.
+They normalize to one raw-u32 subtraction operation; negated-A swaps the source
+order before lowering. Source/destination aliasing reads old operand values. RZ,
+readiness, six-stall scheduling, provenance clearing and both-source arithmetic
+hazard propagation remain unchanged. Both negation bits together are the distinct
+IADD.PO encoding and remain rejected, alongside saturation, CC, extended carry,
+other operands and predicated execution.
+
+Selected fragment code and packed CB words use the existing bounded journal
+observation proof already used by geometry. Complete canonical mappings, CB bounds
+and paired-access preflight remain mandatory. A proved unchanged access advances
+its observation without reading guest bytes; changed/evicted history or an epoch
+change forces acquisition. CB staging observations commit only after the entire
+resource synchronization succeeds. These cursors do not replace pending-output
+publication stamps or erase CPU patch history. GPU-newer aliases still require
+the guarded source acquisition/publication path before reuse.
