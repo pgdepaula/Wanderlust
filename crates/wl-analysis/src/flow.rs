@@ -16,7 +16,7 @@
 //! table only adds control-flow edges and block leaders.
 use super::{Block, Image};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use wl_aarch64::{FpOp, Index, Op, Operand, Reg, SimdOp, Width};
+use wl_aarch64::{ExtensionOp, FpOp, Index, Op, Operand, Reg, SimdOp, Width};
 use wl_common::GuestAddr;
 
 /// Largest jump table accepted (entries).
@@ -224,6 +224,8 @@ fn defs(op: &Op) -> Vec<(Reg, Width)> {
             vec![(dst, width)]
         }
         Op::Simd(SimdOp::MoveToGeneral { dst, width, .. }) => vec![(dst, width)],
+        Op::Extension(ExtensionOp::Counter(c)) => vec![(c.reg, Width::X64)],
+        Op::Extension(ExtensionOp::Crc(c)) => vec![(c.dst, Width::W32)],
         _ => vec![],
     }
 }
@@ -255,7 +257,8 @@ fn preserves_flags(op: &Op) -> bool {
         | Op::Conditional { .. }
         | Op::CompareBranch { .. }
         | Op::TestBranch { .. }
-        | Op::Indirect { .. } => true,
+        | Op::Indirect { .. }
+        | Op::Extension(_) => true,
         _ => false,
     }
 }

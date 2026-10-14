@@ -77,6 +77,10 @@ pub const SQSUB: u8 = 27;
 pub const UQSUB: u8 = 28;
 pub const SABA: u8 = 29;
 pub const UABA: u8 = 30;
+/// Signed saturating doubling multiply returning the high half (SQDMULH).
+pub const SQDMULH: u8 = 31;
+/// SQDMULH with rounding (SQRDMULH).
+pub const SQRDMULH: u8 = 32;
 
 /// Shifts by the signed low byte of `amount` (SSHL/USHL): positive left, negative right.
 fn shift_by_register(x: u64, amount: u64, e: u32, signed: bool) -> u64 {
@@ -187,6 +191,15 @@ fn int_lane(op: u8, x: u64, y: u64, d: u64, e: u32, qc: &mut bool) -> u64 {
             qc,
         ),
         UQSUB => saturate(i128::from(x) - i128::from(y), 0, emask(e).into(), qc),
+        SQDMULH | SQRDMULH => {
+            let round = if op == SQRDMULH { 1i128 << (e - 1) } else { 0 };
+            saturate(
+                (2 * i128::from(sx) * i128::from(sy) + round) >> e,
+                signed_min(e).into(),
+                signed_max(e).into(),
+                qc,
+            )
+        }
         _ => 0,
     };
     r & emask(e)
@@ -571,6 +584,12 @@ pub const UQXTN: u8 = 2;
 pub const SQXTUN: u8 = 3;
 pub const SHRN: u8 = 4;
 pub const RSHRN: u8 = 5;
+pub const SQSHRN: u8 = 6;
+pub const SQRSHRN: u8 = 7;
+pub const UQSHRN: u8 = 8;
+pub const UQRSHRN: u8 = 9;
+pub const SQSHRUN: u8 = 10;
+pub const SQRSHRUN: u8 = 11;
 /// Narrowing: `n` source lanes of `2e` bits become `e`-bit lanes, written to the lower half
 /// (upper half zeroed) or, for the "2" forms, to the upper half with the lower half kept.
 pub fn narrow(
@@ -602,6 +621,25 @@ pub fn narrow(
                 let v = x.min(emask(e));
                 qc |= v != x;
                 v
+            }
+            SQSHRN | SQRSHRN | UQSHRN | UQRSHRN | SQSHRUN | SQRSHRUN => {
+                // Shift right (rounding for the R forms) at full precision, then saturate:
+                // signed source for SQ*, unsigned for UQ*; SQ*UN saturate to unsigned.
+                let rounding = matches!(op, SQRSHRN | UQRSHRN | SQRSHRUN);
+                let source: i128 = if matches!(op, UQSHRN | UQRSHRN) {
+                    i128::from(x)
+                } else {
+                    i128::from(s)
+                };
+                let shifted = (source + if rounding { 1i128 << (amount - 1) } else { 0 }) >> amount;
+                let (lo, hi): (i128, i128) = if matches!(op, SQSHRN | SQRSHRN) {
+                    (signed_min(e).into(), signed_max(e).into())
+                } else {
+                    (0, emask(e).into())
+                };
+                let v = shifted.clamp(lo, hi);
+                qc |= v != shifted;
+                v as u64 & emask(e)
             }
             _ => {
                 let v = s.clamp(0, emask(e) as i64);
@@ -926,6 +964,45 @@ pub fn long3(op: u8, e: u32, n: u32, a: u128, b: u128, d: u128, upper: bool, sig
             _ => widen(lane(half(a), e, i)) * y,
         };
         r = with_lane(r, w, i, v as u64);
+    }
+    r
+}
+
+/// MULL/MLAL/MLSL by element: `long3` with the second operand taken from element `index`
+/// of `b` (source element size `e`).
+#[allow(clippy::too_many_arguments)]
+pub fn long3_element(
+    op: u8,
+    e: u32,
+    n: u32,
+    a: u128,
+    b: u128,
+    index: u32,
+    d: u128,
+    upper: bool,
+    signed: bool,
+) -> u128 {
+    let y = lane(b, e, index);
+    let mut splat = 0u128;
+    for i in 0..128 / e {
+        splat = with_lane(splat, e, i, y);
+    }
+    long3(op, e, n, a, splat, d, upper, signed)
+}
+/// SADDLP/UADDLP (and SADALP/UADALP when `accumulate`): adjacent pairs of `e`-bit lanes
+/// of `a` added into `n` lanes of `2e` bits.
+pub fn add_long_pairwise(e: u32, n: u32, a: u128, d: u128, signed: bool, accumulate: bool) -> u128 {
+    let w = 2 * e;
+    let mut r = 0u128;
+    for i in 0..n {
+        let (x, y) = (lane(a, e, 2 * i), lane(a, e, 2 * i + 1));
+        let sum = if signed {
+            (sext(x, e) as i128 + sext(y, e) as i128) as u64
+        } else {
+            x.wrapping_add(y)
+        };
+        let acc = if accumulate { lane(d, w, i) } else { 0 };
+        r = with_lane(r, w, i, sum.wrapping_add(acc) & emask(w));
     }
     r
 }

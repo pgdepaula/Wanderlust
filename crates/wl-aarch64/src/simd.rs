@@ -334,6 +334,27 @@ pub enum SimdOp {
         m: u8,
         keep: bool,
     },
+    /// MULL/MLAL/MLSL by element (runtime `simd::long3_element`; `esize` is the source size).
+    LongElement {
+        esize: u8,
+        lanes: u8,
+        op: u8,
+        d: u8,
+        n: u8,
+        m: u8,
+        index: u8,
+        upper: bool,
+        signed: bool,
+    },
+    /// SADDLP/UADDLP/SADALP/UADALP (`esize` is the source size, `lanes` the result count).
+    AddLongPairwise {
+        esize: u8,
+        lanes: u8,
+        d: u8,
+        n: u8,
+        signed: bool,
+        accumulate: bool,
+    },
     /// Three registers of different widths (runtime `simd::long3`).
     Long3 {
         esize: u8,
@@ -403,6 +424,8 @@ mod rt {
     pub const UQSUB: u8 = 28;
     pub const SABA: u8 = 29;
     pub const UABA: u8 = 30;
+    pub const SQDMULH: u8 = 31;
+    pub const SQRDMULH: u8 = 32;
     pub const FADD: u8 = 0;
     pub const FSUB: u8 = 1;
     pub const FMUL: u8 = 2;
@@ -470,6 +493,16 @@ mod rt {
     pub const SQXTUN: u8 = 3;
     pub const SHRN: u8 = 4;
     pub const RSHRN: u8 = 5;
+    pub const SQSHRN: u8 = 6;
+    pub const SQRSHRN: u8 = 7;
+    pub const UQSHRN: u8 = 8;
+    pub const UQRSHRN: u8 = 9;
+    pub const SQSHRUN: u8 = 10;
+    pub const SQRSHRUN: u8 = 11;
+    // `simd::long3` selectors.
+    pub const MLAL: u8 = 6;
+    pub const MLSL: u8 = 7;
+    pub const MULL: u8 = 8;
     pub const ADDV: u8 = 0;
     pub const SMAXV: u8 = 1;
     pub const UMAXV: u8 = 2;
@@ -1168,15 +1201,21 @@ fn three_same(w: u32, pc: GuestAddr, rd: u8, rn: u8, rm: u8, scalar: bool) -> De
         (false, 0x15) => (rt::SMIN, true, false),
         (true, 0x15) => (rt::UMIN, true, false),
         (false, 0x17) => (rt::ADD, true, true),
+        (false, 0x16) => (rt::SQDMULH, false, false),
+        (true, 0x16) => (rt::SQRDMULH, false, false),
         _ => return unsupported(w, pc),
     };
+    let doubling = matches!(op, rt::SQDMULH | rt::SQRDMULH);
+    if doubling && !(size == 1 || size == 2) {
+        return unsupported(w, pc);
+    }
     if size == 3 && (!allows_64 || (!scalar && !q)) {
         return unsupported(w, pc);
     }
     if scalar {
         // Scalar integer three-same: 64-bit add/sub/compare/shift, saturating at any size.
         let saturating = matches!(op, rt::SQADD | rt::UQADD | rt::SQSUB | rt::UQSUB);
-        if pairwise || (!saturating && size != 3) || !allows_64 {
+        if pairwise || (!saturating && !doubling && size != 3) || (!allows_64 && !doubling) {
             return unsupported(w, pc);
         }
     }
@@ -1246,6 +1285,21 @@ fn two_misc(w: u32, pc: GuestAddr, rd: u8, rn: u8, scalar: bool) -> Decoded {
     let opcode = field(w, 12, 5);
     let a = size >> 1;
     let sz = size & 1;
+    // SADDLP/UADDLP (0x02) and SADALP/UADALP (0x06).
+    if !scalar && (opcode == 0x02 || opcode == 0x06) {
+        if size == 3 {
+            return unsupported(w, pc);
+        }
+        let esize = 8u32 << size;
+        return Ok(Some(Op::Simd(SimdOp::AddLongPairwise {
+            esize: esize as u8,
+            lanes: ((if q { 128 } else { 64 }) / (2 * esize)) as u8,
+            d: rd,
+            n: rn,
+            signed: !u,
+            accumulate: opcode == 0x06,
+        })));
+    }
     // Narrowing (integer): XTN/SQXTN/UQXTN/SQXTUN.
     if matches!(
         (u, opcode),
@@ -1636,6 +1690,29 @@ fn shift_immediate(w: u32, pc: GuestAddr, rd: u8, rn: u8, scalar: bool) -> Decod
     let left = immhb - esize;
     // Narrowing and widening forms interpret immh as the narrow element size.
     match opcode {
+        0x10..=0x13 if u || opcode >= 0x12 => {
+            // SQSHRN/SQRSHRN (U=0), UQSHRN/UQRSHRN (U=1, 0x12/0x13), SQSHRUN/SQRSHRUN (U=1).
+            if immh & 8 != 0 {
+                return unsupported(w, pc);
+            }
+            let op = match (u, opcode) {
+                (false, 0x12) => rt::SQSHRN,
+                (false, 0x13) => rt::SQRSHRN,
+                (true, 0x12) => rt::UQSHRN,
+                (true, 0x13) => rt::UQRSHRN,
+                (true, 0x10) => rt::SQSHRUN,
+                _ => rt::SQRSHRUN,
+            };
+            return Ok(Some(Op::Simd(SimdOp::Narrow {
+                esize: esize as u8,
+                lanes: if scalar { 1 } else { (64 / esize) as u8 },
+                op,
+                d: rd,
+                n: rn,
+                upper: q && !scalar,
+                amount: right as u8,
+            })));
+        }
         0x10 | 0x11 if !u => {
             if immh & 8 != 0 || scalar {
                 return unsupported(w, pc);
@@ -1765,8 +1842,55 @@ fn by_element(w: u32, pc: GuestAddr, rd: u8, rn: u8, scalar: bool) -> Decoded {
             index: index as u8,
         })));
     }
+    // SQDMULH/SQRDMULH by element (vector and scalar), 16- and 32-bit lanes.
+    if !u && (opcode == 0xc || opcode == 0xd) {
+        let (esize, index, m) = match size {
+            1 => (16u32, h << 2 | l << 1 | m_bit, rm4),
+            2 => (32, h << 1 | l, m_bit << 4 | rm4),
+            _ => return unsupported(w, pc),
+        };
+        return Ok(Some(Op::Simd(SimdOp::IntElement {
+            shape: if scalar {
+                Shape::scalar(esize)
+            } else {
+                Shape::vector(esize, q)
+            },
+            op: if opcode == 0xc {
+                rt::SQDMULH
+            } else {
+                rt::SQRDMULH
+            },
+            d: rd,
+            n: rn,
+            m: m as u8,
+            index: index as u8,
+        })));
+    }
     if scalar {
         return unsupported(w, pc);
+    }
+    // SMULL/UMULL, SMLAL/UMLAL, SMLSL/UMLSL by element (Q selects the "2" upper forms).
+    if matches!(opcode, 0x2 | 0x6 | 0xa) {
+        let (esize, index, m) = match size {
+            1 => (16u32, h << 2 | l << 1 | m_bit, rm4),
+            2 => (32, h << 1 | l, m_bit << 4 | rm4),
+            _ => return unsupported(w, pc),
+        };
+        return Ok(Some(Op::Simd(SimdOp::LongElement {
+            esize: esize as u8,
+            lanes: (64 / esize) as u8,
+            op: match opcode {
+                0x2 => rt::MLAL,
+                0x6 => rt::MLSL,
+                _ => rt::MULL,
+            },
+            d: rd,
+            n: rn,
+            m: m as u8,
+            index: index as u8,
+            upper: q,
+            signed: !u,
+        })));
     }
     let op = match (u, opcode) {
         (false, 0x8) => rt::MUL,

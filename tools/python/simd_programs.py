@@ -6,6 +6,42 @@ differential harness: X2 points into scratch memory, X30 is the return address, 
 register (X and V) starts with deterministic test values.
 """
 PROGRAMS = {
+    # CRC32/CRC32C and the crypto-extension forms found in game code (encoded with GNU as
+    # from devkitA64, Capstone round-trip checked like the Keystone encodings).
+    'simd_gaps': [
+        'sqdmulh v0.4s, v1.4s, v3.4s',
+        'sqdmulh v4.8h, v5.8h, v6.8h',
+        'sqrdmulh v7.4s, v8.4s, v9.4s',
+        'sqrdmulh v10.4h, v11.4h, v12.4h',
+        'sqdmulh v13.4s, v14.4s, v15.s[1]',
+        'sqrdmulh v16.8h, v17.8h, v3.h[5]',
+        'sqdmulh s18, s19, v20.s[3]',
+        'sqrdmulh h21, h22, v4.h[2]',
+        'smull v23.2d, v24.2s, v25.s[1]',
+        'smull2 v26.2d, v27.4s, v28.s[2]',
+        'umull v29.4s, v31.4h, v5.h[7]',
+        'smlal v0.4s, v1.4h, v3.h[0]',
+        'umlsl2 v4.4s, v5.8h, v6.h[3]',
+        'saddlp v7.2d, v8.4s',
+        'uaddlp v9.8h, v10.16b',
+        'sadalp v11.4s, v12.8h',
+        'uadalp v13.1d, v14.2s',
+        'sqshrn v15.8b, v16.8h, #3',
+        'sqrshrn v17.4h, v18.4s, #7',
+        'sqrshrn2 v19.8h, v20.4s, #16',
+        'uqshrn v21.2s, v22.2d, #9',
+        'uqrshrn v23.8b, v24.8h, #1',
+        'sqshrun v25.4h, v26.4s, #5',
+        'sqrshrun2 v27.16b, v28.8h, #8',
+    ],
+    'crypto_crc': [
+        'crc32b w0, w1, w2', 'crc32h w3, w4, w5', 'crc32w w6, w7, w8', 'crc32x w9, w10, x11',
+        'crc32cb w12, w13, w14', 'crc32ch w15, w16, w17', 'crc32cw w18, w19, w20',
+        'crc32cx w21, w22, x23', 'aese v0.16b, v1.16b', 'aesd v2.16b, v3.16b',
+        'aesimc v4.16b, v5.16b', 'sha1c q6, s7, v8.4s', 'sha256su0 v9.4s, v10.4s',
+        'pmull v11.1q, v12.1d, v13.1d', 'aese v14.16b, v14.16b', 'sha1c q15, s15, v15.4s',
+        'aesd v16.16b, v31.16b', 'pmull v17.1q, v17.1d, v18.1d',
+    ],
     'fp_arith_d': [
         'fadd d0, d1, d2', 'fsub d3, d4, d5', 'fmul d6, d7, d8', 'fdiv d9, d10, d11',
         'fnmul d12, d13, d14', 'fmax d15, d16, d17', 'fmin d18, d19, d20', 'fmaxnm d21, d22, d23',

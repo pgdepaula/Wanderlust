@@ -415,7 +415,7 @@ fn analysis_summary(program: &Program) -> serde_json::Value {
         .collect();
     serde_json::json!({
         "entry": program.entry,
-        "required_roots": program.roots.len() - program.speculative_roots_accepted - program.flow_roots,
+        "required_roots": program.required_roots,
         "flow_roots": program.flow_roots,
         "jump_tables": program.jump_tables.len(),
         "jump_table_entries": program.jump_tables.values().sum::<usize>(),

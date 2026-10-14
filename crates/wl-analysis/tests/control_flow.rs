@@ -151,3 +151,16 @@ fn stored_code_address_becomes_a_root() {
     assert!(starts(&p).contains(&0x10054));
     assert_eq!(p.flow_roots, 1);
 }
+#[test]
+fn duplicate_roots_are_counted_without_underflow() {
+    // The same address as entry, twice as a speculative root, and reached again by flow.
+    let roots = wl_analysis::Roots {
+        required: vec![GuestAddr(0x10000), GuestAddr(0x10054)],
+        speculative: vec![GuestAddr(0x10000), GuestAddr(0x10054), GuestAddr(0x10054)],
+        allow_unsupported: true,
+    };
+    let p = wl_analysis::discover_roots(&image(&SWITCHES), &roots).unwrap();
+    assert_eq!(p.required_roots, 2);
+    assert_eq!(p.speculative_roots_accepted, 3);
+    assert!(p.roots.len() >= 2);
+}

@@ -2,7 +2,8 @@
 pub mod build;
 use std::fmt::Write as _;
 use wl_aarch64::{
-    FpBinary, FpOp, FpUnary, Op, Operand, PostIndex, Reg, SimdOp, SystemRegister, Width,
+    CounterRegister, CryptoOp, ExtensionOp, FpBinary, FpOp, FpUnary, Op, Operand, PostIndex, Reg,
+    SimdOp, SystemRegister, Width,
 };
 use wl_analysis::{Image, Program, RelocationState};
 use wl_common::Result;
@@ -597,6 +598,43 @@ fn lower_simd(op: SimdOp) -> String {
                 u32::from(total),
             ));
         }
+        SimdOp::LongElement {
+            esize,
+            lanes,
+            op,
+            d,
+            n,
+            m,
+            index,
+            upper,
+            signed,
+        } => {
+            out.push_str(&operands(n, m, d));
+            out.push_str(&vwrite(
+                d,
+                &format!(
+                    "simd::long3_element({op}, {esize}, {lanes}, a, b, {index}, d0, {upper}, {signed})"
+                ),
+                128,
+            ));
+        }
+        SimdOp::AddLongPairwise {
+            esize,
+            lanes,
+            d,
+            n,
+            signed,
+            accumulate,
+        } => {
+            writeln!(out, "let a = c.v[{n}]; let d0 = c.v[{d}];").unwrap();
+            out.push_str(&vwrite(
+                d,
+                &format!(
+                    "simd::add_long_pairwise({esize}, {lanes}, a, d0, {signed}, {accumulate})"
+                ),
+                2 * u32::from(esize) * u32::from(lanes),
+            ));
+        }
         SimdOp::Long3 {
             esize,
             lanes,
@@ -640,9 +678,48 @@ fn lower_simd(op: SimdOp) -> String {
     }
     out
 }
+/// System counter reads, CRC32/CRC32C and the recognised crypto-extension forms.
+fn lower_extension(e: ExtensionOp) -> String {
+    match e {
+        ExtensionOp::Counter(c) => {
+            let value = match c.register {
+                CounterRegister::CntfrqEl0 => "COUNTER_FREQUENCY".to_string(),
+                CounterRegister::CntpctEl0 | CounterRegister::CntvctEl0 => {
+                    "system_counter(c, m)".to_string()
+                }
+            };
+            write(c.reg, &value, Width::X64)
+        }
+        ExtensionOp::Crc(c) => {
+            let value = format!(
+                "crc32({}, {}, {}, {})",
+                read(c.acc),
+                read(c.val),
+                1u8 << c.sz,
+                c.c
+            );
+            write(c.dst, &value, Width::W32)
+        }
+        ExtensionOp::Crypto(op) => match op {
+            CryptoOp::Aese { dst, src } => format!("c.v[{dst}] = aese(c.v[{dst}], c.v[{src}]);\n"),
+            CryptoOp::Aesd { dst, src } => format!("c.v[{dst}] = aesd(c.v[{dst}], c.v[{src}]);\n"),
+            CryptoOp::Aesimc { dst, src } => format!("c.v[{dst}] = aesimc(c.v[{src}]);\n"),
+            CryptoOp::Sha1c { dst, src1, src2 } => {
+                format!("c.v[{dst}] = sha1c(c.v[{dst}], c.v[{src1}], c.v[{src2}]);\n")
+            }
+            CryptoOp::Sha256su0 { dst, src } => {
+                format!("c.v[{dst}] = sha256su0(c.v[{dst}], c.v[{src}]);\n")
+            }
+            CryptoOp::Pmull { dst, lhs, rhs } => {
+                format!("c.v[{dst}] = pmull64(c.v[{lhs}] as u64, c.v[{rhs}] as u64);\n")
+            }
+        },
+    }
+}
 fn lower(op: Op, next: u64) -> String {
     let mut out = String::new();
     match op {
+        Op::Extension(e) => out.push_str(&lower_extension(e)),
         Op::Fp(fp) => out.push_str(&lower_fp(fp)),
         Op::Simd(simd) => out.push_str(&lower_simd(simd)),
         Op::VecMemory {

@@ -17,7 +17,7 @@ The Switch CPU (Cortex-A57) implements ARMv8.0-A. The decoder ([`wl-aarch64`](..
 | Extract | EXTR (ROR immediate) | `op21`/`o0`, W `imms ≥ 32` |
 | Conditional select | CSEL, CSINC, CSINV, CSNEG (CSET, CINC, CNEG, …) | `S = 1`, `op2 ≥ 2` |
 | Conditional compare | CCMP, CCMN, register and immediate | `S = 0`, `o2`/`o3` set |
-| 2-source | UDIV, SDIV, LSLV, LSRV, ASRV, RORV | other opcodes (CRC32 etc.) |
+| 2-source | UDIV, SDIV, LSLV, LSRV, ASRV, RORV, CRC32B/H/W/X, CRC32CB/CH/CW/CX | other opcodes |
 | 1-source | RBIT, REV16, REV32, REV, CLZ, CLS | W REV32 slot, PAC opcodes |
 | 3-source | MADD, MSUB, SMADDL, SMSUBL, UMADDL, UMSUBL, SMULH, UMULH | `op54 ≠ 0`, W long/high forms |
 | PC-relative | ADR, ADRP | checked target formation |
@@ -33,7 +33,7 @@ The Switch CPU (Cortex-A57) implements ARMv8.0-A. The decoder ([`wl-aarch64`](..
 | Cache maintenance | DC ZVA (zeroes the 64-byte block); DC CVAC, DC CVAU, DC CIVAC, IC IVAU (no effect) | other SYS operations |
 | Exceptions | SVC (dispatched to the runtime), BRK, HLT (reported as guest faults) | — |
 
-SIMD&FP registers, floating point and Advanced SIMD are specified in [AArch64 SIMD and floating point](aarch64-simd-fp.md). Not implemented: CRC32, pointer-authentication data operations, and system registers other than those listed. Unsupported reachable instructions are either reported at translation time or, with `--allow-unsupported`, compiled into a fault that reports the exact opcode and PC.
+SIMD&FP registers, floating point and Advanced SIMD are specified in [AArch64 SIMD and floating point](aarch64-simd-fp.md). System counter reads `MRS Xt, CNTPCT_EL0`, `CNTVCT_EL0` and `CNTFRQ_EL0` (writes are undefined at EL0 and rejected) are implemented in [`crypto.rs`](../../crates/wl-runtime/src/crypto.rs): the frequency is 19.2 MHz, and both counters return the deterministic virtual clock of a Horizon process (the value svcGetSystemTick reports at the same point) or, in harness mode, the retired-instruction count as nanoseconds. CRC32/CRC32C are the bit-reflected polynomials 0x04C11DB7 and 0x1EDC6F41 over the low 1, 2, 4 or 8 bytes, without inversion. The decoders for these forms and for the recognised crypto instructions are in [`extensions.rs`](../../crates/wl-aarch64/src/extensions.rs). Not implemented: pointer-authentication data operations, and system registers other than those listed. Unsupported reachable instructions are either reported at translation time or, with `--allow-unsupported`, compiled into a fault that reports the exact opcode and PC.
 
 ## Semantics
 

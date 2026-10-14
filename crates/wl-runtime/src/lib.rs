@@ -1,5 +1,6 @@
 //! Dependency-free guest runtime linked into AOT executables as an rlib.
 //! No guest address is converted into a host pointer; no unsafe code is used.
+pub mod crypto;
 pub mod fp;
 pub mod horizon;
 pub mod ipc;
@@ -36,6 +37,9 @@ impl Stop {
         }
     }
 }
+pub use crypto::{
+    COUNTER_FREQUENCY, aesd, aese, aesimc, crc32, pmull64, sha1c, sha256su0, system_counter,
+};
 pub use horizon::Process;
 /// One translation unit's blocks, sorted by guest address.
 pub type BlockTable = &'static [(u64, BlockFn)];

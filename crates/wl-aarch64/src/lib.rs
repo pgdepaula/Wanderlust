@@ -310,6 +310,9 @@ pub enum Op {
     Fp(FpOp),
     Simd(SimdOp),
     VecStructures(Structures),
+    /// System counter reads, CRC32/CRC32C and the recognised crypto-extension forms
+    /// (`extensions`).
+    Extension(ExtensionOp),
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Instruction {
@@ -370,6 +373,14 @@ pub fn decode_bit_masks(n: u32, imms: u32, immr: u32, immediate: bool) -> Option
 pub fn decode(word: u32, pc: GuestAddr) -> Result<Instruction> {
     if pc.0 % 4 != 0 {
         return Err(format!("unaligned instruction address {:#x}", pc.0));
+    }
+    // The extension decoders match exact encodings that the base decoder rejects.
+    if let Some(op) = decode_extension(word, pc)? {
+        return Ok(Instruction {
+            pc,
+            word,
+            op: Op::Extension(op),
+        });
     }
     let width = if word >> 31 == 0 {
         Width::W32

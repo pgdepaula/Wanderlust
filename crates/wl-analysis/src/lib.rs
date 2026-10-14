@@ -188,6 +188,8 @@ pub struct RejectedRoot {
 pub struct Program {
     pub entry: GuestAddr,
     pub roots: Vec<GuestAddr>,
+    /// Required roots (entry and seeds) as given.
+    pub required_roots: usize,
     pub speculative_roots_accepted: usize,
     pub rejected_roots: Vec<RejectedRoot>,
     /// Supported instructions reached by traversal.
@@ -439,6 +441,7 @@ pub fn discover_roots(image: &Image, roots: &Roots) -> Result<Program> {
     all_roots.extend(found);
     Ok(Program {
         entry,
+        required_roots: roots.required.len(),
         roots: all_roots,
         speculative_roots_accepted,
         rejected_roots,
@@ -526,6 +529,9 @@ pub fn survey(image: &Image, examples: usize) -> Result<Survey> {
                         Op::VecStructures(_) => "simd-structure-memory",
                         Op::Fp(_) => "fp-scalar",
                         Op::Simd(_) => "simd",
+                        Op::Extension(wl_aarch64::ExtensionOp::Counter(_)) => "system-counter",
+                        Op::Extension(wl_aarch64::ExtensionOp::Crc(_)) => "crc32",
+                        Op::Extension(wl_aarch64::ExtensionOp::Crypto(_)) => "crypto",
                         Op::Wide { .. } => "move-wide",
                         Op::Arithmetic { .. } => "arithmetic",
                         Op::Logical { .. } => "logical-shifted",
