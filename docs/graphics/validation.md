@@ -1507,3 +1507,50 @@ those 74 GPU cases. A faithful ordinary source snapshot passed 352 CPU tests
 (74 GPU cases ignored) and strict workspace Clippy, preserving unfinished
 peer-owned files outside the snapshot. Original-game GPU execution remains
 unproven; these independently assembled programs are synthetic conformance data.
+
+## Ordered mutable constants across deferred channel requests
+
+`mutable_draw_gpu.rs` submits 64 genuine driver/GPFIFO requests with guest-indexed
+geometry, the independently assembled ALD/AST vertex program and LDC pixel program.
+The guest vertex buffer specifies a clipped triangle covering the viewport; each
+request selects its own RGB constants and one-pixel B197 scissor. Thirty-two
+successive overlapping draw pairs cover an 8×4 tile grid inside 52×29 pitch RGBA8.
+An independent exact-frame oracle requires each odd-colored draw to overwrite its
+even-colored predecessor, with all other pixels and unused pitch columns retaining
+background. Reversed pair order or retroactively replaced constant data changes
+observable pixels. No host draw helper supplies the geometry or fragment color.
+
+After the first cold draw, 63 mutable draws read 1008 CB bytes and upload 756 changed
+bytes; unchanged alpha is not uploaded again. Assertions require 63 target reuses,
+zero additional target/vertex/index/texture uploads, shader reads/decodes, module/
+pipeline creation, intermediate readbacks or completion waits. The two CPU writes
+per request rotate the global journal without changing protected pending target
+identity. This workload depends on actual mutable per-draw resource isolation,
+not identical-draw endurance alone.
+
+All 64 framebuffer updates remain GPU-newer until one explicit publication. A 65th
+request must report the specific completion-capacity preflight error, without
+altering RAM or graphics counters. Publication checks every framebuffer byte,
+uses one readback/wait and writes 6032 guest bytes. All 64 tokens must then report
+host completion and guest visibility before retirement. Total queue submissions
+remain 65: 64 draws and one readback; no submission batching is claimed.
+
+The allocation interval includes test fixture vectors, channel/WGPU bookkeeping
+and asynchronous backend activity. Representative debug observations for 63 warm
+mutable submissions were 68.36 ms with 3972 allocations/252 reallocations on GL,
+38.31 ms with 3740 allocations/67 reallocations on D3D12
+and 27.32 ms with 3812/65 on Vulkan. Transfer and synchronization counts are asserted;
+CPU timings are not GPU durations or game-performance predictions.
+
+The normal gates passed 148 CPU tests in each feature configuration, strict package
+Clippy and workspace formatting. The full matrix passed 75 GPU scenarios per WSL
+OpenGL/native Windows D3D12/native Windows Vulkan backend, with no GPU failures or
+explicit skips. The strengthened overlapping-pair/capacity-specific candidate was
+additionally executed successfully on all three backends after review. Native
+launch initially encountered a WSL interoperability startup timeout 110 before
+GPU execution; a bounded startup retry after verifying native process launch
+completed the matrix. This is separate from graphics-test execution.
+A faithful ordinary source snapshot passed 352 CPU tests (75 GPU cases ignored)
+and strict workspace Clippy; the final strengthened test also passed package
+Clippy in that snapshot. No production code or peer-owned runtime files changed
+for this regression, and no original-game GPU workload is established.
