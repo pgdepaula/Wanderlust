@@ -119,7 +119,18 @@ Implementation: [`ipc.rs`](../../crates/wl-runtime/src/ipc.rs).
 
 A request occupies the first 0x100 bytes of the calling thread's thread-local region: HIPC header words (type, descriptor counts, data-word count, special header), the optional process ID, handles, descriptors, then data words whose CMIF part starts at the next 16-byte boundary (`SFCI`, version, command, token, arguments). The kernel checks that the message fits the buffer (else MessageTooLarge) and writes the sender's process ID where the special header requests one.
 
-The service manager behind `sm:` runs inside the runtime and reproduces the CMIF compatibility layer of Atmosphère's `sm` (0e9cd964), which accepts exactly the header words that libnx sends:
+The service manager behind `sm:` runs inside the runtime and reproduces Atmosphère's `sm` (0e9cd964), a TIPC server. A TIPC request has no CMIF part: its tag is the command ID plus 0x10, its raw data words follow the headers directly, and its first two header words (and the special header, when the command sends the process ID) must equal those of the command exactly, else the request fails with InvalidMessageFormat. The reply repeats the tag; a moved handle is placed in the special data and the result is the first raw data word, followed by any output data. Applications built with current SDKs, among them Tears of the Kingdom 1.4.3 (SDK 21.4), use TIPC:
+
+| Header words | Command | Reply words |
+|---|---|---|
+| `0x10`, `0x80000000`, `0x1` (process ID) | 0 RegisterClient | `0x10`, `0x1`, result |
+| `0x11`, `0x2` (service name) | 1 GetServiceHandle | `0x11`, `0x80000001`, `0x20`, handle, result |
+| `0x12`, `0x4` (name, `u32` max_sessions, `bool` is_light) | 2 RegisterService | `0x12`, `0x80000001`, `0x20`, handle, result |
+| `0x13`, `0x2` (service name) | 3 UnregisterService | `0x13`, `0x1`, result |
+| `0x14`, `0x80000000`, `0x1` (process ID) | 4 DetachClient | `0x14`, `0x1`, result |
+| `0xF`, `0x0` | Close | the session is closed (SessionClosed) |
+
+The handle is 0 when the result is not success. sm also keeps a CMIF compatibility layer that accepts exactly the header words libnx's CMIF client sends:
 
 | Header words | Command | Behaviour | Reply |
 |---|---|---|---|
@@ -129,7 +140,7 @@ The service manager behind `sm:` runs inside the runtime and reproduces the CMIF
 | `0x4`, `0xC` | 2 RegisterService | validates name and host access, creates a port of `max_sessions` sessions, moves its server handle to the caller | one move handle, result |
 | control (type 5 or 7) | any | pointer-buffer size 0 | fixed reply |
 
-Commands before RegisterClient answer InvalidClient (`0x415`); other sm results are AlreadyRegistered `0x815`, OutOfSessions `0x615`, InvalidServiceName `0xc15`, NotRegistered `0xe15`, NotAllowed `0x1015`. A GetServiceHandle for a service that is not registered is deferred, as in `sm`: the calling thread stays blocked in svcSendSyncRequest until the service is registered, and then receives the reply. Any other request, including libnx's CMIF Close from serviceClose, is an invalid method: the server closes the session without replying, so this and every later request on it return SessionClosed. The process access control comes from `main.npdm`; without it every service may be used and hosted.
+Commands before RegisterClient answer InvalidClient (`0x415`); other sm results are AlreadyRegistered `0x815`, OutOfSessions `0x615`, InvalidServiceName `0xc15`, NotRegistered `0xe15`, NotAllowed `0x1015`. Both protocols share these behaviours and results. A GetServiceHandle for a service that is not registered is deferred, as in `sm`: the calling thread stays blocked in svcSendSyncRequest until the service is registered, and then receives the reply in the protocol of its request. Any other request (an unknown TIPC command such as Atmosphère's extensions, a malformed TIPC header, libnx's CMIF Close from serviceClose) is an invalid method: the server closes the session without replying, so this and every later request on it return SessionClosed. The process access control comes from `main.npdm`; without it every service may be used and hosted.
 
 ## Handles
 
@@ -141,7 +152,7 @@ The launcher prints one JSON object: `mode`, `status` (`exit_process`, `exit_thr
 
 ## Limits
 
-Threads run on their ideal core; svcGetThreadCoreMask/svcSetThreadCoreMask, thread activity, thread context access and core migration are not implemented. The only synchronization objects are threads: no events (svcCreateEvent, SignalEvent, ClearEvent, ResetSignal), no WaitForAddress/SignalToAddress. A partial svcUnmapMemory of an alias faults explicitly. The only service is `sm:`: libnx's default `__appInit` (applet, hid, time, fs) cannot run. Requests carrying handles or buffer descriptors to `sm:`, requests to services registered by the guest (svcAcceptSession, svcReplyAndReceive), TIPC requests, domains, svcSendSyncRequestWithUserBuffer, light sessions and waits on ports fault explicitly. No shared or transfer memory, code memory or device address spaces. Memory-mapping, interrupt and debug capabilities are parsed but have no effect. NRO loader-configuration keys beyond those listed are not provided (no argv, heap override, next-load path, applet type or random seed).
+Threads run on their ideal core; svcGetThreadCoreMask/svcSetThreadCoreMask, thread activity, thread context access and core migration are not implemented. The only synchronization objects are threads: no events (svcCreateEvent, SignalEvent, ClearEvent, ResetSignal), no WaitForAddress/SignalToAddress. A partial svcUnmapMemory of an alias faults explicitly. The only service is `sm:`: libnx's default `__appInit` (applet, hid, time, fs) cannot run. Requests carrying handles or buffer descriptors to `sm:`, requests to services registered by the guest (svcAcceptSession, svcReplyAndReceive), domains, svcSendSyncRequestWithUserBuffer, light sessions and waits on ports fault explicitly. No shared or transfer memory, code memory or device address spaces. Memory-mapping, interrupt and debug capabilities are parsed but have no effect. NRO loader-configuration keys beyond those listed are not provided (no argv, heap override, next-load path, applet type or random seed).
 
 ## Validation
 
@@ -169,7 +180,7 @@ wait timed=0xea01 index=-1 joined=0 closed=0
 
 The total is the sum over both threads of 24 byte windows of a mixing function, computed independently. A lost update from broken mutual exclusion would change it. Each thread's `__thread` counter ends at 7 + 3,000. The run retires 1,041,282 guest instructions in 208 slices with 156 context switches, 50 contended svcArbitrateLock calls, 54 blocking waits and 1.75 ms of idle virtual time. Linux and Windows (`x86_64-pc-windows-gnu`, Windows 10.0.26300) executables produced identical output and identical counters, taking 0.044 s and 0.062 s of host time.
 
-[`tests/ipc.rs`](../../crates/wl-runtime/tests/ipc.rs) checks named-port lookup and name validation, the process ID inserted by the kernel, InvalidClient before RegisterClient, name validation, access control for lookups and registrations, registration and duplicate registration, the session limit, unregistration, a deferred lookup completed by another thread's registration, control requests, MessageTooLarge, the SessionClosed behaviour after an invalid method or a CMIF Close, closed and wrong-type handles, and the explicit faults for descriptors and guest-hosted services.
+[`tests/ipc.rs`](../../crates/wl-runtime/tests/ipc.rs) checks named-port lookup and name validation, the process ID inserted by the kernel, InvalidClient before RegisterClient, name validation, access control for lookups and registrations, registration and duplicate registration, the session limit, unregistration, a deferred lookup completed by another thread's registration, control requests, MessageTooLarge, the SessionClosed behaviour after an invalid method or a CMIF Close, closed and wrong-type handles, and the explicit faults for descriptors and guest-hosted services. The same file checks the TIPC protocol with requests laid out as libnx's `tipcMakeRequest`: the exact reply words of every command, InvalidClient before RegisterClient and after DetachClient, a deferred lookup answered in TIPC, and the session closed by a malformed header, a missing process ID, an unknown command and a TIPC Close.
 
 [`ipc.c`](../../tests/horizon/ipc.c) (NSO SHA-256 `6483eaae9ed654b4f6bb810950bdf1d2af953fc84b6ca15aeba17175aa9a61bf`) uses libnx's own `smInitialize`, `smGetServiceOriginal`, `smRegisterService`, `smUnregisterService` and `smExit`, a second thread that opens its own session with libnx's `Service` API and is deferred until main registers `wl:late`, and raw protocol errors. The CLI test requires:
 

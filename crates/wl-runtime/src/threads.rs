@@ -62,8 +62,13 @@ pub enum Wait {
         order: u64,
         deadline: Option<u64>,
     },
-    /// svcSendSyncRequest to sm:GetServiceHandle for a service not registered yet.
-    Service { session: usize, name: [u8; 8] },
+    /// svcSendSyncRequest to sm:GetServiceHandle for a service not registered yet; `tipc`
+    /// when the request (and so the reply) uses TIPC rather than CMIF.
+    Service {
+        session: usize,
+        name: [u8; 8],
+        tipc: bool,
+    },
     /// svcWaitProcessWideKeyAtomic before being signalled.
     CondVar {
         key: u64,

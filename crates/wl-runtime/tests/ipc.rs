@@ -289,3 +289,160 @@ fn register_client_fails(p: &mut Process, c: &mut Cpu, sm: u32) {
     request(p, 0, true, &[0; 8]);
     assert_eq!(send(p, c, sm).0, result::SESSION_CLOSED);
 }
+
+/// Writes a TIPC request as libnx's tipcMakeRequest lays it out: tag = command + 16, the
+/// raw data directly after the headers, the process ID slot filled in by the kernel.
+fn tipc_request(p: &mut Process, command: u16, send_pid: bool, data: &[u8]) {
+    let mut m = vec![0u8; 0x100];
+    let words = data.len().div_ceil(4) as u32;
+    m[0..4].copy_from_slice(&u32::from(command + 16).to_le_bytes());
+    m[4..8].copy_from_slice(&(words | if send_pid { 1 << 31 } else { 0 }).to_le_bytes());
+    let mut at = 8;
+    if send_pid {
+        m[8..12].copy_from_slice(&1u32.to_le_bytes());
+        at = 20;
+    }
+    m[at..at + data.len()].copy_from_slice(data);
+    let t = tls(p);
+    p.write_bytes(t, &m).unwrap();
+}
+fn words(p: &Process, n: usize) -> Vec<u32> {
+    reply(p)[..4 * n]
+        .chunks(4)
+        .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
+        .collect()
+}
+fn tipc_register_client(p: &mut Process, c: &mut Cpu, session: u32) {
+    tipc_request(p, 0, true, &[]);
+    assert_eq!(send(p, c, session), (result::SUCCESS, None));
+    assert_eq!(words(p, 3), [0x10, 1, result::SUCCESS]);
+}
+
+#[test]
+fn tipc_register_client_lookup_and_registration() {
+    let (mut p, mut c) = process(&[(false, "*"), (true, "wl:*")]);
+    let sm = connect(&mut p, &mut c);
+    // Before RegisterClient: InvalidClient, the handle slot zero.
+    tipc_request(&mut p, 1, false, &name("wl:echo"));
+    assert_eq!(send(&mut p, &mut c, sm), (result::SUCCESS, None));
+    assert_eq!(
+        words(&p, 5),
+        [0x11, 1 | 1 << 31, 1 << 5, 0, sm_result::INVALID_CLIENT]
+    );
+    tipc_register_client(&mut p, &mut c, sm);
+    assert!(matches!(
+        p.kernel.as_ref().unwrap().sessions[0].endpoint,
+        wl_runtime::ipc::Endpoint::Sm { client: Some(0x51) }
+    ));
+    // RegisterService(name, max_sessions = 1, is_light = false).
+    let mut register = name("wl:svc").to_vec();
+    register.extend([1, 0, 0, 0, 0]);
+    tipc_request(&mut p, 2, false, &register);
+    send(&mut p, &mut c, sm);
+    let w = words(&p, 5);
+    assert_eq!((w[0], w[1], w[2], w[4]), (0x12, 1 | 1 << 31, 1 << 5, 0));
+    assert!(matches!(
+        p.kernel.as_ref().unwrap().handles.get(w[3]),
+        Some(Object::Port(_))
+    ));
+    tipc_request(&mut p, 2, false, &register);
+    send(&mut p, &mut c, sm);
+    assert_eq!(words(&p, 5)[4], sm_result::ALREADY_REGISTERED);
+    tipc_request(&mut p, 1, false, &name("wl:svc"));
+    send(&mut p, &mut c, sm);
+    let w = words(&p, 5);
+    assert_eq!(w[4], result::SUCCESS);
+    assert!(matches!(
+        p.kernel.as_ref().unwrap().handles.get(w[3]),
+        Some(Object::Session(_))
+    ));
+    tipc_request(&mut p, 1, false, &name("wl:svc"));
+    send(&mut p, &mut c, sm);
+    assert_eq!(words(&p, 5)[3..], [0, sm_result::OUT_OF_SESSIONS]);
+    // UnregisterService: result-only replies.
+    tipc_request(&mut p, 3, false, &name("wl:svc"));
+    send(&mut p, &mut c, sm);
+    assert_eq!(words(&p, 3), [0x13, 1, result::SUCCESS]);
+    tipc_request(&mut p, 3, false, &name("wl:svc"));
+    send(&mut p, &mut c, sm);
+    assert_eq!(words(&p, 3), [0x13, 1, sm_result::NOT_REGISTERED]);
+    // DetachClient: later lookups are InvalidClient again.
+    tipc_request(&mut p, 4, true, &[]);
+    send(&mut p, &mut c, sm);
+    assert_eq!(words(&p, 3), [0x14, 1, result::SUCCESS]);
+    tipc_request(&mut p, 1, false, &name("wl:svc"));
+    send(&mut p, &mut c, sm);
+    assert_eq!(words(&p, 5)[4], sm_result::INVALID_CLIENT);
+}
+
+#[test]
+fn tipc_deferred_lookup_replies_in_tipc() {
+    let (mut p, mut c) = process(&[(false, "*"), (true, "*")]);
+    let sm = connect(&mut p, &mut c);
+    tipc_register_client(&mut p, &mut c, sm);
+    tipc_request(&mut p, 1, false, &name("wl:late"));
+    assert_eq!(send(&mut p, &mut c, sm).1, Some(Stop::Reschedule));
+    let k = p.kernel.as_mut().unwrap();
+    assert!(matches!(
+        k.threads[0].wait,
+        Some(Wait::Service { tipc: true, .. })
+    ));
+    k.threads[0].context = Some(Box::new(c.clone()));
+    let stack = k.threads[0].stack.end - 0x8000;
+    let mut c2 = c.clone();
+    c2.x[..6].copy_from_slice(&[0, CODE, 0, stack, 44, 1]);
+    dispatch(&mut c2, &mut p, 0x08).unwrap();
+    let k = p.kernel.as_mut().unwrap();
+    let t = k.threads.len() - 1;
+    let mut c2 = *k.threads[t].context.take().unwrap();
+    k.current = t;
+    let sm2 = connect(&mut p, &mut c2);
+    tipc_register_client(&mut p, &mut c2, sm2);
+    let mut register = name("wl:late").to_vec();
+    register.extend([4, 0, 0, 0, 0]);
+    tipc_request(&mut p, 2, false, &register);
+    c2.x[0] = u64::from(sm2);
+    assert_eq!(
+        dispatch(&mut c2, &mut p, 0x21).unwrap(),
+        Some(Stop::Reschedule)
+    );
+    let k = p.kernel.as_ref().unwrap();
+    assert_eq!(k.threads[0].state, ThreadState::Runnable);
+    let reply = p.read_bytes(k.threads[0].tls, 20).unwrap();
+    let w: Vec<u32> = reply
+        .chunks(4)
+        .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
+        .collect();
+    assert_eq!((w[0], w[1], w[2], w[4]), (0x11, 1 | 1 << 31, 1 << 5, 0));
+    assert!(matches!(k.handles.get(w[3]), Some(Object::Session(_))));
+}
+
+#[test]
+fn tipc_malformed_unknown_and_close_end_the_session() {
+    let (mut p, mut c) = process(&[(false, "*")]);
+    // GetServiceHandle with three data words: InvalidMessageFormat closes the session.
+    let sm = connect(&mut p, &mut c);
+    tipc_register_client(&mut p, &mut c, sm);
+    tipc_request(
+        &mut p,
+        1,
+        false,
+        &[b'f', b's', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    );
+    assert_eq!(send(&mut p, &mut c, sm).0, result::SESSION_CLOSED);
+    tipc_request(&mut p, 0, true, &[]);
+    assert_eq!(send(&mut p, &mut c, sm).0, result::SESSION_CLOSED);
+    // RegisterClient without the process ID.
+    let sm = connect(&mut p, &mut c);
+    tipc_request(&mut p, 0, false, &[]);
+    assert_eq!(send(&mut p, &mut c, sm).0, result::SESSION_CLOSED);
+    // An unknown command (Atmosphère extensions are not Nintendo's sm).
+    let sm = connect(&mut p, &mut c);
+    tipc_request(&mut p, 65100, false, &name("fs"));
+    assert_eq!(send(&mut p, &mut c, sm).0, result::SESSION_CLOSED);
+    // TIPC Close (libnx tipcClose).
+    let sm = connect(&mut p, &mut c);
+    let t = tls(&p);
+    p.write_bytes(t, &[15, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+    assert_eq!(send(&mut p, &mut c, sm).0, result::SESSION_CLOSED);
+}

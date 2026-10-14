@@ -1,15 +1,20 @@
 //! Horizon IPC: the named port `sm:`, client sessions, the HIPC message in the calling
 //! thread's thread-local region, and the service manager as a server hosted by the runtime.
 //!
-//! The service manager reproduces the CMIF compatibility layer of Atmosphère's `sm`
-//! (`stratosphere/sm/source/sm_user_service.cpp`, `impl/sm_service_manager.cpp`; 0e9cd964):
-//! it recognises the exact HIPC header words of RegisterClient/DetachClient,
-//! GetServiceHandle/UnregisterService and RegisterService, answers control requests with its
-//! pointer-buffer size, and treats anything else as an invalid method. Its TIPC server then
-//! closes the session without replying (`tipc_server_manager.hpp`), so the client's
-//! svcSendSyncRequest ends with SessionClosed, as for the CMIF Close request libnx sends from
-//! serviceClose. GetServiceHandle for a service that is not registered is deferred: the
-//! client stays blocked until the service is registered.
+//! The service manager is a TIPC server, as Atmosphère's `sm`
+//! (`stratosphere/sm/source/sm_user_service.{hpp,cpp}`, `impl/sm_service_manager.cpp`,
+//! `libstratosphere/include/stratosphere/tipc`; 0e9cd964). A TIPC request's tag is the
+//! command ID plus 0x10 and must carry the exact message header (and special header, when a
+//! process ID is sent) of that command; the reply repeats the tag, places a move handle in the
+//! special data and the result as the first raw data word. Tag 15 closes the session. sm also
+//! keeps a CMIF compatibility layer for older clients: it recognises the exact HIPC header
+//! words of RegisterClient/DetachClient, GetServiceHandle/UnregisterService and
+//! RegisterService and answers control requests with its pointer-buffer size. Anything else is
+//! an invalid method, and a failed request closes the session without a reply
+//! (`tipc_server_manager.hpp`), so the client's svcSendSyncRequest ends with SessionClosed.
+//! GetServiceHandle for a service that is not registered is deferred: the client stays
+//! blocked until the service is registered, and then receives the reply in the protocol of
+//! its request.
 use crate::horizon::{Kernel, Object, result};
 use crate::threads::{self, Wait};
 use crate::{Cpu, Memory, Stop};
@@ -207,7 +212,11 @@ fn allowed(k: &Kernel, name: &[u8; 8], host: bool) -> bool {
 enum Reply {
     Bytes(Vec<u8>),
     Close,
-    Defer([u8; 8]),
+    /// GetServiceHandle deferred; `tipc` selects the layout of the eventual reply.
+    Defer {
+        name: [u8; 8],
+        tipc: bool,
+    },
 }
 
 /// svcSendSyncRequest (0x21): W0 client session handle; the request and the reply occupy the
@@ -296,13 +305,17 @@ pub fn send_sync_request(
             c.x[0] = u64::from(result::SESSION_CLOSED);
             Ok(None)
         }
-        Reply::Defer(name) => {
+        Reply::Defer { name, tipc } => {
             k.ipc.deferred += 1;
             Ok(threads::block_for(
                 k,
                 c,
                 0x21,
-                Wait::Service { session: s, name },
+                Wait::Service {
+                    session: s,
+                    name,
+                    tipc,
+                },
             ))
         }
     }
@@ -320,7 +333,7 @@ fn sm_request(
         return Reply::Bytes(RESPONSE_POINTER_BUFFER_SIZE.to_vec());
     }
     if tag != 4 && tag != 6 {
-        return Reply::Close;
+        return tipc_request(k, s, client, tag, message);
     }
     message[0..2].copy_from_slice(&4u16.to_le_bytes());
     let name: [u8; 8] = message[0x20..0x28].try_into().unwrap_or_default();
@@ -336,7 +349,7 @@ fn sm_request(
     if message[..8] == REQUEST_GET_SERVICE_HANDLE {
         return match read_u32(message, 0x18) {
             1 => match get_service_handle(k, client, &name) {
-                Err(Deferred) => Reply::Defer(name),
+                Err(Deferred) => Reply::Defer { name, tipc: false },
                 Ok(r) => Reply::Bytes(with_handle(r)),
             },
             3 => {
@@ -360,6 +373,91 @@ fn sm_request(
         )));
     }
     Reply::Close
+}
+
+/// TIPC tags: the command ID plus 0x10; 15 closes the session.
+const TIPC_CLOSE: u16 = 15;
+const TIPC_REGISTER_CLIENT: u16 = 0x10;
+const TIPC_GET_SERVICE_HANDLE: u16 = 0x11;
+const TIPC_REGISTER_SERVICE: u16 = 0x12;
+const TIPC_UNREGISTER_SERVICE: u16 = 0x13;
+const TIPC_DETACH_CLIENT: u16 = 0x14;
+/// Special header of a request sending the process ID and no handles.
+const SPECIAL_PROCESS_ID: u32 = 1;
+/// Special header of a reply moving one handle.
+const SPECIAL_ONE_MOVE_HANDLE: u32 = 1 << 5;
+
+/// One TIPC request to sm (`tipc::impl::InvokeServiceCommandImpl`): the first two header
+/// words must equal the command's (tag, raw data words, special-header flag), and its special
+/// header must match; otherwise the request fails with InvalidMessageFormat and the session is
+/// closed.
+fn tipc_request(
+    k: &mut Kernel,
+    s: usize,
+    client: Option<u64>,
+    tag: u16,
+    message: &[u8; MESSAGE_BUFFER_SIZE],
+) -> Reply {
+    let header = (read_u32(message, 0), read_u32(message, 4));
+    let expect = |words: u32| header == (u32::from(tag), words);
+    let name: [u8; 8] = message[8..16].try_into().unwrap_or_default();
+    match tag {
+        TIPC_REGISTER_CLIENT | TIPC_DETACH_CLIENT
+            if expect(1 << 31) && read_u32(message, 8) == SPECIAL_PROCESS_ID =>
+        {
+            let pid = u64::from_le_bytes(message[12..20].try_into().unwrap_or_default());
+            let client = (tag == TIPC_REGISTER_CLIENT).then_some(pid);
+            k.sessions[s].endpoint = Endpoint::Sm { client };
+            Reply::Bytes(tipc_result(tag, result::SUCCESS))
+        }
+        TIPC_GET_SERVICE_HANDLE if expect(2) => match get_service_handle(k, client, &name) {
+            Err(Deferred) => Reply::Defer { name, tipc: true },
+            Ok(r) => Reply::Bytes(tipc_with_handle(tag, r)),
+        },
+        // ServiceName, u32 max_sessions, bool is_light: 13 bytes in four words.
+        TIPC_REGISTER_SERVICE if expect(4) => {
+            let max_sessions = read_u32(message, 16);
+            let is_light = message[20] & 1 != 0;
+            Reply::Bytes(tipc_with_handle(
+                tag,
+                register_service(k, client, &name, max_sessions, is_light),
+            ))
+        }
+        TIPC_UNREGISTER_SERVICE if expect(2) => {
+            Reply::Bytes(tipc_result(tag, unregister_service(k, client, &name)))
+        }
+        // Close: the server closes its end, the client sees SessionClosed.
+        TIPC_CLOSE if expect(0) => Reply::Close,
+        // InvalidMessageFormat or InvalidMethod: the session is closed without a reply.
+        _ => Reply::Close,
+    }
+}
+
+/// A TIPC reply with only the result: one raw data word.
+fn tipc_result(tag: u16, code: u32) -> Vec<u8> {
+    [u32::from(tag), 1, code]
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect()
+}
+
+/// A TIPC reply moving one handle (`Ok(handle)`, or handle 0 with `Err(result)`): the handle
+/// in the special data, then the result.
+fn tipc_with_handle(tag: u16, r: Result<u32, u32>) -> Vec<u8> {
+    let (handle, code) = match r {
+        Ok(h) => (h, result::SUCCESS),
+        Err(e) => (0, e),
+    };
+    [
+        u32::from(tag),
+        1 | 1 << 31,
+        SPECIAL_ONE_MOVE_HANDLE,
+        handle,
+        code,
+    ]
+    .iter()
+    .flat_map(|w| w.to_le_bytes())
+    .collect()
 }
 
 /// A reply carrying one move handle: `Ok(handle)` or `Err(result)` with handle 0.
@@ -466,21 +564,30 @@ fn unregister_service(k: &mut Kernel, client: Option<u64>, name: &[u8; 8]) -> u3
 /// Re-runs deferred GetServiceHandle requests after a registration; completed ones write
 /// their reply into the waiting thread's message buffer and wake it.
 fn retry_deferred(k: &mut Kernel) {
-    let waiting: Vec<(usize, usize, [u8; 8])> = k
+    let waiting: Vec<(usize, usize, [u8; 8], bool)> = k
         .threads
         .iter()
         .enumerate()
         .filter_map(|(t, th)| match th.wait {
-            Some(Wait::Service { session, name }) => Some((t, session, name)),
+            Some(Wait::Service {
+                session,
+                name,
+                tipc,
+            }) => Some((t, session, name, tipc)),
             _ => None,
         })
         .collect();
-    for (t, session, name) in waiting {
+    for (t, session, name, tipc) in waiting {
         let Endpoint::Sm { client } = k.sessions[session].endpoint else {
             continue;
         };
         if let Ok(r) = get_service_handle(k, client, &name) {
-            k.pending_replies.push((k.threads[t].tls, with_handle(r)));
+            let reply = if tipc {
+                tipc_with_handle(TIPC_GET_SERVICE_HANDLE, r)
+            } else {
+                with_handle(r)
+            };
+            k.pending_replies.push((k.threads[t].tls, reply));
             k.ipc.replies += 1;
             threads::end_wait(k, t, result::SUCCESS, None);
         }
