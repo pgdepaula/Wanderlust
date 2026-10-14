@@ -456,3 +456,276 @@ fn driver_min_ignored_factor_changes_and_warm_deferred_draws() {
     );
     f.d.close(f.c, &mut mem(&mut f.data)).unwrap();
 }
+
+// Independent coefficient mathematics. Labels below are test-local, not the
+// production enum or decoder: zero, one, source color, its complement,
+// destination alpha, its complement, destination color, its complement.
+fn component_blend(
+    destination: [u8; 4],
+    coefficients: [u8; 4],
+    separate: bool,
+    mask: u8,
+) -> [u8; 4] {
+    let s = SOURCE.map(f64::from);
+    let d = destination.map(|v| f64::from(v) / 255.);
+    let factor = |n, k| match n {
+        0 => 0.,
+        1 => 1.,
+        2 => s[k],
+        3 => 1. - s[k],
+        4 => d[3],
+        5 => 1. - d[3],
+        6 => d[k],
+        7 => 1. - d[k],
+        _ => unreachable!(),
+    };
+    let mut result = destination;
+    for k in 0..4 {
+        if mask & (1 << k) != 0 {
+            let n = if k == 3 && separate { 2 } else { 0 };
+            result[k] = ((s[k] * factor(coefficients[n], k)
+                + d[k] * factor(coefficients[n + 1], k))
+            .clamp(0., 1.)
+                * 255.)
+                .round() as u8;
+        }
+    }
+    result
+}
+type ComponentLayer = ([u8; 4], bool, u8, usize);
+fn check_components(pixels: &[u8], layers: &[ComponentLayer]) {
+    let mut checked = [0usize; 4];
+    for y in 0..H {
+        for x in 0..W {
+            let mut expected = BG;
+            let mut hits = 0;
+            let mut tie = false;
+            for &(coefficients, separate, mask, triangle) in layers {
+                match coverage(x, y, triangle) {
+                    Some(true) => {
+                        expected = component_blend(expected, coefficients, separate, mask);
+                        hits |= 1 << triangle;
+                    }
+                    Some(false) => (),
+                    None => {
+                        tie = true;
+                        break;
+                    }
+                }
+            }
+            if tie {
+                continue;
+            }
+            for k in 0..4 {
+                let actual = pixels[(y * W + x) * 4 + k];
+                assert!(
+                    actual.abs_diff(expected[k]) <= 1,
+                    "component blend {x},{y} channel{k}: {actual} != {}",
+                    expected[k]
+                );
+            }
+            checked[hits] += 1;
+        }
+    }
+    assert!(
+        checked[0] > 300 && checked.iter().skip(1).sum::<usize>() > 100,
+        "{checked:?}"
+    );
+    if layers.len() == 2 {
+        assert!(checked.iter().all(|n| *n > 20), "{checked:?}");
+    }
+}
+#[test]
+#[ignore = "requires actual GPU; component and destination-alpha coefficients in all four B197 slots"]
+fn driver_component_blend_factor_matrix_and_alias_reuse() {
+    let mut f = Fixture::new(false);
+    let encodings = [
+        (3, 0x4300),
+        (4, 0x4301),
+        (7, 0x4304),
+        (8, 0x4305),
+        (9, 0x4306),
+        (10, 0x4307),
+    ];
+    let mut baseline = None;
+    for slot in 0..4 {
+        for (kind, &(compact, gl_alias)) in encodings.iter().enumerate() {
+            for gl in [false, true] {
+                f.reset();
+                let before = f.d.graphics_counters();
+                let mut w = if baseline.is_none() {
+                    f.setup.clone()
+                } else {
+                    Vec::new()
+                };
+                let mut raw = [2, 1, 2, 1];
+                raw[slot] = if gl { gl_alias } else { compact };
+                let mut oracle = [1, 0, 1, 0];
+                oracle[slot] = kind as u8 + 2;
+                blend(&mut w, [1, 1], raw, true);
+                draw(&mut w, 0);
+                let report = f.submit(&w);
+                assert!(report.fault.is_none(), "{:?}", report.fault);
+                let after = f.d.graphics_counters();
+                if gl {
+                    assert_eq!(after.pipeline_allocations, before.pipeline_allocations);
+                }
+                let identity = (
+                    after.shader_module_allocations,
+                    after.shader_decodes,
+                    after.vertex_shader_decodes,
+                );
+                if let Some(old) = baseline {
+                    assert_eq!(identity, old);
+                }
+                baseline = Some(identity);
+                check_components(&f.publish(), &[(oracle, true, 15, 0)]);
+                f.d.retire(report.token).unwrap();
+            }
+        }
+    }
+    // Overwrite with S*S on every draw: repeated real blending has a stable
+    // independent result while exercising new factors without CPU visibility.
+    f.reset();
+    let mut w = Vec::new();
+    blend(&mut w, [1, 1], [3, 1, 3, 1], true);
+    draw(&mut w, 0);
+    let first = f.submit(&w);
+    assert!(first.fault.is_none());
+    let before = f.d.graphics_counters();
+    let mut w = Vec::new();
+    draw(&mut w, 0);
+    let region = stats_alloc::Region::new(&stats_alloc::INSTRUMENTED_SYSTEM);
+    let start = std::time::Instant::now();
+    let mut tokens = [None; 32];
+    for token in &mut tokens {
+        let r = f.submit(&w);
+        assert!(r.fault.is_none());
+        *token = Some(r.token);
+    }
+    let elapsed = start.elapsed();
+    let allocation = region.change();
+    let after = f.d.graphics_counters();
+    assert_eq!(after.draw_commands - before.draw_commands, 32);
+    assert_eq!(after.submissions - before.submissions, 32);
+    assert_eq!(
+        (
+            after.upload_bytes,
+            after.readback_operations,
+            after.synchronization_points,
+            after.pipeline_allocations,
+            after.shader_module_allocations,
+            after.shader_binary_bytes,
+            after.vertex_shader_bytes,
+            after.vertex_guest_bytes,
+            after.index_guest_bytes,
+            after.descriptor_reads,
+            after.render_target_guest_bytes
+        ),
+        (
+            before.upload_bytes,
+            before.readback_operations,
+            before.synchronization_points,
+            before.pipeline_allocations,
+            before.shader_module_allocations,
+            before.shader_binary_bytes,
+            before.vertex_shader_bytes,
+            before.vertex_guest_bytes,
+            before.index_guest_bytes,
+            before.descriptor_reads,
+            before.render_target_guest_bytes
+        )
+    );
+    check_components(&f.publish(), &[([2, 0, 2, 0], true, 15, 0)]);
+    f.d.retire(first.token).unwrap();
+    for token in tokens {
+        f.d.retire(token.unwrap()).unwrap();
+    }
+    assert_eq!(
+        f.d.graphics_counters().readback_operations - after.readback_operations,
+        1
+    );
+    assert_eq!(
+        f.d.graphics_counters().synchronization_points - after.synchronization_points,
+        1
+    );
+    eprintln!(
+        "component coefficients warm32 {elapsed:?} allocations={} reallocations={}",
+        allocation.allocations, allocation.reallocations
+    );
+    eprintln!("component coefficient matrix {:?}", f.d.graphics_counters());
+    f.d.close(f.c, &mut mem(&mut f.data)).unwrap();
+}
+#[test]
+#[ignore = "requires actual GPU; destination reads, inherited alpha, masks and tiled overlapping draws"]
+fn driver_component_blend_order_masks_and_pending_fault() {
+    let mut f = Fixture::new(true);
+    let mut w = f.setup.clone();
+    // S*S + D*(1-S), including alpha inherited from RGB despite unrelated
+    // explicitly programmed alpha coefficients.
+    blend(&mut w, [1, 1], [3, 4, 1, 1], false);
+    draw(&mut w, 0);
+    let first = f.submit(&w);
+    assert!(first.fault.is_none());
+    assert_eq!(
+        &f.data[RT..RT + gob::size(W, H, 1)],
+        gob::encode(&BG.repeat(W * H), W, H, 1, &vec![0xab; gob::size(W, H, 1)])
+    );
+    // Read the first draw's updated destination alpha; mask alpha off, but
+    // destination alpha must still affect the second draw's RGB equation.
+    let mut w = Vec::new();
+    blend(&mut w, [1, 1], [7, 9, 9, 10], true);
+    method(&mut w, 0x1a00, 0x101);
+    draw(&mut w, 1);
+    let second = f.submit(&w);
+    assert!(second.fault.is_none());
+    let before = f.d.graphics_counters();
+    let unchanged = gob::encode(&BG.repeat(W * H), W, H, 1, &vec![0xab; gob::size(W, H, 1)]);
+    assert_eq!(&f.data[RT..RT + unchanged.len()], unchanged);
+    assert_eq!(before.readback_operations, 0);
+    assert_eq!(before.synchronization_points, 0);
+    // Independent rational arithmetic: overlap [230,131,234,180]; reversing
+    // draw order gives [189,131,195,180], well beyond conversion tolerance.
+    assert_eq!(
+        component_blend(
+            component_blend(BG, [2, 3, 0, 0], false, 15),
+            [4, 6, 6, 7],
+            true,
+            5
+        ),
+        [230, 131, 234, 180]
+    );
+    // Constant blending remains unsupported. Earlier draws remain publishable.
+    let fault = f.submit(&[0x200104d1, 0xc001]);
+    assert!(
+        fault.fault.as_ref().is_some_and(|e| e
+            .to_string()
+            .contains("UnsupportedValue { method: 4932, value: 49153 }")),
+        "{:?}",
+        fault.fault
+    );
+    assert_eq!(&f.data[RT..RT + unchanged.len()], unchanged);
+    assert_eq!(f.d.graphics_counters().readback_operations, 0);
+    assert_eq!(f.d.graphics_counters().synchronization_points, 0);
+    assert_eq!(f.d.graphics_counters().draw_commands, before.draw_commands);
+    assert_eq!(f.d.graphics_counters().submissions, before.submissions);
+    check_components(
+        &f.publish(),
+        &[([2, 3, 0, 0], false, 15, 0), ([4, 6, 6, 7], true, 5, 1)],
+    );
+    assert_eq!(f.d.graphics_counters().readback_operations, 1);
+    assert_eq!(f.d.graphics_counters().synchronization_points, 1);
+    let mut used = vec![false; gob::size(W, H, 1)];
+    for y in 0..H {
+        for x in 0..W * 4 {
+            used[gob::address(x, y, W, 1)] = true;
+        }
+    }
+    for (n, used) in used.into_iter().enumerate() {
+        if !used {
+            assert_eq!(f.data[RT + n], 0xab);
+        }
+    }
+    assert_eq!(f.d.graphics_counters().draw_commands, before.draw_commands);
+    f.d.close(f.c, &mut mem(&mut f.data)).unwrap();
+}

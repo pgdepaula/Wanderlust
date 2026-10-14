@@ -1756,3 +1756,55 @@ A WSL interop startup110 occurred before the full native run launched GPU work;
 a functioning broker then ran the full matrix. Neither startup failure nor the
 earlier depth-oracle failure is disguised as a passing or skipped GPU scenario.
 Concurrent unfinished runtime changes were excluded and preserved.
+
+
+## Component blend coefficient execution
+
+Six CPU tests cover all ten supported factors in every coefficient slot under
+both literal encodings, shared/separate-alpha state, ignored MIN/MAX factors and
+raw-state restoration. Negative tests retain explicit rejection of constants,
+saturation, dual-source, malformed methods and nonzero color-key writes. Literal
+incrementing packets check successful state prefixes and unread suffix refusal.
+
+Two additional GPU scenarios execute through GpuDriver, mapped GPFIFO and B197
+indexed draws. The 48-case matrix tests each new factor in all four source/
+destination RGB/alpha slots under both aliases. A separate f64 component equation
+oracle uses independently specified source fractions [3/4,1/4,5/8,3/8] and
+destination bytes [51,153,204,230], with at most one RGBA8 conversion unit of
+tolerance. Color factors are evaluated per channel, including alpha; neither
+production factor decoding nor shader output is used to derive expectations.
+Equivalent aliases retain the pipeline, and real factor changes retain shader
+modules and decoded programs.
+
+A tiled overlap first computes S*S+D*(1-S), then S*destinationAlpha+D*D with
+an R/B write mask. Independent rational expectations are [230,131,234,180] in
+the overlap, versus [189,131,195,180] in reverse order. Alpha remains masked
+during the second draw but its newer value still weights RGB. Guest RAM stays
+byte-exactly unchanged after both draws and a later unsupported constant-factor
+fault; zero intermediate readbacks/waits and one final boundary are asserted.
+Independent GOB addressing verifies untouched padding; no accepted draw replays.
+
+The matrix plus its warm sequence executes 81 draws and 130 queue submissions:
+49 explicit validation readbacks/waits, 364560 readback bytes, 295568 guest target
+upload/write bytes, 72 vertex upload bytes and 16 constant upload bytes. It uses
+one target allocation with 80 reuses, 28 pipelines and four shader modules.
+Thirty-two warm S*S overwrite draws add no resource reads/uploads, shaders,
+pipelines, readbacks or waits; they still add 32 queue submissions and one final
+publication. Representative debug CPU observations were 26.254ms with1606
+allocations/129 reallocations on GL, 27.470ms with1441/32 on D3D12, and10.651ms
+with1607/34 on Vulkan. Process-wide allocator counts include backend activity;
+these are not GPU durations, zero-copy claims or game performance estimates.
+
+A faithful ordinary snapshot of 515c444 plus the exact five implementation/test
+files, identical Cargo.lock and dedicated artifacts passed whole-workspace
+formatting, strict workspace Clippy, 180 graphics CPU tests in each feature
+configuration and 399 workspace CPU tests (86 GPU cases ignored). Its source
+files were updated by content after prior validation finished, retaining artifact
+separation from the live checkout and preserving unchanged source timestamps.
+Concurrent unfinished runtime changes were excluded and preserved.
+
+All 86 GPU scenarios actually passed on each WSL OpenGL, native Windows D3D12
+and native Windows Vulkan backend: 258 passes, zero failures or explicit skips.
+The focused GL run separately passed five blend GPU scenarios and eleven CPU
+tests. Source-grounded independent review covered production mappings and the
+math/visibility oracle. No original-game GPU submission or frame is established.

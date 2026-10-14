@@ -788,3 +788,24 @@ positions and a 32x16 viewport with all clipping intersections on the subpixel
 grid, so an independent analytic plane remains a valid cross-backend oracle.
 This avoids assuming that unsnapped decimal geometry must have identical depth
 on every host rasterizer. No backend-specific production workaround is applied.
+
+
+## Component blend coefficient encodings
+
+Pinned NVIDIA [clb197.h](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/3d/clb197.h)
+SET_BLEND_COLOR_SOURCE_COEFF, COLOR_DEST_COEFF, ALPHA_SOURCE_COEFF and
+ALPHA_DEST_COEFF define the same six additional compact/GL pairs:
+SRC_COLOR3/4300, INV_SRC_COLOR4/4301, DST_ALPHA7/4304, INV_DST_ALPHA8/4305,
+DST_COLOR9/4306 and INV_DST_COLOR10/4307. Byte methods are1344,1348,1350,1358;
+the1354 color-key field remains separate. Pinned Mesa
+[nvc0_blend_fac](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nvc0/nvc0_state.c)
+corroborates the source/destination mappings and independent alpha programming.
+
+Cargo.lock pins wgpu-hal26.0.6. Its
+[DX12 coefficient lowering](https://github.com/gfx-rs/wgpu/blob/6f8edda9b180efada6a24b6d40c567c57f59e9ea/wgpu-hal/src/dx12/conv.rs)
+maps Src/Dst and their complements to corresponding alpha coefficients when
+lowering the alpha blend component. This respects
+[D3D12's alpha-slot restrictions](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/ns-d3d12-d3d12_render_target_blend_desc)
+without changing guest semantics or patching the dependency. These factors need
+no additional feature beyond the existing blendable Rgba8Unorm attachment.
+Constant, saturation and dual-source forms are not inferred from this subset.

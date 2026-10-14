@@ -406,6 +406,12 @@ fn host_blend(state: crate::raster::BlendState) -> wgpu::BlendState {
         crate::raster::BlendFactor::One => wgpu::BlendFactor::One,
         crate::raster::BlendFactor::SourceAlpha => wgpu::BlendFactor::SrcAlpha,
         crate::raster::BlendFactor::OneMinusSourceAlpha => wgpu::BlendFactor::OneMinusSrcAlpha,
+        crate::raster::BlendFactor::SourceColor => wgpu::BlendFactor::Src,
+        crate::raster::BlendFactor::OneMinusSourceColor => wgpu::BlendFactor::OneMinusSrc,
+        crate::raster::BlendFactor::DestinationAlpha => wgpu::BlendFactor::DstAlpha,
+        crate::raster::BlendFactor::OneMinusDestinationAlpha => wgpu::BlendFactor::OneMinusDstAlpha,
+        crate::raster::BlendFactor::DestinationColor => wgpu::BlendFactor::Dst,
+        crate::raster::BlendFactor::OneMinusDestinationColor => wgpu::BlendFactor::OneMinusDst,
     };
     let component = |f: [crate::raster::BlendFactor; 2], op| wgpu::BlendComponent {
         src_factor: factor(f[0]),

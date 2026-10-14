@@ -1181,8 +1181,9 @@ resolved pipeline state canonicalizes their ignored factors to ONE/ONE; raw gues
 factor registers remain available when a later command selects another equation.
 With separate-alpha disabled at 0x133c, alpha inherits both the color equation and
 its coefficients. Enabled separation requires independent, explicit alpha state.
-The existing supported factors remain ZERO, ONE, SRC_ALPHA and INV_SRC_ALPHA.
-Unknown factors remain rejected even when the selected equation ignores them.
+Supported factors include ZERO, ONE, source/destination color and alpha, and
+their complements as detailed below. Unknown factors remain rejected even when
+the selected equation ignores them.
 
 The public GPU BlendState carries color_operation and alpha_operation alongside
 its factor pairs. Pipeline identity includes both operations, normalized factors
@@ -1231,3 +1232,26 @@ rasterization; unequal positive W and screen-linear varyings remain supported.
 Alternate homogeneous ranges, nonidentity viewport Z transforms and other
 guardband configurations remain unsupported. Submission, completion and
 publication interfaces are unchanged.
+
+
+## Component and destination-alpha blend factors
+
+The four B197 RGB/alpha source/destination coefficient methods accept SRC_COLOR,
+INV_SRC_COLOR, DST_ALPHA, INV_DST_ALPHA, DST_COLOR and INV_DST_COLOR in addition
+to ZERO, ONE and source-alpha factors. Compact3/4/7/8/9/10 and aliases
+4300/4301/4304/4305/4306/4307 normalize to the same typed factors. Color factors
+multiply corresponding RGB components, rather than replicating a selected color
+channel. In the alpha equation their corresponding component is alpha.
+
+Destination factors read the attachment value established by earlier ordered
+draws, including its quantization. Disabling alpha writes preserves destination
+alpha but does not stop that alpha from contributing to subsequent RGB blending.
+Shared-alpha mode inherits the RGB factors and evaluates them on alpha; explicit
+separate-alpha coefficients remain independently stored. MIN/MAX continue to
+ignore validated coefficients without erasing their raw guest values.
+
+The existing wgpu factors implement these operations, including native DX12
+alpha-slot conversion for color factors. No extra device feature, shader
+translation, framebuffer publication or driver-facing API is introduced. Pipeline
+identity includes the typed factors. Constants, saturation, dual-source factors
+and compact BOTH_SRC_ALPHA forms remain unsupported.

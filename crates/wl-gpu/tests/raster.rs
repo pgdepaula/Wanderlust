@@ -183,7 +183,7 @@ fn literal_global_blend_factors_separate_alpha_and_channel_masks() {
         (0x133c, 2),
         (0x1340, 0x8009),
         (0x1344, 0xc902),
-        (0x1348, 0x4306),
+        (0x1348, 0x4308), // SRC_ALPHA_SATURATE remains unsupported.
         (0x1350, 0xc001),
         (0x1a00, 2),
         (0x1a00, 0x10000),

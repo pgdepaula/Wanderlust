@@ -107,6 +107,12 @@ pub enum BlendFactor {
     One,
     SourceAlpha,
     OneMinusSourceAlpha,
+    SourceColor,
+    OneMinusSourceColor,
+    DestinationAlpha,
+    OneMinusDestinationAlpha,
+    DestinationColor,
+    OneMinusDestinationColor,
 }
 fn factor(v: u32) -> Option<BlendFactor> {
     match v {
@@ -114,6 +120,12 @@ fn factor(v: u32) -> Option<BlendFactor> {
         0x4001 | 2 => Some(BlendFactor::One),
         0x4302 | 5 => Some(BlendFactor::SourceAlpha),
         0x4303 | 6 => Some(BlendFactor::OneMinusSourceAlpha),
+        0x4300 | 3 => Some(BlendFactor::SourceColor),
+        0x4301 | 4 => Some(BlendFactor::OneMinusSourceColor),
+        0x4304 | 7 => Some(BlendFactor::DestinationAlpha),
+        0x4305 | 8 => Some(BlendFactor::OneMinusDestinationAlpha),
+        0x4306 | 9 => Some(BlendFactor::DestinationColor),
+        0x4307 | 10 => Some(BlendFactor::OneMinusDestinationColor),
         _ => None,
     }
 }
