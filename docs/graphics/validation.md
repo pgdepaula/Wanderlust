@@ -1596,3 +1596,61 @@ passes, zero failures or explicit skips. Ordinary default tests ignore those
 78 GPU cases. A faithful ordinary source snapshot passed 359 CPU tests and strict
 workspace Clippy, excluding unfinished peer-owned runtime/compiler changes.
 No original-game GPU execution is established by these synthetic fixtures.
+
+
+## Independent global blend equation matrix
+
+Six CPU tests verify 100 RGB/alpha compact-versus-GL alias combinations, independent
+alpha selection, incomplete state, raw coefficient preservation across MIN/MAX,
+unsupported equations and unaligned methods. Literal incrementing B06F packets
+cross 0x1354 with explicit inactive color-key state; nonzero values latch a fault,
+preserve successfully consumed state and never consume the unread coefficient.
+
+Three GPU scenarios enter through GpuDriver, mapped GPFIFO commands and B197 indexed
+draws. An independently defined f64 equation oracle checks all 25 RGB/alpha pairs
+under both compact and GL aliases, plus two factor-sensitive subtraction cases.
+Source RGBA consists of exact binary fractions [3/4,1/4,5/8,3/8]; destination RGBA8
+is [51,153,204,230]. ONE/ONE ADD, SUBTRACT, reverse SUBTRACT, MIN and MAX respectively
+expect [242,217,255,255], [140,0,0,0], [0,89,45,134], [51,64,159,96] and
+[191,153,204,230], with at most one RGBA8 unit of conversion tolerance. MIN/MAX use
+contradictory raw ZERO/ZERO coefficients to expose accidental weighting. Analytic
+triangle coverage includes clipped and uncovered pixels and unused pitch columns.
+
+A tiled test combines MIN RGB/MAX alpha, then restores stored source-alpha factors
+for reverse subtraction with an R/B write mask. The independent overlap-blue
+expectation is 40; reversing the draw order gives 68. Guest RAM stays unchanged
+until publication. Unsupported weighted MIN at 0x134c faults before its following
+draw, while both earlier draws remain publishable exactly once. Independent scalar
+GOB addresses verify padding bytes remain unchanged.
+
+The 52-case matrix intentionally resets and publishes the target for each oracle
+check: 52 draws, 104 queue submissions, 52 readbacks/waits, 313664 target upload
+bytes, one target allocation and 51 reuses. It creates 30 pipelines while retaining
+four total shader modules (including baseline infrastructure). Equivalent aliases
+reuse the current pipeline; actual equation/factor changes rebuild the compatible
+pipeline without decoding either guest shader again.
+
+A separate tiled warm scenario changes ignored factors and an inactive alpha
+equation, then executes 32 unchanged deferred draws. Assertions require zero extra
+uploads, layout conversions, shader reads/decodes, module/pipeline/target creation,
+intermediate readbacks or waits. Draws still use 32 queue submissions; one final
+publication provides guest visibility. Representative debug CPU observations were
+17.172ms and 1575 allocations/130 reallocations on GL, 31.379ms and 1409/32 on
+D3D12, and 10.338ms and 1571/33 on Vulkan. These process-wide observations include
+backend work and do not establish GPU timing, allocation-free execution or game
+frame performance.
+
+
+Validation passed 161 CPU tests in each graphics feature configuration and strict
+package Clippy. All 81 GPU scenarios passed on each actual WSL OpenGL, native
+Windows D3D12 and native Windows Vulkan backend: 243 passes, zero failures or
+explicit skips. The final strengthened three-test blend executable also passed
+on both native backends. GPU-owned Rust formatting passes.
+
+The live workspace attempt encountered concurrent peer-owned CLI/analysis edits:
+E0560 for an instruction_limit field in Roots, followed by formatting differences
+in unfinished analysis source. Those files were preserved. An ordinary faithful
+snapshot of committed d4eb09c plus the exact GPU candidate, with identical
+Cargo.lock, passed 369 CPU tests (81 GPU tests ignored), strict workspace Clippy
+and whole-workspace formatting. This is snapshot validation, not a claim that
+unfinished live peer changes passed. Original-game GPU execution remains unproven.

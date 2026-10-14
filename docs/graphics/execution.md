@@ -563,7 +563,7 @@ submitted work for explicit synchronization. Dropping a renderer does not publis
 pending output. These are GPU test-adapter contracts, not Horizon fences, syncpoints,
 GPU-service wiring or cross-thread runtime memory transactions.
 
-## Global additive blending and channel writes
+## Global blending and channel writes
 
 B197 target-zero blend enable is 0x1360. Global blend selection remains explicit
 (`SET_BLEND_STATE_PER_TARGET` at 0x12e4 must be zero). When enabled,
@@ -571,11 +571,12 @@ SET_BLEND_SEPARATE_FOR_ALPHA (0x133c) must be specified; color operation/source/
 destination are 0x1340/0x1344/0x1348, and alpha operation/source/destination are
 0x134c/0x1350/0x1358. Separate alpha disabled reuses the color equation.
 
-The implemented operation is ADD (OGL 0x8006, D3D 1); factors are ZERO
+The implemented operations are ADD, SUBTRACT, REVERSE_SUBTRACT, MIN and MAX
+(equation interpretation and aliases are described below); factors are ZERO
 (0x4000/1), ONE (0x4001/2), SRC_ALPHA (0x4302/5), ONE_MINUS_SRC_ALPHA
 (0x4303/6). This supports conventional source-over, premultiplied-over and other
-additive combinations of those four factors, on the existing RGBA8 UNORM target.
-Other documented operations/factors, per-target equations, constants and dual
+combinations of those four factors, on the existing RGBA8 UNORM target.
+Other documented factors, per-target equations, constants and dual
 sources are rejected explicitly. Enabling incomplete blend state cannot draw.
 
 SET_CT_WRITE(0), 0x1a00, independently enables R/G/B/A at bits 0/4/8/12.
@@ -1165,3 +1166,28 @@ producer. It cannot overwrite an existing pending register because the producer
 preflight rejects any outstanding result before marking its own destination.
 These are conservative accepted barrier/scheduling combinations, not calibrated
 Maxwell timing or general scoreboard emulation. No CPU/GPU wait is added per draw.
+
+
+## Global RGB and alpha blend equations
+
+B197 byte methods 0x1340 (color equation) and 0x134c (alpha equation) accept ADD,
+SUBTRACT, REVERSE_SUBTRACT, MIN and MAX. Compact values 1/2/3/4/5 and GL aliases
+8006/800a/800b/8007/8008 normalize to the same typed state. SUBTRACT computes
+source times source factor minus destination times destination factor; REVERSE
+SUBTRACT reverses those terms. RGBA8 attachment storage clamps the result.
+
+Ordinary MIN/MAX compare unweighted source and destination components. Only the
+resolved pipeline state canonicalizes their ignored factors to ONE/ONE; raw guest
+factor registers remain available when a later command selects another equation.
+With separate-alpha disabled at 0x133c, alpha inherits both the color equation and
+its coefficients. Enabled separation requires independent, explicit alpha state.
+The existing supported factors remain ZERO, ONE, SRC_ALPHA and INV_SRC_ALPHA.
+Unknown factors remain rejected even when the selected equation ignores them.
+
+The public GPU BlendState carries color_operation and alpha_operation alongside
+its factor pairs. Pipeline identity includes both operations, normalized factors
+and write masks. Equation changes reuse compatible shader modules; equivalent
+aliases and ignored-factor changes reuse the current pipeline. GpuDriver request,
+completion and publication APIs are unchanged. Weighted MIN/MAX, logic operations,
+independent MRT blending and other factors remain unsupported. The inactive
+color-key register at 0x1354 and direct method-alignment validation are retained.

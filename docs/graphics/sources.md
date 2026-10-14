@@ -696,3 +696,33 @@ mask and multiplies raw X bits by it, waiting before AST exports. Independently
 specified finite input geometry retains negative X and zeros nonnegative X.
 These binaries contain no commercial shader data and have not executed on original
 Maxwell hardware.
+
+
+## Global blend equations beyond ADD
+
+Pinned NVIDIA [clb197.h](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/3d/clb197.h)
+(MIT), symbols NVB197_SET_BLEND_COLOR_OP and NVB197_SET_BLEND_ALPHA_OP, specifies
+byte methods 0x1340/0x134c and the compact/GL aliases for ADD, SUBTRACT, reverse
+SUBTRACT, MIN and MAX. SET_BLEND_SEPARATE_FOR_ALPHA at 0x133c selects independent
+alpha state. The 0x1354 color-key method remains a distinct field in incrementing
+packets, rather than another coefficient.
+
+Pinned Mesa [st_update_blend](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/mesa/state_tracker/st_atom_blend.c)
+normalizes MIN/MAX coefficients to ONE/ONE separately for RGB and alpha.
+[Softpipe equations](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/softpipe/sp_quad_blend.c)
+and [Nouveau emission](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nvc0/nvc0_state.c)
+corroborate subtraction order and equation programming. These are semantic
+references; implementation code is not copied.
+
+NVIDIA's [NV_blend_minmax_factor specification](https://registry.khronos.org/OpenGL/extensions/NV/NV_blend_minmax_factor.txt),
+revision 3 (2017-07-26), distinguishes ordinary factor-independent MIN/MAX from
+weighted FACTOR_MIN_AMD/FACTOR_MAX_AMD (901c/901d), which remain rejected. Ordinary
+raw B197 factors are interpreted using this corroborated API model; contradictory
+factors have not been tested on original Maxwell hardware.
+
+[wgpu 26 blend operations](https://docs.rs/wgpu/26.0.1/wgpu/enum.BlendOperation.html)
+support all five equations for the existing Rgba8Unorm attachment. Pinned
+[wgpu-core pipeline validation](https://github.com/gfx-rs/wgpu/blob/0c978d0d46c7eaf68f6d1ecf2ea1bd03a96b7c47/wgpu-core/src/device/resource.rs)
+checks blendability and relevant features; that version does not itself require
+MIN/MAX factors to be ONE. Canonicalization follows the guest equation semantics,
+not a claimed wgpu 26 validation error. No additional host feature is enabled.

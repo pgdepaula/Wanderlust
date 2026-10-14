@@ -99,7 +99,7 @@ impl ColorTarget {
         Ok(size)
     }
 }
-/// Implemented global additive blending factors, independently of host enum values.
+/// Implemented global blending factors, independently of host enum values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlendFactor {
     Zero,
@@ -117,9 +117,37 @@ fn factor(v: u32) -> Option<BlendFactor> {
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlendOperation {
+    Add,
+    Subtract,
+    ReverseSubtract,
+    Min,
+    Max,
+}
+fn blend_operation(v: u32) -> Option<BlendOperation> {
+    use BlendOperation::*;
+    Some(match v {
+        1 | 0x8006 => Add,
+        2 | 0x800a => Subtract,
+        3 | 0x800b => ReverseSubtract,
+        4 | 0x8007 => Min,
+        5 | 0x8008 => Max,
+        _ => return None,
+    })
+}
+fn blend_factors(op: BlendOperation, factors: [BlendFactor; 2]) -> [BlendFactor; 2] {
+    if matches!(op, BlendOperation::Min | BlendOperation::Max) {
+        [BlendFactor::One; 2]
+    } else {
+        factors
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlendState {
     pub color: [BlendFactor; 2],
     pub alpha: [BlendFactor; 2],
+    pub color_operation: BlendOperation,
+    pub alpha_operation: BlendOperation,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColorState {
@@ -357,7 +385,7 @@ impl RasterRegisters {
                 } else {
                     ((method - 0x1340) / 4) as usize
                 };
-                if (n == 0 || n == 3) && !matches!(value, 1 | 0x8006)
+                if (n == 0 || n == 3) && blend_operation(value).is_none()
                     || n != 0 && n != 3 && factor(value).is_none()
                 {
                     return Err(bad());
@@ -449,15 +477,28 @@ impl RasterRegisters {
                 .ok_or_else(|| invalid("missing explicit alpha blend selection"))?;
             let get =
                 |n: usize| self.blend[n].ok_or_else(|| invalid("incomplete global blend state"));
-            get(0)?;
-            let color = [factor(get(1)?).unwrap(), factor(get(2)?).unwrap()];
-            let alpha = if separate {
-                get(3)?;
-                [factor(get(4)?).unwrap(), factor(get(5)?).unwrap()]
+            let color_operation = blend_operation(get(0)?).unwrap();
+            // Canonicalize ignored MIN/MAX factors only in the resolved pipeline
+            // state. Raw registers remain intact for a later ADD/SUBTRACT write.
+            let color = blend_factors(
+                color_operation,
+                [factor(get(1)?).unwrap(), factor(get(2)?).unwrap()],
+            );
+            let (alpha_operation, alpha) = if separate {
+                let op = blend_operation(get(3)?).unwrap();
+                (
+                    op,
+                    blend_factors(op, [factor(get(4)?).unwrap(), factor(get(5)?).unwrap()]),
+                )
             } else {
-                color
+                (color_operation, color)
             };
-            Some(BlendState { color, alpha })
+            Some(BlendState {
+                color,
+                alpha,
+                color_operation,
+                alpha_operation,
+            })
         } else {
             None
         };

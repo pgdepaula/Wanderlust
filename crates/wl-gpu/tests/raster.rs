@@ -152,6 +152,8 @@ fn literal_global_blend_factors_separate_alpha_and_channel_masks() {
     let expected = BlendState {
         color: [SourceAlpha, OneMinusSourceAlpha],
         alpha: [One, OneMinusSourceAlpha],
+        color_operation: BlendOperation::Add,
+        alpha_operation: BlendOperation::Add,
     };
     assert_eq!(e.rasterization().unwrap().1.color.blend, Some(expected));
     // Documented D3D aliases normalize to the same hardware equation.
@@ -179,7 +181,7 @@ fn literal_global_blend_factors_separate_alpha_and_channel_masks() {
     for (m, v) in [
         (0x1360, 2),
         (0x133c, 2),
-        (0x1340, 0x800a),
+        (0x1340, 0x8009),
         (0x1344, 0xc902),
         (0x1348, 0x4306),
         (0x1350, 0xc001),
