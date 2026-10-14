@@ -1461,3 +1461,49 @@ workspace Clippy, excluding unfinished peer-owned work. The strengthened alterna
 opcode negative tests were additionally rerun in both feature configurations and
 in the snapshot after source review. These synthetic guest shaders and command
 streams do not establish original-game GPU execution or general ISA coverage.
+
+
+## Arithmetic SHR and complete result observation
+
+Five CPU tests verify the independent signed/default/wrapped encodings in both
+stages, explicit unsigned count bounds, i32 bitcasts, RZ, in-place value/count
+operands, readiness/barriers, unsupported modifiers/predicates/operand fields,
+resource provenance erasure and FMUL-hazard taint from either input. The former
+unsigned suite's signed-word rejection now asserts the distinct signed IR variant;
+unsigned lowering remains covered unchanged.
+
+Two actual GPU scenarios enter through GpuDriver→GPFIFO→B197. The full-word
+observer checks nine values against twenty counts for each default and .W form:
+360 observed results, including zero, signed extrema, −1, nonuniform bit patterns,
+counts 0/31/32/33/64 and high unsigned counts through ffffffff. Expected bits come
+from an independent logical-shift/sign-mask oracle, separately cross-checked with
+mathematical signed floor division. Every result byte is verified through RGBA8
+readback and analytic triangle coverage, avoiding NaN/color clamping loss.
+For 80000001 shifted by 33, default gives ffffffff and .W gives c0000000.
+
+Data-only changes preserve the selected program/pipeline. An accepted later .W
+draw remains pending when newly written .BREV code faults; publication returns
+`[0,0,0,192]` without draw replay or premature guest writes. The vertex shader's
+real SHR sign-mask changes guest geometry according to independent min(X,0)
+coverage. Its 32 warm repeated draws add 32 queue submissions and no uploads,
+shader reads, modules, pipelines, intermediate readbacks or waits. Explicit final
+visibility adds one readback/wait. This is deferred ordered execution, not host
+submission batching or allocation-free drawing.
+
+The word workload records 361 successful draws and one later fault, 2888 CB guest
+bytes and 1504 CB upload bytes, two valid 464-byte programs plus one failed decode
+attempt, one target allocation and 360 reuses. Its per-case oracle intentionally
+uses 361 readbacks/waits; the separate warm scenario proves deferred reuse.
+Representative warm32 debug CPU observations were 21.25ms with 1573 allocations/
+130 reallocations on GL, 16.33ms with 1410/34 on D3D12 and 11.83ms with 1568/32 on
+Vulkan. Process-wide Rust activity includes backend/channel bookkeeping; these
+are not GPU timings, zero-copy claims or game-level performance measurements.
+
+Validation passed 148 CPU tests in each feature configuration, strict package
+Clippy and whole-workspace formatting. All 74 GPU scenarios passed on each
+actual WSL OpenGL, native Windows D3D12 and native Windows Vulkan backend:
+222 passes, zero explicit skips/failures. Ordinary default-feature tests ignore
+those 74 GPU cases. A faithful ordinary source snapshot passed 352 CPU tests
+(74 GPU cases ignored) and strict workspace Clippy, preserving unfinished
+peer-owned files outside the snapshot. Original-game GPU execution remains
+unproven; these independently assembled programs are synthetic conformance data.

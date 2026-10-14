@@ -63,10 +63,7 @@ fn independent_shift_words_operands_and_unsigned_lowering() {
 }
 #[test]
 fn shift_modifier_predicate_and_operand_forms_reject() {
-    for (base, bits) in [
-        (BASES[0], vec![43, 47, 48]),
-        (BASES[2], vec![44, 47, 48, 40]),
-    ] {
+    for (base, bits) in [(BASES[0], vec![43, 47, 48]), (BASES[2], vec![44, 47, 40])] {
         for bit in bits {
             let mut b = BIN.to_vec();
             change(&mut b, 0x68, |_| base | (5 << 20) | (4 << 8) | (1 << bit));
@@ -87,10 +84,18 @@ fn shift_modifier_predicate_and_operand_forms_reject() {
             assert!(FragmentProgram::decode(&b).is_err());
         }
     }
-    // Independent envyas signed SHR word must not masquerade as unsigned SHR.
+    // Independent signed SHR must retain its interpretation, not unsigned fallback.
     let mut b = BIN.to_vec();
     change(&mut b, 0x68, |_| 0x5c29000000570400);
-    assert!(FragmentProgram::decode(&b).is_err());
+    assert_eq!(
+        FragmentProgram::decode(&b).unwrap().operations()[2],
+        Operation::Integer {
+            dst: 0,
+            left: 4,
+            right: 5,
+            operator: IntegerOperator::ShiftRightSigned { wrap: false }
+        }
+    );
 }
 #[test]
 fn shift_dependency_and_zero_register_rules() {

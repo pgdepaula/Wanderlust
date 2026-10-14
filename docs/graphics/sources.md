@@ -629,3 +629,32 @@ validated finite float byte construction to observe every bit of runtime SEL
 candidates through RGBA8. The vertex fixture retains negative X by signed X<0
 and otherwise selects RZ. Mutating only signedness to unsigned makes X<0 always
 false, collapsing the independently specified triangle to zero-area geometry.
+
+
+## Signed SHR count and sign-fill semantics
+
+Pinned MIT envytools GM107 and UAM/Mesa `emitSHR` establish signedness at bit 48,
+.W at bit 39, .X at 44, .BREV at 40 and CC at 47. The GPR signed fixed bases are
+`5c29000000070000` and `5c29008000070000`, excluding destination and GPR fields.
+[MIT NAK `OpShr::fold`](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/ir.rs)
+independently clamps default unsigned counts to 32 and returns the signed value's
+sign mask when checked shifting is out of range. Wrapped counts reduce to five
+bits. The pinned MIT
+[Ryujinx `EmitShr`](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Shader/Instructions/InstEmitShift.cs)
+also implements signed sign-fill fallback for counts >=32. Source interpretation
+was independently corroborated; no implementation code was copied.
+
+Retained original unmodified envyas/envydis assembly/binaries use the existing
+exact LDC PS and VTG headers and the reproduction commands above:
+
+| Fixture | SPH+code bytes | SHA-256 |
+|---|---:|---|
+| signed-shr-bytes | 464 | `c63aa3e432cd7cfd635a3a2bd7a6b757bfe5d63451466c04dad5bd5adfd94737` |
+| signed-shr-wrap-bytes | 464 | `46ad68ea7d2a6fa87fe0b8def8380921496491d8c97d90bfd00efdd8e791e0f0` |
+| vertex-signed-shr | 176 | `42b413fe89315b35a63125fa9d7179293c907b1c5d1561c37d040e914b851a37` |
+
+The fragment observer converts each result byte through the previously validated
+finite float construction. The vertex fixture computes the sign mask of raw X
+with SHR by 31, ANDs X with that mask and exports position/UV. For independently
+specified finite positions this preserves negative X and zeros nonnegative X.
+No execution on original Maxwell hardware or general shader coverage is claimed.

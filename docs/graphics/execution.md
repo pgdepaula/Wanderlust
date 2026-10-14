@@ -1123,3 +1123,20 @@ extension admits only the signedness bit in the previously verified instruction
 mask. Extended .X comparisons, other Boolean operations/accumulators/predicate
 outputs, immediate/constant operands and predicated execution remain unsupported.
 This adds conditional data selection, not branches or general control flow.
+
+
+## Arithmetic signed right shifts
+
+Both stages additionally accept GPR SHR and SHR.W with signed value interpretation.
+The shifted value is raw two's-complement i32; the shift count remains the complete
+unsigned u32 register value. Default counts of 32 or greater produce sign fill
+(all ones for a negative value, zero otherwise). Wrapped .W counts use the low
+five bits. WGSL bounds every evaluated count: arithmetic shift by min(count,31)
+for default or count&31 for .W, with the result bitcast back to raw u32.
+
+These semantics differ from unsigned SHR's out-of-range zero result. Signedness
+bit 48 and wrapping bit 39 are admitted only through the two exact verified GPR
+encodings. Readiness, RZ, in-place operands, six-stall scheduling, provenance
+erasure and conservative FMUL taint from either operand retain the shared integer
+path. .X, .BREV, CC, immediate/constant operands and execution predicates remain
+unsupported. No wide shift, funnel shift or integer conversion is implied.

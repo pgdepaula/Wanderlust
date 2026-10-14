@@ -25,6 +25,7 @@ pub enum IntegerOperator {
     MaxSigned,
     ShiftLeft { wrap: bool },
     ShiftRight { wrap: bool },
+    ShiftRightSigned { wrap: bool },
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntegerComparison {
@@ -434,6 +435,8 @@ impl Program {
                         | 0x5c48008000070000
                         | 0x5c28000000070000
                         | 0x5c28008000070000
+                        | 0x5c29000000070000
+                        | 0x5c29008000070000
                         | 0x5c20038000070000
                         | 0x5c20078000070000
                         | 0x5c21038000070000
@@ -467,6 +470,8 @@ impl Program {
                             0x5c48008000070000 => IntegerOperator::ShiftLeft { wrap: true },
                             0x5c28000000070000 => IntegerOperator::ShiftRight { wrap: false },
                             0x5c28008000070000 => IntegerOperator::ShiftRight { wrap: true },
+                            0x5c29000000070000 => IntegerOperator::ShiftRightSigned { wrap: false },
+                            0x5c29008000070000 => IntegerOperator::ShiftRightSigned { wrap: true },
                             0x5c20038000070000 => IntegerOperator::MinUnsigned,
                             0x5c20078000070000 => IntegerOperator::MaxUnsigned,
                             0x5c21038000070000 => IntegerOperator::MinSigned,
@@ -965,6 +970,23 @@ fn emit_integer(s: &mut String, dst: u8, left: u8, right: u8, operator: IntegerO
         }
         IntegerOperator::ShiftLeft { wrap } => ("<<", Some(wrap)),
         IntegerOperator::ShiftRight { wrap } => (">>", Some(wrap)),
+        IntegerOperator::ShiftRightSigned { wrap } => {
+            // Counts remain unsigned. Default >=32 is sign fill, equivalent
+            // to arithmetic shift by31; every host count is explicitly bounded.
+            if wrap {
+                writeln!(
+                    s,
+                    "r[{dst}]=bitcast<u32>(bitcast<i32>(r[{left}]) >> (r[{right}] & 31u));"
+                )
+            } else {
+                writeln!(
+                    s,
+                    "r[{dst}]=bitcast<u32>(bitcast<i32>(r[{left}]) >> min(r[{right}],31u));"
+                )
+            }
+            .unwrap();
+            return;
+        }
     };
     match wrap {
         None => writeln!(s, "r[{dst}]=r[{left}] {symbol} r[{right}];"),
