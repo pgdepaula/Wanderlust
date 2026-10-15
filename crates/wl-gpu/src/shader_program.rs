@@ -84,6 +84,13 @@ pub enum Operation {
         right: u8,
         operator: IntegerOperator,
     },
+    /// Ordinary raw-u32 IADD32I, without carry input/output or saturation.
+    AddImmediate {
+        dst: u8,
+        src: u8,
+        bits: u32,
+        negate_src: bool,
+    },
     /// Raw 32-bit immediate logic; immediate bits are not GPR operands.
     LogicImmediate {
         dst: u8,
@@ -423,6 +430,17 @@ impl Program {
                         right,
                         invert: word & (1 << 42) != 0,
                     }
+                } else if word & !0x010ffffffff0ffff == 0x1c00000000070000 {
+                    let src = ((word >> 8) & 255) as u8;
+                    if write_barrier != 7 || !initialized[src as usize] || pending[src as usize] {
+                        return Err(fail("unready immediate addition operand/control"));
+                    }
+                    Operation::AddImmediate {
+                        dst,
+                        src,
+                        bits: (word >> 20) as u32,
+                        negate_src: word & (1 << 56) != 0,
+                    }
                 } else if word & !0x01effffffff0ffff == 0x0400000000070000 {
                     let src = ((word >> 8) & 255) as u8;
                     let operator = match (word >> 53) & 3 {
@@ -729,9 +747,9 @@ impl Program {
                         operator: FloatOperator::Multiply,
                         ..
                     } => true,
-                    Operation::Move { src, .. } | Operation::LogicImmediate { src, .. } => {
-                        multiply_result[src as usize]
-                    }
+                    Operation::Move { src, .. }
+                    | Operation::LogicImmediate { src, .. }
+                    | Operation::AddImmediate { src, .. } => multiply_result[src as usize],
                     _ => false,
                 };
                 position_w[dst as usize] = match op {
@@ -805,7 +823,9 @@ impl Program {
                         }
                     }
                 }
-                Operation::Move { dst, src } | Operation::LogicImmediate { dst, src, .. } => {
+                Operation::Move { dst, src }
+                | Operation::LogicImmediate { dst, src, .. }
+                | Operation::AddImmediate { dst, src, .. } => {
                     largest = largest.max(u16::from(dst));
                     if src != 255 {
                         largest = largest.max(u16::from(src));
@@ -899,6 +919,9 @@ impl Program {
                 }
                 Operation::LogicImmediate { dst, src, bits, operator, invert_src, invert_immediate } => {
                     emit_logic_immediate(&mut s, dst, src, bits, operator, invert_src, invert_immediate);
+                }
+                Operation::AddImmediate { dst, src, bits, negate_src } => {
+                    emit_add_immediate(&mut s, dst, src, bits, negate_src);
                 }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
@@ -1070,6 +1093,14 @@ impl VertexProgram {
                         invert_immediate,
                     );
                 }
+                Operation::AddImmediate {
+                    dst,
+                    src,
+                    bits,
+                    negate_src,
+                } => {
+                    emit_add_immediate(&mut s, dst, src, bits, negate_src);
+                }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
                 _ => unreachable!("resource/fragment operation in strict vertex program"),
@@ -1222,4 +1253,13 @@ fn emit_logic_immediate(
     let left = if invert_src { "~" } else { "" };
     let right = if invert_immediate { "~" } else { "" };
     writeln!(s, "r[{dst}]=({left}r[{src}]) {symbol} ({right}{bits}u);").unwrap();
+}
+
+fn emit_add_immediate(s: &mut String, dst: u8, src: u8, bits: u32, negate_src: bool) {
+    use std::fmt::Write;
+    if negate_src {
+        writeln!(s, "r[{dst}]=(0u-r[{src}])+{bits}u;").unwrap();
+    } else {
+        writeln!(s, "r[{dst}]=r[{src}]+{bits}u;").unwrap();
+    }
 }

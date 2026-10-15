@@ -873,3 +873,57 @@ independently assembled/disassembled twice using pinned unmodified envytools:
 The finite byte observer exposes all32 result bits through RGBA8. The vertex
 program XORs clip X with immediate80000000, independently distinguishing a
 full-width immediate from a narrow or sign-extension interpretation.
+
+
+## Maxwell IADD32I raw integer semantics
+
+Pinned MIT [envytools GM107](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/gm107.c),
+[Mesa SM50 OpIAdd2](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs)
+and [NAK integer folding](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/ir.rs)
+corroborate raw immediate bits 51:20 and source-A negation at bit 56. Destination
+and source registers occupy 7:0 and 15:8, with PT execution at 19:16. The strict
+variable mask `010ffffffff0ffff` against `1c00000000070000` excludes CC52, X53,
+SAT54 and bit55, including the distinct PO encoding. Ordinary negation is
+two's-complement source negation before low-32-bit addition. Carry/X forms are
+not inferred from the ordinary encoding.
+
+Pinned [UAM long-immediate emission](https://github.com/devkitPro/uam/blob/5a5afc2bae8b55409ab36ba45be63fcb73f68993/mesa-imported/codegen/nv50_ir_emit_gm107.cpp)
+independently corroborates field placement. The six-stall scheduling restriction
+remains a conservative translator subset, not measured original-Maxwell timing.
+No implementation source is copied.
+
+Unmodified pinned envyas uses signed textual notation for this full-width field:
+`-1`, `-0x80000000` and `-0x76543211` encode raw `ffffffff`, `80000000` and
+`89abcdef`. This notation does not imply signed-20-bit binary decoding. Original
+fixtures were independently assembled/disassembled twice and complete bytes
+compared, retaining existing strict 80-byte stage headers:
+
+| Fixture | Bytes | SHA-256 |
+| --- | ---: | --- |
+| iadd32i.bin | 144 | eef4b0894812e376f3e9a9314ac13ec38b54313e4b7d4e9609cad9a617df2d9c |
+| iadd32i-bytes.bin | 464 | 04ebbd399e3d8a3f3abd5a52b3cd112e60dca7ebd7b997429940c9209702bfa7 |
+| vertex-iadd32i.bin | 144 | 07b65db0e3c8a6f6cfe4341caae5747c712c2b904fb0da4bf20b4fa4d1e8e78e |
+
+The vertex program adds raw `80000000` modulo 2^32 to clip X bits. This toggles
+the floating-point sign bit and produces an independently testable mirrored
+triangle without host-injected positions. The finite byte observer exposes
+arbitrary raw arithmetic results through RGBA8, avoiding NaN export assumptions.
+
+
+### Portable fused-rounding limit
+
+The [WGSL September 2026 specification](https://www.w3.org/TR/2026/CRD-WGSL-20260921/#fma-builtin)
+permits `fma` to perform a rounded multiply followed by a rounded add. Installed
+[Naga 26 HLSL lowering](https://github.com/gfx-rs/wgpu/blob/03f1b535ca2356d4d490540e76480b0116cf7d7f/naga/src/back/hlsl/writer.rs)
+emits `mad`; [Microsoft's contract](https://learn.microsoft.com/en-us/windows/win32/direct3dhlsl/mad)
+also permits fused or separate arithmetic even with `precise`. Thus an intrinsic
+spelling or successful adapter test cannot establish general Maxwell FFMA.RN
+single-rounding semantics. FFMA remains unsupported and FMUL-to-FADD taint
+validation remains necessary.
+
+An independent exact-rational counterexample uses raw float inputs `3f800001`,
+`3f7ffffe`, `bf800000`: `(1+2^-23)*(1-2^-23)-1` rounds to `a8800000` with one
+rounding, versus `00000000` after separately rounded multiply/add. General FFMA
+requires a stronger host-operation guarantee or explicitly implemented integer
+floating-point semantics. This is a translation-contract limitation, not a
+claim that the current hardware adapters necessarily produce the unfused result.

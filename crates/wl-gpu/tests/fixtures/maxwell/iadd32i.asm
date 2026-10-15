@@ -1,0 +1,8 @@
+sched (st 0x6 wr 0x0) (st 0x6 wt 0x1) (st 0x6);
+ld b32 $r4 c0[0x10];
+iadd32i $r0 $r4 -1;
+iadd32i $r1 neg $r4 -0x80000000;
+sched (st 0x6) (st 0x6) (st 0x6);
+iadd32i $r2 $r4 -0x76543211;
+iadd32i $r3 neg $r4 -0x76543211;
+exit;

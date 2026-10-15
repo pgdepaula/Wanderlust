@@ -1304,3 +1304,20 @@ PT execution, initialized ready GPR/RZ source, ordinary destination, WB7 and
 the existing conservative six-stall schedule are required. CC52, X57, operator3,
 other predicates and operand families remain explicitly unsupported. This
 restriction does not assert that operator3 is an invalid hardware encoding.
+
+
+## Full-width integer immediate addition
+
+IADD32I executes ordinary low-32-bit addition with an optional independently
+encoded source-A negation. The second operand is the complete raw 32-bit field
+at instruction bits 51:20. Both stages lower unsigned arithmetic, including
+`0u - A` for negation, before overwriting the destination. This implements
+modulo-2^32 behavior; it does not numerically convert operands to floating point.
+
+The additive AddImmediate IR operation counts only actual source/destination
+registers, retains source FMUL rounding hazards and clears resource/PositionW/
+reciprocal proofs even for addition by zero. Ready initialized GPR/RZ inputs,
+ordinary destination, PT execution, WB7 and the existing conservative six-stall
+schedule are required. CC output, X/carry input, saturation, PO and other
+predicates remain unsupported. Changes to encoded immediate bits invalidate
+shader code; mutable constant-buffer source values preserve compiled artifacts.

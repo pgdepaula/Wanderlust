@@ -1908,3 +1908,50 @@ executables per backend; compilation alone is not counted. Unfinished runtime
 changes remained excluded and preserved. Earlier diagnostic-test and wrong-cwd
 prototype compile failures were corrected before this final validation and are
 not counted as passing GPU executions. No original-game graphics is established.
+
+
+## Full-width IADD32I execution
+
+Seven CPU tests independently verify the original assembled words, plain and
+source-negated forms in both stages, every immediate bit, RZ/in-place/high GPRs,
+conservative scheduling, pending-source/destination checks, strict side-effect
+rejection, proof erasure and retained FMUL hazards. Two GPU scenarios execute
+through GpuDriver, guest GPFIFO and indexed B197 drawing. Two forms times twelve
+immediates times 28 edge/deterministic source values produce 672 full-word
+observations. An independent signed-i64 calculation with mathematical modulo
+2^32 determines all four expected bytes, including carry wrap and source
+negation. The oracle does not evaluate production WGSL or reuse GPU output.
+
+Each encoded immediate change invalidates code; 28 mutable CB source values
+under that code preserve translation, shader modules and pipelines. A final
+accepted A+ffffffff draw remains pending before a newly selected CC52 shader
+faults. No extra draw, queue submission or guest publication occurs at the
+fault. Explicit publication yields [119,86,52,18] for A=12345678 without replay.
+A vertex program adds raw80000000 to clip X modulo2^32, toggling its sign bit;
+independent asymmetric mirrored coverage verifies actual vertex execution.
+
+The arithmetic workload has 673 draws, 1346 queue submissions, 673 intentional
+oracle readbacks/waits, 5007120 readback bytes and 4059536 guest framebuffer
+write bytes. It reads 12064 shader bytes over 26 decode attempts, creates 28
+modules and 52 pipelines, reads 5384 constant bytes and uploads 2696, plus 72
+vertex and eight index bytes. One target allocation is reused 672 times. These
+per-case publications validate individual arithmetic results; they are not an
+unconditional runtime requirement.
+
+Thirty-two warm vertex draws add no resource reads/uploads, shader decodes,
+modules/pipelines, readbacks or waits. They still add 32 queue submissions
+before one final explicit publication. Debug CPU observations were 15.979ms
+with 1568 allocations/128 reallocations on GL, 25.132ms with 1420/41 on D3D12
+and 13.988ms with 1568/32 on Vulkan. Process-wide allocation counts include
+backend activity; these are not GPU durations or game-performance claims.
+
+A faithful ordinary snapshot of 0ad9ea6 plus exactly nine IADD32I candidate
+source/test/fixture files, unchanged Cargo.lock and dedicated artifacts passed
+workspace formatting, strict workspace Clippy, 200 graphics CPU tests in each
+feature configuration and 419 workspace CPU tests (92 GPU scenarios ignored).
+All 92 GPU scenarios actually passed on each WSL OpenGL, native Windows D3D12
+and native Windows Vulkan: 276 passes, zero failures or explicit skips. Forty
+native test executables ran per backend. Unfinished runtime work was excluded
+and preserved. Source/production/math reviews and independent fixture assembly
+covered the exact candidate; external coordination review remains separate.
+No original-game GPU submission or frame is established.
