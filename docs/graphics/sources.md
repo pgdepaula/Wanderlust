@@ -974,3 +974,28 @@ comparison and writes occur in the D16 attachment. Export's integer packing is
 checked; it does not define Maxwell rounding at halfway values. Exact endpoints
 and codes away from comparison ties provide portable independent raster tests.
 All65536 stored codes also have an executed native initialization/export test.
+
+
+## Short-immediate floating arithmetic
+
+Pinned MIT [GM107 tables](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/gm107.c)
+define FADD3858 and FMUL3868 with `F20_20`: nineteen payload bits38:20 plus
+sign56 reconstruct f32 bits31:12. Low twelve mantissa bits are zero. Pinned
+[UAM GM107 emitter](https://github.com/devkitPro/uam/blob/5a5afc2bae8b55409ab36ba45be63fcb73f68993/mesa-imported/codegen/nv50_ir_emit_gm107.cpp)
+corroborates this in `emitIMMD`/`longIMMD` and the operation emitters. These
+are raw IEEE representations, not signed20 integer values or numeric conversions.
+
+The accepted variable mask0100007ffff0ffff permits destination7:0, source15:8,
+payload38:20 and sign56. Round modes, saturation, FTZ/FMZ, scaling, absolute/
+negate modifiers, condition-code outputs and predicates remain excluded. The
+existing stall-six/write-barrier-seven fixed-latency contract remains strict.
+Original unmodified envyas/envydis assembled both stage fixtures. Float immediate
+assembly uses raw IEEE hex; decimal tokens are not relied upon. Explicit positive
+zero mutations are distinguished from the assembler's GPR-RZ canonical choice.
+
+The shared lowering bitcasts the immediate operand. Immediate multiplication
+sets the existing contraction-hazard metadata; GPR/immediate additions reject
+multiply-derived values even through identities. Arithmetic erases resource and
+perspective proofs. FFMA remains unsupported. Exceptional immediate bit decoding
+does not establish exact Maxwell NaN, subnormal, negative-zero or halfway behavior;
+the same bounded portable f32 limitations as existing GPR arithmetic apply.

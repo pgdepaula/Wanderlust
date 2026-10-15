@@ -299,3 +299,158 @@ fn driver_vertex_float_alu_moves_guest_geometry() {
     );
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+#[test]
+#[ignore = "requires actual GPU; short-float immediates, mutable guest constants and binary invalidation"]
+fn driver_float_immediate_resources_and_code_coherence() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/float-immediate.bin");
+    data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x2144, 0x600),
+        (0x2380, 32),
+        (0x2384, 0),
+        (0x2388, 0x40040),
+        (0x2490, 1),
+    ] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let mut identity = None;
+    for (input, expected) in [
+        ([0.125f32, 0.75, 0.75], [64, 96, 128, 255]),
+        ([0.375, 0.25, 0.5], [128, 32, 64, 255]),
+        ([0.125, 0.75, 0.75], [64, 96, 128, 255]),
+    ] {
+        let bytes: Vec<_> = input.iter().flat_map(|v| v.to_le_bytes()).collect();
+        d.write_backing(b, 0x50, &bytes, &mut mem(&mut data))
+            .unwrap();
+        d.write_backing(b, RT as u64, &BG.repeat(W * H), &mut mem(&mut data))
+            .unwrap();
+        let r = submit(&mut d, c, b, &mut data, &words);
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        check(&data, expected, false);
+        d.retire(r.token).unwrap();
+        let n = d.graphics_counters();
+        let now = [
+            n.shader_decodes,
+            n.shader_module_allocations,
+            n.pipeline_allocations,
+        ];
+        if let Some(old) = identity {
+            assert_eq!(now, old);
+        }
+        identity = Some(now);
+    }
+    // Independently decoded raw sign/exponent/mantissa field: change -0.25 to -0.5.
+    let mut code = bin.to_vec();
+    let off = 0x88;
+    let w = u64::from_le_bytes(code[off..off + 8].try_into().unwrap());
+    let w = (w & !(0x7ffffu64 << 20)) | (0x3f000u64 << 20);
+    code[off..off + 8].copy_from_slice(&w.to_le_bytes());
+    d.write_backing(b, 0x4600, &code, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert!(d.has_pending_output());
+    // Unsupported SAT must fault without reusing the previously resident shader.
+    let w = u64::from_le_bytes(code[0x78..0x80].try_into().unwrap()) | (1 << 50);
+    code[0x78..0x80].copy_from_slice(&w.to_le_bytes());
+    d.write_backing(b, 0x4600, &code, &mut mem(&mut data))
+        .unwrap();
+    let accepted = d.graphics_counters();
+    let fault = submit(&mut d, c, b, &mut data, &draw());
+    assert!(fault.fault.is_some());
+    assert_eq!(d.graphics_counters().draw_commands, accepted.draw_commands);
+    assert_eq!(d.graphics_counters().submissions, accepted.submissions);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [64, 96, 64, 255], false);
+    assert_eq!(accepted.shader_decodes, before.shader_decodes + 1);
+    assert_eq!(
+        d.graphics_counters().draw_commands,
+        before.draw_commands + 1
+    );
+    eprintln!("shortfloat resources {:?}", d.graphics_counters());
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+#[test]
+#[ignore = "requires actual GPU; Maxwell immediate vertex arithmetic and warm resource identity"]
+fn driver_vertex_float_immediate_moves_guest_geometry() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/vertex-float-immediate.bin");
+    data[0x4800..0x4800 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    method(&mut words, 0x2044, 0x800);
+    method(&mut words, 0x2144, 0x400);
+    words.extend(end);
+    let r = submit(&mut d, c, b, &mut data, &words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [255, 0, 0, 255], true);
+    d.retire(r.token).unwrap();
+    let bytes: Vec<_> = draw().iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let start = std::time::Instant::now();
+    for _ in 0..32 {
+        assert!(submit_existing(&mut d, c, &mut data, 8).fault.is_none());
+    }
+    let elapsed = start.elapsed();
+    let after = d.graphics_counters();
+    assert_eq!(after.submissions - before.submissions, 32);
+    assert_eq!(
+        [
+            after.shader_decodes,
+            after.vertex_shader_decodes,
+            after.shader_binary_bytes,
+            after.vertex_shader_bytes,
+            after.vertex_guest_bytes,
+            after.index_guest_bytes,
+            after.constant_guest_bytes,
+            after.guest_texture_bytes,
+            after.descriptor_reads,
+            after.render_target_guest_bytes
+        ],
+        [
+            before.shader_decodes,
+            before.vertex_shader_decodes,
+            before.shader_binary_bytes,
+            before.vertex_shader_bytes,
+            before.vertex_guest_bytes,
+            before.index_guest_bytes,
+            before.constant_guest_bytes,
+            before.guest_texture_bytes,
+            before.descriptor_reads,
+            before.render_target_guest_bytes
+        ]
+    );
+    assert_eq!(
+        [
+            after.upload_bytes,
+            after.upload_calls,
+            after.shader_module_allocations,
+            after.pipeline_allocations,
+            after.readback_operations,
+            after.synchronization_points
+        ],
+        [
+            before.upload_bytes,
+            before.upload_calls,
+            before.shader_module_allocations,
+            before.pipeline_allocations,
+            before.readback_operations,
+            before.synchronization_points
+        ]
+    );
+    assert!(d.has_pending_output());
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [255, 0, 0, 255], true);
+    eprintln!("shortfloat warm32 CPU={elapsed:?} before={before:?} after={after:?}");
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

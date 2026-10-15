@@ -2090,3 +2090,44 @@ added to the297count. Final depth test SHA-256:
 Native execution used Intel UHD; WSL used llvmpipe. Independent source/test review
 resolved two oracle gaps. Unfinished runtime and subsequent shader work remained
 excluded and preserved. No original-game GPU submission or frame is established.
+
+## Short-immediate FADD/FMUL execution
+
+Five additional CPU tests pin independently assembled words and raw IEEE payload
+reconstruction, including sign/exponent/mantissa boundaries. They cover both
+stages, RZ sources, pending destinations, strict modifiers/scheduling and mixed
+GPR/immediate contraction hazards. Immediate multiplication taint survives MOV,
+LOP.OR-RZ and IADD32I-zero identities. Valid-schedule TEX negatives require handle
+provenance rejection after immediate FADD+0/FMUL1. Exceptional bit decoding is
+separate from unproven portable exceptional arithmetic equivalence.
+
+Two additional GPU scenarios enter through GpuDriver/GPFIFO and indexed B197
+geometry. Independent dyadic arithmetic predicts [64,96,128,255], then mutable
+constants produce [128,32,64,255] without module/pipeline recreation. In-place
+code changes produce [64,96,64,255]. A later unsupported SAT instruction faults
+without stale execution, replay or extra submission; accepted output remains
+publishable. The fragment workload has4draws,8queues,3decode attempts (including
+the rejected program),528shader bytes read,5modules/6pipelines,48constant bytes
+read/uploaded,4intentional oracle readbacks/waits,29760readback bytes and24128guest
+publication bytes. One target allocation is reused3times.
+
+The vertex fixture genuinely scales X by.5 and offsets Y by.5; an independent
+analytic coverage oracle verifies the rasterized result. Thirty-two unchanged
+draws add no resource reads/uploads, shader/pipeline allocations, readbacks or
+waits, but still submit32queues. Debug CPU observations were31.345ms on OpenGL,
+16.325ms on D3D12 and17.798ms on Vulkan. No allocation-free or GPU-duration claim
+is made.
+
+A faithful ordinary snapshot of850e2e2 plus seven exact shader/test/fixture files
+and unchanged Cargo.lock passed workspace formatting, strict workspace Clippy,
+210graphics CPU tests/configuration and429workspace CPU tests (101GPU ignored).
+All101GPU scenarios actually passed on each WSL OpenGL, native Windows D3D12 and
+Vulkan:303passes,zero final failures or explicit skips,40native executables/backend.
+Linux and Windows used separate exclusive artifact directories for this source.
+An earlier shared Windows artifact set linked the old decoder and failed the two
+new tests before host shader compilation; it is excluded. The fresh exclusive
+executables contain the new lowering and pass. Interop startup failures before
+process acquisition are also excluded, never counted as GPU passes. The final
+source and fixture hashes match the frozen validation manifest and independent
+review/reassembly. Subsequent clear-test and unfinished runtime edits were
+excluded and preserved. No original-game GPU command or frame is established.

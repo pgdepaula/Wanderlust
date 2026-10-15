@@ -106,6 +106,14 @@ pub enum Operation {
         right: u8,
         operator: FloatOperator,
     },
+    /// IEEE f32 immediate bits; the supported short encoding has twelve zero
+    /// mantissa bits. This operand is neither a GPR nor an integer conversion.
+    FloatImmediate {
+        dst: u8,
+        src: u8,
+        bits: u32,
+        operator: FloatOperator,
+    },
     Immediate {
         dst: u8,
         bits: u32,
@@ -531,6 +539,32 @@ impl Program {
                         operator,
                     }
                 } else if matches!(
+                    word & !0x0100007ffff0ffff,
+                    0x3858000000070000 | 0x3868000000070000
+                ) {
+                    let src = ((word >> 8) & 255) as u8;
+                    if write_barrier != 7 || !initialized[src as usize] || pending[src as usize] {
+                        return Err(fail("unready floating ALU operand or unsupported schedule"));
+                    }
+                    let operator = if word & !0x0100007ffff0ffff == 0x3858000000070000 {
+                        FloatOperator::Add
+                    } else {
+                        FloatOperator::Multiply
+                    };
+                    if operator == FloatOperator::Add && multiply_result[src as usize] {
+                        return Err(fail("FMUL-derived FADD requires unfused rounding control"));
+                    }
+                    // F20_20 contains f32 bits31:12, split between sign bit56
+                    // and payload38:20. It is not S20 sign extension.
+                    let bits =
+                        (((word >> 20) & 0x7ffff) as u32) << 12 | (((word >> 56) & 1) as u32) << 31;
+                    Operation::FloatImmediate {
+                        dst,
+                        src,
+                        bits,
+                        operator,
+                    }
+                } else if matches!(
                     word & !(255 | (255u64 << 8) | (255u64 << 20)),
                     0x5c58000000070000 | 0x5c68000000070000
                 ) {
@@ -765,6 +799,10 @@ impl Program {
                     Operation::Float {
                         operator: FloatOperator::Multiply,
                         ..
+                    }
+                    | Operation::FloatImmediate {
+                        operator: FloatOperator::Multiply,
+                        ..
                     } => true,
                     Operation::Move { src, .. }
                     | Operation::LogicImmediate { src, .. }
@@ -844,7 +882,8 @@ impl Program {
                 }
                 Operation::Move { dst, src }
                 | Operation::LogicImmediate { dst, src, .. }
-                | Operation::AddImmediate { dst, src, .. } => {
+                | Operation::AddImmediate { dst, src, .. }
+                | Operation::FloatImmediate { dst, src, .. } => {
                     largest = largest.max(u16::from(dst));
                     if src != 255 {
                         largest = largest.max(u16::from(src));
@@ -932,6 +971,9 @@ impl Program {
                         FloatOperator::Multiply => "*",
                     };
                     writeln!(s,"r[{dst}]=bitcast<u32>(bitcast<f32>(r[{left}]) {symbol} bitcast<f32>(r[{right}]));").unwrap();
+                }
+                Operation::FloatImmediate { dst, src, bits, operator } => {
+                    emit_float_immediate(&mut s, dst, src, bits, operator);
                 }
                 Operation::Integer { dst, left, right, operator } => {
                     emit_integer(&mut s, dst, left, right, operator);
@@ -1085,6 +1127,14 @@ impl VertexProgram {
                         FloatOperator::Multiply => "*",
                     };
                     writeln!(s,"r[{dst}]=bitcast<u32>(bitcast<f32>(r[{left}]) {symbol} bitcast<f32>(r[{right}]));").unwrap();
+                }
+                Operation::FloatImmediate {
+                    dst,
+                    src,
+                    bits,
+                    operator,
+                } => {
+                    emit_float_immediate(&mut s, dst, src, bits, operator);
                 }
                 Operation::Integer {
                     dst,
@@ -1281,4 +1331,17 @@ fn emit_add_immediate(s: &mut String, dst: u8, src: u8, bits: u32, negate_src: b
     } else {
         writeln!(s, "r[{dst}]=r[{src}]+{bits}u;").unwrap();
     }
+}
+
+fn emit_float_immediate(s: &mut String, dst: u8, src: u8, bits: u32, operator: FloatOperator) {
+    use std::fmt::Write;
+    let symbol = match operator {
+        FloatOperator::Add => "+",
+        FloatOperator::Multiply => "*",
+    };
+    writeln!(
+        s,
+        "r[{dst}]=bitcast<u32>(bitcast<f32>(r[{src}]) {symbol} bitcast<f32>({bits}u));"
+    )
+    .unwrap();
 }

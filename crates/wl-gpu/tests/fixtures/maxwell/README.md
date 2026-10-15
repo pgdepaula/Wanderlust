@@ -200,3 +200,20 @@ assembler produces the PO negative fixture; it is never executed as subtraction.
 The VS has 7 GPRs and uses both legal negation forms to modify X/Y raw bits before
 position/UV export. Half-coordinate expectations apply only to the explicitly
 specified normal finite input geometry.
+
+
+`float-immediate` and `vertex-float-immediate` use original unmodified envyas/
+envydis at the pinned revision. Each contains the existing validated80-byte
+PS/VS header followed by96bytes of independently assembled scheduled code.
+The fragment loads c0[0x10/0x14/0x18], adds raw3e000000 to R4, multiplies R5
+by3f000000, adds rawbe800000 to R6 and exports alpha1. The vertex multiplies
+clip X by.5, adds.5 to clip Y and exports position/UV through the original
+ALD/AST interface. All immediate tokens in assembly are raw IEEE hex.
+SHA-256 including SPH:
+
+- float-immediate.bin:04c46334c384e3673bad525872a5ba2dfc9f32600f27546e5abf059055a8321b
+- vertex-float-immediate.bin:d1936c74a78df843dc8db125794f10fc5ec4d0a355013f4e290086e936b5e02e
+
+Positive-zero opcode mutations in tests are explicit field tests, not claimed
+assembler output. Exceptional payload assembly/decoding does not prove exact
+portable exceptional arithmetic. Fixtures contain no commercial game content.

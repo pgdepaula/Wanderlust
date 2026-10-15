@@ -1361,3 +1361,19 @@ Thirty-two warm unchanged draws need no additional depth conversion/upload,
 attachment/pipeline/shader allocation, readback or blocking wait. They still
 submit32 host queues. Stored code round-trip and endpoint equality are verified;
 Maxwell equivalence for arbitrary depth-conversion ties is not established.
+
+
+## Short-float shader operands
+
+The bounded vertex/fragment translator additionally accepts unconditional default
+FADD3858 and FMUL3868 with one initialized GPR/RZ source and one short f32 immediate.
+`FloatImmediate` retains raw bits, operand identity and Add/Multiply semantics;
+it uses shared stage lowering and register accounting. Guest constant-buffer data
+remains runtime data. Code changes invalidate translation, while mutable constants
+do not require shader recompilation.
+
+Side-effect/modifier variants remain explicit errors. Fixed scheduling, pending
+register checks and resource proof rules apply unchanged. Immediate FMUL results
+cannot flow into either form of FADD until portable unfused-rounding control exists;
+MOV, logical and integer identities do not remove that restriction. This is a
+small additional operand family, not general floating-point or shader compatibility.
