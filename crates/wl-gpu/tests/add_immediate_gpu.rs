@@ -638,3 +638,204 @@ fn guest_iadd_signed20_vertex_positions() {
     eprintln!("IADD signed20 vertex warm32 before={before:?} after={after:?}");
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+#[test]
+#[ignore = "requires actual GPU; 1024 mutable-uniform draws ordered in one guest GPFIFO request"]
+fn guest_frame_1024_ordered_draws_one_publication() {
+    const DRAWS: usize = 1024;
+    let (mut data, mut setup) = prepare();
+    for (address, color) in [
+        (0x50, [0.75f32, 0.25, 0.75, 1.]),
+        (0x90, [0.25f32, 0.75, 1., 1.]),
+    ] {
+        for (component, value) in color.into_iter().enumerate() {
+            let at = address + component * 4;
+            data[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    let end = setup.split_off(setup.len() - 8);
+    for (m, v) in [
+        (0x2144, 0x500), // Real guest LDC shader, four color words.
+        (0x214c, 5),
+        (0x2380, 32), // Four words at CB offsets10..1c require size32.
+        (0x2490, 1),  // Snapshot the corrected selector size into pixel slot0.
+        (0x133c, 1),
+        (0x1340, 2), // RGB subtract, sourceONE/destinationONE.
+        (0x1344, 2),
+        (0x1348, 2),
+        (0x134c, 1), // Alpha replace through ADD, ONE/ZERO.
+        (0x1350, 2),
+        (0x1358, 1),
+        (0x1360, 1),
+    ] {
+        method(&mut setup, m, v);
+    }
+    setup.extend(end);
+    let (mut d, c, space, backing, _) = driver();
+    // A genuine extra GPU VA alias, installed before output becomes pending.
+    // The 48KiB stream is disjoint from attachments and all shader resources.
+    let reservation = d
+        .reserve_fixed(space, GpuAddress(0xe0000), 0x10000)
+        .unwrap();
+    d.map(space, reservation, backing, 0x10000).unwrap();
+    let warm = submit(&mut d, c, backing, &mut data, &setup);
+    assert!(warm.fault.is_none(), "{:?}", warm.fault);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [180, 47, 168, 255], false);
+    d.retire(warm.token).unwrap();
+    let visible = data[RT..RT + SIZE].to_vec();
+
+    let mut words = Vec::with_capacity(DRAWS * 12);
+    let primitive = draw();
+    for n in 0..DRAWS {
+        method(
+            &mut words,
+            0x2388,
+            if n % 2 == 0 { 0x40040 } else { 0x40080 },
+        );
+        method(&mut words, 0x2490, 1);
+        words.extend_from_slice(&primitive);
+    }
+    assert_eq!(words.len(), 12288);
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    d.write_backing(backing, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let wire = entry(0xe0000, words.len());
+    let mut request = [0u8; 24];
+    request[8..12].copy_from_slice(&1u32.to_le_bytes());
+    request[12..16].copy_from_slice(&4u32.to_le_bytes());
+    let before = d.graphics_counters();
+    let driver_before = d.counters;
+    let region = stats_alloc::Region::new(ALLOCATOR);
+    let start = std::time::Instant::now();
+    let report = d
+        .submit(c, KICKOFF_PB, &request, Some(&wire), &mut mem(&mut data))
+        .unwrap();
+    let elapsed = start.elapsed();
+    let allocations = region.change();
+    assert!(report.fault.is_none(), "{:?}", report.fault);
+    assert_eq!(report.progress.entries_completed, 1);
+    assert_eq!(report.progress.words_consumed, 12288);
+    assert_eq!(report.progress.draws_submitted, 1024);
+    let after = d.graphics_counters();
+    assert!(d.has_pending_output());
+    assert_eq!(data[RT..RT + SIZE], visible);
+    assert!(!d.query(report.token).unwrap().guest_visible);
+    assert_eq!(d.counters.accepted - driver_before.accepted, 1);
+    assert_eq!(
+        d.counters.metadata_borrowed_bytes - driver_before.metadata_borrowed_bytes,
+        32
+    );
+    assert_eq!(d.counters.completion_waits, driver_before.completion_waits);
+    assert_eq!(after.draw_commands - before.draw_commands, 1024);
+    assert_eq!(after.submissions - before.submissions, 1024);
+    assert_eq!(
+        after.gpfifo_command_bytes - before.gpfifo_command_bytes,
+        49152
+    );
+    assert_eq!(after.gpfifo_read_calls - before.gpfifo_read_calls, 1025);
+    // Borrowed span lengths count suffix reacquisition, not bytes copied/read
+    // twice by the scalar decoder. It consumes exactly the 48KiB above.
+    assert_eq!(
+        after.gpfifo_borrowed_bytes - before.gpfifo_borrowed_bytes,
+        25198592
+    );
+    assert_eq!(
+        after.constant_guest_bytes - before.constant_guest_bytes,
+        16368
+    );
+    assert_eq!(
+        after.constant_upload_bytes - before.constant_upload_bytes,
+        12276
+    );
+    assert_eq!(
+        after.render_target_reuses - before.render_target_reuses,
+        1024
+    );
+    assert_eq!(after.upload_bytes - before.upload_bytes, 12276);
+    assert_eq!(after.upload_calls - before.upload_calls, 1023);
+    assert_eq!(
+        [
+            after.vertex_upload_bytes,
+            after.index_upload_bytes,
+            after.render_target_upload_bytes,
+            after.texture_uploads,
+            after.bind_group_allocations,
+            after.buffer_allocations,
+            after.texture_allocations,
+            after.vertex_guest_bytes,
+            after.index_guest_bytes,
+            after.guest_texture_bytes,
+            after.descriptor_reads,
+            after.shader_binary_bytes,
+            after.vertex_shader_bytes,
+            after.shader_decodes,
+            after.vertex_shader_decodes,
+            after.pipeline_allocations,
+            after.shader_module_allocations,
+            after.render_target_allocations,
+            after.render_target_guest_bytes,
+            after.readback_operations,
+            after.synchronization_points
+        ],
+        [
+            before.vertex_upload_bytes,
+            before.index_upload_bytes,
+            before.render_target_upload_bytes,
+            before.texture_uploads,
+            before.bind_group_allocations,
+            before.buffer_allocations,
+            before.texture_allocations,
+            before.vertex_guest_bytes,
+            before.index_guest_bytes,
+            before.guest_texture_bytes,
+            before.descriptor_reads,
+            before.shader_binary_bytes,
+            before.vertex_shader_bytes,
+            before.shader_decodes,
+            before.vertex_shader_decodes,
+            before.pipeline_allocations,
+            before.shader_module_allocations,
+            before.render_target_allocations,
+            before.render_target_guest_bytes,
+            before.readback_operations,
+            before.synchronization_points
+        ]
+    );
+    // Independent rational RGBA8 recurrence. Each source is an exact quarter;
+    // round-to-nearest-even is evaluated in integers after clamping S-D.
+    let quantized_subtract = |destination: u8, quarters: i32| {
+        let numerator = (quarters * 255 - 4 * i32::from(destination)).clamp(0, 1020);
+        let quotient = numerator / 4;
+        let remainder = numerator % 4;
+        (quotient + i32::from(remainder > 2 || remainder == 2 && quotient % 2 != 0)) as u8
+    };
+    let mut expected = [180u8, 47, 168, 255];
+    for n in 0..DRAWS {
+        let source = if n % 2 == 0 { [3, 1, 3] } else { [1, 3, 4] };
+        for component in 0..3 {
+            expected[component] = quantized_subtract(expected[component], source[component]);
+        }
+    }
+    assert_eq!(expected, [0, 191, 255, 255]);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, expected, false);
+    let published = d.graphics_counters();
+    assert_eq!(published.readback_operations, after.readback_operations + 1);
+    assert_eq!(
+        published.synchronization_points,
+        after.synchronization_points + 1
+    );
+    assert_eq!(published.draw_commands, after.draw_commands);
+    assert_eq!(
+        published.guest_framebuffer_write_bytes - after.guest_framebuffer_write_bytes,
+        SIZE as u64
+    );
+    assert!(d.query(report.token).unwrap().host_completed);
+    assert!(d.query(report.token).unwrap().guest_visible);
+    d.retire(report.token).unwrap();
+    eprintln!(
+        "Frame1024 CPU {elapsed:?} Rust {allocations:?} before={before:?} pending={after:?} published={published:?}"
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

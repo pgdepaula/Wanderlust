@@ -2000,3 +2000,44 @@ final matrix includes the strengthened resource-read assertions. Independent
 production/math review and complete fixture reassembly covered exact candidate
 hashes. Unfinished runtime work remained excluded and preserved. No original
 game GPU command or frame is established.
+
+
+## Ordered 1024-draw frame workload
+
+`guest_frame_1024_ordered_draws_one_publication` submits one mapped GPFIFO entry
+containing 1024 indexed B197 draws. Guest constant-buffer bindings alternate two
+quarter-valued colors; RGB SUBTRACT and separate alpha ADD make order observable.
+An independent integer recurrence with nearest-even RGBA8 quantization predicts
+[0,191,255,255]. It distinguishes stale late-bound constants, reversed order,
+framebuffer reinitialization and default blending. Uncovered background and
+pre-publication guest bytes are checked independently. This is a targeted
+ordering oracle, not a claim that every intermediate image is unique.
+
+The measured delta is 1024 draws and 1024 host queue submissions, 49152 consumed
+command bytes, 1025 command borrows and 25198592 borrowed-span bytes. The larger
+span count describes suffix reacquisition, not copied or repeatedly decoded
+payload bytes. Constants account for 16368 guest-read bytes, 12276 upload bytes
+and 1023 upload calls; the first binding is already resident. There are 1024
+target reuses and no new vertex/index/texture/descriptor/target/shader reads,
+resource uploads other than constants, buffers, textures, bind groups, shader
+modules, pipelines or target allocations. No intermediate readback or blocking
+wait occurs. One final visibility boundary reads 7440 host bytes and publishes
+6032 guest bytes, without replay; its completion token is retired explicitly.
+
+Debug CPU submission observations were 968.805ms on OpenGL, 436.004ms on D3D12
+and 368.741ms on Vulkan. Process-wide Rust allocation/reallocation counts were
+58362/4096, 54283/1031 and 55321/1028 respectively. These include backend activity;
+they establish neither allocation-free rendering, bounded long-term memory
+usage, GPU durations nor game frame rates. This remains one queue submit per draw.
+
+A faithful ordinary snapshot of 6bd69cb plus exactly the candidate GPU test file,
+unchanged Cargo.lock and dedicated artifacts passed formatting, strict workspace
+Clippy, 203 graphics CPU tests in each feature configuration and 422 workspace
+CPU tests (95 GPU scenarios ignored). All 95 GPU scenarios actually passed on
+WSL OpenGL, native Windows D3D12 and native Windows Vulkan: 285 passes, zero
+failures or explicit skips. Forty native executables ran per backend. The final
+candidate SHA-256 is ddbc72d583bac75babdbe9bcef681eb0dfef7f30c9824166a6f5023fb43cd8e9.
+The native matrix resumed missing executions from preserved same-build logs;
+successful runs were not replaced by compilation claims. Separate unfinished
+Z16 and runtime edits were excluded and preserved. No original-game GPU command
+or Tears of the Kingdom frame is established.
