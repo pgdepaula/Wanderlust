@@ -6,10 +6,10 @@ use std::{
     process,
     time::Instant,
 };
-use wl_analysis::{Image, Program, RAW_BASE, Roots, discover_roots, survey};
+use wl_analysis::{discover_roots, survey, Image, Program, Roots, RAW_BASE};
 use wl_common::{GuestAddr, Result};
-use wl_loader::{DEFAULT_CODE_BASE, LinkMode, MODULE_ORDER, Process};
-use wl_nso::{Module, read_input};
+use wl_loader::{LinkMode, Process, DEFAULT_CODE_BASE, MODULE_ORDER};
+use wl_nso::{read_input, Module};
 
 const HELP: &str = "Wanderlust — experimental AArch64 ahead-of-time recompiler
 
@@ -391,6 +391,10 @@ fn horizon_options(
     options.priority_mask = md.priority_mask;
     options.handle_table_size = md.handle_table_size;
     options.is_application = md.is_application;
+    if md.is_application && options.memory_limit == 0x2000_0000 {
+        // Standard Nintendo Switch 4GB retail application memory limit (3296 MiB).
+        options.memory_limit = 0xCE00_0000;
+    }
     options.svc_permissions = svc_permissions;
     options.service_access = npdm
         .aci0_services()

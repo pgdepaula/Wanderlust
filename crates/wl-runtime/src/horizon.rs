@@ -893,6 +893,14 @@ pub(crate) fn finish_registers(c: &mut Cpu, id: u16, written: bool) {
     }
 }
 fn set_result(c: &mut Cpu, value: u32) {
+    if value != 0 {
+        eprintln!(
+            "[svc] error result: {value:#x} (desc={}, mod={}) pc={:#x}",
+            value & 0x1fff,
+            (value >> 9) & 0x1ff,
+            c.pc
+        );
+    }
     c.x[0] = u64::from(value);
 }
 
@@ -1170,8 +1178,19 @@ pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<S
         }
         0x26 => {
             let (reason, arg, size) = (c.x[0], c.x[1], c.x[2]);
+            let mut payload = vec![0u8; (size as usize).min(64)];
+            let _ = memory.read_into(arg, &mut payload);
+            let val = u32::from_le_bytes(
+                payload
+                    .get(..4)
+                    .and_then(|s| s.try_into().ok())
+                    .unwrap_or([0; 4]),
+            );
             return Err(format!(
-                "guest svcBreak: reason={reason:#x} arg={arg:#x} size={size:#x}"
+                "guest svcBreak: reason={reason:#x} arg={arg:#x} size={size:#x} val={val:#x} (desc={}, mod={}) bytes={:02x?}",
+                val & 0x1fff,
+                (val >> 9) & 0x1ff,
+                payload
             ));
         }
         0x27 => {
@@ -1405,6 +1424,7 @@ fn map_shared_memory(
     };
     let shmem = &k.shared_memories[idx];
     if size != shmem.size {
+        eprintln!("[svc 0x13] map_shared_memory size mismatch: requested size={size:#x}, shmem.size={:#x}", shmem.size);
         return Ok(result::INVALID_SIZE);
     }
     if perm != 1 && perm != 3 {
@@ -1414,12 +1434,23 @@ fn map_shared_memory(
         return Ok(result::INVALID_NEW_MEMORY_PERMISSION);
     }
     let end = address + size;
-    if memory.regions.iter().any(|r| r.base < end && address < r.end()) {
+    if memory
+        .regions
+        .iter()
+        .any(|r| r.base < end && address < r.end())
+    {
         return Ok(result::INVALID_CURRENT_MEMORY);
     }
     let read = (perm & 1) != 0;
     let write = (perm & 2) != 0;
-    memory.map_state(address, shmem.bytes.clone(), read, write, false, state::SHARED_MEMORY)?;
+    memory.map_state(
+        address,
+        shmem.bytes.clone(),
+        read,
+        write,
+        false,
+        state::SHARED_MEMORY,
+    )?;
     Ok(result::SUCCESS)
 }
 /// svcUnmapSharedMemory (0x14): unmaps shared memory previously mapped at address.
@@ -1465,11 +1496,15 @@ fn unmap_shared_memory(
 /// still be plain RW heap (no reprotected or attributed pages) and unmaps it.
 fn set_heap_size(memory: &mut Memory, k: &mut Kernel, size: u64) -> Result<u64, u32> {
     if size % HEAP_ALIGNMENT != 0 || size >= 1 << 36 {
+        eprintln!(
+            "[svc 0x01] set_heap_size INVALID_SIZE: size={size:#x}, align={HEAP_ALIGNMENT:#x}"
+        );
         return Err(result::INVALID_SIZE);
     }
     let fixed = k.code.size() + k.threads[0].stack.size();
     let max_heap = k.config.memory_limit.saturating_sub(fixed);
     if size > k.layout.heap.size() || size > max_heap {
+        eprintln!("[svc 0x01] set_heap_size OUT_OF_MEMORY: size={size:#x}, max_heap={max_heap:#x}");
         return Err(result::OUT_OF_MEMORY);
     }
     let base = k.layout.heap.start;

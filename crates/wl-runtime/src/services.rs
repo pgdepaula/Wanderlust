@@ -842,6 +842,16 @@ pub(crate) fn request(
         }
         (HostObject::ApplicationFunctions, 22) => {
             // SetTerminateResult(u32).
+            let rc = if args.len() >= 4 {
+                ipc::read_u32(args, 0)
+            } else {
+                0
+            };
+            eprintln!(
+                "[am] SetTerminateResult: {rc:#x} (desc={}, mod={})",
+                rc & 0x1fff,
+                (rc >> 9) & 0x1ff
+            );
             Done::ok()
         }
         (HostObject::ApplicationFunctions, 23) => {
