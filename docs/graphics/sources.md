@@ -927,3 +927,30 @@ rounding, versus `00000000` after separately rounded multiply/add. General FFMA
 requires a stronger host-operation guarantee or explicitly implemented integer
 floating-point semantics. This is a translation-contract limitation, not a
 claim that the current hardware adapters necessarily produce the unfused result.
+
+
+## Signed-20-bit IADD immediate fields
+
+Pinned [envytools GM107 S20_20](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/gm107.c),
+[Mesa SM50 OpIAdd2](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs)
+and [UAM emitIADD](https://github.com/devkitPro/uam/blob/5a5afc2bae8b55409ab36ba45be63fcb73f68993/mesa-imported/codegen/nv50_ir_emit_gm107.cpp)
+corroborate low immediate bits 38:20, sign bit 56 and source negation at bit 49.
+The complete-word variable mask `0102007ffff0ffff` against `3810000000070000`
+excludes immediate-negation/PO48, CC47, X43, SAT50 and other side effects.
+Sign extension produces raw 32-bit data before the existing AddImmediate
+operation executes; no new lowering or guest-memory representation is required.
+
+All three original fixtures were independently assembled/disassembled twice
+with unmodified pinned envytools, retaining strict existing 80-byte headers:
+
+| Fixture | Bytes | SHA-256 |
+| --- | ---: | --- |
+| iadd20.bin | 144 | d624f2786795fb0f901e07ff732aa8a44d17462b3d6044053c8652ed97b4179f |
+| iadd20-bytes.bin | 464 | 493f130e7a04f3f449ad28ffdb67ee084d1826a75b9a3c3a2aeac47e62448145 |
+| vertex-iadd20.bin | 144 | bb6c68c43421e73193f4bd2237d41d18915639790002c8adc9b86b2cb1f89b27 |
+
+Textual zero assembles as the equivalent GPR-RZ form in envytools. Immediate-zero
+boundary cases therefore explicitly mutate the verified binary field; they are
+not falsely attributed to assembler output. The vertex fixture uses -524288,
+whose zero low payload and set sign bit independently catch a missing sign
+extension. No original-game content or implementation source is copied.

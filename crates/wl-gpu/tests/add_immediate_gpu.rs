@@ -172,6 +172,9 @@ fn check(data: &[u8], color: [u8; 4], transformed: bool) {
             p.map(f64::from)
         }
     });
+    check_triangle(data, color, v);
+}
+fn check_triangle(data: &[u8], color: [u8; 4], v: [[f64; 2]; 3]) {
     let area = edge(v[0], v[1], v[2]);
     let mut covered = 0;
     let mut outside = 0;
@@ -422,5 +425,216 @@ fn guest_iadd32i_vertex_sign_flip_and_warm_deferred_execution() {
     eprintln!(
         "IADD32I vertex warm32 {elapsed:?} Rust {allocations:?} before={before:?} after={after:?}"
     );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+
+#[test]
+#[ignore = "requires actual GPU; signed20 immediate sign and source negation are distinct fields"]
+fn guest_iadd_signed20_sign_extension_and_partial_fault() {
+    let (mut data, w) = prepare();
+    let code = include_bytes!("fixtures/maxwell/iadd20-bytes.bin");
+    data[0x4600..0x4600 + code.len()].copy_from_slice(code);
+    let (mut d, c, _, b, _) = driver();
+    let immediates = [
+        -524288i32, -524287, -262144, -1, 0, 1, 262143, 524286, 524287,
+    ];
+    let mut sources = vec![
+        0u32, 1, 0xffffffff, 0x7fffffff, 0x80000000, 0x80000001, 0x12345678, 0xdeadbeef,
+        0xaaaaaaaa, 0x55555555, 0xffff, 0x10000,
+    ];
+    let mut seed = 0x9137aaf5u32;
+    for _ in 0..16 {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        sources.push(seed);
+    }
+    for negate in [false, true] {
+        for immediate in immediates {
+            // Zero is an explicit literal field mutation: envytools prefers
+            // the equivalent GPR-RZ encoding when assembling textual zero.
+            let word = 0x3810000000070409u64
+                | (u64::from(immediate as u32 & 0x7ffff) << 20)
+                | (u64::from(immediate < 0) << 56)
+                | (u64::from(negate) << 49);
+            d.write_backing(b, 0x4698, &word.to_le_bytes(), &mut mem(&mut data))
+                .unwrap();
+            let mut cached = None;
+            for &a in &sources {
+                input(&mut d, b, &mut data, a, 0xdeadbeef);
+                let report = submit(&mut d, c, b, &mut data, &w);
+                assert!(report.fault.is_none(), "{:?}", report.fault);
+                d.publish(c, &mut mem(&mut data)).unwrap();
+                let signed_source = if negate { -i64::from(a) } else { i64::from(a) };
+                let expected = (signed_source + i64::from(immediate)).rem_euclid(1i64 << 32) as u32;
+                check(&data, expected.to_le_bytes(), false);
+                let now = d.graphics_counters();
+                let identity = (
+                    now.shader_decodes,
+                    now.shader_module_allocations,
+                    now.pipeline_allocations,
+                );
+                if let Some(old) = cached {
+                    assert_eq!(identity, old);
+                }
+                cached = Some(identity);
+                d.retire(report.token).unwrap();
+            }
+        }
+    }
+    assert_eq!(d.graphics_counters().draw_commands, 504);
+    let good = 0x3910007ffff70409u64; // A + sign-extended negative one.
+    d.write_backing(b, 0x4698, &good.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    input(&mut d, b, &mut data, 0x12345678, 0xdeadbeef);
+    let previous = data[RT..RT + SIZE].to_vec();
+    assert!(submit(&mut d, c, b, &mut data, &draw()).fault.is_none());
+    assert_eq!(&data[RT..RT + SIZE], previous);
+    d.write_backing(
+        b,
+        0x4698,
+        &(good | (1 << 47)).to_le_bytes(),
+        &mut mem(&mut data),
+    )
+    .unwrap();
+    let before = d.graphics_counters();
+    let fault = submit(&mut d, c, b, &mut data, &draw());
+    assert!(
+        fault
+            .fault
+            .as_ref()
+            .is_some_and(|f| f.to_string().contains("unsupported instruction")),
+        "{:?}",
+        fault.fault
+    );
+    assert_eq!(d.graphics_counters().draw_commands, before.draw_commands);
+    assert_eq!(d.graphics_counters().submissions, before.submissions);
+    assert_eq!(&data[RT..RT + SIZE], previous);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [119, 86, 52, 18], false);
+    assert_eq!(d.graphics_counters().draw_commands, before.draw_commands);
+    eprintln!(
+        "IADD signed20 full-word counters {:?}",
+        d.graphics_counters()
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+
+#[test]
+#[ignore = "requires actual GPU; negative signed20 immediate moves actual vertex output"]
+fn guest_iadd_signed20_vertex_positions() {
+    let (mut data, mut w) = prepare();
+    let code = include_bytes!("fixtures/maxwell/vertex-iadd20.bin");
+    data[0x4800..0x4800 + code.len()].copy_from_slice(code);
+    let input_positions = [[-0.75f32, -0.5], [0.5, -0.25], [-0.25, 0.75]];
+    // Independently specified exact IEEE bit results for adding raw fff80000:
+    // bf400000->bf380000,3f000000->3ef80000,be800000->be780000.
+    let expected_positions = [[-0.71875, -0.5], [0.484375, -0.25], [-0.2421875, 0.75]];
+    for (n, position) in input_positions.into_iter().enumerate() {
+        for (component, value) in position.into_iter().enumerate() {
+            let at = 0x3000 + n * 24 + component * 4;
+            data[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    let end = w.split_off(w.len() - 8);
+    for (m, v) in [(0x2144, 0x400), (0x214c, 4), (0x2044, 0x800), (0x204c, 8)] {
+        method(&mut w, m, v);
+    }
+    w.extend(end);
+    let (mut d, c, _, b, _) = driver();
+    let report = submit(&mut d, c, b, &mut data, &w);
+    assert!(report.fault.is_none(), "{:?}", report.fault);
+    assert_eq!(&data[RT..RT + 4], &BG);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_triangle(&data, [255, 0, 0, 255], expected_positions);
+    let original = input_positions.map(|p| p.map(f64::from));
+    let mut distinguished = 0;
+    for y in 0..H {
+        for x in 0..47 {
+            let p = [
+                (x as f64 + 0.5) * 2. / 47. - 1.,
+                1. - (y as f64 + 0.5) * 2. / 29.,
+            ];
+            let weights = |v: [[f64; 2]; 3]| {
+                let area = edge(v[0], v[1], v[2]);
+                [
+                    edge(v[1], v[2], p) / area,
+                    edge(v[2], v[0], p) / area,
+                    edge(v[0], v[1], p) / area,
+                ]
+            };
+            let old = weights(original);
+            let new = weights(expected_positions);
+            if old.iter().chain(new.iter()).any(|v| v.abs() < 0.005) {
+                continue;
+            }
+            if old.iter().all(|v| *v >= 0.) != new.iter().all(|v| *v >= 0.) {
+                distinguished += 1;
+            }
+        }
+    }
+    assert_eq!(
+        distinguished, 4,
+        "independent safe pixel centers distinguish immediate-zero/NOP decoding"
+    );
+    d.retire(report.token).unwrap();
+    let before = d.graphics_counters();
+    for _ in 0..32 {
+        assert!(submit(&mut d, c, b, &mut data, &draw()).fault.is_none());
+    }
+    let after = d.graphics_counters();
+    assert_eq!(after.draw_commands - before.draw_commands, 32);
+    assert_eq!(after.submissions - before.submissions, 32);
+    assert_eq!(
+        (
+            after.shader_binary_bytes,
+            after.vertex_shader_bytes,
+            after.shader_decodes,
+            after.vertex_shader_decodes,
+            after.shader_module_allocations,
+            after.pipeline_allocations,
+            after.upload_bytes,
+            after.readback_operations,
+            after.synchronization_points
+        ),
+        (
+            before.shader_binary_bytes,
+            before.vertex_shader_bytes,
+            before.shader_decodes,
+            before.vertex_shader_decodes,
+            before.shader_module_allocations,
+            before.pipeline_allocations,
+            before.upload_bytes,
+            before.readback_operations,
+            before.synchronization_points
+        )
+    );
+    assert_eq!(
+        (
+            after.vertex_guest_bytes,
+            after.index_guest_bytes,
+            after.constant_guest_bytes,
+            after.guest_texture_bytes,
+            after.descriptor_reads,
+            after.shader_decodes,
+            after.vertex_shader_decodes,
+            after.render_target_guest_bytes
+        ),
+        (
+            before.vertex_guest_bytes,
+            before.index_guest_bytes,
+            before.constant_guest_bytes,
+            before.guest_texture_bytes,
+            before.descriptor_reads,
+            before.shader_decodes,
+            before.vertex_shader_decodes,
+            before.render_target_guest_bytes
+        )
+    );
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_triangle(&data, [255, 0, 0, 255], expected_positions);
+    assert_eq!(
+        d.graphics_counters().readback_operations,
+        after.readback_operations + 1
+    );
+    eprintln!("IADD signed20 vertex warm32 before={before:?} after={after:?}");
     d.close(c, &mut mem(&mut data)).unwrap();
 }

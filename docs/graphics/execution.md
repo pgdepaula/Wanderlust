@@ -1321,3 +1321,13 @@ ordinary destination, PT execution, WB7 and the existing conservative six-stall
 schedule are required. CC output, X/carry input, saturation, PO and other
 predicates remain unsupported. Changes to encoded immediate bits invalidate
 shader code; mutable constant-buffer source values preserve compiled artifacts.
+
+
+The signed-20-bit immediate IADD form reuses AddImmediate after explicit
+sign extension. Payload bits 38:20 plus sign bit 56 represent -524288 through
+524287; source-A negation is bit 49. These positions deliberately differ from
+IADD32I, where bit 56 negates the source. The short form retains identical
+raw-u32 wrapping arithmetic, readiness, proof erasure and rounding-hazard rules.
+Its immediate-negation/PO, CC47, X43, SAT50 and other predicate/modifier forms
+remain unsupported. An explicitly encoded immediate zero is accepted, although
+the pinned assembler prefers an equivalent GPR-RZ instruction for textual zero.

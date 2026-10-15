@@ -84,7 +84,7 @@ pub enum Operation {
         right: u8,
         operator: IntegerOperator,
     },
-    /// Ordinary raw-u32 IADD32I, without carry input/output or saturation.
+    /// Ordinary immediate IADD, without carry input/output or saturation.
     AddImmediate {
         dst: u8,
         src: u8,
@@ -440,6 +440,25 @@ impl Program {
                         src,
                         bits: (word >> 20) as u32,
                         negate_src: word & (1 << 56) != 0,
+                    }
+                } else if word & !0x0102007ffff0ffff == 0x3810000000070000 {
+                    let src = ((word >> 8) & 255) as u8;
+                    if write_barrier != 7 || !initialized[src as usize] || pending[src as usize] {
+                        return Err(fail("unready immediate addition operand/control"));
+                    }
+                    // This form has a signed20 immediate. Bit56 is its sign;
+                    // source-A negation lives at bit49, unlike IADD32I.
+                    let low = ((word >> 20) & 0x7ffff) as u32;
+                    let bits = if word & (1 << 56) != 0 {
+                        low | 0xfff80000
+                    } else {
+                        low
+                    };
+                    Operation::AddImmediate {
+                        dst,
+                        src,
+                        bits,
+                        negate_src: word & (1 << 49) != 0,
                     }
                 } else if word & !0x01effffffff0ffff == 0x0400000000070000 {
                     let src = ((word >> 8) & 255) as u8;

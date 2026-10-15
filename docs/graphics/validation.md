@@ -1955,3 +1955,48 @@ native test executables ran per backend. Unfinished runtime work was excluded
 and preserved. Source/production/math reviews and independent fixture assembly
 covered the exact candidate; external coordination review remains separate.
 No original-game GPU submission or frame is established.
+
+
+## Signed-20-bit immediate IADD execution
+
+Three additional CPU tests independently pin the assembled words, cross sign56
+with source-negation49 in both stages, exercise every low payload bit and its
+complement, and verify strict register/scheduling/side-effect/proof rules. The
+reference sign extension uses wide signed arithmetic, not production bitwise OR.
+Explicit immediate-zero mutations are distinguished from assembler output.
+
+Two additional GPU scenarios enter through GpuDriver, mapped GPFIFO and indexed
+B197 draws. Two source-negation forms times nine signed immediates times 28 edge/
+deterministic source values yield 504 full-word observations. Independent signed
+i64 arithmetic modulo2^32 supplies expected bytes, including -524288 and524287.
+Per-code CB mutations retain translations/modules/pipelines. One later accepted
+A-1 draw remains pending when CC47 faults: no extra draw, submission or premature
+publication occurs, and explicit publication yields [119,86,52,18] without replay.
+
+The vertex fixture adds -524288 to raw clip X. Independently specified inputs
+[-0.75,-0.5],[0.5,-0.25],[-0.25,0.75] become
+[-0.71875,-0.5],[0.484375,-0.25],[-0.2421875,0.75]. Four safe pixel centers
+independently distinguish that geometry from a NOP/missing sign extension.
+Thirty-two repeated draws add no shader/vertex/index/CB/texture/descriptor/target
+source reads, uploads, modules, pipelines, readbacks or waits; they still add32
+queues before one explicit final publication. New assertions cover all resource
+classes, not only shader reads.
+
+The arithmetic workload has505draws,1010queues,505intentional oracle readbacks/
+waits,3757200readback bytes and3046160guest framebuffer write bytes. It reads
+9280shader bytes over20decode attempts, creates22modules/40pipelines, reads
+4040constant bytes and uploads2024, plus72vertex/eight index bytes. One target
+allocation is reused504times. These synchronizations validate individual
+arithmetic results; they are not unconditional per-draw runtime behavior.
+
+A faithful ordinary snapshot of5395cf9 plus exactly nine signed20 candidate
+source/test/fixture files and unchanged Cargo.lock passed workspace formatting,
+strict workspace Clippy,203graphics CPU tests in each feature configuration and
+422workspace CPU tests (94GPU scenarios ignored). Dedicated artifacts remained
+separate from the live checkout. All94GPU scenarios actually passed on each WSL
+OpenGL, native Windows D3D12 and native Windows Vulkan backend:282passes,zero
+failures or explicit skips. Forty native test executables ran per backend. The
+final matrix includes the strengthened resource-read assertions. Independent
+production/math review and complete fixture reassembly covered exact candidate
+hashes. Unfinished runtime work remained excluded and preserved. No original
+game GPU command or frame is established.

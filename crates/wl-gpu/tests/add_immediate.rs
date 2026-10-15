@@ -301,3 +301,204 @@ fn add_immediate_retains_float_rounding_hazards_until_real_untainted_overwrite()
         );
     }
 }
+
+const SHORT: &[u8] = include_bytes!("fixtures/maxwell/iadd20.bin");
+const SHORT_VERTEX: &[u8] = include_bytes!("fixtures/maxwell/vertex-iadd20.bin");
+fn short_instruction(dst: u8, src: u8, low: u32, sign: bool, negate_src: bool) -> u64 {
+    assert!(low < 524288);
+    0x3810000000070000
+        | u64::from(dst)
+        | (u64::from(src) << 8)
+        | (u64::from(low) << 20)
+        | (u64::from(sign) << 56)
+        | (u64::from(negate_src) << 49)
+}
+fn short_value(low: u32, sign: bool) -> u32 {
+    // Independent mathematical signed20 interpretation, rather than the
+    // production high-bit fill expression.
+    (i64::from(low) - if sign { 524288 } else { 0 }) as u32
+}
+
+#[test]
+fn signed_twenty_bit_literals_and_each_payload_bit_separate_sign_from_source_negation() {
+    assert_eq!((SHORT.len(), SHORT_VERTEX.len()), (144, 144));
+    let original = FragmentProgram::decode(SHORT).unwrap();
+    for (offset, word, dst, bits, negate_src) in [
+        (0x60, 0x3810007ffff70400u64, 0, 0x0007ffff, false),
+        (0x68, 0x3912000000070401, 1, 0xfff80000, true),
+        (0x78, 0x3910007ffff70402, 2, 0xffffffff, false),
+        (0x80, 0x3812000000170403, 3, 1, true),
+    ] {
+        assert_eq!(
+            u64::from_le_bytes(SHORT[offset..offset + 8].try_into().unwrap()),
+            word
+        );
+        assert!(
+            original
+                .operations()
+                .contains(&expected(dst, 4, bits, negate_src))
+        );
+    }
+    assert_eq!(
+        u64::from_le_bytes(SHORT_VERTEX[0x68..0x70].try_into().unwrap()),
+        0x3910000000070000
+    );
+    let mut lows = vec![0, 1, 0x3ffff, 0x40000, 0x7fffe, 0x7ffff];
+    for bit in 0..19 {
+        lows.push(1 << bit);
+        lows.push(0x7ffff ^ (1 << bit));
+    }
+    for sign in [false, true] {
+        for negate_src in [false, true] {
+            for &low in &lows {
+                let bits = short_value(low, sign);
+                // These are explicitly mutated binary encodings. In particular,
+                // textual zero may assemble as a GPR-RZ operand instead.
+                let mut bytes = SHORT.to_vec();
+                change(&mut bytes, 0x60, |_| {
+                    short_instruction(0, 4, low, sign, negate_src)
+                });
+                let p = FragmentProgram::decode(&bytes).unwrap();
+                assert_eq!(p.operations()[1], expected(0, 4, bits, negate_src));
+                assert_eq!(p.required_registers(), 5);
+                validate(&p.wgsl());
+                let mut bytes = SHORT_VERTEX.to_vec();
+                change(&mut bytes, 0x68, |_| {
+                    short_instruction(0, 0, low, sign, negate_src)
+                });
+                let p = VertexProgram::decode(&bytes).unwrap();
+                assert!(p.operations().contains(&expected(0, 0, bits, negate_src)));
+                assert_eq!(p.required_registers(), 6);
+                validate(&p.wgsl());
+            }
+        }
+    }
+}
+
+#[test]
+fn signed_twenty_bit_fields_register_bounds_and_scoreboard_are_strict() {
+    for sign in [false, true] {
+        for negate_src in [false, true] {
+            let valid = short_instruction(0, 4, 0x7ffff, sign, negate_src);
+            for bit in [
+                16, 17, 18, 19, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 50, 51, 52, 53, 54, 55, 57,
+            ] {
+                let mut bytes = SHORT.to_vec();
+                change(&mut bytes, 0x60, |_| valid ^ (1 << bit));
+                error(&bytes, "unsupported instruction");
+            }
+            let mut bytes = SHORT.to_vec();
+            change(&mut bytes, 0x60, |_| {
+                short_instruction(0, 5, 0, sign, negate_src)
+            });
+            error(&bytes, "unready");
+            change(&mut bytes, 0x60, |_| {
+                short_instruction(0, 255, 0, sign, negate_src)
+            });
+            validate(&FragmentProgram::decode(&bytes).unwrap().wgsl());
+            change(&mut bytes, 0x60, |_| {
+                short_instruction(255, 4, 0, sign, negate_src)
+            });
+            error(&bytes, "RZ destination");
+            for (dst, src) in [(4, 4), (254, 4), (0, 254)] {
+                let mut code = initialized();
+                if src == 254 {
+                    code.push(mov32i(254, 0x80000000));
+                }
+                code.extend([
+                    (short_instruction(dst, src, 0, sign, negate_src), ALU),
+                    (EXIT, ALU),
+                ]);
+                let p = FragmentProgram::decode(&program(SHORT, &code)).unwrap();
+                assert_eq!(
+                    p.required_registers(),
+                    if src == 254 || dst == 254 { 255 } else { 5 }
+                );
+                validate(&p.wgsl());
+            }
+            for (field, mask, replacement, message) in [
+                (21, 1 << 11, 0, "unready"),
+                (21, 7 << 5, 0, "unready immediate addition operand/control"),
+                (21, 31, 13, "fixed-latency schedule"),
+            ] {
+                let mut bytes = SHORT.to_vec();
+                change(&mut bytes, 0x60, |_| valid);
+                change(&mut bytes, 0x50, |c| {
+                    (c & !(mask << field)) | (replacement << field)
+                });
+                error(&bytes, message);
+            }
+            let mut code = initialized();
+            code.extend([
+                (0xef9400000107ff06, WRITE),
+                (short_instruction(6, 255, 0, sign, negate_src), ALU),
+                (EXIT, READY),
+            ]);
+            error(&program(SHORT, &code), "write to pending register");
+            code[6] = (short_instruction(0, 6, 0, sign, negate_src), ALU);
+            error(&program(SHORT, &code), "unready");
+            code[6].1 = READY;
+            validate(
+                &FragmentProgram::decode(&program(SHORT, &code))
+                    .unwrap()
+                    .wgsl(),
+            );
+        }
+    }
+}
+
+#[test]
+fn signed_twenty_bit_addition_erases_proofs_but_keeps_source_float_hazards() {
+    for sign in [false, true] {
+        for negate_src in [false, true] {
+            for (bin, at, register, message) in [
+                (
+                    include_bytes!("fixtures/maxwell/tex.bin").as_slice(),
+                    3,
+                    6,
+                    "TEX handle",
+                ),
+                (
+                    include_bytes!("fixtures/maxwell/perspective.bin").as_slice(),
+                    2,
+                    7,
+                    "PositionW",
+                ),
+                (
+                    include_bytes!("fixtures/maxwell/perspective.bin").as_slice(),
+                    3,
+                    7,
+                    "reciprocal",
+                ),
+            ] {
+                let mut code = items(bin);
+                code.insert(
+                    at,
+                    (
+                        short_instruction(register, register, 0, sign, negate_src),
+                        READY,
+                    ),
+                );
+                error(&program(bin, &code), message);
+            }
+            for dst in [1, 2] {
+                let mut code = items(include_bytes!("fixtures/maxwell/alu.bin"));
+                code[5] = (short_instruction(dst, 1, 0, sign, negate_src), ALU);
+                code[6] = (0x5c5800000ff70003 | (u64::from(dst) << 8), ALU);
+                error(&program(SHORT, &code), "unfused rounding");
+            }
+            let mut code = initialized();
+            code.extend([
+                (0x5c68000000170004, ALU),
+                (short_instruction(4, 2, 0, sign, negate_src), ALU),
+                (0x5c5800000ff70400, ALU),
+                (EXIT, ALU),
+            ]);
+            validate(
+                &FragmentProgram::decode(&program(SHORT, &code))
+                    .unwrap()
+                    .wgsl(),
+            );
+        }
+    }
+}
