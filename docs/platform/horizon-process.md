@@ -179,8 +179,11 @@ Some system services are served by the runtime itself. sm treats their names as 
 | | IApplicationProxy | 0, 1, 2, 3, 4, 11, 20, 1000 | ICommonStateGetter, ISelfController, IWindowController, IAudioController, IDisplayController, ILibraryAppletCreator, IApplicationFunctions, IDebugFunctions |
 | | ICommonStateGetter | 0 GetEventHandle | copies a readable event, the same event each time, signalled while AppletMessages are queued |
 | | | 1 ReceiveMessage | the oldest AppletMessage (u32), or NoMessage `0x680` when the queue is empty |
+| | | 2 GetThisAppletKind | Application (`3`) |
 | | | 5 GetOperationMode, 6 GetPerformanceMode | Console (u8 1), Boost (u32 1): docked |
+| | | 7 GetCradleStatus, 8 GetBootMode | InCradle (u8 1), Normal (u8 0) |
 | | | 9 GetCurrentFocusState | InFocus (u8 1) |
+| | | 65..=69 SetGamePlayRecordingState, InitializeGamePlayRecording, RequestFlushGamePlayingMovieForDebug | acknowledges recording initialization |
 | | | 900 SetRequestExitToLibraryAppletAtExecuteNextProgramEnabled | records the setting |
 | | ISelfController | 11 SetOperationModeChangedNotification, 12 SetPerformanceModeChangedNotification, 16 SetOutOfFocusSuspendingEnabled (bool); 13 SetFocusHandlingMode (three bools) | records the setting |
 | | | 90 GetAccumulatedSuspendedTickValue | 0 (u64): the application is never suspended |

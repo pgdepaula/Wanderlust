@@ -793,6 +793,22 @@ pub(crate) fn request(
             k.host.focus_handling_mode = Some([0, 1, 2].map(|i| args[i] & 1 != 0));
             Done::ok()
         }
+        (HostObject::CommonStateGetter, 2) => {
+            // GetThisAppletKind: Application (3).
+            Done::data(&3u32.to_le_bytes())
+        }
+        (HostObject::CommonStateGetter, 7) => {
+            // GetCradleStatus: InCradle (1).
+            Done::data(&[1u8])
+        }
+        (HostObject::CommonStateGetter, 8) => {
+            // GetBootMode: Normal (0).
+            Done::data(&[0u8])
+        }
+        (HostObject::CommonStateGetter, 65..=69) => {
+            // SetGamePlayRecordingState, InitializeGamePlayRecording, RequestFlushGamePlayingMovieForDebug.
+            Done::ok()
+        }
         (HostObject::CommonStateGetter, 900) => {
             // SetRequestExitToLibraryAppletAtExecuteNextProgramEnabled.
             check(no_arguments)?;
@@ -814,6 +830,10 @@ pub(crate) fn request(
             })?;
             k.host.delay_time_to_abort_on_gpu_error =
                 Some(u64::from_le_bytes(args[..8].try_into().unwrap_or_default()));
+            Done::ok()
+        }
+        (HostObject::ApplicationFunctions, 65..=69) => {
+            // SetGamePlayRecordingState, InitializeGamePlayRecording, RequestFlushGamePlayingMovieForDebug.
             Done::ok()
         }
         (HostObject::WindowController, 1) => {
@@ -1080,8 +1100,8 @@ fn get_or_create_time_shared_memory(k: &mut Kernel) -> Result<u32, u32> {
         None => {
             let mut bytes = vec![0u8; 4096];
             let clock_source_id: [u8; 16] = [
-                0x57, 0x4c, 0x54, 0x4b, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99,
-                0xaa, 0xbb, 0xcc,
+                0x57, 0x4c, 0x54, 0x4b, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa,
+                0xbb, 0xcc,
             ];
             // 1. SteadyClockContext at offset 0x00
             bytes[0..4].copy_from_slice(&2u32.to_le_bytes());

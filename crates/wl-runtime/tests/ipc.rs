@@ -899,6 +899,13 @@ fn applet_oe_application_startup() {
     assert_eq!(reply(&p)[0x30], 1);
     // SetRequestExitToLibraryAppletAtExecuteNextProgramEnabled.
     assert_eq!(call(&mut p, &mut c, am, getter, 900, &[]).0, 0);
+    // GetThisAppletKind, GetCradleStatus, GetBootMode, InitializeGamePlayRecording.
+    assert_eq!(call(&mut p, &mut c, am, getter, 2, &[]).1, 3);
+    assert_eq!(call(&mut p, &mut c, am, getter, 7, &[]).0, 0);
+    assert_eq!(reply(&p)[0x30], 1);
+    assert_eq!(call(&mut p, &mut c, am, getter, 8, &[]).0, 0);
+    assert_eq!(reply(&p)[0x30], 0);
+    assert_eq!(call(&mut p, &mut c, am, getter, 66, &[]).0, 0);
     // Never suspended: tick value 0, a copied event that is not signalled.
     assert_eq!(call(&mut p, &mut c, am, controller, 90, &[]), (0, 0, 0));
     domain_request(&mut p, 1, controller, 91, false, &[]);
