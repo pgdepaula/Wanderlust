@@ -1377,3 +1377,18 @@ register checks and resource proof rules apply unchanged. Immediate FMUL results
 cannot flow into either form of FADD until portable unfused-rounding control exists;
 MOV, logical and integer identities do not remove that restriction. This is a
 small additional operand family, not general floating-point or shader compatibility.
+
+
+## Full32 floating operands
+
+FADD32I and FMUL32I additionally use the existing `FloatImmediate` IR and shared
+stage lowering. Every raw immediate bit is retained, including low mantissa bits
+absent from F20. Strict unconditional/default forms only are accepted; register,
+scheduling, provenance and multiply-to-add restrictions remain unchanged across
+GPR, short and full-width encodings. No extra compiler or resource-binding path
+is introduced. Exceptional floating-point equivalence and FFMA remain unproven.
+
+A guest shader can compare the raw arithmetic result with an independently
+provided constant using ISETP/SEL. This permits exact low-bit validation without
+introducing a forbidden multiply-to-add chain or reducing the observation to
+8-bit color quantization alone.

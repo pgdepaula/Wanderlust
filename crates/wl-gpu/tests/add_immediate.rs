@@ -243,7 +243,23 @@ fn predicates_cc_extended_saturating_and_unverified_bit55_are_rejected() {
             change(&mut bytes, 0x60, |_| {
                 instruction(base, 0, 4, 0) ^ (1 << bit)
             });
-            error(&bytes, "unsupported instruction");
+            if base == 0x1c00000000070000 && bit == 57 {
+                // This bit belongs to opcode space: IADD32I becomes the newly
+                // supported FMUL32I. Require its distinct floating semantics.
+                let p = FragmentProgram::decode(&bytes).unwrap();
+                assert_eq!(
+                    p.operations()[1],
+                    Operation::FloatImmediate {
+                        dst: 0,
+                        src: 4,
+                        bits: 0,
+                        operator: wl_gpu::shader_program::FloatOperator::Multiply,
+                    }
+                );
+                validate(&p.wgsl());
+            } else {
+                error(&bytes, "unsupported instruction");
+            }
         }
     }
 }

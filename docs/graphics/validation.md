@@ -2166,3 +2166,49 @@ has three-backend coverage; this is not reported as a fresh full102-scenario run
 Exclusive source/artifact provenance was retained. No production API changed,
 whole-frame atomicity or allocation-free transfer is claimed. Runtime edits were
 excluded and preserved; no original-game GPU submission is established.
+
+## Full-width floating immediates
+
+FADD32I and FMUL32I preserve all 32 immediate payload bits, including the low
+mantissa bits absent from short-immediate instructions. Independently assembled
+fragment and vertex fixtures have SHA-256
+`88472bdac976fb58f5144a9284ebb74e027af272425ee0f6a418e050fb343676` and
+`58f41ea86fd831e1c36a52ef501436384276d41899e09adea7d674f5445f90f2`.
+CPU tests exercise every payload bit, strict modifiers, predicates, readiness,
+register bounds and multiplication-to-addition contraction hazards across all
+three supported operand forms. The IADD32I opcode-bit-57 test now verifies the
+distinct valid FMUL32I instruction instead of incorrectly expecting rejection.
+
+The fragment fixture uses guest constant operands and compares raw arithmetic
+results against independently supplied expected bits. For immediate `3f800001`,
+adding -1 yields `34000000`, multiplying 1 yields `3f800001`, and multiplying 2
+yields `40000001`. Correct answers produce yellow `[255,255,0,255]`; deliberately
+truncated answers produce black. Mutable constants preserve shader/pipeline
+identity. Changing only the addition immediate to `3f800002` produces green
+`[0,255,0,255]`. An unsupported subsequent CC modifier faults without replay,
+stale execution or an extra host submission; earlier output remains publishable.
+The vertex fixture changes actual indexed geometry using `3f000001`; independent
+barycentric coverage checks demonstrate the transform. Its one-ULP difference is
+below pixel resolution, so low-bit fidelity is established by the raw fragment
+oracle and decoder tests rather than by that coverage result.
+
+The fragment workload records 5 draws, 10 queue submissions, 3 decode attempts
+(including rejected code), 720 shader bytes, 5 shader modules, 6 pipelines,
+80 constant guest bytes and 72 constant upload bytes. Five intentional oracle
+publications perform 5 readbacks/waits, 37,200 readback bytes and 30,160 guest
+write bytes. One target allocation is reused four times. Thirty-two unchanged
+vertex draws add no resource reads/uploads, shader modules, pipelines, readbacks
+or waits, but still submit 32 queues. Debug CPU observations were 41.597 ms on
+OpenGL, 26.326 ms on D3D12 and 25.252 ms on Vulkan. This is not GPU timing or a
+game performance estimate; allocator traffic was not separately measured here.
+
+A faithful ordinary snapshot of `31e4c4d` plus the exact eight changed Rust and
+fixture files, with unchanged Cargo.lock, passed workspace formatting, strict
+workspace Clippy, 213 graphics CPU tests per feature configuration and 432
+workspace CPU tests (104 GPU scenarios ignored). All 104 GPU scenarios actually
+passed on each WSL OpenGL, native Windows D3D12 and native Windows Vulkan:
+312 passes, zero failures or explicit skips, 40 native executables per backend.
+Exclusive artifact directories and final source hashes matched the validation
+manifest. Unfinished runtime files were excluded and preserved. Exceptional
+floating-point equivalence and portable fused multiply-add remain unproven; no
+general predication, general shader coverage or original-game graphics is claimed.

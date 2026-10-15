@@ -280,7 +280,12 @@ fn short_float_zero_sources_pending_destinations_and_mixed_hazards() {
     let exit = bytes[0x80..0x88].to_vec();
     bytes[0x80..0x88].copy_from_slice(&tex);
     bytes[0x88..0x90].copy_from_slice(&exit);
-    for instruction in [0x3858000000070606u64, 0x3868003f80070606] {
+    for instruction in [
+        0x3858000000070606u64,
+        0x3868003f80070606,
+        0x0800000000070606,
+        0x1e03f80000070606,
+    ] {
         // FADD +0 and FMUL 1 remain arithmetic, not resource-handle proofs.
         bytes[0x78..0x80].copy_from_slice(&instruction.to_le_bytes());
         let error = FragmentProgram::decode(&bytes).unwrap_err().to_string();
@@ -305,5 +310,147 @@ fn immediate_multiply_taint_survives_cross_form_identity_operations() {
         word(&mut bytes, 0x88, |w| (w & !(255 << 8)) | (1 << 8));
         let error = FragmentProgram::decode(&bytes).unwrap_err().to_string();
         assert!(error.contains("unfused"), "{identity:016x}: {error}");
+    }
+}
+
+const FLOAT32_IMM: &[u8] = include_bytes!("fixtures/maxwell/float32-immediate.bin");
+#[test]
+fn full_float_immediates_retain_all_ieee_bits_and_share_stage_ir() {
+    let p = FragmentProgram::decode(FLOAT32_IMM).unwrap();
+    assert_eq!(p.required_registers(), 11);
+    assert_eq!(
+        p.operations()[5],
+        Operation::FloatImmediate {
+            dst: 8,
+            src: 4,
+            bits: 0x3f800001,
+            operator: FloatOperator::Add
+        }
+    );
+    assert_eq!(
+        p.operations()[6],
+        Operation::FloatImmediate {
+            dst: 9,
+            src: 5,
+            bits: 0x3f800001,
+            operator: FloatOperator::Multiply
+        }
+    );
+    assert_eq!(
+        u64::from_le_bytes(FLOAT32_IMM[0x88..0x90].try_into().unwrap()),
+        0x0803f80000170408
+    );
+    assert_eq!(
+        u64::from_le_bytes(FLOAT32_IMM[0x98..0xa0].try_into().unwrap()),
+        0x1e03f80000170509
+    );
+    for bits in (0..32)
+        .flat_map(|n| [1u32 << n, !(1u32 << n)])
+        .chain([0, 0x80000000, 0x3f800001, 0xbf800001])
+    {
+        for (offset, index, dst, src, operator) in [
+            (0x88, 5, 8, 4, FloatOperator::Add),
+            (0x98, 6, 9, 5, FloatOperator::Multiply),
+        ] {
+            let mut bytes = FLOAT32_IMM.to_vec();
+            word(&mut bytes, offset, |w| {
+                (w & !(0xffffffffu64 << 20)) | (u64::from(bits) << 20)
+            });
+            let p = FragmentProgram::decode(&bytes).unwrap();
+            assert_eq!(
+                p.operations()[index],
+                Operation::FloatImmediate {
+                    dst,
+                    src,
+                    bits,
+                    operator
+                }
+            );
+        }
+    }
+    let p = wl_gpu::shader_program::VertexProgram::decode(include_bytes!(
+        "fixtures/maxwell/vertex-float32-immediate.bin"
+    ))
+    .unwrap();
+    assert!(p.operations().contains(&Operation::FloatImmediate {
+        dst: 0,
+        src: 0,
+        bits: 0x3f000001,
+        operator: FloatOperator::Multiply
+    }));
+    assert!(p.operations().contains(&Operation::FloatImmediate {
+        dst: 1,
+        src: 1,
+        bits: 0x3f000001,
+        operator: FloatOperator::Add
+    }));
+}
+#[test]
+fn full_float_side_effects_predicates_and_readiness_are_rejected() {
+    for offset in [0x88, 0x98] {
+        for bit in [16, 19, 52, 53, 54, 55, 56, 57] {
+            if offset == 0x98 && bit == 57 {
+                continue;
+            }
+            let mut bytes = FLOAT32_IMM.to_vec();
+            word(&mut bytes, offset, |w| w ^ (1 << bit));
+            assert!(
+                FragmentProgram::decode(&bytes).is_err(),
+                "{offset:x} bit{bit}"
+            );
+        }
+        let mut bytes = FLOAT32_IMM.to_vec();
+        word(&mut bytes, offset, |w| (w & !255) | 255);
+        assert!(FragmentProgram::decode(&bytes).is_err());
+        let mut bytes = FLOAT32_IMM.to_vec();
+        word(&mut bytes, offset, |w| (w & !(255 << 8)) | (11 << 8));
+        assert!(FragmentProgram::decode(&bytes).is_err());
+    }
+    // Flipping FMUL32I opcode bit57 yields the already supported IADD32I,
+    // not a floating modifier. A strict decoder must retain its integer meaning.
+    let mut bytes = FLOAT32_IMM.to_vec();
+    word(&mut bytes, 0x98, |w| w ^ (1 << 57));
+    assert_eq!(
+        FragmentProgram::decode(&bytes).unwrap().operations()[6],
+        Operation::AddImmediate {
+            dst: 9,
+            src: 5,
+            bits: 0x3f800001,
+            negate_src: false
+        }
+    );
+    // R6 is pending from LDC; sourceR4 is ready. Full-width arithmetic must
+    // reject an overwrite independently of operand-read validation.
+    let mut bytes = FLOAT_IMM.to_vec();
+    word(&mut bytes, 0x70, |w| w & !(1 << 11));
+    word(&mut bytes, 0x78, |_| 0x0803f80000170406);
+    assert!(
+        FragmentProgram::decode(&bytes)
+            .unwrap_err()
+            .to_string()
+            .contains("write to pending register")
+    );
+}
+#[test]
+fn full_float_multiply_hazards_cross_every_operand_encoding() {
+    for multiply in [
+        0x1e03f80000170501u64,
+        0x3868003f00070501,
+        0x5c68000000670501,
+    ] {
+        for add in [
+            0x0803f80000170102u64,
+            0x3858003e80070102,
+            0x5c5800000ff70102,
+        ] {
+            let mut bytes = FLOAT_IMM.to_vec();
+            word(&mut bytes, 0x80, |_| multiply);
+            word(&mut bytes, 0x88, |_| add);
+            let error = FragmentProgram::decode(&bytes).unwrap_err().to_string();
+            assert!(
+                error.contains("unfused"),
+                "{multiply:x} -> {add:x}: {error}"
+            );
+        }
     }
 }

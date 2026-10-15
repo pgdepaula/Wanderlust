@@ -999,3 +999,23 @@ multiply-derived values even through identities. Arithmetic erases resource and
 perspective proofs. FFMA remains unsupported. Exceptional immediate bit decoding
 does not establish exact Maxwell NaN, subnormal, negative-zero or halfway behavior;
 the same bounded portable f32 limitations as existing GPR arithmetic apply.
+
+
+## Full-width floating immediates
+
+The same pinned GM107 tables define FADD32I=`0x08` and FMUL32I=`0x1e` with
+`F32_20`, a complete raw32-bit IEEE operand in instruction bits51:20. UAM's
+long-immediate emitters corroborate both bases and select this form when low
+twelve mantissa bits are nonzero. Strict default bases are0800000000070000 and
+1e00000000070000; variable mask000ffffffff0ffff permits destination7:0,
+source15:8 and immediate51:20. Sign is immediate bit31 at instruction51, unlike
+the short encoding's separate sign56.
+
+Bits39/40 and every other position within51:20 are data in these forms, not
+short-form rounding controls. FADD condition-code, source/immediate negate/abs
+and FTZ modifiers remain excluded. FMUL condition-code, FTZ/FMZ and SAT remain
+excluded. Bit57 of FMUL32I is opcode space: flipping it yields the separately
+supported IADD32I=`0x1c`, not a floating modifier. Tests preserve that valid
+integer interpretation rather than requiring a false rejection. Neither pinned
+long emitter exposes a rounding selector here; unmodified envyas rejects `rm`.
+No inference from neighboring short encodings is used.

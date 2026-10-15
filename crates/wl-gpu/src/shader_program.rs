@@ -106,8 +106,8 @@ pub enum Operation {
         right: u8,
         operator: FloatOperator,
     },
-    /// IEEE f32 immediate bits; the supported short encoding has twelve zero
-    /// mantissa bits. This operand is neither a GPR nor an integer conversion.
+    /// IEEE f32 immediate bits. Short encodings omit twelve low mantissa bits;
+    /// full-width forms retain all bits. This is not a GPR or integer conversion.
     FloatImmediate {
         dst: u8,
         src: u8,
@@ -541,23 +541,41 @@ impl Program {
                 } else if matches!(
                     word & !0x0100007ffff0ffff,
                     0x3858000000070000 | 0x3868000000070000
+                ) || matches!(
+                    word & !0x000ffffffff0ffff,
+                    0x0800000000070000 | 0x1e00000000070000
                 ) {
                     let src = ((word >> 8) & 255) as u8;
                     if write_barrier != 7 || !initialized[src as usize] || pending[src as usize] {
                         return Err(fail("unready floating ALU operand or unsupported schedule"));
                     }
-                    let operator = if word & !0x0100007ffff0ffff == 0x3858000000070000 {
-                        FloatOperator::Add
+                    let (operator, bits) = if matches!(
+                        word & !0x000ffffffff0ffff,
+                        0x0800000000070000 | 0x1e00000000070000
+                    ) {
+                        // F32_20 occupies bits51:20, including the positions
+                        // used for rounding and other modifiers in short forms.
+                        let operator = if word & !0x000ffffffff0ffff == 0x0800000000070000 {
+                            FloatOperator::Add
+                        } else {
+                            FloatOperator::Multiply
+                        };
+                        (operator, ((word >> 20) & 0xffff_ffff) as u32)
                     } else {
-                        FloatOperator::Multiply
+                        let operator = if word & !0x0100007ffff0ffff == 0x3858000000070000 {
+                            FloatOperator::Add
+                        } else {
+                            FloatOperator::Multiply
+                        };
+                        // F20_20 contains f32 bits31:12, split between sign bit56
+                        // and payload38:20. It is not S20 sign extension.
+                        let bits = (((word >> 20) & 0x7ffff) as u32) << 12
+                            | (((word >> 56) & 1) as u32) << 31;
+                        (operator, bits)
                     };
                     if operator == FloatOperator::Add && multiply_result[src as usize] {
                         return Err(fail("FMUL-derived FADD requires unfused rounding control"));
                     }
-                    // F20_20 contains f32 bits31:12, split between sign bit56
-                    // and payload38:20. It is not S20 sign extension.
-                    let bits =
-                        (((word >> 20) & 0x7ffff) as u32) << 12 | (((word >> 56) & 1) as u32) << 31;
                     Operation::FloatImmediate {
                         dst,
                         src,

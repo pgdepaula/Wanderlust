@@ -454,3 +454,197 @@ fn driver_vertex_float_immediate_moves_guest_geometry() {
     eprintln!("shortfloat warm32 CPU={elapsed:?} before={before:?} after={after:?}");
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+#[test]
+#[ignore = "requires actual GPU; raw-bit oracle exposes complete FADD32I/FMUL32I mantissas"]
+fn driver_float32_immediate_raw_bits_and_code_coherence() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/float32-immediate.bin");
+    data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x2144, 0x600),
+        (0x214c, 11),
+        (0x2380, 32),
+        (0x2384, 0),
+        (0x2388, 0x40040),
+        (0x2490, 1),
+    ] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let mut identity = None;
+    // The guest shader compares actual raw arithmetic outputs with independent
+    // expected words supplied as runtime data, then SEL exports the two answers.
+    // One missing low mantissa bit changes yellow into black.
+    for (input, color) in [
+        (
+            [0xbf800000u32, 0x3f800000, 0x34000000, 0x3f800001],
+            [255, 255, 0, 255],
+        ),
+        ([0xbf800000, 0x3f800000, 0, 0x3f800000], [0, 0, 0, 255]),
+        ([0, 0x40000000, 0x3f800001, 0x40000001], [255, 255, 0, 255]),
+        (
+            [0xbf800000, 0x3f800000, 0x34000000, 0x3f800001],
+            [255, 255, 0, 255],
+        ),
+    ] {
+        let bytes: Vec<_> = input.iter().flat_map(|v| v.to_le_bytes()).collect();
+        d.write_backing(b, 0x50, &bytes, &mut mem(&mut data))
+            .unwrap();
+        let r = submit(&mut d, c, b, &mut data, &words);
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        check(&data, color, false);
+        d.retire(r.token).unwrap();
+        let n = d.graphics_counters();
+        let now = [
+            n.shader_decodes,
+            n.shader_module_allocations,
+            n.pipeline_allocations,
+        ];
+        if let Some(old) = identity {
+            assert_eq!(now, old);
+        }
+        identity = Some(now);
+    }
+    let mut code = bin.to_vec();
+    let off = 0x88;
+    let old = u64::from_le_bytes(code[off..off + 8].try_into().unwrap());
+    let changed = (old & !(0xffffffffu64 << 20)) | (0x3f800002u64 << 20);
+    code[off..off + 8].copy_from_slice(&changed.to_le_bytes());
+    d.write_backing(b, 0x4600, &code, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    let accepted = d.graphics_counters();
+    assert_eq!(accepted.shader_decodes, before.shader_decodes + 1);
+    let off = 0x98;
+    let old = u64::from_le_bytes(code[off..off + 8].try_into().unwrap());
+    code[off..off + 8].copy_from_slice(&(old | (1 << 52)).to_le_bytes());
+    d.write_backing(b, 0x4600, &code, &mut mem(&mut data))
+        .unwrap();
+    let fault = submit(&mut d, c, b, &mut data, &draw());
+    assert!(fault.fault.is_some());
+    assert_eq!(d.graphics_counters().draw_commands, accepted.draw_commands);
+    assert_eq!(d.graphics_counters().submissions, accepted.submissions);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [0, 255, 0, 255], false);
+    assert_eq!(
+        d.graphics_counters().draw_commands,
+        before.draw_commands + 1
+    );
+    eprintln!("fullfloat rawbit counters {:?}", d.graphics_counters());
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+fn check_full32_geometry(data: &[u8]) {
+    let scale = f64::from(f32::from_bits(0x3f000001));
+    let v = POS.map(|p| [f64::from(p[0]) * scale, f64::from(p[1]) + scale]);
+    let area = edge(v[0], v[1], v[2]);
+    let mut inside = 0;
+    let mut outside = 0;
+    for y in 0..H {
+        for x in 0..W {
+            let p = [
+                (x as f64 + 0.5) * 2. / 47. - 1.,
+                1. - (y as f64 + 0.5) * 2. / 29.,
+            ];
+            let weights = [
+                edge(v[1], v[2], p) / area,
+                edge(v[2], v[0], p) / area,
+                edge(v[0], v[1], p) / area,
+            ];
+            if weights.iter().any(|w| w.abs() < 0.005) {
+                continue;
+            }
+            let expected = if x < 47 && weights.iter().all(|w| *w > 0.) {
+                inside += 1;
+                [255, 0, 0, 255]
+            } else {
+                outside += 1;
+                BG
+            };
+            let off = RT + (y * W + x) * 4;
+            assert_eq!(&data[off..off + 4], &expected, "full32 VS {x},{y}");
+        }
+    }
+    assert!(inside > 80 && outside > 1000);
+}
+#[test]
+#[ignore = "requires actual GPU; full32 vertex constants and unchanged resource residency"]
+fn driver_vertex_float32_immediate_geometry_and_warm_cache() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/vertex-float32-immediate.bin");
+    data[0x4800..0x4800 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    method(&mut words, 0x2044, 0x800);
+    method(&mut words, 0x2144, 0x400);
+    words.extend(end);
+    let r = submit(&mut d, c, b, &mut data, &words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_full32_geometry(&data);
+    d.retire(r.token).unwrap();
+    let bytes: Vec<_> = draw().iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let start = std::time::Instant::now();
+    for _ in 0..32 {
+        assert!(submit_existing(&mut d, c, &mut data, 8).fault.is_none());
+    }
+    let elapsed = start.elapsed();
+    let after = d.graphics_counters();
+    assert_eq!(after.submissions - before.submissions, 32);
+    assert_eq!(
+        [
+            after.shader_decodes,
+            after.vertex_shader_decodes,
+            after.shader_binary_bytes,
+            after.vertex_shader_bytes,
+            after.vertex_guest_bytes,
+            after.index_guest_bytes,
+            after.constant_guest_bytes,
+            after.guest_texture_bytes,
+            after.descriptor_reads,
+            after.render_target_guest_bytes
+        ],
+        [
+            before.shader_decodes,
+            before.vertex_shader_decodes,
+            before.shader_binary_bytes,
+            before.vertex_shader_bytes,
+            before.vertex_guest_bytes,
+            before.index_guest_bytes,
+            before.constant_guest_bytes,
+            before.guest_texture_bytes,
+            before.descriptor_reads,
+            before.render_target_guest_bytes
+        ]
+    );
+    assert_eq!(
+        [
+            after.upload_bytes,
+            after.upload_calls,
+            after.shader_module_allocations,
+            after.pipeline_allocations,
+            after.readback_operations,
+            after.synchronization_points
+        ],
+        [
+            before.upload_bytes,
+            before.upload_calls,
+            before.shader_module_allocations,
+            before.pipeline_allocations,
+            before.readback_operations,
+            before.synchronization_points
+        ]
+    );
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_full32_geometry(&data);
+    eprintln!("fullfloat warm32 CPU={elapsed:?} before={before:?} after={after:?}");
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

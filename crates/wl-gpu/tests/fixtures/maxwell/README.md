@@ -217,3 +217,21 @@ SHA-256 including SPH:
 Positive-zero opcode mutations in tests are explicit field tests, not claimed
 assembler output. Exceptional payload assembly/decoding does not prove exact
 portable exceptional arithmetic. Fixtures contain no commercial game content.
+
+
+`float32-immediate` retains the validated PS header and160bytes of original
+unmodified envyas code. Four scalar LDC loads supply two runtime operands and
+two expected raw words. FADD32I/FMUL32I use literal3f800001; ISETP.EQ and SEL
+export their bit-equality results as red/green, with blue0 and alpha1. Expected
+words are test data, not translator specialization. The source explicitly
+uses stall13 for predicate production and the existing wait/barrier contract.
+`vertex-float32-immediate` has96code bytes and scales/offsets positions with
+literal3f000001. Low-bit fidelity is established by the FS oracle; VS coverage
+proves the transformation, not resolution of that tiny mantissa difference.
+SHA-256 including80-byte SPH:
+
+- float32-immediate.bin:88472bdac976fb58f5144a9284ebb74e027af272425ee0f6a418e050fb343676
+- vertex-float32-immediate.bin:58f41ea86fd831e1c36a52ef501436384276d41899e09adea7d674f5445f90f2
+
+Both code streams were independently reassembled with the original pinned
+assembler and disassembled by unmodified envydis. No commercial content is used.
