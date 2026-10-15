@@ -13,7 +13,7 @@ use std::cell::Cell;
 pub(crate) struct GuestTargetStamp {
     guest: GuestAddress,
     size: usize,
-    surface: crate::raster::ColorTarget,
+    surface: crate::raster::SurfaceStorage,
     version: (u64, u64),
 }
 impl GuestTargetStamp {
@@ -23,6 +23,7 @@ impl GuestTargetStamp {
             && self.surface.width == other.surface.width
             && self.surface.height == other.surface.height
             && self.surface.layout == other.surface.layout
+            && self.surface.format == other.surface.format
     }
 }
 impl PartialEq for GuestTargetStamp {
@@ -371,7 +372,7 @@ impl Renderer {
         if self.poisoned {
             return Err(invalid("renderer unavailable after backend failure"));
         }
-        let resolve = |surface: crate::raster::ColorTarget| -> Result<GuestTargetStamp> {
+        let resolve = |surface: crate::raster::SurfaceStorage| -> Result<GuestTargetStamp> {
             let size = surface.size()?;
             let guest = map.resolve(surface.address, size)?;
             memory.validate_write(guest, size)?;
@@ -382,7 +383,7 @@ impl Renderer {
                 version: changes.stamp(guest.0..guest.0 + size as u64),
             })
         };
-        let mut color_stamp = clear.color.map(|v| resolve(v.0)).transpose()?;
+        let mut color_stamp = clear.color.map(|v| resolve(v.0.storage())).transpose()?;
         let mut depth_stamp = clear.depth.map(|v| resolve(v.0.storage())).transpose()?;
         let overlap = |a: GuestTargetStamp, b: GuestTargetStamp| {
             a.guest.0 < b.guest.0 + b.size as u64 && b.guest.0 < a.guest.0 + a.size as u64
@@ -444,7 +445,7 @@ impl Renderer {
                 }
             }
             if let Some((target, _)) = clear.depth {
-                self.prepare_depth(target.width, target.height, None)?;
+                self.prepare_depth(target.format, target.width, target.height, None)?;
             }
             let mut encoder = self
                 .device
@@ -539,7 +540,7 @@ impl Renderer {
         let mut stamp = GuestTargetStamp {
             guest,
             size,
-            surface: target,
+            surface: target.storage(),
             version: changes.stamp(guest.0..guest.0 + size as u64),
         };
         let depth_target = engine.depth_target()?;
@@ -689,11 +690,10 @@ impl Renderer {
                 if let Some(d) = depth_stamp {
                     let bytes;
                     let upload = if self.guest_depth != Some(d)
-                        || self
-                            .depth
-                            .as_ref()
-                            .is_none_or(|r| r.extent != (d.surface.width, d.surface.height))
-                    {
+                        || self.depth.as_ref().is_none_or(|r| {
+                            r.extent != (d.surface.width, d.surface.height)
+                                || Some(r.format) != d.surface.depth_format().ok()
+                        }) {
                         let tiled = memory.read(d.guest, d.size)?;
                         bytes = d
                             .surface
@@ -705,7 +705,12 @@ impl Renderer {
                     } else {
                         None
                     };
-                    self.prepare_depth(d.surface.width, d.surface.height, upload)?;
+                    self.prepare_depth(
+                        d.surface.depth_format()?,
+                        d.surface.width,
+                        d.surface.height,
+                        upload,
+                    )?;
                 }
                 Ok(())
             })();

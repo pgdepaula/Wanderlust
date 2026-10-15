@@ -2041,3 +2041,52 @@ The native matrix resumed missing executions from preserved same-build logs;
 successful runs were not replaced by compilation claims. Separate unfinished
 Z16 and runtime edits were excluded and preserved. No original-game GPU command
 or Tears of the Kingdom frame is established.
+
+## Native Z16 attachment execution
+
+Two additional CPU tests validate B197 Z16=`0x13`, format transitions and invalid
+state, then compare exact two-byte GOB addressing with the independent scalar
+oracle across seven asymmetric geometries and all six block heights. Production
+uses tegra_swizzle; the oracle does not. Truncated storage and geometry/address
+limits fail explicitly. ZF32 and pitch-linear RGBA8 regressions remain covered.
+
+Four additional actual GPU scenarios enter through GpuDriver/GPFIFO/B06F/B197:
+
+- Sixteen comparison/write combinations verify asymmetric textured coverage,
+  exact logical LEu16 samples, uncovered pixels and every padding byte. Incoming
+  Z=.375 and stored codes8192/24575/40959/57343 avoid ambiguous comparison ties.
+- A canonical alias retains depth residency. Thirty-two warm draws add32 queues
+  with zero new uploads, attachment allocations, shaders/pipelines, readbacks or
+  waits. Separate CPU low/high-byte and padding patches survive failed atomic
+  publication and retry. Failure leaves all guest RAM intact; retry checks both
+  patched bytes and untouched GPU-produced inside/original outside samples.
+- A32x2048 guest surface stores every one of65536 Z16 codes exactly once. A fully
+  clipped guest triangle still drives native attachment initialization/export;
+  all codes and the unchanged color image survive exact publication. Endpoint
+  Z=0/1 then verifies real EQUAL/NOT_EQUAL color visibility independently.
+- Pending ZF32-to-Z16-to-ZF32 transitions publish the old attachment before native
+  replacement. Immediate RAM assertions prove raw CPU full-patch precedence.
+  Guest shaders remain cached; a later unsupported format faults without replay,
+  leaving accepted output publishable.
+
+Z16 is native Depth16Unorm during testing/writes. For52x29/BH2, guest footprint is
+4096bytes, logical depth3016bytes and portable R32 upload6032bytes. Readback remains
+four bytes/sample with host row padding. In the exhaustive65536-code case, initial
+portable upload is262144bytes versus131072guest bytes; publication preserves the
+exact131072-byte storage. Conversion/patch/readback counters measure these distinct
+boundaries. Failed publication may repeat export/readback, but never the draw.
+No allocation-free conversion or whole-frame atomic transaction is claimed.
+Maxwell halfway depth-conversion equivalence remains unproven.
+
+A faithful ordinary snapshot of7a2cc2a plus the seven Z16 production/test files
+and unchanged Cargo.lock passed workspace formatting, strict workspace Clippy,
+205graphics CPU tests/configuration and424workspace CPU tests (99GPU ignored).
+All99GPU scenarios passed on each WSL OpenGL, native Windows D3D12 and Vulkan:
+297unique backend/scenario passes, zero failures or explicit skips. After review
+strengthened assertions, the final11-scenario depth executable passed again on
+all three, with final package Clippy/formatting; these repeated passes are not
+added to the297count. Final depth test SHA-256:
+0e12e9ff48341027585505f5de304c5de5224178d024561c2079519c33a9871b.
+Native execution used Intel UHD; WSL used llvmpipe. Independent source/test review
+resolved two oracle gaps. Unfinished runtime and subsequent shader work remained
+excluded and preserved. No original-game GPU submission or frame is established.

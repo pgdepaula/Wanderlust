@@ -18,12 +18,36 @@ pub struct BlockLinear2d {
 }
 impl BlockLinear2d {
     pub fn new(width: u32, height: u32, format: Format, block_height_log2: u8) -> Result<Self> {
-        if width == 0 || height == 0 || block_height_log2 > 5 {
-            return Err(invalid("invalid Tegra 2D geometry"));
-        }
         let (bw, bh, bytes_per_block) = format.block();
         let width_blocks = width.div_ceil(bw);
         let height_blocks = height.div_ceil(bh);
+        Self::from_blocks(
+            width_blocks,
+            height_blocks,
+            bytes_per_block,
+            block_height_log2,
+        )
+    }
+    pub(crate) fn new_uncompressed(
+        width: u32,
+        height: u32,
+        bytes_per_texel: u32,
+        block_height_log2: u8,
+    ) -> Result<Self> {
+        if !matches!(bytes_per_texel, 2 | 4) {
+            return Err(invalid("unsupported uncompressed surface texel width"));
+        }
+        Self::from_blocks(width, height, bytes_per_texel, block_height_log2)
+    }
+    fn from_blocks(
+        width_blocks: u32,
+        height_blocks: u32,
+        bytes_per_block: u32,
+        block_height_log2: u8,
+    ) -> Result<Self> {
+        if width_blocks == 0 || height_blocks == 0 || block_height_log2 > 5 {
+            return Err(invalid("invalid Tegra 2D geometry"));
+        }
         let rows_per_block = 8_u64 << block_height_log2;
         let width_bytes = u64::from(width_blocks) * u64::from(bytes_per_block);
         let linear_size = width_bytes

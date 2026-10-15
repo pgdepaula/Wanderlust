@@ -3,8 +3,11 @@
 //! in docs/graphics/sources.md. Production uses tegra_swizzle, not this oracle.
 #![allow(dead_code)]
 pub fn address(byte_x: usize, y: usize, width: usize, log2: u8) -> usize {
+    address_bytes(byte_x, y, width * 4, log2)
+}
+pub fn address_bytes(byte_x: usize, y: usize, row_bytes: usize, log2: u8) -> usize {
     let bh = 1usize << log2;
-    let columns = (width * 4).div_ceil(64);
+    let columns = row_bytes.div_ceil(64);
     let block = (y / (8 * bh)) * columns + byte_x / 64;
     let gob = (y % (8 * bh)) / 8;
     // GOB interleave: x[5],y[2:1],x[4],y[0],x[3:0].

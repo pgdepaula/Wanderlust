@@ -909,7 +909,7 @@ use exact wrapping/bitwise semantics.
 unconditional rendering `0x0138=1`, single sample `0x15d0=0`, clear controls
 `0x10f8=0` and full surface clip `0x0ff4/0x0ff8`. Selected color/depth descriptors
 and corresponding target selection must be complete. Color supports the same
-pitch/block-linear RGBA8 layouts; depth uses block-linear ZF32. Normalized finite
+pitch/block-linear RGBA8 layouts; depth uses block-linear ZF32 or Z16. Normalized finite
 clear values are supported, with the existing ZF32 zero/normal restrictions.
 Stencil, partial component masks, additional targets/layers, partial clips and
 optional scissor/viewport/rectangle/stencil-mask controls remain unsupported.
@@ -1331,3 +1331,33 @@ raw-u32 wrapping arithmetic, readiness, proof erasure and rounding-hazard rules.
 Its immediate-negation/PO, CC47, X43, SAT50 and other predicate/modifier forms
 remain unsupported. An explicitly encoded immediate zero is accepted, although
 the pinned assembler prefers an equivalent GPR-RZ instruction for textual zero.
+
+
+## Native Z16 attachments
+
+B197 `SET_ZT_FORMAT=0x13` selects single-layer block-linear Z16_UNORM. Existing
+ZT address, geometry, block-height, selection, comparison and write methods apply;
+unknown formats, stencil, multisampling and pitch-linear depth remain unsupported.
+The complete two-byte-per-sample GOB footprint is mapped and guarded. ZF32 retains
+its four-byte storage and normalized finite-value restrictions.
+
+`DepthFormat` is explicit in `DepthTarget` and `DepthState`. Guest storage stamps,
+native attachment residency and graphics pipeline identity include that format.
+A pending format change publishes prior output before replacing native storage.
+Canonical aliases retain compatible residency; GPU mapping mutation remains
+blocked while output is pending. Existing GpuDriver submission/completion APIs
+are unchanged.
+
+Host testing and writes use `Depth16Unorm`, not a float shadow. Portable transfers
+expand LEu16 codes into R32Uint staging, initialize normalized native depth, and
+export the sampled attachment through another R32Uint image. Guest initialization
+and publication use two bytes/sample; staging/upload/readback use four plus row
+padding. Publication reuses the Tegra conversion, preserves padding and overlays
+CPU-after-GPU patches in exact canonical tiled byte intervals. Atomic-write failure
+retains retryable pending depth without draw replay. Attachments publish separately;
+a whole color-plus-depth transaction is not promised.
+
+Thirty-two warm unchanged draws need no additional depth conversion/upload,
+attachment/pipeline/shader allocation, readback or blocking wait. They still
+submit32 host queues. Stored code round-trip and endpoint equality are verified;
+Maxwell equivalence for arbitrary depth-conversion ties is not established.

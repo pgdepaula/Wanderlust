@@ -954,3 +954,23 @@ boundary cases therefore explicitly mutate the verified binary field; they are
 not falsely attributed to assembler output. The vertex fixture uses -524288,
 whose zero low payload and set sign bit independently catch a missing sign
 extension. No original-game content or implementation source is copied.
+
+
+## Native Z16 depth storage
+
+The pinned NVIDIA [B197 class](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/3d/clb197.h)
+defines `SET_ZT_FORMAT` at byte offset `0x0fe8`, field4:0, Z16=`0x13` and
+ZF32=`0x0a`. Pinned Mesa [nv50_formats.c](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nv50/nv50_formats.c)
+corroborates Z16_UNORM; framebuffer setup retains pixel dimensions separately
+from the block-linear allocation footprint. Z16 therefore uses two little-endian
+bytes per sample and GOB row width `2*width`, with the same validated B197 block
+height fields and single-layer restrictions. It is not an RGBA image of half width.
+
+Locked wgpu26 maps `Depth16Unorm` to native D16 storage on the three tested
+backends. As for ZF32, direct depth-buffer copies are not the portable GLES
+contract. R32Uint transfer shaders expand guest codes to f32(code)/65535 on
+initialization and recover normalized sampled codes on export. Native depth
+comparison and writes occur in the D16 attachment. Export's integer packing is
+checked; it does not define Maxwell rounding at halfway values. Exact endpoints
+and codes away from comparison ties provide portable independent raster tests.
+All65536 stored codes also have an executed native initialization/export test.

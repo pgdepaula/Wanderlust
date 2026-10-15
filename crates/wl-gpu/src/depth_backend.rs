@@ -1,17 +1,23 @@
-//! Portable ZF32 transfers: wgpu forbids Depth32Float CPU uploads, and GLES
-//! lacks depth texture-to-buffer copies. Integer color textures preserve bits
-//! around GPU depth initialization/export passes; they are not CPU depth shadows.
+//! Portable ZF32/Z16 transfers: GLES does not guarantee depth buffer copies.
+//! Integer color textures carry ZF32 bits or Z16 codes around initialization and
+//! export passes. Testing and writes occur in the native depth attachment.
 use crate::{
     Result,
     backend::Renderer,
     invalid,
-    raster::{DepthCompare, DepthState},
+    raster::{DepthCompare, DepthFormat, DepthState},
 };
 use std::{sync::mpsc, time::Duration};
+fn host_format(format: DepthFormat) -> wgpu::TextureFormat {
+    match format {
+        DepthFormat::Float32 => wgpu::TextureFormat::Depth32Float,
+        DepthFormat::Unorm16 => wgpu::TextureFormat::Depth16Unorm,
+    }
+}
 pub(crate) fn host_depth(s: DepthState) -> wgpu::DepthStencilState {
     use DepthCompare::*;
     wgpu::DepthStencilState {
-        format: wgpu::TextureFormat::Depth32Float,
+        format: host_format(s.format),
         depth_write_enabled: s.write,
         depth_compare: match s.compare {
             Never => wgpu::CompareFunction::Never,
@@ -28,6 +34,7 @@ pub(crate) fn host_depth(s: DepthState) -> wgpu::DepthStencilState {
     }
 }
 pub(crate) struct ResidentDepth {
+    pub format: DepthFormat,
     pub extent: (u32, u32),
     pub view: wgpu::TextureView,
     upload: wgpu::Texture,
@@ -44,22 +51,73 @@ const VERTEX: &str = "@vertex fn vs(@builtin(vertex_index) n:u32)->@builtin(posi
 impl Renderer {
     pub(crate) fn prepare_depth(
         &mut self,
+        format: DepthFormat,
         width: u32,
         height: u32,
         bytes: Option<&[u8]>,
     ) -> Result<()> {
+        if width == 0
+            || height == 0
+            || width > self.capabilities.device_limits.max_texture_dimension_2d
+            || height > self.capabilities.device_limits.max_texture_dimension_2d
+        {
+            return Err(invalid("depth extent exceeds device"));
+        }
+        let pixels = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or_else(|| invalid("depth sample count overflow"))?;
+        let row_bytes = width
+            .checked_mul(4)
+            .ok_or_else(|| invalid("depth transfer row overflow"))?;
+        let transfer_size = pixels
+            .checked_mul(4)
+            .ok_or_else(|| invalid("depth transfer size overflow"))?;
+        let guest_size = pixels
+            .checked_mul(format.bytes_per_sample() as usize)
+            .ok_or_else(|| invalid("depth guest size overflow"))?;
+        // The portable transfer image uses four bytes per sample even for Z16.
+        // Expand only when guest data needs uploading; the warm path allocates
+        // no conversion buffer here.
+        let mut expanded = Vec::new();
+        let upload_bytes = if let Some(bytes) = bytes {
+            if bytes.len() != guest_size {
+                return Err(invalid("incorrect depth upload length"));
+            }
+            match format {
+                DepthFormat::Float32 => {
+                    // frag_depth initialization has a normalized-depth contract.
+                    for b in bytes.chunks_exact(4) {
+                        let z = f32::from_le_bytes(b.try_into().unwrap());
+                        if !z.is_finite()
+                            || z.is_subnormal()
+                            || z.to_bits() == 0x80000000
+                            || !(0.0..=1.0).contains(&z)
+                        {
+                            return Err(invalid("unsupported initial ZF32 value"));
+                        }
+                    }
+                    Some(bytes)
+                }
+                DepthFormat::Unorm16 => {
+                    expanded
+                        .try_reserve_exact(transfer_size)
+                        .map_err(|e| crate::Error(e.to_string()))?;
+                    for b in bytes.chunks_exact(2) {
+                        let code = u16::from_le_bytes(b.try_into().unwrap());
+                        expanded.extend_from_slice(&u32::from(code).to_le_bytes());
+                    }
+                    self.counters.temporary_allocations += 1;
+                    Some(expanded.as_slice())
+                }
+            }
+        } else {
+            None
+        };
         if self
             .depth
             .as_ref()
-            .is_none_or(|d| d.extent != (width, height))
+            .is_none_or(|d| d.extent != (width, height) || d.format != format)
         {
-            if width == 0
-                || height == 0
-                || width > self.capabilities.device_limits.max_texture_dimension_2d
-                || height > self.capabilities.device_limits.max_texture_dimension_2d
-            {
-                return Err(invalid("depth extent exceeds device"));
-            }
             let texture = |label, format, usage| {
                 self.device.create_texture(&wgpu::TextureDescriptor {
                     label: Some(label),
@@ -77,8 +135,8 @@ impl Renderer {
                 })
             };
             let depth = texture(
-                "guest ZF32",
-                wgpu::TextureFormat::Depth32Float,
+                "guest depth",
+                host_format(format),
                 wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             );
             let view = depth.create_view(&Default::default());
@@ -147,6 +205,7 @@ impl Renderer {
                             primitive: Default::default(),
                             depth_stencil: (!out).then(|| {
                                 host_depth(DepthState {
+                                    format,
                                     compare: DepthCompare::Always,
                                     write: true,
                                 })
@@ -157,14 +216,28 @@ impl Renderer {
                         });
                 (layout, pipeline)
             };
+            let (initialize, export_code) = match format {
+                DepthFormat::Float32 => (
+                    "bitcast<f32>(textureLoad(t,vec2<i32>(p.xy),0).x)",
+                    "bitcast<u32>(textureLoad(t,vec2<i32>(p.xy),0).x)",
+                ),
+                DepthFormat::Unorm16 => (
+                    "f32(textureLoad(t,vec2<i32>(p.xy),0).x) / 65535.0",
+                    "u32(floor(clamp(textureLoad(t,vec2<i32>(p.xy),0).x,0.0,1.0) * 65535.0 + 0.5))",
+                ),
+            };
             let (il, init) = make(
                 wgpu::TextureSampleType::Uint,
-                "@group(0) @binding(0) var t:texture_2d<u32>; @fragment fn fs(@builtin(position) p:vec4<f32>)->@builtin(frag_depth) f32 { return bitcast<f32>(textureLoad(t,vec2<i32>(p.xy),0).x); }",
+                &format!(
+                    "@group(0) @binding(0) var t:texture_2d<u32>; @fragment fn fs(@builtin(position) p:vec4<f32>)->@builtin(frag_depth) f32 {{ return {initialize}; }}"
+                ),
                 false,
             );
             let (el, extract) = make(
                 wgpu::TextureSampleType::Float { filterable: false },
-                "@group(0) @binding(0) var t:texture_2d<f32>; @fragment fn fs(@builtin(position) p:vec4<f32>)->@location(0) u32 { return bitcast<u32>(textureLoad(t,vec2<i32>(p.xy),0).x); }",
+                &format!(
+                    "@group(0) @binding(0) var t:texture_2d<f32>; @fragment fn fs(@builtin(position) p:vec4<f32>)->@location(0) u32 {{ return {export_code}; }}"
+                ),
                 true,
             );
             let binding = |layout, view| {
@@ -180,7 +253,10 @@ impl Renderer {
             let upload_view = upload.create_view(&Default::default());
             let init_binding = binding(&il, &upload_view);
             let extract_binding = binding(&el, &view);
-            let pitch = (width * 4).div_ceil(256) * 256;
+            let pitch = row_bytes
+                .checked_add(255)
+                .map(|n| n / 256 * 256)
+                .ok_or_else(|| invalid("depth readback pitch overflow"))?;
             let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("depth readback"),
                 size: u64::from(pitch) * u64::from(height),
@@ -188,6 +264,7 @@ impl Renderer {
                 mapped_at_creation: false,
             });
             self.depth = Some(ResidentDepth {
+                format,
                 extent: (width, height),
                 view,
                 upload,
@@ -207,22 +284,7 @@ impl Renderer {
             self.counters.bind_group_allocations += 2;
             self.counters.buffer_allocations += 1;
         }
-        if let Some(bytes) = bytes {
-            if bytes.len() != width as usize * height as usize * 4 {
-                return Err(invalid("short ZF32 upload"));
-            }
-            // frag_depth initialization has a normalized-depth contract. Reject
-            // unsupported NaNs/infinities/out-of-range storage before any upload.
-            for b in bytes.chunks_exact(4) {
-                let z = f32::from_le_bytes(b.try_into().unwrap());
-                if !z.is_finite()
-                    || z.is_subnormal()
-                    || z.to_bits() == 0x80000000
-                    || !(0.0..=1.0).contains(&z)
-                {
-                    return Err(invalid("unsupported initial ZF32 value"));
-                }
-            }
+        if let Some(bytes) = upload_bytes {
             let d = self.depth.as_ref().unwrap();
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
@@ -234,7 +296,7 @@ impl Renderer {
                 bytes,
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(width * 4),
+                    bytes_per_row: Some(row_bytes),
                     rows_per_image: Some(height),
                 },
                 wgpu::Extent3d {
@@ -282,6 +344,18 @@ impl Renderer {
             .as_ref()
             .ok_or_else(|| invalid("missing resident depth"))?;
         let (width, height) = d.extent;
+        let row_bytes = (width as usize)
+            .checked_mul(4)
+            .ok_or_else(|| invalid("depth readback row overflow"))?;
+        let output_size = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(d.format.bytes_per_sample() as usize))
+            .ok_or_else(|| invalid("depth readback output overflow"))?;
+        // Allocation must succeed before mapping. Once mapped, every packing
+        // path below drops the borrowed view and unmaps before returning.
+        let mut out = Vec::new();
+        out.try_reserve_exact(output_size)
+            .map_err(|e| crate::Error(e.to_string()))?;
         let mut e = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -337,22 +411,40 @@ impl Renderer {
             .map_async(wgpu::MapMode::Read, move |r| {
                 let _ = tx.send(r);
             });
-        self.device
-            .poll(wgpu::PollType::wait_for(submission))
-            .map_err(|e| crate::Error(e.to_string()))?;
-        self.counters.synchronization_points += 1;
-        rx.recv_timeout(Duration::from_secs(30))
-            .map_err(|e| crate::Error(e.to_string()))?
-            .map_err(|e| crate::Error(e.to_string()))?;
-        let mapped = d.readback.slice(..).get_mapped_range();
-        let mut out = Vec::new();
-        out.try_reserve_exact(width as usize * height as usize * 4)
-            .map_err(|e| crate::Error(e.to_string()))?;
-        for row in mapped.chunks_exact(d.pitch as usize) {
-            out.extend_from_slice(&row[..width as usize * 4]);
+        if let Err(error) = self.device.poll(wgpu::PollType::wait_for(submission)) {
+            d.readback.unmap();
+            return Err(crate::Error(error.to_string()));
         }
+        self.counters.synchronization_points += 1;
+        let mapping = rx
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|e| crate::Error(e.to_string()))
+            .and_then(|result| result.map_err(|e| crate::Error(e.to_string())));
+        if let Err(error) = mapping {
+            d.readback.unmap();
+            return Err(error);
+        }
+        let mapped = d.readback.slice(..).get_mapped_range();
+        let packed = (|| -> Result<()> {
+            for row in mapped.chunks_exact(d.pitch as usize) {
+                let pixels = &row[..row_bytes];
+                match d.format {
+                    DepthFormat::Float32 => out.extend_from_slice(pixels),
+                    DepthFormat::Unorm16 => {
+                        for b in pixels.chunks_exact(4) {
+                            let code = u32::from_le_bytes(b.try_into().unwrap());
+                            let code = u16::try_from(code)
+                                .map_err(|_| invalid("depth export exceeds Z16 code range"))?;
+                            out.extend_from_slice(&code.to_le_bytes());
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })();
         drop(mapped);
         d.readback.unmap();
+        packed?;
         self.counters.readback_operations += 1;
         self.counters.readback_bytes += u64::from(d.pitch) * u64::from(height);
         self.counters.readback_host_copy_bytes += out.len() as u64;

@@ -51,25 +51,74 @@ pub struct ColorTarget {
     pub layout: ColorLayout,
 }
 impl ColorTarget {
+    pub(crate) fn storage(self) -> SurfaceStorage {
+        SurfaceStorage {
+            address: self.address,
+            width: self.width,
+            height: self.height,
+            layout: self.layout,
+            format: SurfaceFormat::Rgba8,
+        }
+    }
     pub fn linear_pitch(&self) -> Result<u32> {
+        self.storage().linear_pitch()
+    }
+    pub fn block_linear(&self) -> Result<Option<crate::layout::BlockLinear2d>> {
+        self.storage().block_linear()
+    }
+    pub fn size(&self) -> Result<usize> {
+        self.storage().size()
+    }
+}
+/// Storage identity is independent of GPU aliases and host attachment handles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SurfaceFormat {
+    Rgba8,
+    Depth(DepthFormat),
+}
+impl SurfaceFormat {
+    fn bytes_per_texel(self) -> u32 {
+        match self {
+            Self::Rgba8 => 4,
+            Self::Depth(format) => format.bytes_per_sample(),
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SurfaceStorage {
+    pub address: GpuAddress,
+    pub width: u32,
+    pub height: u32,
+    pub layout: ColorLayout,
+    pub format: SurfaceFormat,
+}
+impl SurfaceStorage {
+    #[cfg(feature = "wgpu-backend")]
+    pub fn depth_format(self) -> Result<DepthFormat> {
+        match self.format {
+            SurfaceFormat::Depth(format) => Ok(format),
+            SurfaceFormat::Rgba8 => Err(invalid("color surface used as depth storage")),
+        }
+    }
+    pub fn linear_pitch(self) -> Result<u32> {
         self.width
-            .checked_mul(4)
-            .ok_or_else(|| invalid("color row overflow"))
+            .checked_mul(self.format.bytes_per_texel())
+            .ok_or_else(|| invalid("surface row overflow"))
     }
     pub fn block_linear(&self) -> Result<Option<crate::layout::BlockLinear2d>> {
         match self.layout {
             ColorLayout::BlockLinear { block_height_log2 } => {
-                let layout = crate::layout::BlockLinear2d::new(
+                let layout = crate::layout::BlockLinear2d::new_uncompressed(
                     self.width,
                     self.height,
-                    crate::format::Format::Rgba8Unorm,
+                    self.format.bytes_per_texel(),
                     block_height_log2,
                 )?;
                 // Bound the complete publication transaction: padded work image,
                 // tiled output, readback/redecoded logical pixels and raw CPU patches.
                 if layout.tiled_size > (64 * 1024 * 1024) / 5 {
                     return Err(invalid(
-                        "color conversion transaction exceeds 64 MiB budget",
+                        "surface conversion transaction exceeds 64 MiB budget",
                     ));
                 }
                 Ok(Some(layout))
@@ -87,7 +136,7 @@ impl ColorTarget {
             layout.tiled_size
         } else {
             usize::try_from(u64::from(self.linear_pitch()?) * u64::from(self.height))
-                .map_err(|_| invalid("color span exceeds host"))?
+                .map_err(|_| invalid("surface span exceeds host"))?
         };
         if self
             .address
@@ -95,7 +144,7 @@ impl ColorTarget {
             .checked_add(size as u64)
             .is_none_or(|end| end > 1 << 40)
         {
-            return Err(invalid("color target exceeds 40-bit GPU space"));
+            return Err(invalid("surface exceeds 40-bit GPU space"));
         }
         Ok(size)
     }
@@ -221,30 +270,56 @@ pub enum DepthCompare {
     Always,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DepthFormat {
+    Float32,
+    Unorm16,
+}
+impl DepthFormat {
+    pub fn bytes_per_sample(self) -> u32 {
+        match self {
+            Self::Float32 => 4,
+            Self::Unorm16 => 2,
+        }
+    }
+    fn decode(value: u32) -> Option<Self> {
+        match value {
+            0x0a => Some(Self::Float32),
+            0x13 => Some(Self::Unorm16),
+            _ => None,
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DepthState {
+    pub format: DepthFormat,
     pub compare: DepthCompare,
     pub write: bool,
 }
-/// Single-layer ZF32, block-linear, four little-endian bytes per depth sample.
+/// Single-layer block-linear depth, with an explicit guest sample format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DepthTarget {
+    pub format: DepthFormat,
     pub address: GpuAddress,
     pub width: u32,
     pub height: u32,
     pub block_height_log2: u8,
 }
 impl DepthTarget {
-    // ColorTarget is reused ONLY as a checked four-byte storage geometry, not a
-    // color format interpretation. Depth transfers remain f32 throughout.
-    pub(crate) fn storage(self) -> ColorTarget {
-        ColorTarget {
+    pub(crate) fn storage(self) -> SurfaceStorage {
+        SurfaceStorage {
             address: self.address,
             width: self.width,
             height: self.height,
             layout: ColorLayout::BlockLinear {
                 block_height_log2: self.block_height_log2,
             },
+            format: SurfaceFormat::Depth(self.format),
         }
+    }
+    pub fn block_linear(self) -> Result<crate::layout::BlockLinear2d> {
+        self.storage()
+            .block_linear()?
+            .ok_or_else(|| invalid("depth requires block-linear storage"))
     }
     pub fn size(self) -> Result<usize> {
         self.storage().size()
@@ -372,7 +447,7 @@ impl RasterRegisters {
                 let valid = match n {
                     0 => value <= 255,
                     1 => value % 256 == 0,
-                    2 => value == 0xa,
+                    2 => DepthFormat::decode(value).is_some(),
                     3 => value & !0x70 == 0 && value >> 4 <= 5,
                     4 => true,
                     5 => value > 0 && value <= 0xfffffff,
@@ -451,6 +526,8 @@ impl RasterRegisters {
             return Err(invalid("unsupported depth test/target selection"));
         }
         Ok(Some(DepthState {
+            format: DepthFormat::decode(self.zt[2].ok_or_else(|| invalid("missing depth format"))?)
+                .ok_or_else(|| invalid("unsupported depth format"))?,
             compare: self
                 .depth_func
                 .ok_or_else(|| invalid("missing depth comparison"))?,
@@ -466,9 +543,10 @@ impl RasterRegisters {
     fn raw_depth_target(&self) -> Result<DepthTarget> {
         let mut z = [0; 9];
         for (out, v) in z.iter_mut().zip(self.zt) {
-            *out = v.ok_or_else(|| invalid("incomplete ZF32 target"))?;
+            *out = v.ok_or_else(|| invalid("incomplete depth target"))?;
         }
         let target = DepthTarget {
+            format: DepthFormat::decode(z[2]).ok_or_else(|| invalid("unsupported depth format"))?,
             address: GpuAddress((u64::from(z[0]) << 32) | u64::from(z[1])),
             width: z[5],
             height: z[6],

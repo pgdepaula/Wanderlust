@@ -883,3 +883,396 @@ fn driver_explicit_z_clip_planes_partial_geometry_and_unequal_w() {
     eprintln!("explicit Z clipping counters {:?}", d.graphics_counters());
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+fn z16_initial() -> Vec<u8> {
+    let row = W * 2;
+    let mut tiled = vec![0x6d; row.div_ceil(64) * H.div_ceil(16) * 1024];
+    for y in 0..H {
+        for x in 0..W {
+            let code = [8192u16, 24575, 40959, 57343][(x + y) % 4];
+            for (k, b) in code.to_le_bytes().into_iter().enumerate() {
+                tiled[gob::address_bytes(x * 2 + k, y, row, 1)] = b;
+            }
+        }
+    }
+    tiled
+}
+fn z16_setup(words: &mut Vec<u32>, comparison: u32, write: bool) {
+    depth_setup(words, comparison, write);
+    let end = words.split_off(words.len() - 8);
+    method(words, 0xfe8, 0x13);
+    method(words, 0xff0, 1024);
+    words.extend(end);
+}
+fn z16_verify(data: &[u8], initial: &[u8], texture: &[u8], f: usize, write: bool) {
+    let mut used = vec![false; initial.len()];
+    let mut checked = 0;
+    for y in 0..H {
+        for x in 0..W {
+            let off = gob::address_bytes(x * 2, y, W * 2, 1);
+            used[off] = true;
+            used[off + 1] = true;
+            let code = u16::from_le_bytes(initial[off..off + 2].try_into().unwrap());
+            let b = weights(x, y);
+            if x < 47 && b.iter().any(|v| v.abs() < 0.005) {
+                continue;
+            }
+            let inside = x < 47 && b.iter().all(|v| *v > 0.);
+            // Vertex Z=0.375 has an unambiguous nearest D16 code 24576.
+            // Stored test values avoid the incoming code and quantization ties.
+            // Thus float-versus-quantized comparison precision cannot change this oracle.
+            let stored = f64::from(code) / 65535.;
+            let pass = inside
+                && match f {
+                    0 => false,
+                    1 => 0.375 < stored,
+                    2 => 0.375 == stored,
+                    3 => 0.375 <= stored,
+                    4 => 0.375 > stored,
+                    5 => 0.375 != stored,
+                    6 => 0.375 >= stored,
+                    _ => true,
+                };
+            let expected = if pass && write { 24576u16 } else { code };
+            assert_eq!(
+                &data[Z + off..Z + off + 2],
+                &expected.to_le_bytes(),
+                "Z16 {x},{y} compare={f} write={write}"
+            );
+            let mut color = BG;
+            if pass {
+                let u = (0..3).map(|n| b[n] * f64::from(UV[n][0])).sum::<f64>() * 37.;
+                let v = (0..3).map(|n| b[n] * f64::from(UV[n][1])).sum::<f64>() * 19.;
+                if (u - u.round()).abs() < 0.02 || (v - v.round()).abs() < 0.02 {
+                    continue;
+                }
+                let p = (v.floor().clamp(0., 18.) as usize * 37
+                    + u.floor().clamp(0., 36.) as usize)
+                    * 4;
+                color.copy_from_slice(&texture[p..p + 4]);
+            }
+            let p = RT + (y * W + x) * 4;
+            assert_eq!(&data[p..p + 4], &color, "Z16 color {x},{y} compare={f}");
+            checked += 1;
+        }
+    }
+    assert!(checked > 1300);
+    for (n, visible) in used.into_iter().enumerate() {
+        if !visible {
+            assert_eq!(data[Z + n], initial[n], "Z16 padding {n}");
+        }
+    }
+}
+#[test]
+#[ignore = "requires real GPU; native Z16 tests/writes and exact guest block-linear bytes"]
+fn driver_z16_comparisons_and_publication() {
+    let (mut data, setup, texture) = fixture();
+    for n in 0..3 {
+        data[0x3008 + n * 24..0x300c + n * 24].copy_from_slice(&0.375f32.to_le_bytes());
+    }
+    let (mut d, c, _, b, _) = driver();
+    let initial = z16_initial();
+    for write in [false, true] {
+        for f in 0..8 {
+            d.write_backing(b, Z as u64, &initial, &mut mem(&mut data))
+                .unwrap();
+            d.write_backing(b, RT as u64, &BG.repeat(W * H), &mut mem(&mut data))
+                .unwrap();
+            let mut words = setup.clone();
+            z16_setup(&mut words, 0x200 + f as u32, write);
+            let report = submit(&mut d, c, b, &mut data, &words);
+            assert!(report.fault.is_none(), "{:?}", report.fault);
+            assert_eq!(&data[Z..Z + initial.len()], &initial);
+            assert!(!d.query(report.token).unwrap().guest_visible);
+            d.publish(c, &mut mem(&mut data)).unwrap();
+            z16_verify(&data, &initial, &texture, f, write);
+            d.retire(report.token).unwrap();
+        }
+    }
+    eprintln!("Z16 compare counters {:?}", d.graphics_counters());
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+#[test]
+#[ignore = "requires real GPU; Z16 raw byte patches, alias residency and publication retry"]
+fn driver_z16_alias_cpu_patches_retry_and_warm_residency() {
+    let (mut data, mut words, _) = fixture();
+    for n in 0..3 {
+        data[0x3008 + n * 24..0x300c + n * 24].copy_from_slice(&0.375f32.to_le_bytes());
+    }
+    let initial = z16_initial();
+    data[Z..Z + initial.len()].copy_from_slice(&initial);
+    let (mut d, c, s, b, _) = driver();
+    let r = d.reserve_fixed(s, GpuAddress(0xe0000), 0x1000).unwrap();
+    let mapping = d.map(s, r, b, Z as u64).unwrap();
+    z16_setup(&mut words, 0x207, true);
+    assert!(submit(&mut d, c, b, &mut data, &words).fault.is_none());
+    let mut alias = Vec::new();
+    method(&mut alias, 0xfe4, 0xe0000);
+    alias.extend(draw());
+    let before = d.graphics_counters();
+    assert!(submit(&mut d, c, b, &mut data, &alias).fault.is_none());
+    assert_eq!(
+        d.graphics_counters().depth_upload_bytes,
+        before.depth_upload_bytes
+    );
+    assert_eq!(
+        d.graphics_counters().depth_allocations,
+        before.depth_allocations
+    );
+    assert!(d.unmap(s, mapping).is_err());
+    let bytes: Vec<_> = draw().iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    for _ in 0..32 {
+        assert!(submit_existing(&mut d, c, &mut data, 8).fault.is_none());
+    }
+    let after = d.graphics_counters();
+    assert_eq!(after.submissions - before.submissions, 32);
+    assert_eq!(after.depth_upload_bytes, before.depth_upload_bytes);
+    assert_eq!(after.upload_bytes, before.upload_bytes);
+    assert_eq!(after.depth_allocations, before.depth_allocations);
+    assert_eq!(after.pipeline_allocations, before.pipeline_allocations);
+    assert_eq!(
+        after.shader_module_allocations,
+        before.shader_module_allocations
+    );
+    assert_eq!(after.readback_operations, before.readback_operations);
+    assert_eq!(after.synchronization_points, before.synchronization_points);
+    let off = gob::address_bytes(20 * 2, 14, W * 2, 1);
+    let padding = (0..initial.len())
+        .find(|n| !(0..H).any(|y| (0..W * 2).any(|x| gob::address_bytes(x, y, W * 2, 1) == *n)))
+        .unwrap();
+    d.write_backing(b, (Z + off) as u64, &[0x21], &mut mem(&mut data))
+        .unwrap();
+    d.write_backing(b, (Z + off + 1) as u64, &[0x43], &mut mem(&mut data))
+        .unwrap();
+    d.write_backing(b, (Z + padding) as u64, &[0xe3], &mut mem(&mut data))
+        .unwrap();
+    let draws = after.draw_commands;
+    let unchanged = data.clone();
+    assert!(d.publish(c, &mut FailAt(&mut data, Z as u64)).is_err());
+    assert_eq!(
+        data, unchanged,
+        "failed depth write leaves all guest RAM intact"
+    );
+    assert_eq!(d.graphics_counters().depth_write_bytes, 0);
+    assert!(d.has_pending_output());
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    assert_eq!(&data[Z + off..Z + off + 2], &[0x21, 0x43]);
+    assert_eq!(data[Z + padding], 0xe3);
+    let inside = gob::address_bytes(21 * 2, 14, W * 2, 1);
+    assert_eq!(&data[Z + inside..Z + inside + 2], &24576u16.to_le_bytes());
+    let outside = gob::address_bytes(0, 0, W * 2, 1);
+    assert_eq!(
+        &data[Z + outside..Z + outside + 2],
+        &initial[outside..outside + 2]
+    );
+    assert_eq!(
+        d.graphics_counters().depth_write_bytes,
+        initial.len() as u64
+    );
+    assert_eq!(d.graphics_counters().draw_commands, draws);
+    assert!(!d.has_pending_output());
+    eprintln!(
+        "Z16 warm32 before={before:?} after={after:?} published={:?}",
+        d.graphics_counters()
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+
+#[test]
+#[ignore = "requires real GPU; every Z16 code survives native attachment initialization/export"]
+fn driver_z16_all_codes_roundtrip_and_exact_endpoint_equality() {
+    let (mut data, mut setup, _) = fixture();
+    data.resize(0x100000, 0);
+    let width = 32usize;
+    let height = 2048usize;
+    let color = 0x20000usize;
+    let depth = 0x80000usize;
+    let initial_color = BG.repeat(width * height);
+    data[color..color + initial_color.len()].copy_from_slice(&initial_color);
+    let mut tiled = vec![0; 65536 * 2];
+    for code in 0..65536usize {
+        let x = code % width;
+        let y = code / width;
+        let off = gob::address_bytes(x * 2, y, width * 2, 0);
+        tiled[off..off + 2].copy_from_slice(&(code as u16).to_le_bytes());
+    }
+    data[depth..depth + tiled.len()].copy_from_slice(&tiled);
+    // An entirely clipped guest triangle initializes depth without changing codes.
+    for n in 0..3 {
+        data[0x3000 + n * 24..0x3004 + n * 24].copy_from_slice(&2f32.to_le_bytes());
+    }
+    let mut d = GpuDriver::new().unwrap();
+    eprintln!("adapter {:?}", d.capabilities().adapter);
+    let b = d
+        .register_backing(GuestAddress(0), data.len() as u64)
+        .unwrap();
+    let s = d.create_space().unwrap();
+    let c = d.create_channel(s).unwrap();
+    for (gpu, offset, size) in [
+        (0x10000, 0x1000, 0x2000),
+        (0x30000, 0, 0x1000),
+        (0x31000, 0, 0x1000),
+        (0x40000, 0, 0x1000),
+        (0x50000, 0x4000, 0x1000),
+        (0x70000, 0x3000, 0x1000),
+        (0x80000, 0x6000, 0x1000),
+        (0xb0000, 0x10000, 0x2000),
+        (0x100000, color as u64, 0x40000),
+        (0x200000, depth as u64, 0x20000),
+    ] {
+        let r = d.reserve_fixed(s, GpuAddress(gpu), size).unwrap();
+        d.map(s, r, b, offset).unwrap();
+    }
+    let end = setup.split_off(setup.len() - 8);
+    for (m, v) in [
+        (0x2144, 0x400),
+        (0x800, 0),
+        (0x804, 0x100000),
+        (0x808, (width * 4) as u32),
+        (0x80c, height as u32),
+        (0xa00, 16f32.to_bits()),
+        (0xa04, (-1024f32).to_bits()),
+        (0xa0c, 16f32.to_bits()),
+        (0xa10, 1024f32.to_bits()),
+        (0xff4, (width as u32) << 16),
+        (0xff8, (height as u32) << 16),
+        (0xc00, (width as u32) << 16),
+        (0xc04, (height as u32) << 16),
+        (0xe04, (width as u32) << 16),
+        (0xe08, (height as u32) << 16),
+        (0xfe0, 0),
+        (0xfe4, 0x200000),
+        (0xfe8, 0x13),
+        (0xfec, 0),
+        (0xff0, 0),
+        (0x1228, width as u32),
+        (0x122c, height as u32),
+        (0x1230, 0x10001),
+        (0x179c, 0),
+        (0x12cc, 1),
+        (0x12e8, 1),
+        (0x1538, 1),
+        (0x130c, 0x207),
+    ] {
+        method(&mut setup, m, v);
+    }
+    setup.extend(end);
+    let report = submit(&mut d, c, b, &mut data, &setup);
+    assert!(report.fault.is_none(), "{:?}", report.fault);
+    assert_eq!(&data[depth..depth + tiled.len()], &tiled);
+    assert!(!d.query(report.token).unwrap().guest_visible);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    assert_eq!(
+        &data[depth..depth + tiled.len()],
+        &tiled,
+        "all65536 Z16 codes"
+    );
+    assert_eq!(&data[color..color + initial_color.len()], &initial_color);
+    let counters = d.graphics_counters();
+    assert_eq!(counters.depth_guest_bytes, tiled.len() as u64 * 2); // initialization and padding-preserving publication
+    assert_eq!(counters.depth_upload_bytes, 65536 * 4);
+    assert_eq!(counters.depth_write_bytes, 65536 * 2);
+    assert_eq!(counters.draw_commands, 1);
+    d.retire(report.token).unwrap();
+    // Exactly representable endpoints exercise EQUAL/NOT_EQUAL without a D16 tie.
+    for z in [0f32, 1.] {
+        let code = if z == 0. { 0u16 } else { u16::MAX };
+        for y in 0..height {
+            for x in 0..width {
+                let off = gob::address_bytes(x * 2, y, width * 2, 0);
+                tiled[off..off + 2].copy_from_slice(&code.to_le_bytes());
+            }
+        }
+        let vertices: Vec<u8> = (0..3)
+            .flat_map(|n| [POS[n][0], POS[n][1], z, 1., UV[n][0], UV[n][1]])
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        d.write_backing(b, 0x3000, &vertices, &mut mem(&mut data))
+            .unwrap();
+        for equal in [true, false] {
+            d.write_backing(b, depth as u64, &tiled, &mut mem(&mut data))
+                .unwrap();
+            d.write_backing(b, color as u64, &initial_color, &mut mem(&mut data))
+                .unwrap();
+            let mut words = Vec::new();
+            method(&mut words, 0x130c, if equal { 0x202 } else { 0x205 });
+            words.extend(draw());
+            let r = submit(&mut d, c, b, &mut data, &words);
+            assert!(r.fault.is_none(), "{:?}", r.fault);
+            d.publish(c, &mut mem(&mut data)).unwrap();
+            assert_eq!(&data[depth..depth + tiled.len()], &tiled);
+            // At (12,1024), NDC(-0.21875,-0.00048828125) is strictly inside.
+            let off = color + (1024 * width + 12) * 4;
+            assert_eq!(
+                &data[off..off + 4],
+                if equal { &[255, 0, 0, 255] } else { &BG }
+            );
+            assert_eq!(&data[color..color + 4], &BG);
+            d.retire(r.token).unwrap();
+        }
+    }
+    eprintln!("Z16 exhaustive counters {:?}", d.graphics_counters());
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+
+#[test]
+#[ignore = "requires real GPU; pending depth format switches publish old backing before host replacement"]
+fn driver_z16_zf32_format_switch_and_fault_prefix() {
+    let (mut data, mut setup, _) = fixture();
+    let initial = initial_depth();
+    data[Z..Z + initial.len()].copy_from_slice(&initial);
+    let (mut d, c, _, b, _) = driver();
+    depth_setup(&mut setup, 0x207, true);
+    assert!(submit(&mut d, c, b, &mut data, &setup).fault.is_none());
+    let first = d.graphics_counters();
+    let z16 = z16_initial();
+    d.write_backing(b, Z as u64, &z16, &mut mem(&mut data))
+        .unwrap();
+    let mut words = Vec::new();
+    method(&mut words, 0xfe8, 0x13);
+    method(&mut words, 0xff0, 1024);
+    words.extend(draw());
+    assert!(submit(&mut d, c, b, &mut data, &words).fault.is_none());
+    assert_eq!(
+        &data[Z..Z + z16.len()],
+        &z16,
+        "old ZF32 publication preserves CPU Z16 patch"
+    );
+    let second = d.graphics_counters();
+    assert_eq!(second.depth_allocations, first.depth_allocations + 1);
+    assert_eq!(second.coherence_barriers, first.coherence_barriers + 1);
+    assert_eq!(second.depth_write_bytes - first.depth_write_bytes, 8192);
+    assert_eq!(second.vertex_shader_decodes, first.vertex_shader_decodes);
+    assert_eq!(second.shader_decodes, first.shader_decodes);
+    assert_eq!(second.shader_binary_bytes, first.shader_binary_bytes);
+    d.write_backing(b, Z as u64, &initial, &mut mem(&mut data))
+        .unwrap();
+    let mut words = Vec::new();
+    method(&mut words, 0xfe8, 0xa);
+    method(&mut words, 0xff0, 2048);
+    words.extend(draw());
+    assert!(submit(&mut d, c, b, &mut data, &words).fault.is_none());
+    assert_eq!(
+        &data[Z..Z + initial.len()],
+        &initial,
+        "old Z16 publication preserves CPU ZF32 patch"
+    );
+    let third = d.graphics_counters();
+    assert_eq!(third.depth_allocations, second.depth_allocations + 1);
+    assert_eq!(third.depth_write_bytes - second.depth_write_bytes, 4096);
+    assert_eq!(third.vertex_shader_decodes, first.vertex_shader_decodes);
+    assert_eq!(third.shader_decodes, first.shader_decodes);
+    let fault = submit(&mut d, c, b, &mut data, &[0x200103fa, 0x14]);
+    assert!(fault.fault.is_some());
+    assert_eq!(d.graphics_counters().draw_commands, third.draw_commands);
+    assert_eq!(d.graphics_counters().submissions, third.submissions);
+    assert!(d.has_pending_output());
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    let off = gob::address(20 * 4, 14, W, 1);
+    assert_eq!(&data[Z + off..Z + off + 4], &0.5f32.to_le_bytes());
+    assert_eq!(d.graphics_counters().draw_commands, third.draw_commands);
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
