@@ -1392,3 +1392,20 @@ A guest shader can compare the raw arithmetic result with an independently
 provided constant using ISETP/SEL. This permits exact low-bit validation without
 introducing a forbidden multiply-to-add chain or reducing the observation to
 8-bit color quantization alone.
+
+## Conditional register moves
+
+The bounded translator accepts full-lane GPR MOV executed under P0 or !P0 in
+both vertex and fragment stages. ISETP supplies the runtime predicate; a false
+predicate preserves the previous destination bits. WGSL performs a conditional
+assignment, without specializing on constant-buffer contents or vertex data.
+Only this MOV form gains conditional execution; other predicates and general
+predication/control flow remain unsupported.
+
+The supported static subset requires initialized P0 and initialized, ready source
+and prior destination registers, even when the runtime predicate would be false.
+This conservative acceptance rule is stricter than hardware's suppressed operand
+read on false execution. Fixed scheduling and ordinary barrier waits remain
+mandatory. Multiplication hazards survive through either candidate value or the
+predicate producer. Conditional moves erase texture-handle and perspective
+proofs, including identity moves, until stronger path-sensitive proofs exist.

@@ -235,3 +235,18 @@ SHA-256 including80-byte SPH:
 
 Both code streams were independently reassembled with the original pinned
 assembler and disassembled by unmodified envydis. No commercial content is used.
+
+`conditional-move` retains the validated PS header and128bytes of original
+unmodified envyas code. Two scalar LDC operands feed unsigned ISETP.LT into P0.
+Initialized RGBA values .25/.5/.75/1 become1/.5/.75/1 when true and .25/.5/0/1
+when false, by P0/!P0 guarded MOVs. Neither operation may overwrite its
+destination when its predicate is false. `vertex-conditional-move` has96code
+bytes; raw equality of each guest vertex X to bf4ccccd selects whether X becomes
+.5. Other vertices retain their guest X. Both sources use explicit stall13 for
+ISETP and the existing scheduled wait/barrier subset.
+SHA-256 including80-byte SPH:
+
+- conditional-move.bin:dfa9e0ba0f91a88505747b5bec86b72886dc5845781bed8e4df1530eb8d60298
+- vertex-conditional-move.bin:2db8619e3b21e456e5cea295d098d0b91aa92e48b53ec854995ebec5a60254c3
+
+These are independently assembled synthetic programs, without commercial data.

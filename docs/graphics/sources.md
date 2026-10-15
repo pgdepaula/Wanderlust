@@ -1019,3 +1019,21 @@ supported IADD32I=`0x1c`, not a floating modifier. Tests preserve that valid
 integer interpretation rather than requiring a false rejection. Neither pinned
 long emitter exposes a rounding selector here; unmodified envyas rejects `rm`.
 No inference from neighboring short encodings is used.
+
+## Predicated GPR MOV
+
+Pinned [GM107 tables](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/gm107.c)
+and [UAM emitPred/emitMOV](https://github.com/devkitPro/uam/blob/5a5afc2bae8b55409ab36ba45be63fcb73f68993/mesa-imported/codegen/nv50_ir_emit_gm107.cpp)
+agree on destination7:0, GPR source27:20, predicate selector18:16 and inversion19.
+The full lane mask is bits42:39=f. Selector7 is PT; inverted PT is never execution.
+The added strict P0/!P0 subset uses base5c98078000000000 and variable
+mask000000000ff800ff. Existing unconditional PT decoding remains separate;
+P1 through P6 and inverted PT remain unsupported.
+
+Original unmodified envyas/envydis assembles P0 MOV R0,R4 as5c98078000400000
+and !P0 as5c98078000480000. NVIDIA's
+[CUDA8 programming guide](https://docs.nvidia.com/cuda/archive/8.0/pdf/CUDA_C_Programming_Guide.pdf)
+describes suppression of operand reads and destination writes on false
+predication. This is conditional execution, not an unconditional SEL. Requiring
+both possible GPR values ready is a conservative translation limit, not a claim
+that hardware faults on a suppressed read. No scheduling bits are ignored.

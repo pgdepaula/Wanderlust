@@ -122,6 +122,13 @@ pub enum Operation {
         dst: u8,
         src: u8,
     },
+    /// Full-lane GPR MOV guarded by P0 or !P0. A false guard retains the prior
+    /// destination; both possible input values must be initialized and ready.
+    ConditionalMove {
+        dst: u8,
+        src: u8,
+        invert: bool,
+    },
     Constant {
         dst: u8,
         input: u8,
@@ -417,6 +424,28 @@ impl Program {
                         return Err(fail("unready MOV source or unsupported schedule"));
                     }
                     Operation::Move { dst, src }
+                } else if word & !0x000000000ff800ff == 0x5c98078000000000 {
+                    let src = ((word >> 20) & 255) as u8;
+                    if !predicate_initialized {
+                        return Err(fail("uninitialized conditional MOV predicate P0"));
+                    }
+                    // The predicate is runtime data. The false path retains
+                    // dst, so a conditional write cannot establish readiness
+                    // for an otherwise undefined or pending destination.
+                    if write_barrier != 7
+                        || [dst, src]
+                            .iter()
+                            .any(|r| !initialized[*r as usize] || pending[*r as usize])
+                    {
+                        return Err(fail(
+                            "unready conditional MOV operand or unsupported schedule",
+                        ));
+                    }
+                    Operation::ConditionalMove {
+                        dst,
+                        src,
+                        invert: word & (1 << 19) != 0,
+                    }
                 } else if word & !(255 | (255u64 << 8) | (255u64 << 20) | (1u64 << 42))
                     == 0x5ca0000000070000
                 {
@@ -811,6 +840,11 @@ impl Program {
                             || multiply_result[right as usize]
                             || predicate_multiply
                     }
+                    Operation::ConditionalMove { dst, src, .. } => {
+                        multiply_result[dst as usize]
+                            || multiply_result[src as usize]
+                            || predicate_multiply
+                    }
                     Operation::Integer { left, right, .. } => {
                         multiply_result[left as usize] || multiply_result[right as usize]
                     }
@@ -899,6 +933,7 @@ impl Program {
                     }
                 }
                 Operation::Move { dst, src }
+                | Operation::ConditionalMove { dst, src, .. }
                 | Operation::LogicImmediate { dst, src, .. }
                 | Operation::AddImmediate { dst, src, .. }
                 | Operation::FloatImmediate { dst, src, .. } => {
@@ -942,7 +977,9 @@ impl Program {
         if self.operations.iter().any(|op| {
             matches!(
                 op,
-                Operation::PredicateCompare { .. } | Operation::Select { .. }
+                Operation::PredicateCompare { .. }
+                    | Operation::Select { .. }
+                    | Operation::ConditionalMove { .. }
             )
         }) {
             s.push_str("var p0:bool;\n");
@@ -1004,6 +1041,9 @@ impl Program {
                 }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
+                Operation::ConditionalMove { dst, src, invert } => {
+                    emit_conditional_move(&mut s, dst, src, invert);
+                }
                 Operation::Constant { dst, input } => {
                     writeln!(s, "r[{dst}]=cb.words[{}][{}];", input / 4, input % 4).unwrap()
                 }
@@ -1073,7 +1113,9 @@ impl VertexProgram {
         if self.operations().iter().any(|op| {
             matches!(
                 op,
-                Operation::PredicateCompare { .. } | Operation::Select { .. }
+                Operation::PredicateCompare { .. }
+                    | Operation::Select { .. }
+                    | Operation::ConditionalMove { .. }
             )
         }) {
             s.push_str("var p0:bool;\n");
@@ -1190,6 +1232,9 @@ impl VertexProgram {
                 }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
+                Operation::ConditionalMove { dst, src, invert } => {
+                    emit_conditional_move(&mut s, dst, src, invert);
+                }
                 _ => unreachable!("resource/fragment operation in strict vertex program"),
             }
         }
@@ -1362,4 +1407,10 @@ fn emit_float_immediate(s: &mut String, dst: u8, src: u8, bits: u32, operator: F
         "r[{dst}]=bitcast<u32>(bitcast<f32>(r[{src}]) {symbol} bitcast<f32>({bits}u));"
     )
     .unwrap();
+}
+
+fn emit_conditional_move(s: &mut String, dst: u8, src: u8, invert: bool) {
+    use std::fmt::Write;
+    let condition = if invert { "!p0" } else { "p0" };
+    writeln!(s, "if {condition} {{ r[{dst}]=r[{src}]; }}").unwrap();
 }

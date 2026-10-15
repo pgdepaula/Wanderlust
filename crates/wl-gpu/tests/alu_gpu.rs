@@ -648,3 +648,229 @@ fn driver_vertex_float32_immediate_geometry_and_warm_cache() {
     eprintln!("fullfloat warm32 CPU={elapsed:?} before={before:?} after={after:?}");
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+#[test]
+#[ignore = "requires actual GPU; conditional MOV preserves false destinations and runtime predicate data"]
+fn driver_conditional_move_runtime_predicates_and_code_coherence() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/conditional-move.bin");
+    data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x2144, 0x600),
+        (0x214c, 8),
+        (0x2380, 32),
+        (0x2384, 0),
+        (0x2388, 0x40040),
+        (0x2490, 1),
+    ] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let mut identity = None;
+    // Independently specified unsigned comparisons include pairs that disagree
+    // with signed-integer or floating comparisons. False MOV retains .25/.75.
+    for (input, color) in [
+        ([1u32, 2], [255, 128, 191, 255]),
+        ([2, 1], [64, 128, 0, 255]),
+        ([7, 7], [64, 128, 0, 255]),
+        ([0, 0xffffffff], [255, 128, 191, 255]),
+        ([0x80000000, 0x7fffffff], [64, 128, 0, 255]),
+        ([1, 2], [255, 128, 191, 255]),
+    ] {
+        let bytes: Vec<_> = input.iter().flat_map(|v| v.to_le_bytes()).collect();
+        d.write_backing(b, 0x50, &bytes, &mut mem(&mut data))
+            .unwrap();
+        let r = submit(&mut d, c, b, &mut data, &words);
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        check(&data, color, false);
+        d.retire(r.token).unwrap();
+        let n = d.graphics_counters();
+        let now = [
+            n.shader_decodes,
+            n.shader_module_allocations,
+            n.pipeline_allocations,
+        ];
+        if let Some(old) = identity {
+            assert_eq!(now, old);
+        }
+        identity = Some(now);
+    }
+    // Invert only the first MOV's execution predicate. With true P0 both MOVs
+    // now preserve their old destination. This is code, not mutable CB data.
+    let mut code = bin.to_vec();
+    let off = 0xb8;
+    let old = u64::from_le_bytes(code[off..off + 8].try_into().unwrap());
+    code[off..off + 8].copy_from_slice(&(old ^ (1 << 19)).to_le_bytes());
+    d.write_backing(b, 0x4600, &code, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let accepted = submit(&mut d, c, b, &mut data, &draw());
+    assert!(accepted.fault.is_none(), "{:?}", accepted.fault);
+    let after = d.graphics_counters();
+    assert_eq!(after.shader_decodes, before.shader_decodes + 1);
+    assert_eq!(after.draw_commands, before.draw_commands + 1);
+    // Unsupported P1 must not execute a stale cached program or repeat the
+    // already accepted draw. Publication is still possible after this fault.
+    let old = u64::from_le_bytes(code[off..off + 8].try_into().unwrap());
+    code[off..off + 8].copy_from_slice(&(old | (1 << 16)).to_le_bytes());
+    d.write_backing(b, 0x4600, &code, &mut mem(&mut data))
+        .unwrap();
+    assert!(submit(&mut d, c, b, &mut data, &draw()).fault.is_some());
+    assert_eq!(d.graphics_counters().draw_commands, after.draw_commands);
+    assert_eq!(d.graphics_counters().submissions, after.submissions);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [64, 128, 191, 255], false);
+    eprintln!(
+        "conditional MOV fragment counters {:?}",
+        d.graphics_counters()
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+
+fn check_conditional_geometry(data: &[u8], first_x: f64) {
+    let v = [
+        [first_x, f64::from(POS[0][1])],
+        POS[1].map(f64::from),
+        POS[2].map(f64::from),
+    ];
+    let area = edge(v[0], v[1], v[2]);
+    let mut inside = 0;
+    let mut outside = 0;
+    for y in 0..H {
+        for x in 0..W {
+            let p = [
+                (x as f64 + 0.5) * 2. / 47. - 1.,
+                1. - (y as f64 + 0.5) * 2. / 29.,
+            ];
+            let weights = [
+                edge(v[1], v[2], p) / area,
+                edge(v[2], v[0], p) / area,
+                edge(v[0], v[1], p) / area,
+            ];
+            if weights.iter().any(|w| w.abs() < 0.005) {
+                continue;
+            }
+            let expected = if x < 47 && weights.iter().all(|w| *w > 0.) {
+                inside += 1;
+                [255, 0, 0, 255]
+            } else {
+                outside += 1;
+                BG
+            };
+            let off = RT + (y * W + x) * 4;
+            assert_eq!(&data[off..off + 4], &expected, "conditional VS {x},{y}");
+        }
+    }
+    assert!(inside > 20 && outside > 1000);
+}
+
+#[test]
+#[ignore = "requires actual GPU; per-vertex conditional MOV and guest vertex mutations"]
+fn driver_vertex_conditional_move_geometry_and_warm_cache() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/vertex-conditional-move.bin");
+    data[0x4800..0x4800 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    method(&mut words, 0x2044, 0x800);
+    method(&mut words, 0x204c, 8);
+    method(&mut words, 0x2144, 0x400);
+    words.extend(end);
+    let r = submit(&mut d, c, b, &mut data, &words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_conditional_geometry(&data, 0.5);
+    d.retire(r.token).unwrap();
+    // Only guest X changes: raw equality to -.8 becomes false for vertex zero.
+    // Explicit canonical target reset removes prior coverage before the oracle.
+    d.write_backing(b, 0x3000, &(-0.6f32).to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let background: Vec<_> = (0..W * H).flat_map(|_| BG).collect();
+    d.write_backing(b, RT as u64, &background, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_conditional_geometry(&data, f64::from(-0.6f32));
+    d.retire(r.token).unwrap();
+    let after = d.graphics_counters();
+    assert_eq!(
+        [
+            before.vertex_shader_decodes,
+            before.shader_decodes,
+            before.shader_module_allocations,
+            before.pipeline_allocations
+        ],
+        [
+            after.vertex_shader_decodes,
+            after.shader_decodes,
+            after.shader_module_allocations,
+            after.pipeline_allocations
+        ]
+    );
+    assert_eq!(after.vertex_upload_bytes - before.vertex_upload_bytes, 72);
+    let bytes: Vec<_> = draw().iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let start = std::time::Instant::now();
+    for _ in 0..32 {
+        let report = submit_existing(&mut d, c, &mut data, 8);
+        assert!(report.fault.is_none());
+        assert_eq!(report.progress.draws_submitted, 1);
+    }
+    let elapsed = start.elapsed();
+    let after = d.graphics_counters();
+    assert_eq!(after.submissions - before.submissions, 32);
+    assert_eq!(after.draw_commands - before.draw_commands, 32);
+    assert_eq!(after.shader_decodes, before.shader_decodes);
+    assert_eq!(after.vertex_shader_decodes, before.vertex_shader_decodes);
+    assert_eq!(
+        [
+            after.shader_binary_bytes,
+            after.vertex_shader_bytes,
+            after.vertex_guest_bytes,
+            after.index_guest_bytes,
+            after.constant_guest_bytes,
+            after.guest_texture_bytes,
+            after.descriptor_reads,
+            after.render_target_guest_bytes
+        ],
+        [
+            before.shader_binary_bytes,
+            before.vertex_shader_bytes,
+            before.vertex_guest_bytes,
+            before.index_guest_bytes,
+            before.constant_guest_bytes,
+            before.guest_texture_bytes,
+            before.descriptor_reads,
+            before.render_target_guest_bytes
+        ]
+    );
+    assert_eq!(
+        [
+            after.upload_bytes,
+            after.upload_calls,
+            after.shader_module_allocations,
+            after.pipeline_allocations,
+            after.readback_operations,
+            after.synchronization_points
+        ],
+        [
+            before.upload_bytes,
+            before.upload_calls,
+            before.shader_module_allocations,
+            before.pipeline_allocations,
+            before.readback_operations,
+            before.synchronization_points
+        ]
+    );
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_conditional_geometry(&data, f64::from(-0.6f32));
+    eprintln!("conditional MOV warm32 CPU={elapsed:?} before={before:?} after={after:?}");
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
