@@ -2131,3 +2131,38 @@ process acquisition are also excluded, never counted as GPU passes. The final
 source and fixture hashes match the frozen validation manifest and independent
 review/reassembly. Subsequent clear-test and unfinished runtime edits were
 excluded and preserved. No original-game GPU command or frame is established.
+
+## Z16 clear, full-storage CPU patches and depth reuse
+
+`z16_clear_full_cpu_patch_retry_and_indexed_depth_test` exercises the existing
+B197 CLEAR_SURFACE path through GpuDriver/GPFIFO with native Z16. A52x29/BH2
+surface occupies4096guest bytes, including padding. Clear depth.375 publishes
+exact LEu16 code24576 at every logical sample while retaining all padding and
+unrelated mapped tail bytes. The clear requires zero depth initialization reads,
+uploads or layout conversions; command acquisition and native resource creation
+still occur. Host completion alone leaves guest RAM unpublished. The initial
+explicit depth-only publication performs one readback and returns no color frame.
+
+A second pending clear receives an entire4096-byte canonical CPU patch: checker
+depths8192/57343 and padding6d. Injected atomic write failure and successful retry
+preserve that exact allocation without repeating either clear. A following indexed
+LESS/write draw at Z=.375 must initialize native depth from the CPU checker rather
+than reuse the stale clear. It uploads6032R32 bytes for3016logical guest depth bytes.
+An independent barycentric/GOB oracle checks all logical color/depth samples,
+rejected and uncovered pixels, every padding byte and unrelated storage. Limited
+edge ambiguity permits only coherent depth/color pairs and only when all weights
+are within the triangle's edge tolerance; clearly outside edge-line extensions
+receive strict background/original-depth checks.
+
+The final test SHA-256 is
+a2b746a07081adba5ba321c2e4c37aba1913863423f96e633a3f9c4dcdd36f72.
+Independent review identified and resolved the edge-extension oracle gap.
+A faithful ordinary9dec2eb snapshot plus exactly this test file passed formatting,
+strict workspace Clippy,210graphics CPU tests/configuration and429workspace CPU
+tests (102GPU scenarios ignored). All7focused clear scenarios passed on each WSL
+OpenGL, native Windows D3D12 and Vulkan:21actual passes,zero failures or skips.
+Together with the preceding unchanged101-scenario production matrix, the new case
+has three-backend coverage; this is not reported as a fresh full102-scenario run.
+Exclusive source/artifact provenance was retained. No production API changed,
+whole-frame atomicity or allocation-free transfer is claimed. Runtime edits were
+excluded and preserved; no original-game GPU submission is established.

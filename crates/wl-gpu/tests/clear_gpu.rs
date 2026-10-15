@@ -679,3 +679,234 @@ fn clear_rebind_and_pending_attachment_overlap_are_safe() {
     assert!(data[RT..RT + 0x4000].iter().all(|v| *v == 0xa5));
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+#[test]
+#[ignore = "requires actual GPU; native Z16 clear, whole-allocation CPU patch and indexed depth reuse"]
+fn z16_clear_full_cpu_patch_retry_and_indexed_depth_test() {
+    // Independent Tegra GOB geometry: two 64-byte columns, two 16-row
+    // blocks, each occupying 1024 bytes. Logical Z16 pixels occupy 3016 bytes.
+    const DEPTH_SIZE: usize = 4096;
+    let (mut data, mut setup, _) = fixture();
+    data[Z..Z + DEPTH_SIZE].fill(0xa5);
+    for n in 0..3 {
+        data[0x3008 + n * 24..0x300c + n * 24].copy_from_slice(&0.375f32.to_le_bytes());
+    }
+    let unrelated = data[Z + DEPTH_SIZE..Z + 0x4000].to_vec();
+    let color_initial = data[RT..RT + SIZE].to_vec();
+    let (mut d, c, _, b, _) = driver();
+    let before = d.graphics_counters();
+    let mut clear = clear_setup(W as u32, H as u32, None);
+    z_setup(&mut clear, W as u32, H as u32, 0.375);
+    method(&mut clear, 0xfe8, 0x13); // SET_ZT_FORMAT.Z16
+    method(&mut clear, 0xff0, 1024); // single-layer footprint in words
+    method(&mut clear, 0x19d0, 1); // CLEAR_SURFACE.Z only
+    let first = submit(&mut d, c, b, &mut data, &clear);
+    assert!(first.fault.is_none(), "{:?}", first.fault);
+    assert_eq!(first.progress.draws_submitted, 0);
+    let cleared = d.graphics_counters();
+    assert_eq!(cleared.clear_commands - before.clear_commands, 1);
+    assert_eq!(cleared.depth_guest_bytes, before.depth_guest_bytes);
+    assert_eq!(cleared.depth_upload_bytes, before.depth_upload_bytes);
+    assert_eq!(
+        cleared.render_target_guest_bytes,
+        before.render_target_guest_bytes
+    );
+    assert_eq!(cleared.upload_calls, before.upload_calls);
+    assert_eq!(cleared.upload_bytes, before.upload_bytes);
+    assert_eq!(cleared.deswizzle_bytes, before.deswizzle_bytes);
+    assert_eq!(
+        cleared.target_deswizzle_bytes,
+        before.target_deswizzle_bytes
+    );
+    assert_eq!(cleared.target_swizzle_bytes, before.target_swizzle_bytes);
+    assert_eq!(cleared.readback_operations, before.readback_operations);
+    assert_eq!(cleared.depth_write_bytes, before.depth_write_bytes);
+    assert!(data[Z..Z + DEPTH_SIZE].iter().all(|v| *v == 0xa5));
+    assert_eq!(&data[RT..RT + SIZE], &color_initial);
+    let completed = d.wait(first.token).unwrap();
+    assert!(completed.host_completed && !completed.guest_visible);
+    assert_eq!(
+        d.graphics_counters().readback_operations,
+        cleared.readback_operations
+    );
+    assert!(data[Z..Z + DEPTH_SIZE].iter().all(|v| *v == 0xa5));
+    assert!(d.publish(c, &mut mem(&mut data)).unwrap().is_none());
+    let mut expected = vec![0xa5; DEPTH_SIZE];
+    let mut visible = vec![false; DEPTH_SIZE];
+    for y in 0..H {
+        for x in 0..W {
+            // .375 * 65535 = 24575.625, away from a rounding tie.
+            for (lane, byte) in 24576u16.to_le_bytes().into_iter().enumerate() {
+                let a = gob_address(x * 2 + lane, y, W * 2, 2);
+                visible[a] = true;
+                expected[a] = byte;
+            }
+        }
+    }
+    assert_eq!(&data[Z..Z + DEPTH_SIZE], &expected);
+    assert_eq!(&data[Z + DEPTH_SIZE..Z + 0x4000], &unrelated);
+    assert_eq!(&data[RT..RT + SIZE], &color_initial);
+    let published = d.graphics_counters();
+    assert_eq!(
+        published.depth_write_bytes - cleared.depth_write_bytes,
+        DEPTH_SIZE as u64
+    );
+    assert_eq!(
+        published.readback_operations - cleared.readback_operations,
+        1
+    );
+    assert!(d.query(first.token).unwrap().guest_visible);
+    d.retire(first.token).unwrap();
+
+    // A CPU write covering the complete canonical storage allocation occurs
+    // after another GPU clear. It replaces visible depth bytes AND padding.
+    let mut again = Vec::new();
+    method(&mut again, 0x19d0, 1);
+    let second = submit(&mut d, c, b, &mut data, &again);
+    assert!(second.fault.is_none(), "{:?}", second.fault);
+    assert_eq!(&data[Z..Z + DEPTH_SIZE], &expected);
+    let mut patch = vec![0x6d; DEPTH_SIZE];
+    for y in 0..H {
+        for x in 0..W {
+            let code = if (x + y) % 2 == 0 { 8192u16 } else { 57343u16 };
+            for (lane, byte) in code.to_le_bytes().into_iter().enumerate() {
+                patch[gob_address(x * 2 + lane, y, W * 2, 2)] = byte;
+            }
+        }
+    }
+    d.write_backing(b, Z as u64, &patch, &mut mem(&mut data))
+        .unwrap();
+    let prior_failure = d.graphics_counters();
+    assert!(d.publish(c, &mut FailAt(&mut data, Z as u64)).is_err());
+    assert_eq!(&data[Z..Z + DEPTH_SIZE], &patch);
+    assert_eq!(
+        d.graphics_counters().depth_write_bytes,
+        prior_failure.depth_write_bytes
+    );
+    assert!(!d.query(second.token).unwrap().guest_visible);
+    assert_eq!(d.graphics_counters().clear_commands, 2);
+    assert_eq!(d.graphics_counters().draw_commands, 0);
+    assert!(d.publish(c, &mut mem(&mut data)).unwrap().is_none());
+    assert_eq!(&data[Z..Z + DEPTH_SIZE], &patch);
+    assert_eq!(&data[Z + DEPTH_SIZE..Z + 0x4000], &unrelated);
+    assert_eq!(&data[RT..RT + SIZE], &color_initial);
+    assert_eq!(d.graphics_counters().clear_commands, 2);
+    assert_eq!(d.graphics_counters().draw_commands, 0);
+    assert!(d.wait(second.token).unwrap().guest_visible);
+    d.retire(second.token).unwrap();
+
+    // The next genuine indexed draw must initialize native depth from the CPU
+    // checker, rather than reuse the stale resident clear. Incoming .375 is
+    // safely between the two stored depths, avoiding comparison precision ties.
+    let end = setup.split_off(setup.len() - 8);
+    method(&mut setup, 0x2144, 0x400); // independently assembled red pixel program
+    z_setup(&mut setup, W as u32, H as u32, 0.375);
+    for (m, v) in [
+        (0xfe8, 0x13),
+        (0xff0, 1024),
+        (0x12cc, 1),
+        (0x12e8, 1),
+        (0x130c, 0x201),
+    ] {
+        method(&mut setup, m, v);
+    }
+    setup.extend(end);
+    let before_draw = d.graphics_counters();
+    let third = submit(&mut d, c, b, &mut data, &setup);
+    assert!(third.fault.is_none(), "{:?}", third.fault);
+    assert_eq!(third.progress.draws_submitted, 1);
+    assert_eq!(&data[Z..Z + DEPTH_SIZE], &patch);
+    assert_eq!(&data[RT..RT + SIZE], &color_initial);
+    assert_eq!(
+        d.graphics_counters().depth_upload_bytes - before_draw.depth_upload_bytes,
+        (W * H * 4) as u64,
+        "portable Z16 initialization stages four-byte R32 codes"
+    );
+    assert_eq!(
+        d.graphics_counters().depth_allocations,
+        before_draw.depth_allocations
+    );
+    assert_eq!(
+        d.graphics_counters().readback_operations,
+        before_draw.readback_operations
+    );
+    assert!(d.publish(c, &mut mem(&mut data)).unwrap().is_some());
+
+    let v = POS.map(|p| p.map(f64::from));
+    let area = edge(v[0], v[1], v[2]);
+    let mut passed = 0;
+    let mut rejected = 0;
+    let mut outside = 0;
+    for y in 0..H {
+        for x in 0..W {
+            let p = [
+                (x as f64 + 0.5) * 2. / 47. - 1.,
+                1. - (y as f64 + 0.5) * 2. / 29.,
+            ];
+            let weights = [
+                edge(v[1], v[2], p) / area,
+                edge(v[2], v[0], p) / area,
+                edge(v[0], v[1], p) / area,
+            ];
+            if x < 47
+                && weights.iter().any(|w| w.abs() < 0.005)
+                && weights.iter().all(|w| *w >= -0.005)
+            {
+                // At a rasterization precision boundary, permit only the two
+                // coherent coverage outcomes, never arbitrary depth/color bytes.
+                let actual_depth = u16::from_le_bytes([
+                    data[Z + gob_address(x * 2, y, W * 2, 2)],
+                    data[Z + gob_address(x * 2 + 1, y, W * 2, 2)],
+                ]);
+                let a = RT + (y * W + x) * 4;
+                let actual_color: [u8; 4] = data[a..a + 4].try_into().unwrap();
+                let valid = if (x + y) % 2 == 0 {
+                    actual_depth == 8192 && actual_color == BG
+                } else {
+                    (actual_depth == 57343 && actual_color == BG)
+                        || (actual_depth == 24576 && actual_color == [255, 0, 0, 255])
+                };
+                assert!(
+                    valid,
+                    "Z16 raster edge {x},{y}: {actual_depth} {actual_color:?}"
+                );
+                continue;
+            }
+            let inside = x < 47 && weights.iter().all(|w| *w > 0.);
+            let pass = inside && (x + y) % 2 != 0;
+            if pass {
+                passed += 1;
+            } else if inside {
+                rejected += 1;
+            } else {
+                outside += 1;
+            }
+            let depth = if pass {
+                24576u16
+            } else if (x + y) % 2 == 0 {
+                8192u16
+            } else {
+                57343u16
+            };
+            for (lane, byte) in depth.to_le_bytes().into_iter().enumerate() {
+                let a = gob_address(x * 2 + lane, y, W * 2, 2);
+                assert_eq!(data[Z + a], byte, "Z16 depth {x},{y} lane {lane}");
+            }
+            let color = if pass { [255, 0, 0, 255] } else { BG };
+            let a = RT + (y * W + x) * 4;
+            assert_eq!(&data[a..a + 4], &color, "Z16-tested color {x},{y}");
+        }
+    }
+    assert!(passed > 100 && rejected > 100 && outside > 1000);
+    for (a, used) in visible.into_iter().enumerate() {
+        if !used {
+            assert_eq!(data[Z + a], 0x6d, "Z16 padding byte {a}");
+        }
+    }
+    assert_eq!(&data[Z + DEPTH_SIZE..Z + 0x4000], &unrelated);
+    assert_eq!(d.graphics_counters().clear_commands, 2);
+    assert_eq!(d.graphics_counters().draw_commands, 1);
+    assert!(d.wait(third.token).unwrap().guest_visible);
+    d.retire(third.token).unwrap();
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
