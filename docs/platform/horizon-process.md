@@ -188,7 +188,12 @@ Some system services are served by the runtime itself. sm treats their names as 
 | | ISelfController | 11 SetOperationModeChangedNotification, 12 SetPerformanceModeChangedNotification, 16 SetOutOfFocusSuspendingEnabled (bool); 13 SetFocusHandlingMode (three bools) | records the setting |
 | | | 90 GetAccumulatedSuspendedTickValue | 0 (u64): the application is never suspended |
 | | | 91 GetAccumulatedSuspendedTickChangedEvent | copies a readable event that is never signalled |
-| | IApplicationFunctions | 130 GetGpuErrorDetectedSystemEvent | copies a readable event that is never signalled (GPU-error detection is not modelled) |
+| | IApplicationFunctions | 20 EnsureSaveData | 0 (u64): save data ensured |
+| | | 21 GetDesiredLanguage | LanguageCode (`en-US`) |
+| | | 22 SetTerminateResult | records clean termination result |
+| | | 23 GetDisplayVersion | `1.0.0` version string |
+| | | 40 NotifyRunning | true (u8 1) |
+| | | 130 GetGpuErrorDetectedSystemEvent | copies a readable event that is never signalled (GPU-error detection is not modelled) |
 | | | 131 SetDelayTimeToAbortOnGpuError (u64) | records the delay |
 | | IWindowController | 1 GetAppletResourceUserId | the process ID (u64): the applet resource user ID is the process ID, as Atmosphère's `sf` checks for `ClientAppletResourceUserId` |
 | | | 10 AcquireForegroundRights | records foreground rights |

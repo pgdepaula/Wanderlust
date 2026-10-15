@@ -922,6 +922,14 @@ fn applet_oe_application_startup() {
     send(&mut p, &mut c, am);
     assert_eq!((reply_u32(&p, 8), reply_u32(&p, 0x28)), (1 << 1, 0));
     assert_eq!(call(&mut p, &mut c, am, 9, 131, &5u64.to_le_bytes()).0, 0);
+    // IApplicationFunctions commands 20, 21, 22, 23, 40.
+    assert_eq!(call(&mut p, &mut c, am, 9, 20, &[]).0, 0);
+    assert_eq!(call(&mut p, &mut c, am, 9, 21, &[]).0, 0);
+    assert_eq!(&reply(&p)[0x30..0x38], b"en-US\0\0\0");
+    assert_eq!(call(&mut p, &mut c, am, 9, 22, &[0; 4]).0, 0);
+    assert_eq!(call(&mut p, &mut c, am, 9, 23, &[]).0, 0);
+    assert_eq!(call(&mut p, &mut c, am, 9, 40, &[]).0, 0);
+    assert_eq!(reply(&p)[0x30], 1);
     // The applet resource user ID is the process ID.
     let (r, aruid, _) = call(&mut p, &mut c, am, window, 1, &[]);
     assert_eq!((r, aruid), (0, 0x51));

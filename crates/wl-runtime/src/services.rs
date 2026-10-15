@@ -832,6 +832,28 @@ pub(crate) fn request(
                 Some(u64::from_le_bytes(args[..8].try_into().unwrap_or_default()));
             Done::ok()
         }
+        (HostObject::ApplicationFunctions, 20) => {
+            // EnsureSaveData: out u64 size.
+            Done::data(&0u64.to_le_bytes())
+        }
+        (HostObject::ApplicationFunctions, 21) => {
+            // GetDesiredLanguage: out LanguageCode (8 bytes, "en-US").
+            Done::data(b"en-US\0\0\0")
+        }
+        (HostObject::ApplicationFunctions, 22) => {
+            // SetTerminateResult(u32).
+            Done::ok()
+        }
+        (HostObject::ApplicationFunctions, 23) => {
+            // GetDisplayVersion: out 16 bytes version string.
+            let mut v = [0u8; 16];
+            v[..5].copy_from_slice(b"1.0.0");
+            Done::data(&v)
+        }
+        (HostObject::ApplicationFunctions, 40) => {
+            // NotifyRunning: out bool (true).
+            Done::data(&[1u8])
+        }
         (HostObject::ApplicationFunctions, 65..=69) => {
             // SetGamePlayRecordingState, InitializeGamePlayRecording, RequestFlushGamePlayingMovieForDebug.
             Done::ok()
