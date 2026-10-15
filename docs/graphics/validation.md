@@ -1856,3 +1856,55 @@ to fault before the first pending UV read; the corrected test asserts the real
 AST failure and separately tests a LOP reading that pending register. Production
 validation was not weakened. Unfinished peer runtime edits were excluded and
 preserved. No original-game GPU command or frame is established.
+
+
+## Full-width immediate logical execution
+
+Seven CPU tests independently check original LOP32I words, twelve operator/
+complement forms in both stages, every immediate bit including48:50, RZ and
+high-register accounting, source/destination readiness, conservative scheduling,
+strict predicate/modifier rejection, proof erasure and retained FMUL hazards.
+Two GPU scenarios enter through GpuDriver, GPFIFO and indexed B197 execution.
+Twelve forms times twelve edge immediates times four mutable CB source values
+produce576 independently checked full-word results. A per-bit Boolean truth
+table specifies expected bytes; finite byte-to-UNORM observation avoids NaN
+float-export assumptions. Full-width masks distinguish narrow/sign-extended
+decoding, while CB-only changes preserve shader/pipeline identity.
+
+An additional accepted A XOR ~ffffffff draw remains pending before a new CC52
+shader faults. The fault adds no draw/submission/publication; explicit publication
+yields [120,86,52,18] for12345678 without replay. A separate translated vertex
+program XORs clip X with80000000; analytic mirrored coverage distinguishes the
+actual raster effect from a NOP. Thirty-two warm repeated draws add no resource
+reads/uploads, shader decodes/modules/pipelines, readbacks or waits. They still
+require32 queue submissions and one final explicit visibility boundary.
+
+The full-word workload has577draws,1154queues,577intentional oracle readbacks/
+waits,4292880readback bytes and3480464guest framebuffer write bytes. It reads
+67744shader bytes over146decode attempts (144matrix programs, one explicit
+good program and one rejected CC variant), creates148modules/292pipelines,
+reads4616constant bytes and uploads2312, plus72vertex and eight index bytes.
+A single target allocation has576reuses. Per-case publication is test policy,
+not a per-draw runtime requirement. Warm32debug CPU observations were23.516ms
+with1569allocations/128reallocations on GL,27.639ms with1408/32 on D3D12 and
+32.561ms with1568/32 on Vulkan. These process-wide measurements include backend
+activity and are not GPU durations, allocation-free or game-performance claims.
+
+The initial full CPU run exposed process-wide allocator noise in the unchanged
+FIFO decoder test: one unexpected allocation. Its separately committed test
+instrumentation now gates counters by calling thread, proves local37B inclusion
+and concurrent127B exclusion, and retains the actual5000-write zero-allocation
+assertions.256isolated executable runs passed before full-suite validation.
+No FIFO production behavior or allocation acceptance threshold changed.
+
+A faithful ordinary snapshot of a9449b7 plus exactly nine LOP32I candidate
+source/test/fixture files and unchanged Cargo.lock passed workspace formatting,
+strict workspace Clippy,193graphics CPU tests in each feature configuration
+and412workspace CPU tests (90GPU scenarios ignored). Dedicated artifacts were
+kept separate from the live checkout. All90GPU scenarios actually passed on
+each WSL OpenGL, native Windows D3D12 and native Windows Vulkan:270passes,
+zero failures or explicit skips in the final matrix. Native runs used39test
+executables per backend; compilation alone is not counted. Unfinished runtime
+changes remained excluded and preserved. Earlier diagnostic-test and wrong-cwd
+prototype compile failures were corrected before this final validation and are
+not counted as passing GPU executions. No original-game graphics is established.

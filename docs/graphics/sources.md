@@ -844,3 +844,32 @@ The byte observer uses the existing validated finite byte-to-UNORM sequence, not
 raw floating export of arbitrary NaN bit patterns. The vertex fixture XORs clip X
 with the complement of7fffffff, toggling its sign bit. No original-game or
 original-Maxwell-hardware execution is claimed for these fixtures.
+
+
+## Full-width Maxwell LOP32I
+
+Pinned [envytools GM107](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/gm107.c)
+and MIT [Mesa SM50 OpLop2](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs)
+identify the full32-bit immediate at51:20, GPR source15:8, destination7:0,
+operator54:53 and complement55/56. PT occupies19:16, CC52 and X57 are separate.
+The complete-word variable mask01effffffff0ffff against0400000000070000
+keeps every other bit fixed. The common six-stall readiness subset is retained.
+
+Operator3 is intentionally unsupported: envytools names a PASS_B form and UAM
+uses long-immediate NOT emission, but the pinned NAK encoder explicitly refuses
+PASS_B for LOP32I. No equivalence is inferred from that disagreement. The three
+verified operators are sufficient for full-width masks and sign-bit changes.
+No implementation source is copied.
+
+Three original fixtures retain existing strict80-byte stage headers and were
+independently assembled/disassembled twice using pinned unmodified envytools:
+
+| Fixture | Bytes | SHA-256 |
+| --- | ---: | --- |
+| lop32i.bin |144|fd955a68bd0ca5ef491e09467a6a5438a62011fc80244f93df92a4890bc2de1e|
+| lop32i-bytes.bin |464|1f3487c32aecbf7242f66ec02ed0a91192bf6631974dcdb4602d5d4dae3e3913|
+| vertex-lop32i.bin |144|fd8bf836fac36a357b7027638c0360f3c10741041542201b79e4e80c8a07d92b|
+
+The finite byte observer exposes all32 result bits through RGBA8. The vertex
+program XORs clip X with immediate80000000, independently distinguishing a
+full-width immediate from a narrow or sign-extension interpretation.

@@ -84,6 +84,15 @@ pub enum Operation {
         right: u8,
         operator: IntegerOperator,
     },
+    /// Raw 32-bit immediate logic; immediate bits are not GPR operands.
+    LogicImmediate {
+        dst: u8,
+        src: u8,
+        bits: u32,
+        operator: LogicalOperator,
+        invert_src: bool,
+        invert_immediate: bool,
+    },
     Float {
         dst: u8,
         left: u8,
@@ -414,6 +423,25 @@ impl Program {
                         right,
                         invert: word & (1 << 42) != 0,
                     }
+                } else if word & !0x01effffffff0ffff == 0x0400000000070000 {
+                    let src = ((word >> 8) & 255) as u8;
+                    let operator = match (word >> 53) & 3 {
+                        0 => LogicalOperator::And,
+                        1 => LogicalOperator::Or,
+                        2 => LogicalOperator::Xor,
+                        _ => return Err(fail("unsupported instruction: LOP32I operator")),
+                    };
+                    if write_barrier != 7 || !initialized[src as usize] || pending[src as usize] {
+                        return Err(fail("unready immediate logic operand/control"));
+                    }
+                    Operation::LogicImmediate {
+                        dst,
+                        src,
+                        bits: (word >> 20) as u32,
+                        operator,
+                        invert_src: word & (1 << 55) != 0,
+                        invert_immediate: word & (1 << 56) != 0,
+                    }
                 } else if word & !0x000007800ff0ffff == 0x5c47000000070000 {
                     let left = ((word >> 8) & 255) as u8;
                     let right = ((word >> 20) & 255) as u8;
@@ -701,7 +729,9 @@ impl Program {
                         operator: FloatOperator::Multiply,
                         ..
                     } => true,
-                    Operation::Move { src, .. } => multiply_result[src as usize],
+                    Operation::Move { src, .. } | Operation::LogicImmediate { src, .. } => {
+                        multiply_result[src as usize]
+                    }
                     _ => false,
                 };
                 position_w[dst as usize] = match op {
@@ -775,7 +805,7 @@ impl Program {
                         }
                     }
                 }
-                Operation::Move { dst, src } => {
+                Operation::Move { dst, src } | Operation::LogicImmediate { dst, src, .. } => {
                     largest = largest.max(u16::from(dst));
                     if src != 255 {
                         largest = largest.max(u16::from(src));
@@ -866,6 +896,9 @@ impl Program {
                 }
                 Operation::Integer { dst, left, right, operator } => {
                     emit_integer(&mut s, dst, left, right, operator);
+                }
+                Operation::LogicImmediate { dst, src, bits, operator, invert_src, invert_immediate } => {
+                    emit_logic_immediate(&mut s, dst, src, bits, operator, invert_src, invert_immediate);
                 }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
@@ -1019,6 +1052,24 @@ impl VertexProgram {
                 } => {
                     emit_integer(&mut s, dst, left, right, operator);
                 }
+                Operation::LogicImmediate {
+                    dst,
+                    src,
+                    bits,
+                    operator,
+                    invert_src,
+                    invert_immediate,
+                } => {
+                    emit_logic_immediate(
+                        &mut s,
+                        dst,
+                        src,
+                        bits,
+                        operator,
+                        invert_src,
+                        invert_immediate,
+                    );
+                }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
                 _ => unreachable!("resource/fragment operation in strict vertex program"),
@@ -1150,4 +1201,25 @@ fn constant_input(constants: &mut Vec<ConstantRef>, reference: ConstantRef) -> O
     let index = constants.len() as u8;
     constants.push(reference);
     Some(index)
+}
+
+fn emit_logic_immediate(
+    s: &mut String,
+    dst: u8,
+    src: u8,
+    bits: u32,
+    operator: LogicalOperator,
+    invert_src: bool,
+    invert_immediate: bool,
+) {
+    use std::fmt::Write;
+    let symbol = match operator {
+        LogicalOperator::And => "&",
+        LogicalOperator::Or => "|",
+        LogicalOperator::Xor => "^",
+        LogicalOperator::PassB => unreachable!("unsupported instruction: LOP32I operator"),
+    };
+    let left = if invert_src { "~" } else { "" };
+    let right = if invert_immediate { "~" } else { "" };
+    writeln!(s, "r[{dst}]=({left}r[{src}]) {symbol} ({right}{bits}u);").unwrap();
 }

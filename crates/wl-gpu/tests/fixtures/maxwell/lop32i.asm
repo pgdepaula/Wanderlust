@@ -1,0 +1,8 @@
+sched (st 0x6 wr 0x0) (st 0x6 wt 0x1) (st 0x6);
+ld b32 $r4 c0[0x10];
+lop32i and $r0 $r4 0x89abcdef;
+lop32i or $r1 inv $r4 inv 0x89abcdef;
+sched (st 0x6) (st 0x6) (st 0x6);
+lop32i xor $r2 $r4 0xffffffff;
+lop32i xor $r3 $r4 inv 0xffffffff;
+exit;

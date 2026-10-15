@@ -1,12 +1,15 @@
 # Graphics execution and memory boundaries
 
-`wl-gpu` executes checked, borrowed graphics commands through wgpu. The headless
-executor allocates vertex/index buffers and an RGBA8 target, renders indexed
-triangles with a WGSL shader, waits for submission completion, and returns packed
-RGBA bytes. It has executed on Windows D3D12 and Vulkan and WSL software GL.
-The input is synthetic. This is not a Tears of the Kingdom frame.
+`wl-gpu` executes guest-format GPFIFO/B06F/B197 commands through translated
+Maxwell shaders and wgpu. GpuDriver owns channel/address-space lifetimes; deferred
+rendering separates queue acceptance, host completion and explicit guest-memory
+publication. Hardware-state draws use guest geometry, resource descriptors and
+color/depth attachments. The older direct command executor remains a separate
+headless validation helper with synchronous packed-RGBA readback. Both paths have
+executed on Windows D3D12/Vulkan and WSL OpenGL using synthetic workloads; no
+original-game GPU command or Tears of the Kingdom frame is established.
 
-## Source semantics and execution commands
+## Direct validation commands
 
 `command::Command` separates resource creation, borrowed buffer uploads, indexed
 draws and resource removal from wgpu encoding. These commands are an execution
@@ -35,19 +38,24 @@ submissions. Destroy drops the CPU resource handle; it does not call wgpu's expl
 range translations, not a duplicate process memory image. Checked insertion rejects
 GPU overlaps and overflow, while distinct GPU mappings can alias the same guest
 range. A read must fit one GPU mapping and one contiguous runtime-provided borrow.
-Cross-mapping gathers, map removal, permissions and backing versions are absent.
+Cross-mapping gathers remain unsupported. Exact mapping removal is checked by
+AddressMap; GpuDriver separately owns backing identities, mapping lifetimes and
+mutation restrictions. AddressMap alone does not implement Horizon permissions.
 
 `GuestMemory::read` leaves permissions, storage and fault policy to its implementation.
 `SliceMemory` is a bounded test adapter; it does not implement Horizon memory or
 permission handling. No production runtime adapter is connected. Address resolution
 never treats a guest pointer as a host pointer. Aliases resolve to the same bytes;
-resource-cache invalidation across aliases is not implemented.
+TextureChanges and resource stamps invalidate caches using canonical resolved
+guest ranges and memory epochs, independently of numerical GPU VA aliases.
 
 `DirtyRanges` coalesces adjacent/overlapping intervals and preserves gaps. It can
 represent canonical backing offsets, independent of GPU aliases. The current test
-uses explicitly selected dirty buffer offsets; automatic CPU-write tracking and
-guest-visible GPU writes are absent. The caller must acknowledge dirtiness only
-after successful transfer, not when merely planning it.
+uses explicitly selected dirty buffer offsets. GpuDriver::write_backing records
+checked canonical writes; explicit publication exposes GPU-written attachment
+bytes with retryable atomic adapter writes. Automatic production-runtime CPU
+write tracking is not installed. Dirtiness is acknowledged only after successful
+transfer, not when merely planning it.
 
 The CPU representation principles follow the inspected ToThePast byte-memory and
 machine-boundary contracts: preserve raw bytes, interpret byte order at a named
@@ -93,8 +101,9 @@ backend sampling support. `BlockLinear2d` uses `tegra_swizzle` for one 2D mip wi
 GOB height 1, 2, 4, 8, 16 or 32, and a 64 MiB conversion budget. Compressed input
 uses block coordinates. It preserves encoded block bytes and does not decompress
 ASTC or BCn itself. A separate compressed block decoder follows deswizzling. `TextureDesc` assembles 2D mip chains using the library's per-mip GOB
-height reduction and successive padded mip sizes. Arrays, depth/stencil and
-multisampling are unsupported.
+height reduction and successive padded mip sizes. Sampled arrays, depth/stencil textures and multisampling remain unsupported.
+The separate B197 attachment path supports the bounded ZF32 depth format
+specified below; this does not imply sampled-depth or stencil support.
 
 ## Guest texture transfers and coherence
 
@@ -1281,3 +1290,17 @@ destination assignment. Identities/complements clear resource-handle, PositionW
 and reciprocal proofs; they cannot bypass the restricted resource/interpolation
 contracts. FMUL hazards follow both sources and only an actual untainted overwrite
 clears an older hazard. No new host waits or guest-memory interface is introduced.
+
+
+The full-width LOP32I subset accepts AND/OR/XOR with independently selected
+source and immediate complements. The second operand is all 32 raw bits in
+instruction51:20, including positions used for predicate outputs in GPR LOP.
+It is never sign-extended from20 bits or interpreted as a register number.
+The additive LogicImmediate operation retains source FMUL hazards and clears
+resource/reciprocal/PositionW proofs, even for mathematical identities. Both
+stages lower unsigned bitwise operations; mutable constant data stays outside
+shader identity, while changes to encoded immediate bits invalidate code.
+PT execution, initialized ready GPR/RZ source, ordinary destination, WB7 and
+the existing conservative six-stall schedule are required. CC52, X57, operator3,
+other predicates and operand families remain explicitly unsupported. This
+restriction does not assert that operator3 is an invalid hardware encoding.
