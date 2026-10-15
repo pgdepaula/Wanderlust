@@ -8,3 +8,25 @@ __pycache__/
 /.dumps/
 .wanderlust-cache/
 /.idea/
+
+# Compiled binaries, objects and test fixtures
+*.bin
+*.nro
+*.npdm
+*.elf
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Extensionless Horizon test binaries
+tests/horizon/ipc/main
+tests/horizon/probe/main
+tests/horizon/threads/main
+tests/**/main
+
+# Retain tracked ISA fixtures needed by wl-gpu compiler unit tests
+!crates/wl-gpu/tests/fixtures/maxwell/*.bin
+!crates/wl-nro/tests/fixtures/*.nro
