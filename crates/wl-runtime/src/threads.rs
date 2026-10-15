@@ -12,10 +12,10 @@
 //! `Waiting` with the PC after the SVC; whoever ends the wait writes the SVC's result and
 //! outputs into the saved context, so no SVC side effect is ever repeated.
 use crate::horizon::{
-    self, CURRENT_THREAD, Kernel, Object, PAGE, Process, Range, TLS_REGION_SIZE, TLS_THREAD_HANDLE,
-    result, state,
+    self, result, state, Kernel, Object, Process, Range, CURRENT_THREAD, PAGE, TLS_REGION_SIZE,
+    TLS_THREAD_HANDLE,
 };
-use crate::{BlockTable, Cpu, Memory, RuntimeResult, Stop, execute_until};
+use crate::{execute_until, BlockTable, Cpu, Memory, RuntimeResult, Stop};
 
 /// Bit 30 of a user mutex word: other threads wait for it (`svc::HandleWaitMask`).
 pub const HANDLE_WAIT_MASK: u32 = 0x4000_0000;
@@ -308,6 +308,62 @@ pub fn thread_of(k: &Kernel, handle: u32, pseudo: bool) -> Option<usize> {
         _ => None,
     }
 }
+/// `svc::IdealCoreDontCare`, `IdealCoreNoUpdate`.
+const IDEAL_CORE_DONT_CARE: i32 = -1;
+const IDEAL_CORE_NO_UPDATE: i32 = -3;
+
+/// svcGetThreadCoreMask (0x0E): W2 thread handle -> W1 ideal core, X2 affinity mask.
+pub fn get_thread_core_mask(k: &Kernel, handle: u32) -> Result<(i32, u64), u32> {
+    let t = thread_of(k, handle, true).ok_or(result::INVALID_HANDLE)?;
+    Ok((k.threads[t].ideal_core, k.threads[t].affinity_mask))
+}
+
+/// svcSetThreadCoreMask (0x0F): W0 thread handle, W1 ideal core, X2 affinity mask, with
+/// Mesosphere's checks (`kern_svc_thread.cpp`, `KThread::SetCoreMask`). A thread whose
+/// core leaves the mask moves to its ideal core, or to the highest core of the mask.
+pub fn set_thread_core_mask(k: &mut Kernel, handle: u32, core: i32, mask: u64) -> u32 {
+    let Some(t) = thread_of(k, handle, true) else {
+        return result::INVALID_HANDLE;
+    };
+    let (mut core, mut mask) = (core, mask);
+    if core == IDEAL_CORE_USE_PROCESS_VALUE {
+        core = i32::from(k.config.ideal_core);
+        mask = 1 << core;
+    } else {
+        let process = k.config.core_mask;
+        if mask | process != process {
+            return result::INVALID_CORE_ID;
+        }
+        if mask == 0 {
+            return result::INVALID_COMBINATION;
+        }
+        if (0..VIRTUAL_CORES as i32).contains(&core) {
+            if mask >> core & 1 == 0 {
+                return result::INVALID_COMBINATION;
+            }
+        } else if core != IDEAL_CORE_NO_UPDATE && core != IDEAL_CORE_DONT_CARE {
+            return result::INVALID_CORE_ID;
+        }
+    }
+    let th = &mut k.threads[t];
+    if core == IDEAL_CORE_NO_UPDATE {
+        core = th.ideal_core;
+        if core < 0 || mask >> core & 1 == 0 {
+            return result::INVALID_COMBINATION;
+        }
+    }
+    th.ideal_core = core;
+    th.affinity_mask = mask;
+    if mask >> th.core & 1 == 0 {
+        th.core = if core >= 0 {
+            core as u8
+        } else {
+            63 - mask.leading_zeros() as u8
+        };
+    }
+    result::SUCCESS
+}
+
 /// Adds a handle to a thread object.
 pub fn open_handle(k: &mut Kernel, t: usize) -> Result<u32, u32> {
     let handle = k.handles.add(Object::Thread(t))?;
@@ -879,7 +935,11 @@ fn expire(k: &mut Kernel, tick: u64) {
 
 /// The preemption priority of a core (59 on cores 0-2, 63 on core 3).
 fn preemption_priority(core: u8) -> u8 {
-    if core == 3 { 63 } else { 59 }
+    if core == 3 {
+        63
+    } else {
+        59
+    }
 }
 /// Every 10 ms of virtual time, the first runnable thread at each core's preemption
 /// priority moves behind the others of that priority (`RotateScheduledQueue`).

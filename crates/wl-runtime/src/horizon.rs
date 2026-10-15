@@ -30,6 +30,7 @@ pub mod state {
     pub const CODE: u32 = 0x03;
     pub const CODE_DATA: u32 = 0x04;
     pub const NORMAL: u32 = 0x05;
+    pub const SHARED_MEMORY: u32 = 0x0D;
     pub const STACK: u32 = 0x0B;
     pub const THREAD_LOCAL: u32 = 0x0C;
     pub const INACCESSIBLE: u32 = 0x10;
@@ -52,6 +53,7 @@ pub mod state {
             NORMAL => 0x077E_BD05,
             STACK => 0x045C_3C0B,
             THREAD_LOCAL => 0x0400_000C,
+            SHARED_MEMORY => 0x0400_000D,
             other => other,
         }
     }
@@ -227,6 +229,8 @@ pub enum Object {
     /// The readable and writable halves of a KEvent (`threads::Event`).
     ReadableEvent(usize),
     WritableEvent(usize),
+    /// Shared memory block (`SharedMemory`).
+    SharedMemory(usize),
 }
 /// Handle table with the Mesosphere encoding: `index | linear_id << 15`; linear ids start at
 /// 1 and free indices are handed out from the top of the table down.
@@ -287,8 +291,12 @@ pub struct Thread {
     pub stack: Range,
     /// Base priority (0 highest, 63 lowest).
     pub priority: u8,
-    /// Ideal core; threads run on their ideal core.
+    /// The core the thread runs on: its ideal core, or the highest core of its affinity
+    /// mask when the ideal core is −1. Threads do not migrate otherwise.
     pub core: u8,
+    /// svcSetThreadCoreMask state: the ideal core (−1: no preference) and affinity mask.
+    pub ideal_core: i32,
+    pub affinity_mask: u64,
     pub state: ThreadState,
     pub wait: Option<Wait>,
     /// The SVC to complete when the current wait ends.
@@ -312,6 +320,8 @@ impl Thread {
             stack,
             priority,
             core,
+            ideal_core: i32::from(core),
+            affinity_mask: 1 << core,
             state: ThreadState::Initialized,
             wait: None,
             pending_svc: 0,
@@ -331,6 +341,14 @@ pub enum Exit {
     Thread,
 }
 
+/// Horizon KSharedMemory kernel object.
+#[derive(Clone, Debug)]
+pub struct SharedMemory {
+    pub size: u64,
+    pub permission: u32,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Debug)]
 pub struct Kernel {
     pub config: ProcessConfig,
@@ -345,6 +363,7 @@ pub struct Kernel {
     pub tls_pages: Vec<(u64, u8)>,
     /// svcMapMemory stack aliases.
     pub aliases: Vec<Alias>,
+    pub shared_memories: Vec<SharedMemory>,
     /// Deterministic virtual clock in nanoseconds: one per retired guest instruction plus
     /// time skipped while every thread waits for a timeout.
     pub time_ns: u64,
@@ -372,6 +391,23 @@ pub struct Kernel {
     pub last_svc: Option<(u64, u16, Option<u32>)>,
     pub debug_output: Vec<String>,
     pub exit: Option<Exit>,
+}
+
+impl Kernel {
+    pub fn create_shared_memory(
+        &mut self,
+        size: u64,
+        permission: u32,
+        bytes: Vec<u8>,
+    ) -> Result<u32, u32> {
+        self.shared_memories.push(SharedMemory {
+            size,
+            permission,
+            bytes,
+        });
+        let index = self.shared_memories.len() - 1;
+        self.handles.add(Object::SharedMemory(index))
+    }
 }
 
 /// The guest process: one memory image and its kernel state, shared by every translation
@@ -457,6 +493,7 @@ impl Process {
             next_thread_id: config.main_thread_id + 1,
             tls_pages: Vec::new(),
             aliases: Vec::new(),
+            shared_memories: Vec::new(),
             time_ns: 0,
             slice_start: 0,
             total_steps: 0,
@@ -834,7 +871,7 @@ pub fn used_memory(memory: &Memory) -> u64 {
 fn outputs(id: u16) -> (bool, usize) {
     match id {
         0x01 | 0x06 | 0x08 | 0x0C | 0x18 | 0x1F | 0x24 | 0x25 | 0x29 => (true, 1),
-        0x45 => (true, 2),
+        0x0E | 0x45 => (true, 2),
         0x0B | 0x1D => (false, 0),
         _ => (true, 0),
     }
@@ -967,6 +1004,30 @@ pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<S
             set_result(c, code);
             None
         }
+        0x0E => {
+            match threads::get_thread_core_mask(k, c.x[2] as u32) {
+                Ok((core, mask)) => {
+                    set_result(c, result::SUCCESS);
+                    c.x[1] = u64::from(core as u32);
+                    c.x[2] = mask;
+                }
+                Err(code) => set_result(c, code),
+            }
+            None
+        }
+        0x0F => {
+            let current_core = k.threads[k.current].core;
+            let code =
+                threads::set_thread_core_mask(k, c.x[0] as u32, c.x[1] as u32 as i32, c.x[2]);
+            set_result(c, code);
+            if k.threads[k.current].core != current_core {
+                // The running thread left its core: the scheduler places it on the new one.
+                finish_registers(c, id, false);
+                c.pc = c.pc.wrapping_add(4);
+                return Ok(Some(Stop::Reschedule));
+            }
+            None
+        }
         0x10 => {
             c.x[0] = u64::from(k.threads[k.current].core);
             None
@@ -977,6 +1038,22 @@ pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<S
         }
         0x12 => {
             set_result(c, threads::clear_event(k, c.x[0] as u32));
+            None
+        }
+        0x13 => {
+            let r = map_shared_memory(memory, k, c.x[0] as u32, c.x[1], c.x[2], c.x[3] as u32);
+            match r {
+                Ok(code) => set_result(c, code),
+                Err(e) => return Err(format!("{e}; guest_pc={:#x}", c.pc)),
+            }
+            None
+        }
+        0x14 => {
+            let r = unmap_shared_memory(memory, k, c.x[0] as u32, c.x[1], c.x[2]);
+            match r {
+                Ok(code) => set_result(c, code),
+                Err(e) => return Err(format!("{e}; guest_pc={:#x}", c.pc)),
+            }
             None
         }
         0x17 => {
@@ -1310,6 +1387,78 @@ fn alias_arguments(k: &Kernel, dst: u64, src: u64, size: u64) -> Result<(), u32>
         return Err(result::INVALID_MEMORY_REGION);
     }
     Ok(())
+}
+/// svcMapSharedMemory (0x13): maps shared memory object into process address space.
+fn map_shared_memory(
+    memory: &mut Memory,
+    k: &mut Kernel,
+    handle: u32,
+    address: u64,
+    size: u64,
+    perm: u32,
+) -> RuntimeResult<u32> {
+    if let Err(code) = check_range(k, address, size) {
+        return Ok(code);
+    }
+    let Some(Object::SharedMemory(idx)) = k.handles.get(handle) else {
+        return Ok(result::INVALID_HANDLE);
+    };
+    let shmem = &k.shared_memories[idx];
+    if size != shmem.size {
+        return Ok(result::INVALID_SIZE);
+    }
+    if perm != 1 && perm != 3 {
+        return Ok(result::INVALID_NEW_MEMORY_PERMISSION);
+    }
+    if (perm & !shmem.permission) != 0 {
+        return Ok(result::INVALID_NEW_MEMORY_PERMISSION);
+    }
+    let end = address + size;
+    if memory.regions.iter().any(|r| r.base < end && address < r.end()) {
+        return Ok(result::INVALID_CURRENT_MEMORY);
+    }
+    let read = (perm & 1) != 0;
+    let write = (perm & 2) != 0;
+    memory.map_state(address, shmem.bytes.clone(), read, write, false, state::SHARED_MEMORY)?;
+    Ok(result::SUCCESS)
+}
+/// svcUnmapSharedMemory (0x14): unmaps shared memory previously mapped at address.
+fn unmap_shared_memory(
+    memory: &mut Memory,
+    k: &mut Kernel,
+    handle: u32,
+    address: u64,
+    size: u64,
+) -> RuntimeResult<u32> {
+    if let Err(code) = check_range(k, address, size) {
+        return Ok(code);
+    }
+    let Some(Object::SharedMemory(idx)) = k.handles.get(handle) else {
+        return Ok(result::INVALID_HANDLE);
+    };
+    if size != k.shared_memories[idx].size {
+        return Ok(result::INVALID_SIZE);
+    }
+    let Ok((parts, st, _, _)) = check_memory_state(
+        memory,
+        address,
+        size,
+        0xFFFF_FFFF,
+        state::kernel(state::SHARED_MEMORY),
+        0xFF,
+        0,
+    ) else {
+        return Ok(result::INVALID_CURRENT_MEMORY);
+    };
+    if st != state::SHARED_MEMORY {
+        return Ok(result::INVALID_CURRENT_MEMORY);
+    }
+    let mut index = 0;
+    memory.regions.retain(|_| {
+        index += 1;
+        !parts.contains(&(index - 1))
+    });
+    Ok(result::SUCCESS)
 }
 /// `svcSetHeapSize`: grows or shrinks the Normal-state RW heap at the heap region start.
 /// Growth maps zeroed pages after the current heap; shrinking requires the released range to

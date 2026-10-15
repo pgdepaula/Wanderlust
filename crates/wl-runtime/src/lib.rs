@@ -39,7 +39,7 @@ impl Stop {
     }
 }
 pub use crypto::{
-    COUNTER_FREQUENCY, aesd, aese, aesimc, crc32, pmull64, sha1c, sha256su0, system_counter,
+    aesd, aese, aesimc, crc32, pmull64, sha1c, sha256su0, system_counter, COUNTER_FREQUENCY,
 };
 pub use horizon::Process;
 /// One translation unit's blocks, sorted by guest address.
@@ -942,7 +942,7 @@ pub fn launch_horizon(program: &Program, memory: Memory, image: &ProcessImage) -
         st.idle_ns
     );
     let ipc = format!(
-        "{{\"requests\":{},\"replies\":{},\"sessions\":{},\"sessions_closed_by_server\":{},\"deferred\":{},\"services\":[{}]}}",
+        "{{\"requests\":{},\"replies\":{},\"sessions\":{},\"sessions_closed_by_server\":{},\"deferred\":{},\"services\":[{}],\"hosted_calls\":[{}]}}",
         k.ipc.requests,
         k.ipc.replies,
         k.sessions.len(),
@@ -951,6 +951,17 @@ pub fn launch_horizon(program: &Program, memory: Memory, image: &ProcessImage) -
         k.services
             .iter()
             .map(|s| json_string(String::from_utf8_lossy(&s.name).trim_end_matches('\0')))
+            .collect::<Vec<_>>()
+            .join(","),
+        k.host
+            .calls
+            .iter()
+            .map(|(name, command, code)| {
+                format!(
+                    "{{\"interface\":{},\"command\":{command},\"result\":{code}}}",
+                    json_string(name)
+                )
+            })
             .collect::<Vec<_>>()
             .join(",")
     );

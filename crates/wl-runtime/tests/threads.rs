@@ -104,12 +104,11 @@ fn create_thread_initial_context_tls_and_handles() {
         (ENTRY, 0xfeed, stack_top & !15, t.tls)
     );
     assert_eq!(ctx.x[18] & 1, 1);
-    assert!(
-        ctx.x
-            .iter()
-            .enumerate()
-            .all(|(i, &x)| matches!(i, 0 | 18) || x == 0)
-    );
+    assert!(ctx
+        .x
+        .iter()
+        .enumerate()
+        .all(|(i, &x)| matches!(i, 0 | 18) || x == 0));
     assert_eq!(ctx.fpcr, 0x0300_0000);
     let tls = t.tls;
     assert_eq!(
@@ -505,11 +504,9 @@ fn map_memory_aliases_heap_into_the_stack_region() {
     );
     // A consistent part of the alias is valid on the kernel but not modelled: explicit fault.
     c.x[..3].copy_from_slice(&[dst, heap + 0x1000, 0x1000]);
-    assert!(
-        dispatch(&mut c, &mut p, 0x05)
-            .unwrap_err()
-            .contains("part of a mapping")
-    );
+    assert!(dispatch(&mut c, &mut p, 0x05)
+        .unwrap_err()
+        .contains("part of a mapping"));
     assert_eq!(
         svc(&mut p, &mut c, 0x05, &[dst, heap + 0x1000, 0x2000]).0,
         result::SUCCESS
@@ -728,4 +725,50 @@ fn events_signal_clear_reset_and_wake_waiters() {
     assert_eq!(svc(&mut p, &mut c, 0x16, &[u64::from(readable)]).0, 0);
     let e = &k(&mut p).events[0];
     assert_eq!((e.readable_references, e.writable_references), (0, 0));
+}
+
+#[test]
+fn thread_core_masks() {
+    let (mut p, mut c) = process();
+    let me = u64::from(CURRENT_THREAD);
+    let get = |p: &mut Process, c: &mut Cpu| {
+        let (r, _) = svc(p, c, 0x0E, &[0, 0, me]);
+        (r, c.x[1] as u32 as i32, c.x[2])
+    };
+    assert_eq!(get(&mut p, &mut c), (0, 0, 1));
+    // Moving the running thread to core 2 ends its slice.
+    let (r, stop) = svc(&mut p, &mut c, 0x0F, &[me, 2, 0b100]);
+    assert_eq!((r, stop), (0, Some(Stop::Reschedule)));
+    assert_eq!(k(&mut p).threads[0].core, 2);
+    assert_eq!(get(&mut p, &mut c), (0, 2, 0b100));
+    // Validation, in Mesosphere's order.
+    for (core, mask, expected) in [
+        (3u64, 0b1000u64, result::INVALID_CORE_ID),
+        (0, 0, result::INVALID_COMBINATION),
+        (1, 0b100, result::INVALID_COMBINATION),
+        (7, 0b1, result::INVALID_COMBINATION),
+        (64, 0b1, result::INVALID_CORE_ID),
+    ] {
+        assert_eq!(svc(&mut p, &mut c, 0x0F, &[me, core, mask]).0, expected);
+    }
+    assert_eq!(
+        svc(&mut p, &mut c, 0x0F, &[0x1234, 0, 1]).0,
+        result::INVALID_HANDLE
+    );
+    // No preference: the thread leaves core 2 for the highest core of the mask.
+    let dont_care = u64::from((-1i32) as u32);
+    assert_eq!(svc(&mut p, &mut c, 0x0F, &[me, dont_care, 0b011]).0, 0);
+    assert_eq!(k(&mut p).threads[0].core, 1);
+    // NoUpdate needs an ideal core inside the mask.
+    let no_update = u64::from((-3i32) as u32);
+    assert_eq!(
+        svc(&mut p, &mut c, 0x0F, &[me, no_update, 0b001]).0,
+        result::INVALID_COMBINATION
+    );
+    // The process value: ideal core 0, mask {0}.
+    let process_value = u64::from((-2i32) as u32);
+    assert_eq!(svc(&mut p, &mut c, 0x0F, &[me, process_value, 0]).0, 0);
+    assert_eq!(get(&mut p, &mut c), (0, 0, 1));
+    assert_eq!(svc(&mut p, &mut c, 0x0F, &[me, no_update, 0b011]).0, 0);
+    assert_eq!(get(&mut p, &mut c), (0, 0, 0b011));
 }

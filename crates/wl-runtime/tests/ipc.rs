@@ -180,11 +180,9 @@ fn register_client_then_lookup_and_registration() {
     assert_eq!(reply_result(&p), sm_result::OUT_OF_SESSIONS);
     // Requests to a guest-hosted service are not modelled: explicit fault.
     c.x[0] = u64::from(client);
-    assert!(
-        dispatch(&mut c, &mut p, 0x21)
-            .unwrap_err()
-            .contains("hosted by the guest")
-    );
+    assert!(dispatch(&mut c, &mut p, 0x21)
+        .unwrap_err()
+        .contains("hosted by the guest"));
     // Unregister: success, then NotRegistered.
     request(&mut p, 3, false, &name("wl:svc"));
     send(&mut p, &mut c, sm);
@@ -262,11 +260,9 @@ fn control_close_and_invalid_requests() {
     // Buffer descriptors to sm are not modelled: explicit fault.
     p.write_bytes(t, &[4, 0, 0x10, 0, 0x0A, 0, 0, 0]).unwrap();
     c.x[0] = u64::from(sm);
-    assert!(
-        dispatch(&mut c, &mut p, 0x21)
-            .unwrap_err()
-            .contains("descriptors")
-    );
+    assert!(dispatch(&mut c, &mut p, 0x21)
+        .unwrap_err()
+        .contains("descriptors"));
     // An unknown command: the server closes the session; every later request fails.
     request(&mut p, 99, false, &[0; 8]);
     assert_eq!(send(&mut p, &mut c, sm).0, result::SESSION_CLOSED);
@@ -571,18 +567,14 @@ fn hosted_service_control_requests_and_limits() {
     assert_eq!(send(&mut p, &mut c, logger), (result::SUCCESS, None));
     p.write_bytes(t, &m).unwrap();
     c.x[0] = u64::from(logger);
-    assert!(
-        dispatch(&mut c, &mut p, 0x21)
-            .unwrap_err()
-            .contains("converting a domain session")
-    );
+    assert!(dispatch(&mut c, &mut p, 0x21)
+        .unwrap_err()
+        .contains("converting a domain session"));
     request(&mut p, 9, false, &[]);
     c.x[0] = u64::from(clone);
-    assert!(
-        dispatch(&mut c, &mut p, 0x21)
-            .unwrap_err()
-            .contains("unknown command")
-    );
+    assert!(dispatch(&mut c, &mut p, 0x21)
+        .unwrap_err()
+        .contains("unknown command"));
     // The name cannot be registered by the guest; CMIF Close ends the session.
     let sm = connect(&mut p, &mut c);
     tipc_register_client(&mut p, &mut c, sm);
@@ -762,11 +754,9 @@ fn apm_performance_mode_and_configuration() {
     }
     control(&mut p, 3, &[]);
     c.x[0] = u64::from(apm);
-    assert!(
-        dispatch(&mut c, &mut p, 0x21)
-            .unwrap_err()
-            .contains("pointer-buffer size")
-    );
+    assert!(dispatch(&mut c, &mut p, 0x21)
+        .unwrap_err()
+        .contains("pointer-buffer size"));
 }
 
 #[test]
@@ -789,4 +779,271 @@ fn domain_ids_are_allocated_per_server() {
     domain_request(&mut p, 1, 1, 0, false, &[]);
     send(&mut p, &mut c, apm);
     assert_eq!((reply_u32(&p, 0x10), reply_u32(&p, 0x30)), (1, 2));
+}
+
+/// A domain request with copied handles, as libnx's cmifMakeRequest lays it out.
+fn domain_request_with(
+    p: &mut Process,
+    id: u32,
+    command: u32,
+    send_pid: bool,
+    copies: &[u32],
+    data: &[u8],
+) {
+    let mut m = vec![0u8; 0x100];
+    let words = (16 + 16 + 16 + data.len()).div_ceil(4) as u32;
+    m[0..4].copy_from_slice(&4u32.to_le_bytes());
+    m[4..8].copy_from_slice(&(words | 1 << 31).to_le_bytes());
+    let special = u32::from(send_pid) | (copies.len() as u32) << 1;
+    m[8..12].copy_from_slice(&special.to_le_bytes());
+    let mut at = if send_pid { 20 } else { 12 };
+    for h in copies {
+        m[at..at + 4].copy_from_slice(&h.to_le_bytes());
+        at += 4;
+    }
+    let start = (at + 15) & !15;
+    m[start] = 1;
+    m[start + 2..start + 4].copy_from_slice(&((16 + data.len()) as u16).to_le_bytes());
+    m[start + 4..start + 8].copy_from_slice(&id.to_le_bytes());
+    m[start + 16..start + 20].copy_from_slice(b"SFCI");
+    m[start + 24..start + 28].copy_from_slice(&command.to_le_bytes());
+    m[start + 32..start + 32 + data.len()].copy_from_slice(data);
+    let t = tls(p);
+    p.write_bytes(t, &m).unwrap();
+}
+/// Sends a domain request with no special header and returns (result, first data word,
+/// first output object ID) of a reply without handles.
+fn call(
+    p: &mut Process,
+    c: &mut Cpu,
+    session: u32,
+    id: u32,
+    command: u32,
+    data: &[u8],
+) -> (u32, u32, u32) {
+    domain_request(p, 1, id, command, false, data);
+    assert_eq!(send(p, c, session), (result::SUCCESS, None));
+    (reply_u32(p, 0x28), reply_u32(p, 0x30), reply_u32(p, 0x30))
+}
+
+#[test]
+fn applet_oe_application_startup() {
+    let (mut p, mut c) = process(&[(false, "*")]);
+    let sm = connect(&mut p, &mut c);
+    tipc_register_client(&mut p, &mut c, sm);
+    let am = service(&mut p, &mut c, sm, "appletOE");
+    control(&mut p, 0, &[]);
+    send(&mut p, &mut c, am);
+    assert_eq!(reply_u32(&p, 0x20), 1);
+    // am has no pointer buffer.
+    control(&mut p, 3, &[]);
+    send(&mut p, &mut c, am);
+    assert_eq!(
+        (reply_u32(&p, 0x18), &reply(&p)[0x20..0x22]),
+        (0, &[0, 0][..])
+    );
+    // OpenApplicationProxy: process ID, the current-process pseudo-handle copied.
+    domain_request_with(&mut p, 1, 0, true, &[CURRENT_PROCESS], &[0; 8]);
+    assert_eq!(send(&mut p, &mut c, am), (result::SUCCESS, None));
+    assert_eq!(
+        (
+            reply_u32(&p, 0x10),
+            reply_u32(&p, 0x28),
+            reply_u32(&p, 0x30)
+        ),
+        (1, 0, 2)
+    );
+    // An invalid copied handle fails the send in the kernel.
+    domain_request_with(&mut p, 1, 0, true, &[0x1234], &[0; 8]);
+    assert_eq!(send(&mut p, &mut c, am).0, result::INVALID_HANDLE);
+    // The proxy's interfaces.
+    let getter = call(&mut p, &mut c, am, 2, 0, &[]).2;
+    let controller = call(&mut p, &mut c, am, 2, 1, &[]).2;
+    let window = call(&mut p, &mut c, am, 2, 2, &[]).2;
+    assert_eq!((getter, controller, window), (3, 4, 5));
+    for command in [3, 4, 11, 20, 1000] {
+        assert_eq!(call(&mut p, &mut c, am, 2, command, &[]).0, 0);
+    }
+    // GetEventHandle: a copied readable event, signalled because startup messages are queued.
+    domain_request(&mut p, 1, getter, 0, false, &[]);
+    send(&mut p, &mut c, am);
+    let r = reply(&p);
+    assert_eq!(reply_u32(&p, 4) >> 31, 1);
+    assert_eq!(reply_u32(&p, 8), 1 << 1);
+    let event = reply_u32(&p, 0x0C);
+    assert_eq!((&r[0x20..0x24], reply_u32(&p, 0x28)), (&b"SFCO"[..], 0));
+    assert!(matches!(
+        p.kernel.as_ref().unwrap().handles.get(event),
+        Some(Object::ReadableEvent(_))
+    ));
+    let list = NAME + 0x80;
+    p.write_bytes(list, &event.to_le_bytes()).unwrap();
+    assert_eq!(
+        svc(&mut p, &mut c, 0x18, &[0, list, 1, 0]).0,
+        result::SUCCESS
+    );
+    // ReceiveMessage: first FocusStateChanged (15), then ChangeIntoForeground (1).
+    assert_eq!(call(&mut p, &mut c, am, getter, 1, &[]), (0, 15, 15));
+    assert_eq!(call(&mut p, &mut c, am, getter, 1, &[]), (0, 1, 1));
+    // ReceiveMessage on now empty queue: am NoMessage (0x680), and the event resets.
+    assert_eq!(call(&mut p, &mut c, am, getter, 1, &[]).0, 0x680);
+    assert_eq!(
+        svc(&mut p, &mut c, 0x18, &[0, list, 1, 0]).0,
+        result::TIMED_OUT
+    );
+    // Operation mode Console, performance mode Boost, in focus.
+    assert_eq!(call(&mut p, &mut c, am, getter, 5, &[]).0, 0);
+    assert_eq!(reply(&p)[0x30], 1);
+    assert_eq!(call(&mut p, &mut c, am, getter, 6, &[]).1, 1);
+    call(&mut p, &mut c, am, getter, 9, &[]);
+    assert_eq!(reply(&p)[0x30], 1);
+    // SetRequestExitToLibraryAppletAtExecuteNextProgramEnabled.
+    assert_eq!(call(&mut p, &mut c, am, getter, 900, &[]).0, 0);
+    // Never suspended: tick value 0, a copied event that is not signalled.
+    assert_eq!(call(&mut p, &mut c, am, controller, 90, &[]), (0, 0, 0));
+    domain_request(&mut p, 1, controller, 91, false, &[]);
+    send(&mut p, &mut c, am);
+    let tick_event = reply_u32(&p, 0x0C);
+    assert_eq!((reply_u32(&p, 8), reply_u32(&p, 0x28)), (1 << 1, 0));
+    p.write_bytes(list, &tick_event.to_le_bytes()).unwrap();
+    assert_eq!(
+        svc(&mut p, &mut c, 0x18, &[0, list, 1, 0]).0,
+        result::TIMED_OUT
+    );
+    // IApplicationFunctions (object 9): the GPU-error event, never signalled.
+    domain_request(&mut p, 1, 9, 130, false, &[]);
+    send(&mut p, &mut c, am);
+    assert_eq!((reply_u32(&p, 8), reply_u32(&p, 0x28)), (1 << 1, 0));
+    assert_eq!(call(&mut p, &mut c, am, 9, 131, &5u64.to_le_bytes()).0, 0);
+    // The applet resource user ID is the process ID.
+    let (r, aruid, _) = call(&mut p, &mut c, am, window, 1, &[]);
+    assert_eq!((r, aruid), (0, 0x51));
+    assert_eq!(call(&mut p, &mut c, am, window, 10, &[]).0, 0);
+    // ISelfController settings.
+    assert_eq!(call(&mut p, &mut c, am, controller, 13, &[1, 0, 1]).0, 0);
+    assert_eq!(call(&mut p, &mut c, am, controller, 11, &[1]).0, 0);
+    assert_eq!(call(&mut p, &mut c, am, controller, 12, &[1]).0, 0);
+    let h = &p.kernel.as_ref().unwrap().host;
+    assert_eq!(h.focus_handling_mode, Some([true, false, true]));
+    assert_eq!(
+        (
+            h.operation_mode_notification,
+            h.performance_mode_notification
+        ),
+        (Some(true), Some(true))
+    );
+    assert!(h.foreground_rights && h.request_exit_to_library_applet_at_execute_next_program);
+    assert_eq!(h.delay_time_to_abort_on_gpu_error, Some(5));
+    assert_eq!(h.calls.last(), Some(&("am ISelfController", 12, 0)));
+}
+
+#[test]
+fn aoc_u_queries_add_on_content() {
+    let (mut p, mut c) = process(&[(false, "*")]);
+    let sm = connect(&mut p, &mut c);
+    tipc_register_client(&mut p, &mut c, sm);
+    let aoc = service(&mut p, &mut c, sm, "aoc:u");
+    // CountAddOnContent: out u32 count (0).
+    request(&mut p, 2, true, &[]);
+    assert_eq!(send(&mut p, &mut c, aoc), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+    assert_eq!(reply_u32(&p, 0x20), 0);
+}
+
+#[test]
+fn ectx_aw_creates_context_registrar() {
+    let (mut p, mut c) = process(&[(false, "*")]);
+    let sm = connect(&mut p, &mut c);
+    tipc_register_client(&mut p, &mut c, sm);
+    let ectx = service(&mut p, &mut c, sm, "ectx:aw");
+    // CreateContextRegistrar (cmd 0): out move handle.
+    request(&mut p, 0, false, &[]);
+    assert_eq!(send(&mut p, &mut c, ectx), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+    let registrar = reply_u32(&p, 0x0C);
+    assert_ne!(registrar, 0);
+    // Complete (cmd 0) on registrar.
+    request(&mut p, 0, false, &[]);
+    assert_eq!(send(&mut p, &mut c, registrar), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+}
+
+#[test]
+fn pctl_creates_service_and_checks_restrictions() {
+    let (mut p, mut c) = process(&[(false, "*")]);
+    let sm = connect(&mut p, &mut c);
+    tipc_register_client(&mut p, &mut c, sm);
+    let pctl = service(&mut p, &mut c, sm, "pctl");
+    // CreateService (cmd 0): out move handle.
+    request(&mut p, 0, true, &[]);
+    assert_eq!(send(&mut p, &mut c, pctl), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+    let svc = reply_u32(&p, 0x0C);
+    assert_ne!(svc, 0);
+    // IsRestrictionEnabled (cmd 1011): out bool (false).
+    request(&mut p, 1011, false, &[]);
+    assert_eq!(send(&mut p, &mut c, svc), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+    assert_eq!(reply(&p)[0x20], 0);
+}
+
+#[test]
+fn time_and_acc_services() {
+    let (mut p, mut c) = process(&[(false, "*")]);
+    let sm = connect(&mut p, &mut c);
+    tipc_register_client(&mut p, &mut c, sm);
+    let time = service(&mut p, &mut c, sm, "time:u");
+    // GetStandardUserSystemClock (cmd 0): out move handle.
+    request(&mut p, 0, false, &[]);
+    assert_eq!(send(&mut p, &mut c, time), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+    let clock = reply_u32(&p, 0x0C);
+    assert_ne!(clock, 0);
+    // GetCurrentTime (cmd 0) on clock: out u64 posix seconds.
+    request(&mut p, 0, false, &[]);
+    assert_eq!(send(&mut p, &mut c, clock), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+    assert_eq!(reply_u32(&p, 0x20), 1_700_000_000);
+
+    // GetSharedMemoryNativeHandle (cmd 20): out copy handle of KSharedMemory.
+    request(&mut p, 20, false, &[]);
+    assert_eq!(send(&mut p, &mut c, time), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+    let shmem = reply_u32(&p, 0x0C);
+    assert_ne!(shmem, 0);
+    assert!(matches!(
+        p.kernel.as_ref().unwrap().handles.get(shmem),
+        Some(Object::SharedMemory(_))
+    ));
+
+    // Map the shared memory via svcMapSharedMemory (0x13).
+    let target = 0x20_0000_0000u64;
+    c.x[0] = u64::from(shmem);
+    c.x[1] = target;
+    c.x[2] = 0x1000;
+    c.x[3] = 1; // Read
+    dispatch(&mut c, &mut p, 0x13).unwrap();
+    assert_eq!(c.x[0], 0);
+
+    // Verify steady clock index and local clock posix epoch offset in shared memory.
+    let mut steady_idx = [0u8; 4];
+    p.read_into(target, &mut steady_idx).unwrap();
+    assert_eq!(u32::from_le_bytes(steady_idx), 2);
+    let mut local_epoch = [0u8; 8];
+    p.read_into(target + 0x40, &mut local_epoch).unwrap();
+    assert_eq!(i64::from_le_bytes(local_epoch), 1_700_000_000);
+
+    // Unmap via svcUnmapSharedMemory (0x14).
+    c.x[0] = u64::from(shmem);
+    c.x[1] = target;
+    c.x[2] = 0x1000;
+    dispatch(&mut c, &mut p, 0x14).unwrap();
+    assert_eq!(c.x[0], 0);
+
+    let acc = service(&mut p, &mut c, sm, "acc:u0");
+    // GetUserCount (cmd 0): out u32 (1).
+    request(&mut p, 0, false, &[]);
+    assert_eq!(send(&mut p, &mut c, acc), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+    assert_eq!(reply_u32(&p, 0x20), 1);
 }

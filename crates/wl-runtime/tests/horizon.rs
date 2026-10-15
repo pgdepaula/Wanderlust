@@ -111,7 +111,7 @@ fn bootstrap_state_follows_the_nso_entry_contract() {
     assert_eq!(c.x[0], 0);
     assert_eq!(c.x[1], u64::from(t.handle));
     assert_eq!(t.handle, 1022 | 1 << 15); // 1023-entry table
-    // Every other register is zero except X18, the kernel's (here deterministic) odd CFI value.
+                                          // Every other register is zero except X18, the kernel's (here deterministic) odd CFI value.
     assert!(c.x[2..18].iter().chain(&c.x[19..]).all(|&x| x == 0));
     assert_eq!(c.x[18] & 1, 1);
     assert_eq!(c.sp, t.stack.end);
@@ -137,18 +137,16 @@ fn bootstrap_state_follows_the_nso_entry_contract() {
     let mut bad = config();
     bad.main_thread_stack_size = 0x1234;
     let m = Memory::default();
-    assert!(
-        Process::horizon(
-            m,
-            CODE,
-            Range {
-                start: CODE,
-                end: CODE + 0x1000
-            },
-            bad
-        )
-        .is_err()
-    );
+    assert!(Process::horizon(
+        m,
+        CODE,
+        Range {
+            start: CODE,
+            end: CODE + 0x1000
+        },
+        bad
+    )
+    .is_err());
 }
 
 #[test]
@@ -522,4 +520,84 @@ fn homebrew_entry_passes_a_loader_configuration() {
     assert_eq!((entry(3, 0, 4), entry(3, 8, 8), entry(3, 16, 8)), (0, 0, 0));
     let block = query(&p, 1 << 39, config);
     assert_eq!((block.state, block.permission), (state::NORMAL, 3));
+}
+
+#[test]
+fn shared_memory_map_and_unmap() {
+    let (mut p, mut c) = process();
+    let k = p.kernel.as_mut().unwrap();
+    let data = vec![0x5au8; PAGE as usize];
+    let handle = u64::from(
+        k.create_shared_memory(PAGE, 1, data)
+            .expect("create shared memory"),
+    );
+    let target = 0x20_0000_0000u64; // free area
+
+    // Invalid handle.
+    assert_eq!(
+        svc(&mut p, &mut c, 0x13, &[0x9999, target, PAGE, 1]),
+        result::INVALID_HANDLE
+    );
+    // Unaligned address.
+    assert_eq!(
+        svc(&mut p, &mut c, 0x13, &[handle, target + 1, PAGE, 1]),
+        result::INVALID_ADDRESS
+    );
+    // Invalid size.
+    assert_eq!(
+        svc(&mut p, &mut c, 0x13, &[handle, target, 0, 1]),
+        result::INVALID_SIZE
+    );
+    assert_eq!(
+        svc(&mut p, &mut c, 0x13, &[handle, target, 2 * PAGE, 1]),
+        result::INVALID_SIZE
+    );
+    // Write permission on read-only shared memory.
+    assert_eq!(
+        svc(&mut p, &mut c, 0x13, &[handle, target, PAGE, 3]),
+        result::INVALID_NEW_MEMORY_PERMISSION
+    );
+    // Overlapping existing code region.
+    assert_eq!(
+        svc(&mut p, &mut c, 0x13, &[handle, CODE, PAGE, 1]),
+        result::INVALID_CURRENT_MEMORY
+    );
+    // Valid mapping.
+    assert_eq!(
+        svc(&mut p, &mut c, 0x13, &[handle, target, PAGE, 1]),
+        result::SUCCESS
+    );
+    assert_eq!(info(&p, target).state, state::SHARED_MEMORY);
+    assert_eq!(info(&p, target).permission, 1);
+    let mut read_back = [0u8; 4];
+    p.read_into(target, &mut read_back).unwrap();
+    assert_eq!(read_back, [0x5a, 0x5a, 0x5a, 0x5a]);
+
+    // Unmap validation:
+    // Invalid handle.
+    assert_eq!(
+        svc(&mut p, &mut c, 0x14, &[0x9999, target, PAGE]),
+        result::INVALID_HANDLE
+    );
+    // Unaligned address.
+    assert_eq!(
+        svc(&mut p, &mut c, 0x14, &[handle, target + 1, PAGE]),
+        result::INVALID_ADDRESS
+    );
+    // Size mismatch.
+    assert_eq!(
+        svc(&mut p, &mut c, 0x14, &[handle, target, 2 * PAGE]),
+        result::INVALID_SIZE
+    );
+    // Target is not shared memory (e.g. unmapped free area).
+    assert_eq!(
+        svc(&mut p, &mut c, 0x14, &[handle, target + PAGE, PAGE]),
+        result::INVALID_CURRENT_MEMORY
+    );
+    // Valid unmap.
+    assert_eq!(
+        svc(&mut p, &mut c, 0x14, &[handle, target, PAGE]),
+        result::SUCCESS
+    );
+    assert_eq!(info(&p, target).state, state::FREE);
 }

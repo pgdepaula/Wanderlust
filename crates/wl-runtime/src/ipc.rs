@@ -15,7 +15,7 @@
 //! GetServiceHandle for a service that is not registered is deferred: the client stays
 //! blocked until the service is registered, and then receives the reply in the protocol of
 //! its request.
-use crate::horizon::{Kernel, Object, result};
+use crate::horizon::{result, Kernel, Object};
 use crate::services::{self, HostObject, Outcome};
 use crate::threads::{self, Wait};
 use crate::{Cpu, Memory, Stop};
@@ -152,7 +152,10 @@ pub fn close_handle(k: &mut Kernel, object: Object) {
                 port.server_closed = true;
             }
         }
-        Object::Thread(_) | Object::ReadableEvent(_) | Object::WritableEvent(_) => {}
+        Object::Thread(_)
+        | Object::ReadableEvent(_)
+        | Object::WritableEvent(_)
+        | Object::SharedMemory(_) => {}
     }
 }
 
@@ -223,6 +226,8 @@ pub struct Request {
     pid_offset: Option<usize>,
     pub copy_handles: u32,
     pub move_handles: u32,
+    /// The copied handle values, as the client wrote them.
+    pub copies: Vec<u32>,
     /// Send statics (X), send (A), receive (B) and the count of exchange (W) buffers.
     pub statics: Vec<(u64, u64)>,
     pub sends: Vec<(u64, u64)>,
@@ -256,6 +261,9 @@ fn parse_request(m: &[u8; MESSAGE_BUFFER_SIZE]) -> Request {
         }
         r.copy_handles = (special >> 1) & 0xf;
         r.move_handles = (special >> 5) & 0xf;
+        for i in 0..r.copy_handles as usize {
+            r.copies.push(read_u32(m, at + 4 * i));
+        }
         at += 4 * (r.copy_handles + r.move_handles) as usize;
     }
     let descriptors = at;
@@ -355,10 +363,22 @@ pub fn send_sync_request(
             sm_request(k, s, client, &mut message)
         }
         Endpoint::Host(object) => {
-            if req.copy_handles + req.move_handles != 0 {
+            if req.move_handles != 0 {
                 return Err(format!(
-                    "unsupported Horizon IPC: handles sent to a hosted service ({object:?})"
+                    "unsupported Horizon IPC: handles moved to a hosted service ({object:?})"
                 ));
+            }
+            // The kernel copies each handle into the server, failing the send for an invalid
+            // one; hosted services only close their copies.
+            let valid = |h: u32| {
+                matches!(
+                    h,
+                    crate::horizon::CURRENT_PROCESS | crate::horizon::CURRENT_THREAD
+                ) || k.handles.get(h).is_some()
+            };
+            if !req.copies.iter().all(|&h| valid(h)) {
+                c.x[0] = u64::from(result::INVALID_HANDLE);
+                return Ok(None);
             }
             match services::request(memory, k, s, object, &req, &message)? {
                 Outcome::Reply(bytes) => Reply::Bytes(bytes),

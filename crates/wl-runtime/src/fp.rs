@@ -95,7 +95,11 @@ impl Format {
     }
     #[inline]
     pub fn zero(self, sign: bool) -> u64 {
-        if sign { self.sign_bit() } else { 0 }
+        if sign {
+            self.sign_bit()
+        } else {
+            0
+        }
     }
     #[inline]
     fn max_normal(self, sign: bool) -> u64 {
@@ -439,7 +443,11 @@ pub fn add(c: &mut Cpu, f: Format, a: u64, b: u64, negate: bool) -> u64 {
 pub fn mul(c: &mut Cpu, f: Format, a: u64, b: u64, negate: bool) -> u64 {
     let r = mul_inner(c, f, a, b);
     // FNMUL is FPNeg(FPMul(...)): the sign flips for every result, NaNs included.
-    if negate { r ^ f.sign_bit() } else { r }
+    if negate {
+        r ^ f.sign_bit()
+    } else {
+        r
+    }
 }
 fn mul_inner(c: &mut Cpu, f: Format, a: u64, b: u64) -> u64 {
     if fast(c.fpcr, c.fpsr) {
@@ -713,7 +721,11 @@ fn compare_values(a: Value, b: Value) -> Ordering {
     let (ma, ea) = normalize(ka.2, ka.3, 120);
     let (mb, eb) = normalize(kb.2, kb.3, 120);
     let magnitude = (ea, ma).cmp(&(eb, mb));
-    if ka.1 { magnitude.reverse() } else { magnitude }
+    if ka.1 {
+        magnitude.reverse()
+    } else {
+        magnitude
+    }
 }
 /// `FPCompare` as NZCV: unordered 0011, equal 0110, less 1000, greater 0010. `signal`
 /// (FCMPE) raises IOC for any NaN; otherwise only signalling NaNs raise it.
@@ -756,7 +768,11 @@ pub fn compare_mask(c: &mut Cpu, f: Format, a: u64, b: u64, kind: u8, absolute: 
         1 => ord != Ordering::Less,
         _ => ord == Ordering::Greater,
     };
-    if holds { f.mask() } else { 0 }
+    if holds {
+        f.mask()
+    } else {
+        0
+    }
 }
 
 /// Rounding selection for integral rounding and conversions.

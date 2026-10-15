@@ -1,6 +1,6 @@
 //! Floating-point semantics checked against values derived from IEEE 754 and the Arm ARM
 //! pseudocode. The differential suite compares the same code with Unicorn over many states.
-use wl_runtime::{Cpu, fp, simd};
+use wl_runtime::{fp, simd, Cpu};
 
 const RN: u64 = 0;
 const RP: u64 = 1 << 22;
