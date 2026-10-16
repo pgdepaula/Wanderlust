@@ -932,6 +932,10 @@ fn applet_oe_application_startup() {
     send(&mut p, &mut c, am);
     assert_eq!((reply_u32(&p, 8), reply_u32(&p, 0x28)), (1 << 1, 0));
     assert_eq!(call(&mut p, &mut c, am, 9, 131, &5u64.to_le_bytes()).0, 0);
+    // IApplicationFunctions command 210: event handle, never signalled.
+    domain_request(&mut p, 1, 9, 210, false, &[]);
+    send(&mut p, &mut c, am);
+    assert_eq!((reply_u32(&p, 8), reply_u32(&p, 0x28)), (1 << 1, 0));
     // IApplicationFunctions commands 20, 21, 22, 23, 40.
     assert_eq!(call(&mut p, &mut c, am, 9, 20, &[]).0, 0);
     assert_eq!(call(&mut p, &mut c, am, 9, 21, &[]).0, 0);

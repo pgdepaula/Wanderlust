@@ -169,6 +169,8 @@ pub struct HostState {
     /// not modelled.
     pub gpu_error_event: Option<usize>,
     pub delay_time_to_abort_on_gpu_error: Option<u64>,
+    /// IApplicationFunctions' Cmd210 event: never signalled.
+    pub application_event_210: Option<usize>,
     /// aoc:u AddOnContentListChangedEvent: never signalled, as DLCs are static.
     pub aoc_list_changed_event: Option<usize>,
     /// Settings recorded by ISelfController and IWindowController.
@@ -892,6 +894,12 @@ pub(crate) fn request(
             k.host.delay_time_to_abort_on_gpu_error =
                 Some(u64::from_le_bytes(args[..8].try_into().unwrap_or_default()));
             Done::ok()
+        }
+        (HostObject::ApplicationFunctions, 210) => {
+            // Cmd210: no arguments, returns copy handle to event.
+            check(no_arguments)?;
+            let e = host_event(k, |h| &mut h.application_event_210, false);
+            copy_event(k, e)
         }
         (HostObject::ApplicationFunctions, 20) => {
             // EnsureSaveData: out u64 size.
