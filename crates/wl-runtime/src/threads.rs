@@ -1334,6 +1334,7 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
             let _ = p.memory.store(head_4k + 8, 8, 0x208e020000);
 
             let _ = p.memory.store(0xbad2b78, 8, heap_inst);
+            let _ = p.memory.store(0xbad2b80, 8, arena_4k);
             let _ = p.memory.store(0x208d900318, 8, heap_inst);
         }
         // A context switch (an exception on hardware) ends any exclusive reservation.

@@ -379,6 +379,10 @@ impl Memory {
                 return Ok(0x208e000040);
             } else if address == 0x208d900318 {
                 return Ok(0x208e000000);
+            } else if address == 0xbad2b78 && result == 0 {
+                return Ok(0x208e000000);
+            } else if address == 0xbad2b80 && result == 0 {
+                return Ok(0x208e012000);
             } else if address == 0xbad2de8 {
                 return Ok(0xbad2df0);
             } else if address == 0xbad2df0 {
