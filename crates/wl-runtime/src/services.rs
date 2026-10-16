@@ -76,6 +76,10 @@ pub enum HostObject {
     ViUser,
     ViDisplayService,
     HosBinderDriver,
+    /// `hid` IHidServer, IAppletResource, IActiveVibrationDeviceList (hid process).
+    HidServer,
+    HidAppletResource,
+    ActiveVibrationDeviceList,
 }
 
 /// The process serving a hosted object; domain object IDs are allocated per server.
@@ -92,6 +96,7 @@ pub enum Server {
     Fs,
     NvDrv,
     Vi,
+    Hid,
 }
 
 /// Size of `lm`'s pointer buffer (`lm_ipc_server.cpp`, `PointerBufferSize`).
@@ -159,8 +164,13 @@ pub struct HostState {
     pub fs_domain_ids: DomainIds,
     pub nvdrv_domain_ids: DomainIds,
     pub vi_domain_ids: DomainIds,
+    pub hid_domain_ids: DomainIds,
     /// Cached time:u shared memory index.
     pub time_shared_memory: Option<usize>,
+    /// Cached hid shared memory index.
+    pub hid_shared_memory: Option<usize>,
+    /// Npad style set update event handle.
+    pub npad_style_set_update_event: Option<usize>,
     /// The application's AppletMessage queue and the event signalled while it is not
     /// empty (created by the first ICommonStateGetter::GetEventHandle).
     pub applet_messages: Vec<u32>,
@@ -246,6 +256,7 @@ pub fn lookup(name: &[u8; 8]) -> Option<HostObject> {
             Some(HostObject::NvDrvServices)
         }
         b"vi:u\0\0\0\0" | b"vi:m\0\0\0\0" | b"vi:s\0\0\0\0" => Some(HostObject::ViUser),
+        b"hid\0\0\0\0\0" | b"hid:sys\0" => Some(HostObject::HidServer),
         _ => None,
     }
 }
@@ -288,6 +299,9 @@ impl HostObject {
             HostObject::ViUser => ("vi:u IApplicationRootService", 0),
             HostObject::ViDisplayService => ("vi IApplicationDisplayService", 0),
             HostObject::HosBinderDriver => ("nns::hosbinder::IHOSBinderDriver", 0),
+            HostObject::HidServer => ("nn::hid::IHidServer", 0),
+            HostObject::HidAppletResource => ("nn::hid::IAppletResource", 0),
+            HostObject::ActiveVibrationDeviceList => ("nn::hid::IActiveVibrationDeviceList", 0),
         }
     }
     fn server(&self) -> Server {
@@ -309,6 +323,9 @@ impl HostObject {
             HostObject::ViUser | HostObject::ViDisplayService | HostObject::HosBinderDriver => {
                 Server::Vi
             }
+            HostObject::HidServer
+            | HostObject::HidAppletResource
+            | HostObject::ActiveVibrationDeviceList => Server::Hid,
             _ => Server::Am,
         }
     }
@@ -324,7 +341,8 @@ impl HostObject {
             | Server::Acc
             | Server::Fs
             | Server::NvDrv
-            | Server::Vi => Some(AM_POINTER_BUFFER_SIZE),
+            | Server::Vi
+            | Server::Hid => Some(AM_POINTER_BUFFER_SIZE),
             Server::Ptm => None,
         }
     }
@@ -385,6 +403,7 @@ impl HostState {
             Server::Fs => &mut self.fs_domain_ids,
             Server::NvDrv => &mut self.nvdrv_domain_ids,
             Server::Vi => &mut self.vi_domain_ids,
+            Server::Hid => &mut self.hid_domain_ids,
         }
     }
     /// Registers `object` in domain `d` under a newly allocated ID of its server (`lm`
@@ -1270,6 +1289,52 @@ pub(crate) fn request(
             Done::ok()
         }
         (HostObject::AccProfile, _) => Done::ok(),
+        (HostObject::HidServer, 0) => {
+            // CreateAppletResource(u64 aruid): out object IAppletResource
+            Done::object(HostObject::HidAppletResource)
+        }
+        (HostObject::HidServer, 101) => {
+            // GetSupportedNpadStyleSet: out u32 (0x1f: FullKey, Handheld, JoyDual, JoyLeft, JoyRight)
+            Done::data(&0x1fu32.to_le_bytes())
+        }
+        (HostObject::HidServer, 106) => {
+            // AcquireNpadStyleSetUpdateEventHandle: out copy handle of event
+            let e = host_event(k, |h| &mut h.npad_style_set_update_event, false);
+            copy_event(k, e)
+        }
+        (HostObject::HidServer, 108 | 121) => {
+            // GetNpadJoyHoldType: out u64 (0: Vertical, 1: Horizontal)
+            Done::data(&0u64.to_le_bytes())
+        }
+        (HostObject::HidServer, 114 | 127) => {
+            // GetNpadHandheldActivationMode: out u64 (0: Dual, 1: Single)
+            Done::data(&0u64.to_le_bytes())
+        }
+        (HostObject::HidServer, 203) => {
+            // CreateActiveVibrationDeviceList: out object ActiveVibrationDeviceList
+            Done::object(HostObject::ActiveVibrationDeviceList)
+        }
+        (HostObject::HidServer, 205) => {
+            // IsVibrationPermitted: out bool (true)
+            Done::data(&[1u8])
+        }
+        (HostObject::HidServer, 511) => {
+            // GetVibrationMasterVolume: out f32 (1.0)
+            Done::data(&1.0f32.to_bits().to_le_bytes())
+        }
+        (HostObject::HidServer, _) => Done::ok(),
+        (HostObject::HidAppletResource, 0) => {
+            // GetSharedMemoryHandle: out copy handle of HidSharedMemory
+            match get_or_create_hid_shared_memory(k) {
+                Ok(h) => Done {
+                    copies: vec![h],
+                    ..Done::ok()
+                },
+                Err(code) => Done::failure(code),
+            }
+        }
+        (HostObject::HidAppletResource, _) => Done::ok(),
+        (HostObject::ActiveVibrationDeviceList, _) => Done::ok(),
         (HostObject::FileSystemProxy, 1) => {
             // Initialize(u64 reserved, ClientProcessId, copied process handle).
             Done::ok()
@@ -1627,6 +1692,25 @@ fn get_or_create_time_shared_memory(k: &mut Kernel) -> Result<u32, u32> {
             });
             let idx = k.shared_memories.len() - 1;
             k.host.time_shared_memory = Some(idx);
+            idx
+        }
+    };
+    k.handles.add(horizon::Object::SharedMemory(idx))
+}
+
+/// Obtains or creates the shared memory object backing hid IAppletResource GetSharedMemoryHandle.
+fn get_or_create_hid_shared_memory(k: &mut Kernel) -> Result<u32, u32> {
+    let idx = match k.host.hid_shared_memory {
+        Some(idx) => idx,
+        None => {
+            let bytes = vec![0u8; 0x40000];
+            k.shared_memories.push(horizon::SharedMemory {
+                size: 0x40000,
+                permission: 1, // Read-only for guest
+                bytes,
+            });
+            let idx = k.shared_memories.len() - 1;
+            k.host.hid_shared_memory = Some(idx);
             idx
         }
     };
