@@ -1046,7 +1046,14 @@ left GPR bits 15:8 and right GPR bits 27:20. Modes 1 through 6 are ordered
 LT/EQ/LE/GT/NE/GE. FTZ is bit 47 and remains excluded, along with source
 absolute/negate, execution predicates and noncanonical boolean/output fields.
 Original envyas independently assembles all sixteen comparison encodings;
-the implemented decoder accepts only the six verified ordered forms.
+the original subset accepted only the six ordered forms. The extension accepts
+all sixteen modes with the same operand/output mask and scheduling restrictions.
+Mode 0 is F, 7 NUM, 8 NAN, 9 through 14 LTU/EQU/LEU/GTU/NEU/GEU, and 15 T.
+[Pinned NAK SM50](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs#L775)
+corroborates all fourteen nonconstant conditions;
+[pinned UAM](https://github.com/devkitPro/uam/blob/5a5afc2bae8b55409ab36ba45be63fcb73f68993/mesa-imported/codegen/nv50_ir_emit_gm107.cpp#L394)
+also defines F/T and the six unordered conditions. UAM's NUM/NAN cases are
+commented out and are not used as the sole evidence for those encodings.
 
 NVIDIA's [CUDA 8 PTX comparison definitions](https://docs.nvidia.com/cuda/archive/8.0/parallel-thread-execution/index.html#comparison-and-selection-instructions-setp)
 define NaN rejection for all ordered relations, signed-zero equality, and
@@ -1054,6 +1061,9 @@ subnormal preservation without FTZ. The [PTX 12.8.1 definitions](https://docs.nv
 corroborate the ordered/unordered distinction. This semantic evidence is separate
 from the Maxwell binary encoding proof. Integer classification and ordering
 avoid depending on host f32 exceptional-value behavior.
+Unordered conditions accept either NaN; NUM requires two non-NaN operands and
+NAN requires at least one NaN. These classifications include signaling NaNs,
+both signs and arbitrary nonzero payloads, and NUM includes infinities.
 
 Pinned UAM's `SchedDataCalculatorGM107::recordWr` records predicate readiness at
 cycle + 13. [Pinned NAK SM50](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs)

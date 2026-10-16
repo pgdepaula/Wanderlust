@@ -1410,13 +1410,14 @@ mandatory. Multiplication hazards survive through either candidate value or the
 predicate producer. Conditional moves erase texture-handle and perspective
 proofs, including identity moves, until stronger path-sensitive proofs exist.
 
-## Ordered floating predicates
+## Floating predicates
 
-Vertex and fragment programs additionally accept GPR FSETP LT, EQ, LE, GT, NE
-and GE into P0, with the complementary result discarded to PT and AND PT as
-the boolean input. Execution is unconditional. FTZ, operand modifiers, other
-predicate outputs/accumulators, unordered modes and immediate/constant operand
-forms remain unsupported. The conservative predicate latency is thirteen cycles;
+Vertex and fragment programs accept all sixteen GPR FSETP conditions: F,
+LT/EQ/LE/GT/NE/GE, NUM/NAN, LTU/EQU/LEU/GTU/NEU/GEU and T. The result goes
+into P0, with the complementary result discarded to PT and AND PT as the
+boolean input. Execution is unconditional. FTZ, operand modifiers, other
+predicate outputs/accumulators and immediate/constant operand forms remain
+unsupported. The conservative predicate latency is thirteen cycles;
 ordinary readiness and wait checks apply. Predicate writes do not modify GPR R7
 despite the instruction's low-byte predicate-pair encoding.
 
@@ -1424,6 +1425,12 @@ The translation classifies IEEE binary32 input bits using integer operations,
 normalizes both signed zeros, and compares monotonic unsigned keys. Any NaN
 operand makes every ordered relation false, including NE. Subnormal bits retain
 their numerical order without relying on host floating-point flush or NaN modes.
+Unordered relations are true if either operand is NaN, otherwise they follow
+their ordered relation. NUM accepts both numeric operands, including infinities
+and subnormals; NAN detects either NaN, including signaling encodings of both
+signs. F/T always return false/true. The static accepted subset still requires
+ready initialized operands and retains multiplication provenance for F/T, even
+though their runtime result does not depend on operand values.
 This exact comparison path does not establish exceptional-value equivalence for
 the separate floating arithmetic instructions. Multiplication dependencies in
 either comparison operand propagate through the resulting predicate into SEL

@@ -12,15 +12,26 @@ pub enum FloatOperator {
     Add,
     Multiply,
 }
-/// Ordered IEEE f32 comparisons; any NaN operand makes every relation false.
+/// IEEE f32 predicate conditions. Ordered relations reject NaN; unordered
+/// relations accept NaN. Numeric includes infinities and subnormals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FloatComparison {
+    False,
     Less,
     Equal,
     LessEqual,
     Greater,
     NotEqual,
     GreaterEqual,
+    Numeric,
+    Nan,
+    LessUnordered,
+    EqualUnordered,
+    LessEqualUnordered,
+    GreaterUnordered,
+    NotEqualUnordered,
+    GreaterEqualUnordered,
+    True,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogicalOperator {
@@ -361,13 +372,22 @@ impl Program {
                 }
                 if word & !0x000f00000ff0ff00 == 0x5bb0038000070007 {
                     let comparison = match (word >> 48) & 15 {
+                        0 => FloatComparison::False,
                         1 => FloatComparison::Less,
                         2 => FloatComparison::Equal,
                         3 => FloatComparison::LessEqual,
                         4 => FloatComparison::Greater,
                         5 => FloatComparison::NotEqual,
                         6 => FloatComparison::GreaterEqual,
-                        _ => return Err(fail("unsupported ordered floating comparison mode")),
+                        7 => FloatComparison::Numeric,
+                        8 => FloatComparison::Nan,
+                        9 => FloatComparison::LessUnordered,
+                        10 => FloatComparison::EqualUnordered,
+                        11 => FloatComparison::LessEqualUnordered,
+                        12 => FloatComparison::GreaterUnordered,
+                        13 => FloatComparison::NotEqualUnordered,
+                        14 => FloatComparison::GreaterEqualUnordered,
+                        _ => FloatComparison::True, // Remaining four-bit mode is 15.
                     };
                     let left = ((word >> 8) & 255) as u8;
                     let right = ((word >> 20) & 255) as u8;
@@ -1422,24 +1442,45 @@ fn emit_comparison(s: &mut String, left: u8, right: u8, comparison: IntegerCompa
 
 fn emit_float_comparison(s: &mut String, left: u8, right: u8, comparison: FloatComparison) {
     use std::fmt::Write;
-    let symbol = match comparison {
-        FloatComparison::Less => "<",
-        FloatComparison::Equal => "==",
-        FloatComparison::LessEqual => "<=",
-        FloatComparison::Greater => ">",
-        FloatComparison::NotEqual => "!=",
-        FloatComparison::GreaterEqual => ">=",
-    };
+    if matches!(comparison, FloatComparison::False | FloatComparison::True) {
+        writeln!(s, "p0={};", comparison == FloatComparison::True).unwrap();
+        return;
+    }
     // Integer classification preserves every subnormal and signaling-NaN bit
     // independently of host floating comparison/flush modes. Signed zeros are
     // equal; complementing negative encodings reverses their magnitude order.
     writeln!(s, "{{ let a=r[{left}]; let b=r[{right}];").unwrap();
     s.push_str("let nan=(a & 0x7fffffffu)>0x7f800000u || (b & 0x7fffffffu)>0x7f800000u;\n");
+    if matches!(comparison, FloatComparison::Numeric | FloatComparison::Nan) {
+        let inversion = if comparison == FloatComparison::Numeric {
+            "!"
+        } else {
+            ""
+        };
+        writeln!(s, "p0={inversion}nan; }}").unwrap();
+        return;
+    }
+    let (symbol, unordered) = match comparison {
+        FloatComparison::Less => ("<", false),
+        FloatComparison::Equal => ("==", false),
+        FloatComparison::LessEqual => ("<=", false),
+        FloatComparison::Greater => (">", false),
+        FloatComparison::NotEqual => ("!=", false),
+        FloatComparison::GreaterEqual => (">=", false),
+        FloatComparison::LessUnordered => ("<", true),
+        FloatComparison::EqualUnordered => ("==", true),
+        FloatComparison::LessEqualUnordered => ("<=", true),
+        FloatComparison::GreaterUnordered => (">", true),
+        FloatComparison::NotEqualUnordered => ("!=", true),
+        FloatComparison::GreaterEqualUnordered => (">=", true),
+        _ => unreachable!("classification and constant conditions returned above"),
+    };
     s.push_str(
         "let an=select(a,0u,(a & 0x7fffffffu)==0u); let bn=select(b,0u,(b & 0x7fffffffu)==0u);\n",
     );
     s.push_str("let ak=select(an ^ 0x80000000u,~an,(an & 0x80000000u)!=0u); let bk=select(bn ^ 0x80000000u,~bn,(bn & 0x80000000u)!=0u);\n");
-    writeln!(s, "p0=!nan && (ak {symbol} bk); }}").unwrap();
+    let guard = if unordered { "nan ||" } else { "!nan &&" };
+    writeln!(s, "p0={guard} (ak {symbol} bk); }}").unwrap();
 }
 
 fn constant_input(constants: &mut Vec<ConstantRef>, reference: ConstantRef) -> Option<u8> {

@@ -890,12 +890,29 @@ fn float_predicate_color(a: u32, b: u32) -> [u8; 4] {
     };
     [red, 64, 191, 255]
 }
+fn all_float_predicate_color(a: u32, b: u32) -> [u8; 4] {
+    // Independent numeric oracle: truth masks for F, six ordered predicates,
+    // NUM, NAN, six unordered predicates, T are AAAA/CCCC/F0F0/FF00.
+    // Four nibble channels use exact dyadic weights 1/16,1/8,1/4,1/2.
+    let a = f64::from(f32::from_bits(a));
+    let b = f64::from(f32::from_bits(b));
+    if a.is_nan() || b.is_nan() {
+        [0, 0, 239, 239]
+    } else if a < b {
+        [159, 159, 159, 159]
+    } else if a == b {
+        [191, 191, 191, 191]
+    } else {
+        [0, 239, 0, 239]
+    }
+}
+
 #[test]
-#[ignore = "requires actual GPU; six ordered float relations with NaNs, signed zeros and subnormals"]
-fn driver_float_predicate_ieee_relations_and_code_coherence() {
+#[ignore = "requires actual GPU; sixteen floating conditions with ordered/unordered NaNs and exact raw data"]
+fn driver_all_float_predicate_modes_and_nan_coherence() {
     let (mut data, mut words, _) = fixture();
     let (mut d, c, _, b, _) = driver();
-    let bin = include_bytes!("fixtures/maxwell/float-predicate.bin");
+    let bin = include_bytes!("fixtures/maxwell/float-predicate-all.bin");
     data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
     let end = words.split_off(words.len() - 8);
     for (m, v) in [
@@ -909,6 +926,113 @@ fn driver_float_predicate_ieee_relations_and_code_coherence() {
         method(&mut words, m, v);
     }
     words.extend(end);
+    let mut identity = None;
+    let pairs = ieee_predicate_pairs();
+    let count = pairs.len();
+    for [a, z] in pairs {
+        let bytes: Vec<_> = [a, z].into_iter().flat_map(u32::to_le_bytes).collect();
+        d.write_backing(b, 0x50, &bytes, &mut mem(&mut data))
+            .unwrap();
+        let r = submit(&mut d, c, b, &mut data, &words);
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert_eq!(r.progress.draws_submitted, 1);
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        check(&data, all_float_predicate_color(a, z), false);
+        d.retire(r.token).unwrap();
+        let n = d.graphics_counters();
+        let now = [
+            n.shader_decodes,
+            n.shader_module_allocations,
+            n.pipeline_allocations,
+        ];
+        if let Some(old) = identity {
+            assert_eq!(now, old);
+        }
+        identity = Some(now);
+    }
+    // The first condition is F, with weight1/16 in red. Change only F→T:
+    // final -1<1 maskAAAA becomesAAAB, red increases from159 to175.
+    let mut code = bin.to_vec();
+    let off = 0xa0;
+    let op = u64::from_le_bytes(code[off..off + 8].try_into().unwrap());
+    assert_eq!(op, 0x5bb0038000570407);
+    code[off..off + 8].copy_from_slice(&(op | (15 << 48)).to_le_bytes());
+    d.write_backing(b, 0x4600, &code, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    assert_eq!(
+        d.graphics_counters().shader_decodes,
+        before.shader_decodes + 1
+    );
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [175, 159, 159, 159], false);
+    d.retire(r.token).unwrap();
+
+    let bytes: Vec<_> = draw().iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let start = std::time::Instant::now();
+    for _ in 0..32 {
+        let r = submit_existing(&mut d, c, &mut data, 8);
+        assert!(r.fault.is_none());
+        assert_eq!(r.progress.draws_submitted, 1);
+        // Completion records remain live until the explicit final publication;
+        // queue acceptance alone does not permit retirement.
+    }
+    let elapsed = start.elapsed();
+    let after = d.graphics_counters();
+    assert_eq!(after.draw_commands - before.draw_commands, 32);
+    assert_eq!(after.submissions - before.submissions, 32);
+    assert_eq!(
+        [
+            after.shader_binary_bytes,
+            after.vertex_shader_bytes,
+            after.shader_decodes,
+            after.vertex_shader_decodes,
+            after.descriptor_reads,
+            after.vertex_guest_bytes,
+            after.index_guest_bytes,
+            after.constant_guest_bytes,
+            after.guest_texture_bytes,
+            after.render_target_guest_bytes,
+            after.upload_bytes,
+            after.upload_calls,
+            after.shader_module_allocations,
+            after.pipeline_allocations,
+            after.readback_operations,
+            after.synchronization_points
+        ],
+        [
+            before.shader_binary_bytes,
+            before.vertex_shader_bytes,
+            before.shader_decodes,
+            before.vertex_shader_decodes,
+            before.descriptor_reads,
+            before.vertex_guest_bytes,
+            before.index_guest_bytes,
+            before.constant_guest_bytes,
+            before.guest_texture_bytes,
+            before.render_target_guest_bytes,
+            before.upload_bytes,
+            before.upload_calls,
+            before.shader_module_allocations,
+            before.pipeline_allocations,
+            before.readback_operations,
+            before.synchronization_points
+        ]
+    );
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [175, 159, 159, 159], false);
+    eprintln!(
+        "FSETP all16 {count} IEEE pairs, warm32 CPU={elapsed:?} before={before:?} after={after:?}"
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+fn ieee_predicate_pairs() -> Vec<[u32; 2]> {
     let mut pairs = vec![
         [0u32, 0],
         [0, 0x80000000],
@@ -945,6 +1069,28 @@ fn driver_float_predicate_ieee_relations_and_code_coherence() {
         pairs.push([a, seed]);
     }
     pairs.push([0xbf800000, 0x3f800000]);
+    pairs
+}
+#[test]
+#[ignore = "requires actual GPU; six ordered float relations with NaNs, signed zeros and subnormals"]
+fn driver_float_predicate_ieee_relations_and_code_coherence() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/float-predicate.bin");
+    data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x2144, 0x600),
+        (0x214c, 8),
+        (0x2380, 32),
+        (0x2384, 0),
+        (0x2388, 0x40040),
+        (0x2490, 1),
+    ] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let pairs = ieee_predicate_pairs();
     let count = pairs.len();
     let mut identity = None;
     for [a, z] in pairs {
@@ -1102,5 +1248,62 @@ fn driver_vertex_float_predicate_geometry_and_warm_cache() {
     d.publish(c, &mut mem(&mut data)).unwrap();
     check_conditional_geometry(&data, f64::from(-0.4f32));
     eprintln!("FSETP warm32 CPU={elapsed:?} before={before:?} after={after:?}");
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+
+#[test]
+#[ignore = "requires actual GPU; NAN predicate controls guest vertex exports without exporting NaN"]
+fn driver_vertex_nan_predicate_controls_primitive_coverage() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let mut bin = include_bytes!("fixtures/maxwell/vertex-float-predicate.bin").to_vec();
+    let word = u64::from_le_bytes(bin[0x80..0x88].try_into().unwrap());
+    assert_eq!(word, 0x5bb1038000670007);
+    bin[0x80..0x88].copy_from_slice(&((word & !(15 << 48)) | (8 << 48)).to_le_bytes());
+    data[0x4800..0x4800 + bin.len()].copy_from_slice(&bin);
+    let end = words.split_off(words.len() - 8);
+    method(&mut words, 0x2044, 0x800);
+    method(&mut words, 0x204c, 8);
+    method(&mut words, 0x2144, 0x400);
+    words.extend(end);
+    let r = submit(&mut d, c, b, &mut data, &words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_conditional_geometry(&data, f64::from(POS[0][0]));
+    d.retire(r.token).unwrap();
+    let background: Vec<_> = (0..W * H).flat_map(|_| BG).collect();
+    for bits in [0x7f800001u32, 0xffc12345, 1, 0x80000000] {
+        // Only the comparison's immediate changes. Vertex positions always
+        // remain finite. NAN=true moves ALL X to .5, producing zero-area
+        // geometry; numeric values leave the asymmetric original triangle.
+        let word = u64::from_le_bytes(bin[0x68..0x70].try_into().unwrap());
+        bin[0x68..0x70].copy_from_slice(
+            &((word & !(u64::from(u32::MAX) << 20)) | (u64::from(bits) << 20)).to_le_bytes(),
+        );
+        d.write_backing(b, 0x4800, &bin, &mut mem(&mut data))
+            .unwrap();
+        d.write_backing(b, RT as u64, &background, &mut mem(&mut data))
+            .unwrap();
+        let before = d.graphics_counters();
+        let r = submit(&mut d, c, b, &mut data, &draw());
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert_eq!(r.progress.draws_submitted, 1);
+        let after = d.graphics_counters();
+        assert_eq!(
+            after.vertex_shader_decodes,
+            before.vertex_shader_decodes + 1
+        );
+        assert_eq!(after.shader_decodes, before.shader_decodes);
+        assert_eq!(after.vertex_upload_bytes, before.vertex_upload_bytes);
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        if f32::from_bits(bits).is_nan() {
+            assert_eq!(&data[RT..RT + SIZE], &background);
+        } else {
+            check_conditional_geometry(&data, f64::from(POS[0][0]));
+        }
+        d.retire(r.token).unwrap();
+    }
+    eprintln!("VS NAN finite-output coverage {:?}", d.graphics_counters());
     d.close(c, &mut mem(&mut data)).unwrap();
 }

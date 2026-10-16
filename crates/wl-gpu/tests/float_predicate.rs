@@ -8,13 +8,23 @@ const WRITE: u64 = 0x706;
 const COMPARE: u64 = 0x7ed;
 const EXIT: u64 = 0xe30000000007000f;
 const NOP: u64 = 0x50b0000000070f00;
-const MODES: [FloatComparison; 6] = [
+const MODES: [FloatComparison; 16] = [
+    FloatComparison::False,
     FloatComparison::Less,
     FloatComparison::Equal,
     FloatComparison::LessEqual,
     FloatComparison::Greater,
     FloatComparison::NotEqual,
     FloatComparison::GreaterEqual,
+    FloatComparison::Numeric,
+    FloatComparison::Nan,
+    FloatComparison::LessUnordered,
+    FloatComparison::EqualUnordered,
+    FloatComparison::LessEqualUnordered,
+    FloatComparison::GreaterUnordered,
+    FloatComparison::NotEqualUnordered,
+    FloatComparison::GreaterEqualUnordered,
+    FloatComparison::True,
 ];
 fn mov(dst: u8, bits: u32) -> (u64, u64) {
     (
@@ -100,7 +110,13 @@ fn independent_six_ordered_comparisons_and_vertex_predicate_linkage() {
             }
         })
         .collect();
-    assert_eq!(decoded, MODES.map(|comparison| (4, 5, comparison)));
+    assert_eq!(
+        decoded,
+        MODES[1..7]
+            .iter()
+            .map(|&comparison| (4, 5, comparison))
+            .collect::<Vec<_>>()
+    );
     assert_eq!(
         u64::from_le_bytes(BIN[0xa0..0xa8].try_into().unwrap()),
         0x5bb1038000570407
@@ -121,30 +137,96 @@ fn independent_six_ordered_comparisons_and_vertex_predicate_linkage() {
 #[test]
 fn all_comparison_modes_are_classified_and_rz_is_not_a_gpr_destination() {
     for mode in 0u8..16 {
+        let mut vertex = VERTEX.to_vec();
+        let word = u64::from_le_bytes(vertex[0x80..0x88].try_into().unwrap());
+        assert_eq!(word, 0x5bb1038000670007);
+        vertex[0x80..0x88]
+            .copy_from_slice(&((word & !(15 << 48)) | (u64::from(mode) << 48)).to_le_bytes());
+        let p = VertexProgram::decode(&vertex).unwrap();
+        assert!(p.operations().contains(&Operation::FloatPredicateCompare {
+            left: 0,
+            right: 6,
+            comparison: MODES[usize::from(mode)],
+        }));
+        validate(&p.wgsl());
         for (left, right) in [(0, 1), (255, 0), (0, 255), (255, 255)] {
             let mut code = initialized(4);
             code.extend([compare(mode, left, right), (EXIT, ALU)]);
             let bytes = program(BIN, &code);
-            if (1..=6).contains(&mode) {
-                let p = FragmentProgram::decode(&bytes).unwrap();
-                assert_eq!(
-                    p.required_registers(),
-                    4,
-                    "P0/PT output must not allocate R7"
-                );
-                assert_eq!(
-                    p.operations()[4],
-                    Operation::FloatPredicateCompare {
-                        left,
-                        right,
-                        comparison: MODES[usize::from(mode - 1)],
-                    }
-                );
-                validate(&p.wgsl());
-            } else {
-                error(&bytes, "unsupported ordered floating comparison mode");
-            }
+            let p = FragmentProgram::decode(&bytes).unwrap();
+            assert_eq!(
+                p.required_registers(),
+                4,
+                "P0/PT output must not allocate R7"
+            );
+            assert_eq!(
+                p.operations()[4],
+                Operation::FloatPredicateCompare {
+                    left,
+                    right,
+                    comparison: MODES[usize::from(mode)],
+                }
+            );
+            validate(&p.wgsl());
         }
+    }
+}
+
+#[test]
+fn independently_assembled_all_sixteen_modes_preserve_raw_operand_mapping() {
+    let bin = include_bytes!("fixtures/maxwell/float-predicate-all.bin");
+    let p = FragmentProgram::decode(bin).unwrap();
+    let decoded: Vec<_> = p
+        .operations()
+        .iter()
+        .filter_map(|op| {
+            if let Operation::FloatPredicateCompare {
+                left,
+                right,
+                comparison,
+            } = *op
+            {
+                Some((left, right, comparison))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(decoded, MODES.map(|comparison| (4, 5, comparison)));
+    assert_eq!(p.required_registers(), 8);
+    validate(&p.wgsl());
+    assert!(VertexProgram::decode(bin).is_err());
+}
+
+#[test]
+fn constant_conditions_keep_conservative_readiness_and_multiply_provenance() {
+    for mode in [0, 15] {
+        let mut code = initialized(4);
+        code.extend([compare(mode, 4, 255), (EXIT, ALU)]);
+        error(&program(BIN, &code), "unready floating predicate operand");
+        let mut code = initialized(8);
+        code.extend([
+            (0xef9400000107ff04, WRITE),
+            compare(mode, 4, 255),
+            (EXIT, ALU),
+        ]);
+        error(&program(BIN, &code), "unready floating predicate operand");
+        code[9].1 |= 1 << 11;
+        validate(
+            &FragmentProgram::decode(&program(BIN, &code))
+                .unwrap()
+                .wgsl(),
+        );
+
+        let mut code = initialized(8);
+        code.extend([
+            (0x5c68000000570404, ALU),
+            compare(mode, 4, 5),
+            (0x5ca0000000770600, ALU),
+            (0x5c5800000ff70002, ALU),
+            (EXIT, ALU),
+        ]);
+        error(&program(BIN, &code), "unfused rounding");
     }
 }
 

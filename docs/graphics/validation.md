@@ -2342,3 +2342,48 @@ failure still prevents Windows process startup. No new D3D12/Vulkan execution
 passes are claimed. The notifier is a serialized runtime integration contract;
 it neither installs automatic AOT dirty tracking nor connects Horizon NVDRV to
 the renderer, and does not equate host completion with guest publication.
+
+## All sixteen floating predicate conditions
+
+The 848-byte `float-predicate-all` fixture independently reassembles exactly
+with original pinned envyas. All sixteen conditions execute through indexed
+GpuDriver/GPFIFO draws for 67 IEEE operand pairs. A separate numeric binary64
+oracle predicts the four RGBA truth-mask patterns: numeric less
+`[159,159,159,159]`, equal `[191,191,191,191]`, greater `[0,239,0,239]`, and
+either NaN `[0,0,239,239]`. Signed zeros, both signs of subnormals, infinities,
+quiet/signaling NaNs and seeded arbitrary payloads are covered. Guest constants
+change without shader/pipeline replacement. Changing only F to T in code gives
+`[175,159,159,159]` for -1 versus 1 and triggers exactly one decode.
+
+Thirty-two unchanged deferred draws add 32 queue submissions and zero extra
+shader/resource reads, uploads, modules, pipelines, readbacks or waits. The final
+GL debug CPU observation is 17.857 ms; allocator traffic is not separately
+measured. Before that warm sequence the test performs 68 intentional oracle
+publications: 505,920 readback bytes and 410,176 guest write bytes, with 1,696
+fragment program bytes read across two decodes, 544 constant guest bytes and
+492 constant upload bytes. Final publication remains explicit. Completion
+records are retained through publication, rather than retired at queue acceptance.
+
+The separate vertex test changes NAN's comparison constant without exporting
+NaN: true moves all vertex X coordinates to finite .5, producing a zero-area
+primitive and untouched background. Numeric subnormal/negative-zero constants
+retain the original asymmetric red triangle. Five real draws, five vertex code
+decodes and one fragment decode are observed; vertex uploads stay at 72 bytes.
+All sixteen vertex conditions also pass decoding and Naga validation. Existing
+predicate scheduling, operand readiness, R7 metadata, provenance and strict
+modifier rejection regressions remain covered.
+
+A faithful ordinary `688bfcc` snapshot plus five exact candidate source/fixture
+files, unchanged Cargo.lock and source-built homebrew fixtures passed GPU
+formatting, strict package/workspace Clippy, 230 graphics CPU tests per feature
+configuration and all 112 actual WSL OpenGL GPU scenarios, with no GPU failures
+or skips. Workspace execution produced 457 passes, three existing Horizon/CLI
+expectation failures and 112 ignored GPU tests. These expectations still use the
+old heap ratio or treat the now-present time:u service as absent. Concurrent
+runtime diagnostics were excluded; the live worktree is not reported validated.
+
+All 40 Windows GPU executables compiled from the same frozen source. A bounded
+Windows startup attempt still failed at WSL interop `UtilAcceptVsock:273:
+accept4 failed 110`, before launching a Windows GPU test. No new D3D12/Vulkan
+passes are claimed. This remains independently assembled synthetic Maxwell
+execution; no original-game GPU submission or frame is established.
