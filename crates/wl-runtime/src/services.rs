@@ -882,6 +882,22 @@ pub(crate) fn request(
             k.host.focus_handling_mode = Some([0, 1, 2].map(|i| args[i] & 1 != 0));
             Done::ok()
         }
+        (HostObject::SelfController, 40) => {
+            // CreateManagedDisplayLayer: out u64 LayerId
+            Done::data(&1u64.to_le_bytes())
+        }
+        (HostObject::SelfController, 44) => {
+            // CreateManagedDisplaySeparableLayer: out u64 LayerId, out u64 RecordingLayerId
+            let mut out = [0u8; 16];
+            out[..8].copy_from_slice(&1u64.to_le_bytes());
+            out[8..16].copy_from_slice(&2u64.to_le_bytes());
+            Done::data(&out)
+        }
+        (HostObject::SelfController, 45..=48) => {
+            // SetManagedDisplayLayerSeparationMode, SetRecordingLayerCompositionEnabled,
+            // SetHandlesRequestToDisplay, ApproveToDisplay.
+            Done::ok()
+        }
         (HostObject::CommonStateGetter, 2) => {
             // GetThisAppletKind: Application (3).
             Done::data(&3u32.to_le_bytes())

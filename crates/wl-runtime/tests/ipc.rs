@@ -953,6 +953,10 @@ fn applet_oe_application_startup() {
     assert_eq!(call(&mut p, &mut c, am, controller, 11, &[1]).0, 0);
     assert_eq!(call(&mut p, &mut c, am, controller, 12, &[1]).0, 0);
     assert_eq!(call(&mut p, &mut c, am, controller, 14, &[1]).0, 0);
+    assert_eq!(call(&mut p, &mut c, am, controller, 40, &[]).0, 0);
+    assert_eq!(call(&mut p, &mut c, am, controller, 44, &[]).0, 0);
+    assert_eq!(reply_u32(&p, 0x30), 1);
+    assert_eq!(reply_u32(&p, 0x38), 2);
     let h = &p.kernel.as_ref().unwrap().host;
     assert_eq!(h.focus_handling_mode, Some([true, false, true]));
     assert_eq!(
@@ -965,7 +969,7 @@ fn applet_oe_application_startup() {
     );
     assert!(h.foreground_rights && h.request_exit_to_library_applet_at_execute_next_program);
     assert_eq!(h.delay_time_to_abort_on_gpu_error, Some(5));
-    assert_eq!(h.calls.last(), Some(&("am ISelfController", 14, 0)));
+    assert_eq!(h.calls.last(), Some(&("am ISelfController", 44, 0)));
 }
 
 #[test]
