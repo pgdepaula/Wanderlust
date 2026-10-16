@@ -274,12 +274,6 @@ impl Memory {
         if bytes == 8 {
             if address == 0xb906d98 {
                 return Ok(0x8c97728);
-            } else if address >= 0x208e900000
-                && address < 0x208ea00000
-                && (address & 0xff == 0x38 || address & 0xff == 0xb8)
-                && result == 0
-            {
-                return Ok(0x208e012000);
             } else if address == 0x208e000000 {
                 return Ok(0x208e001000);
             } else if address == 0x208e001000 + 0x90 {
