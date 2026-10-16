@@ -580,6 +580,7 @@ pub(crate) fn request(
     }
     let command = word(2);
     let args = &message[cmif.start + 0x10..cmif.end];
+    eprintln!("[ipc] {name} cmd {command}");
     let unsupported = |what: &str| {
         Err(format!(
             "unsupported Horizon IPC: {what} (command {command} of {name}{})",
@@ -940,7 +941,7 @@ pub(crate) fn request(
         (HostObject::ApplicationFunctions, 210) => {
             // Cmd210: no arguments, returns copy handle to event.
             check(no_arguments)?;
-            let e = host_event(k, |h| &mut h.application_event_210, false);
+            let e = host_event(k, |h| &mut h.application_event_210, true);
             copy_event(k, e)
         }
         (HostObject::ApplicationFunctions, 20) => {
@@ -1229,7 +1230,7 @@ pub(crate) fn request(
         }
         (HostObject::NvDrvServices, 4) => {
             // QueryEvent: out copy handle, out u32 error_code (0)
-            let e = host_event(k, |h| &mut h.nvdrv_event, false);
+            let e = host_event(k, |h| &mut h.nvdrv_event, true);
             let mut done = copy_event(k, e);
             done.data = 0u32.to_le_bytes().to_vec();
             done
@@ -1259,7 +1260,7 @@ pub(crate) fn request(
         }
         (HostObject::ViDisplayService, 210) => {
             // GetDisplayVsyncEvent: copy handle to event
-            let e = host_event(k, |h| &mut h.vi_vsync_event, false);
+            let e = host_event(k, |h| &mut h.vi_vsync_event, true);
             copy_event(k, e)
         }
         (HostObject::ViDisplayService, 203) => {
@@ -1267,6 +1268,14 @@ pub(crate) fn request(
             let mut data = [0u8; 16];
             data[..8].copy_from_slice(&1u64.to_le_bytes());
             Done::data(&data)
+        }
+        (HostObject::ViDisplayService, 2020) => {
+            // OpenLayer: out u64 parcel_size (0)
+            Done::data(&0u64.to_le_bytes())
+        }
+        (HostObject::ViDisplayService, 2021) => {
+            // CloseLayer
+            Done::ok()
         }
         (HostObject::ViDisplayService, _) => Done::ok(),
         _ => return unsupported("an unknown command"),
