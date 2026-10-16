@@ -92,6 +92,44 @@ const LM_POINTER_BUFFER_SIZE: u16 = 0x400;
 /// allocator returns none and every session's pointer-buffer size is initialised to 0.
 const AM_POINTER_BUFFER_SIZE: u16 = 0;
 
+/// Minimal valid specification-conformant empty RomFS image (header, dir hash table, root dir).
+const EMPTY_ROMFS: [u8; 304] = [
+    0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // header_size: 0x50
+    0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // dir_hash_table_offset: 0x50
+    0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // dir_hash_table_size: 4
+    0x58, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // dir_table_offset: 0x58
+    0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // dir_table_size: 0x18
+    0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // file_hash_table_offset: 0x70
+    0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // file_hash_table_size: 4
+    0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // file_table_offset: 0x78
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // file_table_size: 0
+    0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // file_data_offset: 0x80
+    // 0x50: dir hash table (4 bytes bucket + 4 bytes padding)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // 0x58: root dir entry (parent=0, sibling=none, child=none, file=none, hash=none, name_len=0)
+    0x00, 0x00, 0x00, 0x00, // parent: 0
+    0xff, 0xff, 0xff, 0xff, // sibling: none
+    0xff, 0xff, 0xff, 0xff, // child: none
+    0xff, 0xff, 0xff, 0xff, // file: none
+    0xff, 0xff, 0xff, 0xff, // next_hash: none
+    0x00, 0x00, 0x00, 0x00, // name_len: 0
+    // 0x70: file hash table (4 bytes bucket + 4 bytes padding)
+    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
+    // 0x78..0x100: empty padding
+    0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+
 /// `lm::LogDestination_TargetManager`, the destination before any SetDestination.
 pub const LOG_DESTINATION_TARGET_MANAGER: u32 = 1;
 
@@ -448,7 +486,7 @@ impl Done {
 
 /// One request on a session to a hosted service.
 pub(crate) fn request(
-    memory: &Memory,
+    memory: &mut Memory,
     k: &mut Kernel,
     s: usize,
     object: HostObject,
@@ -1088,9 +1126,36 @@ pub(crate) fn request(
         }
         (HostObject::FileSystemProxy, _) => Done::ok(),
         (HostObject::FileSystem, _) => Done::ok(),
-        (HostObject::Storage, 1) => {
+        (HostObject::Storage, 0) => {
+            // Read(u64 offset, u64 size, OutBuffer)
+            let offset = (ipc::read_u32(args, 0) as usize)
+                | ((ipc::read_u32(args, 4) as usize) << 32);
+            let size = (ipc::read_u32(args, 8) as usize)
+                | ((ipc::read_u32(args, 12) as usize) << 32);
+            let dst_info = req
+                .recvs
+                .first()
+                .or(req.statics.first())
+                .or(req.sends.first());
+            if let Some(&(dst, buf_size)) = dst_info {
+                let to_copy = size.min(buf_size as usize);
+                if offset < EMPTY_ROMFS.len() {
+                    let avail = (EMPTY_ROMFS.len() - offset).min(to_copy);
+                    let _ = memory.write_bytes(dst, &EMPTY_ROMFS[offset..offset + avail]);
+                    if to_copy > avail {
+                        let zeroes = vec![0u8; to_copy - avail];
+                        let _ = memory.write_bytes(dst + avail as u64, &zeroes);
+                    }
+                } else {
+                    let zeroes = vec![0u8; to_copy];
+                    let _ = memory.write_bytes(dst, &zeroes);
+                }
+            }
+            Done::ok()
+        }
+        (HostObject::Storage, 4) => {
             // GetSize: out u64 size
-            Done::data(&0u64.to_le_bytes())
+            Done::data(&(EMPTY_ROMFS.len() as u64).to_le_bytes())
         }
         (HostObject::Storage, _) => Done::ok(),
         _ => return unsupported("an unknown command"),
