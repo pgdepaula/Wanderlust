@@ -133,6 +133,12 @@ pub enum Operation {
         src: u8,
         invert: bool,
     },
+    /// SM50 non-SH FLO, index of the highest non-sign bit or raw FFFFFFFF.
+    LeadingBit {
+        dst: u8,
+        src: u8,
+        signed: bool,
+    },
     /// SM50 LOP3.LUT, three GPR/RZ sources, discarded PT predicate output.
     TernaryLogic {
         dst: u8,
@@ -708,6 +714,22 @@ impl Program {
                         bits,
                         operator,
                     }
+                } else if word & !0x000100000ff000ff == 0x5c30000000070000 {
+                    let src = ((word >> 20) & 255) as u8;
+                    if write_barrier != 0
+                        || pending.iter().any(|v| *v)
+                        || !initialized[src as usize]
+                    {
+                        return Err(fail(
+                            "FLO requires ready source and unused write barrier zero",
+                        ));
+                    }
+                    pending[dst as usize] = true;
+                    Operation::LeadingBit {
+                        dst,
+                        src,
+                        signed: word & (1 << 48) != 0,
+                    }
                 } else if word & !0x000001000ff000ff == 0x5c08000000070000 {
                     let src = ((word >> 20) & 255) as u8;
                     // POPC is scoreboarded on SM50. A stall count alone does
@@ -969,6 +991,7 @@ impl Program {
                         op,
                         Operation::Constant { .. }
                             | Operation::CountBits { .. }
+                            | Operation::LeadingBit { .. }
                             | Operation::Integer {
                                 operator: IntegerOperator::Multiply,
                                 ..
@@ -1019,6 +1042,7 @@ impl Program {
                     } => true,
                     Operation::Move { src, .. }
                     | Operation::CountBits { src, .. }
+                    | Operation::LeadingBit { src, .. }
                     | Operation::BitfieldExtract { src, .. }
                     | Operation::LogicImmediate { src, .. }
                     | Operation::AddImmediate { src, .. } => multiply_result[src as usize],
@@ -1112,6 +1136,7 @@ impl Program {
                 }
                 Operation::Move { dst, src }
                 | Operation::CountBits { dst, src, .. }
+                | Operation::LeadingBit { dst, src, .. }
                 | Operation::BitfieldExtract { dst, src, .. }
                 | Operation::ConditionalMove { dst, src, .. }
                 | Operation::LogicImmediate { dst, src, .. }
@@ -1228,6 +1253,9 @@ impl Program {
                 }
                 Operation::CountBits { dst, src, invert } => {
                     emit_count_bits(&mut s, dst, src, invert);
+                }
+                Operation::LeadingBit { dst, src, signed } => {
+                    emit_leading_bit(&mut s, dst, src, signed);
                 }
                 Operation::TernaryLogic { dst, first, second, third, lut } => {
                     emit_ternary(&mut s, dst, first, second, third, lut);
@@ -1450,6 +1478,9 @@ impl VertexProgram {
                 Operation::CountBits { dst, src, invert } => {
                     emit_count_bits(&mut s, dst, src, invert);
                 }
+                Operation::LeadingBit { dst, src, signed } => {
+                    emit_leading_bit(&mut s, dst, src, signed);
+                }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
                 Operation::ConditionalMove { dst, src, invert } => {
@@ -1466,6 +1497,21 @@ impl VertexProgram {
             s = s.replace("@interpolate(linear)", "@interpolate(perspective,center)");
         }
         s
+    }
+}
+
+fn emit_leading_bit(s: &mut String, dst: u8, src: u8, signed: bool) {
+    use std::fmt::Write;
+    if signed {
+        // Preserve the signed builtin's -1 sentinel as raw u32, including
+        // zero and all-ones inputs. This is not a numeric float conversion.
+        writeln!(
+            s,
+            "r[{dst}]=bitcast<u32>(firstLeadingBit(bitcast<i32>(r[{src}])));"
+        )
+        .unwrap();
+    } else {
+        writeln!(s, "r[{dst}]=firstLeadingBit(r[{src}]);").unwrap();
     }
 }
 

@@ -1145,3 +1145,31 @@ The scalar test oracle sums individual bits independently of the host intrinsic.
 Only encoding/semantic evidence is used from reference implementations; no
 assembler/compiler implementation is imported. FLO and its disputed SH zero
 behavior are not implied by this instruction's support.
+
+## Non-SH SM50 highest-bit search
+
+Pinned GM107 and
+[NAK SM50 OpFlo](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs#L1197)
+agree on GPR opcode 5c30, destination bits 7:0, source bits 27:20 and signed bit 48. The
+strict unconditional base is `5c30000000070000`, variable mask
+`000100000ff000ff`. Original envyas independently assembles unsigned/signed
+fragment and signed vertex fixtures. Pinned MaxAs independently matches the
+unsigned words; its grammar is not claimed to assemble the signed form.
+
+[CUDA 8 PTX bfind](https://docs.nvidia.com/cuda/archive/8.0/parallel-thread-execution/index.html#integer-arithmetic-instructions-bfind)
+and pinned UAM constant folding corroborate non-SH semantics: unsigned highest
+one-bit index, signed negative highest zero-bit index, and FFFFFFFF when no
+qualifying bit exists. UAM's util_last_bit[_signed]-1 handles the sentinel
+explicitly; no reliance is placed on an unchecked unsigned subtraction in
+NAK's folding expression.
+[WGSL signed firstLeadingBit](https://www.w3.org/TR/2026/CRD-WGSL-20260921/#firstLeadingBit-signed-builtin)
+and [unsigned firstLeadingBit](https://www.w3.org/TR/2026/CRD-WGSL-20260921/#firstLeadingBit-unsigned-builtin)
+provides matching signed/unsigned host semantics, with signed -1 retained by
+bitcast. The independent scalar oracle scans each bit instead of using that
+host intrinsic. Reference implementations provide semantic evidence only.
+
+NAK and MaxAs independently classify this SM50 instruction as variable latency.
+The existing single-barrier WB0/wait1 contract is mandatory. SH bit 41 is
+excluded because its zero-result behavior is not resolved by the examined
+references; inversion bit 40, CC bit 47, execution predicates and other source forms
+are also outside the accepted subset. No general FLO/CLZ support is implied.

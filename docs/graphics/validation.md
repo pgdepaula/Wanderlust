@@ -2530,3 +2530,65 @@ subsequent PowerShell-suite and direct D3D12 starts failed at WSL interop
 UtilAcceptVsock/accept4 before GPU execution. No new D3D12/Vulkan passes are
 claimed. No original-game submission or frame is established by these synthetic
 programs.
+
+## Non-SH signed and unsigned highest-bit search
+
+All three 208-byte fixtures independently reassemble exactly with original
+pinned envyas; unsigned forms also match pinned MaxAs. Seven CPU tests verify
+strict signed-bit encoding, RZ, aliases/high registers, explicit waits, barrier
+reuse across variable-latency instructions, pending overwrite/export rejection,
+FMUL hazards, unchanged P0 and invalidation of resource/perspective proofs. SH,
+inversion, CC, predicates and other source forms remain explicitly unsupported.
+
+The GpuDriver/GPFIFO fragment workload executes 132 source words in each signed
+and unsigned mode, including every bit position, power/complement boundaries,
+zero, all ones and 32 seeded words. An independent per-bit scalar scan predicts
+the highest qualifying bit or raw FFFFFFFF. ISETP/SEL compares raw results and
+exports [64,128,191,255]; deliberately wrong reference data produces red zero
+without recompilation. Both RZ modes assert an actual draw and compare against
+FFFFFFFF. Sentinel validation does not depend on rendering a NaN color.
+
+Before the warm sequence, 268 draws account for 536 queue submissions, five
+fragment decodes reading 1,040 bytes, 2,144 constant guest bytes and 1,792
+constant upload bytes. Eight shader modules and twelve pipelines are created
+over the deliberately changed programs. The 268 oracle publications transfer
+1,993,920 readback bytes and 1,616,576 guest framebuffer bytes; one target is
+allocated and reused 267 times. Thirty-two unchanged deferred draws add 32
+queues and zero extra resource reads/uploads, modules, pipelines, readbacks or
+waits. Removing only the consumer wait faults without another draw or queue;
+prior accepted output remains publishable. Final visibility is explicit.
+
+The vertex program compares signed FLO against 29, selecting only initial
+second-vertex X=+.6 and moving it to finite +.5. Changing that guest X to-.6
+changes its highest non-sign bit to 30 and leaves X=-.6. Independent analytic
+coverage changes from 259 to 25 interior samples, with uncovered/background
+pixels also checked. Only 72 extra vertex upload bytes are needed and shader
+and pipeline identity remains unchanged.
+
+An initial default-suite run reported two process-wide allocations in the old
+Maxwell allocation test. The same unchanged workload independently passed 20
+no-harness trials, each 6000 method writes and zero allocations/reallocations.
+Installed libtest source confirms concurrent harness-thread allocation paths
+even with RUST_TEST_THREADS=1; the exact two allocation stacks were not captured.
+The established calibrated per-thread allocator was extracted and reused by
+the three allocation tests without changing workloads or zero thresholds. Its
+zero-sized guard cannot migrate threads. Focused tests passed both feature
+configurations before that measurement-scope correction was delivered.
+
+The final faithful ordinary 3bd688b snapshot plus nine candidate Rust/fixture
+files and unchanged Cargo.lock passed GPU formatting, strict package/workspace
+Clippy, 257 CPU tests per configuration and all 120 actual WSL OpenGL GPU
+scenarios, zero failures/skips. Workspace execution produced 484 passes, the
+same three Horizon/CLI expectation failures and 120 ignored GPU tests; concurrent
+runtime/NSO work was excluded, and the live workspace is not reported green.
+The final GL debug CPU observation for 32 warm
+draws was 209.882 ms, versus 30.855 ms in an earlier focused run. CPU load, memory
+pressure and driver/cache state were uncontrolled; no GPU timing, allocator
+traffic or game performance is inferred from these observations.
+
+Forty native Windows GPU executables compiled from the same FLO production,
+GPU test and fixture bytes. The allocation-scope fix affects separate CPU
+test binaries. A nested cmd/PowerShell launch was additionally attempted, but
+WSL interop again failed at UtilAcceptVsock/accept4 before GPU startup; no new
+D3D12/Vulkan execution passes are claimed. These are synthetic independently
+assembled programs, not original-game GPU commands or frames.

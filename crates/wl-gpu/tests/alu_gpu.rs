@@ -2080,3 +2080,290 @@ fn driver_vertex_popcount_controls_geometry() {
     eprintln!("VS POPC geometry {:?}", d.graphics_counters());
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+fn leading_bit_reference(word: u32, signed: bool) -> u32 {
+    // Independent scalar scan for a bit different from the sign. No host
+    // leading-bit/count-zero intrinsic or production shader invocation.
+    let wanted = if signed && word & 0x80000000 != 0 {
+        0
+    } else {
+        1
+    };
+    for bit in (0..32).rev() {
+        if (word >> bit) & 1 == wanted {
+            return bit;
+        }
+    }
+    u32::MAX
+}
+
+fn leading_bit_draw(
+    d: &mut GpuDriver,
+    c: ChannelId,
+    b: BackingId,
+    data: &mut [u8],
+    words: &[u32],
+    value: u32,
+    expected: u32,
+) {
+    let mut bytes = [0u8; 8];
+    bytes[..4].copy_from_slice(&value.to_le_bytes());
+    bytes[4..].copy_from_slice(&expected.to_le_bytes());
+    d.write_backing(b, 0x50, &bytes, &mut mem(data)).unwrap();
+    let r = submit(d, c, b, data, words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    d.publish(c, &mut mem(data)).unwrap();
+    check(
+        data,
+        if expected == leading_bit_reference(value, false) {
+            [64, 128, 191, 255]
+        } else {
+            [0, 128, 191, 255]
+        },
+        false,
+    );
+    d.retire(r.token).unwrap();
+}
+
+#[test]
+#[ignore = "requires actual GPU; variable-latency FLO signed/unsigned indices, sentinel, RZ and aliases"]
+fn driver_leading_bit_dynamic_words_and_wait_coherence() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/leading-bit.bin");
+    data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x2144, 0x600),
+        (0x214c, 7),
+        (0x2380, 24),
+        (0x2384, 0),
+        (0x2388, 0x40040),
+        (0x2490, 1),
+    ] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let original = u64::from_le_bytes(bin[0x68..0x70].try_into().unwrap());
+    assert_eq!(original, 0x5c30000000470004);
+    let draw_words = draw();
+    let mut values = vec![0, u32::MAX, 0x80000000, 0x7fffffff];
+    for bit in 0..32 {
+        values.push(1 << bit);
+        values.push(!(1 << bit));
+        values.push(((1u64 << (bit + 1)) - 1) as u32);
+    }
+    let mut seed = 0x464c4f31u32;
+    for _ in 0..32 {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        values.push(seed);
+    }
+    let mut first = true;
+    for signed in [false, true] {
+        let op = original | (u64::from(signed) << 48);
+        d.write_backing(b, 0x4668, &op.to_le_bytes(), &mut mem(&mut data))
+            .unwrap();
+        let mut identity = None;
+        for &value in &values {
+            let expected = leading_bit_reference(value, signed);
+            let mut bytes = [0u8; 8];
+            bytes[..4].copy_from_slice(&value.to_le_bytes());
+            bytes[4..].copy_from_slice(&expected.to_le_bytes());
+            d.write_backing(b, 0x50, &bytes, &mut mem(&mut data))
+                .unwrap();
+            let r = submit(
+                &mut d,
+                c,
+                b,
+                &mut data,
+                if first { &words } else { &draw_words },
+            );
+            first = false;
+            assert!(
+                r.fault.is_none(),
+                "value={value:#x} signed={signed}: {:?}",
+                r.fault
+            );
+            assert_eq!(r.progress.draws_submitted, 1);
+            d.publish(c, &mut mem(&mut data)).unwrap();
+            check(&data, [64, 128, 191, 255], false);
+            d.retire(r.token).unwrap();
+            let n = d.graphics_counters();
+            let now = [
+                n.shader_decodes,
+                n.shader_module_allocations,
+                n.pipeline_allocations,
+            ];
+            if let Some(old) = identity {
+                assert_eq!(now, old);
+            }
+            identity = Some(now);
+        }
+    }
+    // Restore unsigned FLO and deliberately provide an incorrect reference.
+    d.write_backing(b, 0x4668, &original.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    leading_bit_draw(&mut d, c, b, &mut data, &draw_words, 0x89abcdef, 0);
+    let before = d.graphics_counters();
+    leading_bit_draw(
+        &mut d,
+        c,
+        b,
+        &mut data,
+        &draw_words,
+        0x89abcdef,
+        leading_bit_reference(0x89abcdef, false),
+    );
+    assert_eq!(d.graphics_counters().shader_decodes, before.shader_decodes);
+    // RZ still requires the independently validated scoreboard wait. Both
+    // signed modes produce the raw FFFFFFFF sentinel, not input-buffer values.
+    for signed in [false, true] {
+        let op = (original & !(255 << 20)) | (255 << 20) | (u64::from(signed) << 48);
+        d.write_backing(b, 0x4668, &op.to_le_bytes(), &mut mem(&mut data))
+            .unwrap();
+        let mut bytes = [0u8; 8];
+        bytes[..4].copy_from_slice(&0x89abcdefu32.to_le_bytes());
+        bytes[4..].copy_from_slice(&u32::MAX.to_le_bytes());
+        d.write_backing(b, 0x50, &bytes, &mut mem(&mut data))
+            .unwrap();
+        let r = submit(&mut d, c, b, &mut data, &draw_words);
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert_eq!(r.progress.draws_submitted, 1);
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        check(&data, [64, 128, 191, 255], false);
+        d.retire(r.token).unwrap();
+    }
+    let bytes: Vec<_> = draw_words.iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let start = std::time::Instant::now();
+    for _ in 0..32 {
+        let r = submit_existing(&mut d, c, &mut data, 8);
+        assert!(r.fault.is_none());
+        assert_eq!(r.progress.draws_submitted, 1);
+    }
+    let elapsed = start.elapsed();
+    let after = d.graphics_counters();
+    assert_eq!(after.draw_commands - before.draw_commands, 32);
+    assert_eq!(after.submissions - before.submissions, 32);
+    assert_eq!(
+        [
+            after.shader_binary_bytes,
+            after.vertex_shader_bytes,
+            after.shader_decodes,
+            after.vertex_shader_decodes,
+            after.descriptor_reads,
+            after.vertex_guest_bytes,
+            after.index_guest_bytes,
+            after.constant_guest_bytes,
+            after.guest_texture_bytes,
+            after.render_target_guest_bytes,
+            after.upload_bytes,
+            after.upload_calls,
+            after.shader_module_allocations,
+            after.pipeline_allocations,
+            after.readback_operations,
+            after.synchronization_points
+        ],
+        [
+            before.shader_binary_bytes,
+            before.vertex_shader_bytes,
+            before.shader_decodes,
+            before.vertex_shader_decodes,
+            before.descriptor_reads,
+            before.vertex_guest_bytes,
+            before.index_guest_bytes,
+            before.constant_guest_bytes,
+            before.guest_texture_bytes,
+            before.render_target_guest_bytes,
+            before.upload_bytes,
+            before.upload_calls,
+            before.shader_module_allocations,
+            before.pipeline_allocations,
+            before.readback_operations,
+            before.synchronization_points
+        ]
+    );
+    // Remove only the consumer's wait. A fault must not replay/append work and
+    // must leave all 32 previously accepted GPU draws available for publication.
+    let ctl = u64::from_le_bytes(bin[0x70..0x78].try_into().unwrap());
+    d.write_backing(
+        b,
+        0x4670,
+        &(ctl & !(1 << 11)).to_le_bytes(),
+        &mut mem(&mut data),
+    )
+    .unwrap();
+    let failed = submit(&mut d, c, b, &mut data, &draw_words);
+    assert!(failed.fault.is_some());
+    assert_eq!(d.graphics_counters().draw_commands, after.draw_commands);
+    assert_eq!(d.graphics_counters().submissions, after.submissions);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [64, 128, 191, 255], false);
+    eprintln!(
+        "FLO {} raw words per signed mode, warm32 CPU={elapsed:?} before={before:?} after={after:?}",
+        values.len()
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+
+#[test]
+#[ignore = "requires actual GPU; signed FLO of raw vertex X selects geometry through guest predicates"]
+fn driver_vertex_leading_bit_controls_geometry() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/vertex-leading-bit.bin");
+    data[0x4800..0x4800 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [(0x2044, 0x800), (0x204c, 9), (0x2144, 0x400)] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    assert_eq!(leading_bit_reference(POS[0][0].to_bits(), true), 30);
+    assert_eq!(leading_bit_reference(POS[1][0].to_bits(), true), 29);
+    assert_eq!(leading_bit_reference(POS[2][0].to_bits(), true), 30);
+    let r = submit(&mut d, c, b, &mut data, &words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_positions(
+        &data,
+        [255, 0, 0, 255],
+        [
+            POS[0].map(f64::from),
+            [0.5, f64::from(POS[1][1])],
+            POS[2].map(f64::from),
+        ],
+    );
+    d.retire(r.token).unwrap();
+    assert_eq!(leading_bit_reference((-0.6f32).to_bits(), true), 30);
+    d.write_backing(b, 0x3018, &(-0.6f32).to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let background: Vec<_> = (0..W * H).flat_map(|_| BG).collect();
+    d.write_backing(b, RT as u64, &background, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none());
+    assert_eq!(r.progress.draws_submitted, 1);
+    let after = d.graphics_counters();
+    assert_eq!(after.vertex_shader_decodes, before.vertex_shader_decodes);
+    assert_eq!(after.pipeline_allocations, before.pipeline_allocations);
+    assert_eq!(after.vertex_upload_bytes - before.vertex_upload_bytes, 72);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_positions(
+        &data,
+        [255, 0, 0, 255],
+        [
+            POS[0].map(f64::from),
+            [f64::from(-0.6f32), f64::from(POS[1][1])],
+            POS[2].map(f64::from),
+        ],
+    );
+    eprintln!("VS FLO geometry {:?}", d.graphics_counters());
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

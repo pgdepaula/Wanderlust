@@ -1508,3 +1508,19 @@ hazards remain conservative, while texture-handle and perspective proofs are
 cleared. POPC neither initializes nor overwrites P0. WGSL countOneBits operates
 on the raw source, after optional bit inversion, in both entry points. No GPU
 driver/runtime API or completion semantics change.
+
+## Highest non-sign bit
+
+Both stages accept unconditional non-SH FLO from a ready GPR/RZ, in unsigned
+or signed mode. Unsigned finds the highest one bit; signed negative inputs
+find the highest zero bit. No qualifying bit returns raw FFFFFFFF. WGSL
+firstLeadingBit implements these two cases; its signed result is bitcast back
+to u32 so the -1 sentinel retains its original bits. Destination/source aliases
+are supported. No guest numeric float conversion is involved.
+
+Like POPC, SM50 FLO requires unused write barrier zero and an explicit wait
+before consuming, overwriting or exporting its result. This applies even to
+RZ and sentinel-producing inputs. Source register metadata, conservative FMUL
+hazards and invalidation of TEX/PositionW/reciprocal proofs are retained. FLO
+leaves P0 unchanged. SH, inversion, CC, predicates, immediate/cbuf sources and
+alternate scoreboard configurations remain unsupported.

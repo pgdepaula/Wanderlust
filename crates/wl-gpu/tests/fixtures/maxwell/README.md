@@ -347,3 +347,23 @@ also have independently assembled GM107 evidence. SHA-256 including SPH:
 - vertex-popcount.bin:bee5997189994b80fa718fc8406b2de9ac01ef6314fa36cc4a7327cb03c5b5e4
 
 These contain independently assembled synthetic instructions only.
+
+`leading-bit`, `leading-bit-signed` and `vertex-leading-bit` each retain a
+validated stage header plus 128 original-envyas-assembled code bytes. The two
+fragment variants differ only in FLO signed bit 48. Both load raw source and
+expected result, alias R4 with FLO at PC0x68, explicitly wait before ISETP,
+and export [64,128,191,255] on success. Sentinel FFFFFFFF is compared as raw
+u32, avoiding any reliance on a host NaN color output.
+
+The vertex program uses signed FLO at PC0x78 and compares against 29 after
+wait1. Only initial guest X=+.6 matches and moves to finite +.5; negative X
+values have highest non-sign bit30. Changing the second guest X to-.6 disables
+that move and changes asymmetric analytic coverage. Ordinary AST exports
+position/UV; no host geometry substitute is involved. SHA-256 including SPH:
+
+- leading-bit.bin:e8897606e7d10309589d8ff4afdc56e2c4d099c26c6c4ec17b2e8e21870b8652
+- leading-bit-signed.bin:383d9bacceb97265425b33547020c1bbdfde181b3ac4a68784fd39e0d325b107
+- vertex-leading-bit.bin:f92917ec3b2a6db3ecbf9cd39dfdbcf90dd6805a5f13bdebb180c5ca5ff2f73a
+
+These are independently assembled synthetic programs. SH/inversion/CC remain
+unsupported, rather than inferred from the ordinary instruction forms.
