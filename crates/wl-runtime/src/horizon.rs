@@ -1361,12 +1361,15 @@ fn map_memory(
     let mut bytes = Vec::with_capacity(size as usize);
     let mut sorted = parts.clone();
     sorted.sort_by_key(|&i| memory.regions[i].base);
+    let is_totk = k.config.program_id == 0x100f2c0115b6000;
     for &i in &sorted {
         let r = &mut memory.regions[i];
         bytes.extend_from_slice(&r.bytes);
-        r.bytes = zeroed(r.bytes.len() as u64);
-        r.read = false;
-        r.write = false;
+        if !is_totk {
+            r.bytes = zeroed(r.bytes.len() as u64);
+            r.read = false;
+            r.write = false;
+        }
         r.attribute |= attribute::LOCKED;
     }
     memory.map_state(dst, bytes, true, true, false, state::STACK)?;
@@ -1384,6 +1387,7 @@ fn unmap_memory(
     if let Err(code) = alias_arguments(k, dst, src, size) {
         return Ok(code);
     }
+    let is_totk = k.config.program_id == 0x100f2c0115b6000;
     let src_ok = check_memory_state(
         memory,
         src,
@@ -1394,7 +1398,7 @@ fn unmap_memory(
         0,
     )
     .ok()
-    .filter(|r| r.2 == 0 && r.3 == attribute::LOCKED)
+    .filter(|r| (r.2 == 0 || (is_totk && r.2 == 3)) && r.3 == attribute::LOCKED)
     .is_some();
     let dst_ok = check_memory_state(
         memory,

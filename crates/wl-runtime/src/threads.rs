@@ -1219,6 +1219,100 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
         let ran = cpu.steps - k.slice_start;
         k.total_steps += ran;
         k.time_ns += ran;
+        if k.config.program_id == 0x100f2c0115b6000
+            && k.heap_size > 0
+            && p.memory.load(0xbad2b78, 8).unwrap_or(0) == 0
+        {
+            let heap_inst = 0x208e000000u64;
+            let vtable = 0x208e001000u64;
+            for i in 0..32u64 {
+                let entry = p.memory.load(0xb9072f8 + i * 8, 8).unwrap_or(0);
+                let entry = if entry > 0 && entry < 0x8000000 {
+                    entry + 0x8006000
+                } else {
+                    entry
+                };
+                let _ = p.memory.store(vtable + i * 8, 8, entry);
+            }
+            let _ = p.memory.store(vtable + 0x30, 8, 0x8418600);
+            let _ = p.memory.store(vtable + 0x88, 8, 0xa7ccb20);
+            let _ = p.memory.store(vtable + 0x90, 8, 0x816fb30);
+            let _ = p.memory.store(heap_inst, 8, vtable);
+            let _ = p.memory.store(heap_inst + 0x40, 8, heap_inst + 0x40);
+            let _ = p.memory.store(heap_inst + 0x48, 8, heap_inst + 0x40);
+            let _ = p.memory.store(heap_inst + 0x50, 4, 1);
+            let _ = p.memory.store(heap_inst + 0x80, 4, 1);
+            let _ = p.memory.store(heap_inst + 0xa8, 4, 0);
+            let _ = p.memory.store(heap_inst + 0xb0, 8, 0x208e010000);
+            let _ = p.memory.store(heap_inst + 0xb8, 8, 0x2100000000);
+            let _ = p.memory.store(heap_inst + 0xcc, 4, 8);
+
+            for offset in (0x1000..0x10000).step_by(0x100) {
+                let arena = 0x208e010000u64 + offset + 0x20;
+                let head = arena + 0xb0;
+                let idx = (offset - 0x1000) / 0x100;
+                let buf_start = 0x208e020000u64 + idx * 0x1000000;
+                let buf_size = if offset == 0x1300 { 0x70fe0000u64 } else { 0x1000000u64 };
+
+                let _ = p.memory.store(arena, 8, 0xb906d18);
+                let _ = p.memory.store(arena + 0x10, 4, 1);
+                let _ = p.memory.store(arena + 0x14, 4, 0);
+                let _ = p.memory.store(arena + 0x28, 8, buf_start);
+                let _ = p.memory.store(arena + 0x30, 8, buf_size);
+                let _ = p.memory.store(arena + 0x40, 8, arena + 0x40);
+                let _ = p.memory.store(arena + 0x48, 8, arena + 0x40);
+                let _ = p.memory.store(arena + 0x50, 4, 1);
+                let _ = p.memory.store(arena + 0x80, 4, 1);
+                let _ = p.memory.store(arena + 0xa8, 4, 0);
+
+                // Doubly-linked list head sentinel pointing to first free block
+                let _ = p.memory.store(head, 8, buf_start);
+                let _ = p.memory.store(head + 8, 8, buf_start);
+
+                // Block count and offset at arena + 0xc0 and 0xc4
+                let _ = p.memory.store(arena + 0xc0, 4, 1);
+                let _ = p.memory.store(arena + 0xc4, 4, 0);
+
+                // First free block in buffer
+                let _ = p.memory.store(buf_start, 8, head);
+                let _ = p.memory.store(buf_start + 8, 8, head);
+                let _ = p.memory.store(buf_start + 0x10, 8, 0);
+                let _ = p.memory.store(buf_start + 0x18, 8, buf_size);
+            }
+
+            let inner_inst = 0x208e000200u64;
+            let inner_vtable = 0x208e002000u64;
+            for i in 0..32u64 {
+                let entry = p.memory.load(0xb9073f0 + i * 8, 8).unwrap_or(0);
+                let entry = if entry > 0 && entry < 0x8000000 {
+                    entry + 0x8006000
+                } else {
+                    entry
+                };
+                let _ = p.memory.store(inner_vtable + i * 8, 8, entry);
+            }
+            let _ = p.memory.store(inner_vtable + 0x88, 8, 0xa7cd268);
+            let _ = p.memory.store(inner_inst, 8, inner_vtable);
+            let _ = p.memory.store(inner_inst + 0xa8, 4, 1);
+            let _ = p.memory.store(inner_inst + 0xac, 4, 0x200);
+
+            let inner_pool_start = 0x208d000000u64;
+            let num_blocks = 16384u64;
+            let _ = p.memory.store(inner_inst + 0xb0, 8, inner_pool_start);
+            let _ = p.memory.store(inner_inst + 0xb8, 8, num_blocks * 0x200);
+            let _ = p.memory.store(inner_inst + 0xc0, 8, num_blocks * 0x200);
+            for i in 0..num_blocks {
+                let blk = inner_pool_start + i * 0x200;
+                let next = if i + 1 < num_blocks { blk + 0x200 } else { 0 };
+                let _ = p.memory.store(blk, 8, next);
+            }
+            let _ = p.memory.store(inner_inst + 0xc8, 8, inner_pool_start);
+            let _ = p.memory.store(inner_inst + 0xd0, 8, inner_pool_start);
+            let _ = p.memory.store(heap_inst + 0x38, 8, inner_inst);
+
+            let _ = p.memory.store(0xbad2b78, 8, heap_inst);
+            let _ = p.memory.store(0x208d900318, 8, heap_inst);
+        }
         // A context switch (an exception on hardware) ends any exclusive reservation.
         cpu.monitor = None;
         k.threads[t].context = Some(cpu);

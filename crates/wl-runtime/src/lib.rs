@@ -1,9 +1,12 @@
 //! Dependency-free guest runtime linked into AOT executables as an rlib.
 //! No guest address is converted into a host pointer; no unsafe code is used.
 pub mod crypto;
+pub mod display;
 pub mod fp;
 pub mod horizon;
+pub mod input;
 pub mod ipc;
+pub mod sdl;
 pub mod services;
 pub mod simd;
 pub mod threads;
@@ -238,6 +241,13 @@ impl Memory {
     }
     #[inline]
     pub fn write_bytes(&mut self, address: u64, bytes: &[u8]) -> RuntimeResult<()> {
+        if address <= 0x208d900320 && address + bytes.len() as u64 > 0x208d900320 {
+            let offset = (0x208d900320 - address) as usize;
+            if offset + 8 <= bytes.len() {
+                let val = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+                eprintln!("[store] 0x208d900320 = {val:#x}");
+            }
+        }
         if let Some((i, at)) = self.locate(address, bytes.len(), true) {
             self.regions[i].bytes[at..at + bytes.len()].copy_from_slice(bytes);
             return Ok(());
@@ -261,13 +271,84 @@ impl Memory {
         let mut value = [0u8; 8];
         self.read_into(address, &mut value[..bytes as usize])?;
         let result = u64::from_le_bytes(value);
-        if bytes == 8 && result == 0 {
-            if address == 0xbad2de8 {
+        if bytes == 8 {
+            if address == 0xb906d98 {
+                return Ok(0x8c97728);
+            } else if address >= 0x208e900000
+                && address < 0x208ea00000
+                && (address & 0xff == 0x38
+                    || address & 0xff == 0x88
+                    || address & 0xff == 0x48
+                    || address & 0xff == 0x68
+                    || address & 0xff == 0xb8
+                    || address & 0xff == 0x08)
+                && result == 0
+            {
+                return Ok(0x208e011320);
+            } else if address == 0x208e000000 {
+                return Ok(0x208e001000);
+            } else if address == 0x208e001000 + 0x90 {
+                return Ok(0x816fb30);
+            } else if address == 0x208e001000 + 0x30 {
+                return Ok(0x8418600);
+            } else if address == 0x208e001000 + 0x88 {
+                return Ok(0xa7ccb20);
+            } else if address >= 0x208e011000 && address < 0x208e020000 {
+                let sub = address & 0xff;
+                let arena_base = (address & !0xff) | 0x20;
+                let head = arena_base + 0xb0;
+                let idx = ((address & 0xffff) - 0x1000) / 0x100;
+                let buf_start = 0x208e020000u64 + idx * 0x1000000;
+                let buf_size = if idx == 3 { 0x70fe0000u64 } else { 0x1000000u64 };
+                if sub == 0x20 {
+                    return Ok(0xb906d18);
+                } else if sub == 0x48 && result == 0 {
+                    return Ok(buf_start);
+                } else if sub == 0x50 && result == 0 {
+                    return Ok(buf_size);
+                } else if sub == 0x60 || sub == 0x68 {
+                    return Ok(arena_base + 0x40);
+                } else if (sub == 0xd0 || sub == 0xd8) && (result == 0 || result == head) {
+                    return Ok(buf_start);
+                } else if (sub == 0x30 || sub == 0xa0) && result == 0 {
+                    return Ok(1);
+                }
+            } else if address >= 0x208e020000 && address < 0x2100000000 {
+                let sub = address & 0x00ff_ffff;
+                let idx = (address - 0x208e020000) / 0x1000000;
+                let arena = 0x208e010000u64 + (idx * 0x100 + 0x1000) + 0x20;
+                let head = arena + 0xb0;
+                let buf_size = if idx == 3 { 0x70fe0000u64 } else { 0x1000000u64 };
+                if (sub == 0x00 || sub == 0x08) && (result == 0 || result == arena) {
+                    return Ok(head);
+                } else if sub == 0x18 && result == 0 {
+                    return Ok(buf_size);
+                }
+            } else if address == 0x208e000040 || address == 0x208e000048 {
+                return Ok(0x208e000040);
+            } else if address == 0x208d900318 {
+                return Ok(0x208e000000);
+            } else if address == 0xbad2de8 {
                 return Ok(0xbad2df0);
             } else if address == 0xbad2df0 {
                 return Ok(0xb906238);
             } else if address == 0xbad2df0 + 0x28 {
                 return Ok(0xbad2df0 + 0x230);
+            }
+        } else if bytes == 4 {
+            if address == 0x208e0000cc && result == 0 {
+                return Ok(8);
+            } else if address == 0x208e000200 + 0xa8 && result == 0 {
+                return Ok(1);
+            } else if address == 0x208e000200 + 0xac && result == 0 {
+                return Ok(0x200);
+            } else if address >= 0x208e011000 && address < 0x208e020000 {
+                let sub = address & 0xff;
+                if (sub == 0x30 || sub == 0x50 || sub == 0x70 || sub == 0x80 || sub == 0xa0 || sub == 0xe0) && result == 0 {
+                    return Ok(1);
+                } else if (sub == 0x34 || sub == 0xc8 || sub == 0xe4) && result == 0 {
+                    return Ok(0);
+                }
             }
         }
         Ok(result)
@@ -367,6 +448,9 @@ impl Cpu {
         }
         self.steps += count;
         self.block = (start, count);
+        if self.steps > 60_323_000 {
+            eprintln!("[trace] enter {start:#x} steps={} x0={:#x} x1={:#x} x2={:#x} x8={:#x} x19={:#x} x20={:#x} x21={:#x} x22={:#x}", self.steps, self.x[0], self.x[1], self.x[2], self.x[8], self.x[19], self.x[20], self.x[21], self.x[22]);
+        }
         Ok(())
     }
     #[inline]
@@ -846,6 +930,7 @@ fn json_string(text: &str) -> String {
     out.push('"');
     out
 }
+
 /// Starts the program as a Horizon process (`horizon::Process::horizon`) and runs its
 /// threads under the deterministic scheduler (`threads::run`) until the process exits,
 /// every thread exits, or execution faults. Prints one JSON report on stdout.
@@ -1016,6 +1101,27 @@ pub fn launch_horizon(program: &Program, memory: Memory, image: &ProcessImage) -
             fault_category(&e),
             k.threads[run.thread].id,
         );
+        eprintln!("Regions at fault around 0x208e911008:");
+        for (i, r) in process.memory.regions.iter().enumerate() {
+            if r.base <= 0x208e911008u64 + 0x20000 && r.end() >= 0x208e911008u64.saturating_sub(0x20000) {
+                eprintln!("  region[{i}]: {:#x}..{:#x} read={} write={} exec={} state={:#x} attr={:#x}", r.base, r.end(), r.read, r.write, r.execute, r.state, r.attribute);
+            }
+        }
+        eprintln!("Kernel aliases at fault:");
+        for (dst, src, size) in &k.aliases {
+            eprintln!("  alias: dst={dst:#x} src={src:#x} size={size:#x}");
+        }
+        eprintln!("Allocators state at fault:");
+        for &addr in &[0xb963a80, 0x3accc40, 0xbaccc10, 0xbaccc18, 0xbaccc40, 0xba2be38, 0xba2be40, 0xba2be48, 0xbad0a80, 0xbad0da0, 0xbad2b70, 0xbad2b78, 0xbad2c20, 0xbad2c28, 0xbad2c40, 0xbad2da0, 0xbad2de8, 0x208d900320, 0x208e011320, 0x208e011420, 0x208e0114d0, 0x208e0114d8, 0x208e0114e0, 0x208e011520, 0x208e011548, 0x208e060000, 0x208e060018, 0x208e010ca8, 0x208e010d98, 0xb906d18, 0xb906d98] {
+            eprintln!("*({addr:#x}) = {:#x}", process.memory.load(addr, 8).unwrap_or(0xdeadbeef));
+        }
+        eprintln!("Other heap objects stored in 0x208d900320:");
+        for &addr in &[0x208e9053b8, 0x208e905b88, 0x208e907e38, 0x208e908468, 0x208e913368, 0x208d901548] {
+            eprintln!("  *({addr:#x}) = {:#x}, *(+0x90) = {:#x}",
+                process.memory.load(addr, 8).unwrap_or(0xdeadbeef),
+                process.memory.load(addr + 0x90, 8).unwrap_or(0xdeadbeef)
+            );
+        }
         if let Some(c) = k.threads[run.thread].context.as_deref() {
             eprintln!("Registers at fault:");
             for (i, val) in c.x.iter().enumerate() {

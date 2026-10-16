@@ -21,15 +21,18 @@ use wl_common::Result;
 use crate::Emitted;
 
 /// Runtime sources compiled into the `wl_guest_runtime` rlib.
-pub const RUNTIME_SOURCES: [(&str, &str); 8] = [
+pub const RUNTIME_SOURCES: [(&str, &str); 11] = [
     ("lib.rs", include_str!("../../wl-runtime/src/lib.rs")),
     ("crypto.rs", include_str!("../../wl-runtime/src/crypto.rs")),
+    ("display.rs", include_str!("../../wl-runtime/src/display.rs")),
     ("fp.rs", include_str!("../../wl-runtime/src/fp.rs")),
     (
         "horizon.rs",
         include_str!("../../wl-runtime/src/horizon.rs"),
     ),
+    ("input.rs", include_str!("../../wl-runtime/src/input.rs")),
     ("ipc.rs", include_str!("../../wl-runtime/src/ipc.rs")),
+    ("sdl.rs", include_str!("../../wl-runtime/src/sdl.rs")),
     (
         "services.rs",
         include_str!("../../wl-runtime/src/services.rs"),
