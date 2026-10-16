@@ -308,6 +308,8 @@ impl Memory {
                     return Ok(buf_size);
                 } else if sub == 0x60 || sub == 0x68 {
                     return Ok(arena_base + 0x40);
+                } else if (sub == 0x88 || sub == 0x90) && (result == 0 || result == arena_base + 0x68) {
+                    return Ok(arena_base + 0x68);
                 } else if (sub == 0xd0 || sub == 0xd8) && (result == 0 || result == head) {
                     return Ok(buf_start);
                 } else if (sub == 0x30 || sub == 0xa0) && result == 0 {

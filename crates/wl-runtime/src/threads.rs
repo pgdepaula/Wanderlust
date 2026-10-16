@@ -1262,6 +1262,9 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
                 let _ = p.memory.store(arena + 0x40, 8, arena + 0x40);
                 let _ = p.memory.store(arena + 0x48, 8, arena + 0x40);
                 let _ = p.memory.store(arena + 0x50, 4, 1);
+                let _ = p.memory.store(arena + 0x68, 8, arena + 0x68);
+                let _ = p.memory.store(arena + 0x70, 8, arena + 0x68);
+                let _ = p.memory.store(arena + 0x78, 8, 0);
                 let _ = p.memory.store(arena + 0x80, 4, 1);
                 let _ = p.memory.store(arena + 0xa8, 4, 0);
 
