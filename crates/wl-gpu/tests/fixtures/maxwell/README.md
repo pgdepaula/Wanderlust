@@ -367,3 +367,24 @@ position/UV; no host geometry substitute is involved. SHA-256 including SPH:
 
 These are independently assembled synthetic programs. SH/inversion/CC remain
 unsupported, rather than inferred from the ordinary instruction forms.
+
+`int-to-float`, `int-to-float-signed` and `vertex-int-to-float` retain the validated
+stage headers, each with 128 code bytes assembled by the original pinned envyas.
+Unsigned/signed fragment variants differ only in I2F signed-source bit13. They
+load source and independently expected binary32 bits, alias R4 at PC0x68, wait1
+before ISETP and export [64,128,191,255] on equality. Incorrect reference bits
+make red zero. Conversion words also independently match pinned MaxAs.
+
+The signed vertex conversion at PC0x78 interprets raw guest position-X bits as
+an integer for a predicate test. It compares the converted encoding against
+CE816666; only initial X=-.8 matches and moves to finite X=.5. Changing that
+vertex's guest X to-.6 gives CE81CCCD and disables the move. Converted large
+values are never exported as clip positions; normal AST exports position/UV.
+SHA-256 including SPH:
+
+- int-to-float.bin:3c912a83e78d166b4f6d3425ef765c5a0093ab697e62299f07778ce2ac1f8fb1
+- int-to-float-signed.bin:0e208255696f18d2305244d1a580a7c254e6b33ec0dd5d8cc1757e54314d308c
+- vertex-int-to-float.bin:e94e5ad765ffab19a6d942974143e9f69f423264b7c379b5f64a6fdaf6361d55
+
+Only synthetic independently assembled instructions are included. Other type
+widths and conversion modes are not implied by these fixtures.

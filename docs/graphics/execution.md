@@ -1524,3 +1524,20 @@ RZ and sentinel-producing inputs. Source register metadata, conservative FMUL
 hazards and invalidation of TEX/PositionW/reciprocal proofs are retained. FLO
 leaves P0 unchanged. SH, inversion, CC, predicates, immediate/cbuf sources and
 alternate scoreboard configurations remain unsupported.
+
+## Integer-to-float conversion in translated shaders
+
+Both supported shader stages accept scoreboarded GPR/RZ I2F RN, F32 destination
+and U32/S32 source, with no operand modifiers. Register data remains raw u32
+through the conversion; the result is the exact RN-even binary32 encoding.
+The WGSL helper uses integer packing because host numeric conversion does not
+promise this rounding choice. It is emitted once, globally before the entry
+points, only for programs containing this operation. Existing shader source
+without I2F is unchanged.
+
+The single-barrier readiness restrictions also apply to zero and aliased inputs.
+I2F does not initialize or change P0, retain texture-handle provenance, or establish
+position-W/reciprocal proofs. Conservative unfused-rounding hazard tracking
+remains intact. Mutable constants and vertex data do not specialize the helper
+or shader cache key. Other type widths, rounding modes, byte selections,
+execution predicates, modifiers and immediate/cbuf conversion forms are rejected.

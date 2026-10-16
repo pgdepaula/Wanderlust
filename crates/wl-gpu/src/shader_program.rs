@@ -139,6 +139,12 @@ pub enum Operation {
         src: u8,
         signed: bool,
     },
+    /// Scoreboarded SM50 I2F RN: 32-bit integer to exact binary32 raw bits.
+    IntToFloat {
+        dst: u8,
+        src: u8,
+        signed: bool,
+    },
     /// SM50 LOP3.LUT, three GPR/RZ sources, discarded PT predicate output.
     TernaryLogic {
         dst: u8,
@@ -714,6 +720,24 @@ impl Program {
                         bits,
                         operator,
                     }
+                } else if word & !0x000000000ff020ff == 0x5cb8000000070a00 {
+                    // Bits 15:8 describe destination/source types, not a GPR.
+                    // Only F32 <- U32/S32, RN, ordinary GPR/RZ is supported.
+                    let src = ((word >> 20) & 255) as u8;
+                    if write_barrier != 0
+                        || pending.iter().any(|v| *v)
+                        || !initialized[src as usize]
+                    {
+                        return Err(fail(
+                            "I2F requires ready source and unused write barrier zero",
+                        ));
+                    }
+                    pending[dst as usize] = true;
+                    Operation::IntToFloat {
+                        dst,
+                        src,
+                        signed: word & (1 << 13) != 0,
+                    }
                 } else if word & !0x000100000ff000ff == 0x5c30000000070000 {
                     let src = ((word >> 20) & 255) as u8;
                     if write_barrier != 0
@@ -992,6 +1016,7 @@ impl Program {
                         Operation::Constant { .. }
                             | Operation::CountBits { .. }
                             | Operation::LeadingBit { .. }
+                            | Operation::IntToFloat { .. }
                             | Operation::Integer {
                                 operator: IntegerOperator::Multiply,
                                 ..
@@ -1043,6 +1068,7 @@ impl Program {
                     Operation::Move { src, .. }
                     | Operation::CountBits { src, .. }
                     | Operation::LeadingBit { src, .. }
+                    | Operation::IntToFloat { src, .. }
                     | Operation::BitfieldExtract { src, .. }
                     | Operation::LogicImmediate { src, .. }
                     | Operation::AddImmediate { src, .. } => multiply_result[src as usize],
@@ -1137,6 +1163,7 @@ impl Program {
                 Operation::Move { dst, src }
                 | Operation::CountBits { dst, src, .. }
                 | Operation::LeadingBit { dst, src, .. }
+                | Operation::IntToFloat { dst, src, .. }
                 | Operation::BitfieldExtract { dst, src, .. }
                 | Operation::ConditionalMove { dst, src, .. }
                 | Operation::LogicImmediate { dst, src, .. }
@@ -1172,7 +1199,8 @@ impl Program {
     }
     pub fn wgsl(&self) -> String {
         use std::fmt::Write;
-        let mut s = String::from(
+        let mut s = stage_source(
+            &self.operations,
             "struct Constants { words: array<vec4<u32>,16> };\n@group(0) @binding(0) var<uniform> cb: Constants;\n",
         );
         if self.texture_input.is_some() {
@@ -1257,6 +1285,9 @@ impl Program {
                 Operation::LeadingBit { dst, src, signed } => {
                     emit_leading_bit(&mut s, dst, src, signed);
                 }
+                Operation::IntToFloat { dst, src, signed } => {
+                    emit_int_to_float(&mut s, dst, src, signed);
+                }
                 Operation::TernaryLogic { dst, first, second, third, lut } => {
                     emit_ternary(&mut s, dst, first, second, third, lut);
                 }
@@ -1328,7 +1359,8 @@ impl VertexProgram {
     }
     pub(crate) fn wgsl_for_raster(&self, flip_y: bool, perspective: bool) -> String {
         use std::fmt::Write;
-        let mut s = String::from(
+        let mut s = stage_source(
+            self.operations(),
             "struct Vertex { @builtin(position) position:vec4<f32>, @location(0) @interpolate(linear) uv:vec2<f32> };\n@vertex fn vs_main(@location(0) a0:vec4<f32>,@location(1) a1:vec2<f32>)->Vertex {var r:array<u32,256>;var v:Vertex;\n",
         );
         if self.operations().iter().any(|op| {
@@ -1481,6 +1513,9 @@ impl VertexProgram {
                 Operation::LeadingBit { dst, src, signed } => {
                     emit_leading_bit(&mut s, dst, src, signed);
                 }
+                Operation::IntToFloat { dst, src, signed } => {
+                    emit_int_to_float(&mut s, dst, src, signed);
+                }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
                 Operation::ConditionalMove { dst, src, invert } => {
@@ -1498,6 +1533,30 @@ impl VertexProgram {
         }
         s
     }
+}
+
+fn stage_source(operations: &[Operation], header: &str) -> String {
+    // Global helper must precede both entry points; vertex headers already open
+    // the function body. Existing shader text stays identical without I2F.
+    let helper = if operations
+        .iter()
+        .any(|op| matches!(op, Operation::IntToFloat { .. }))
+    {
+        include_str!("i2f.wgsl")
+    } else {
+        ""
+    };
+    let mut source = String::with_capacity(helper.len() + header.len());
+    source.push_str(helper);
+    source.push_str(header);
+    source
+}
+
+fn emit_int_to_float(s: &mut String, dst: u8, src: u8, signed: bool) {
+    use std::fmt::Write;
+    // WGSL numeric conversion permits either adjacent representable float.
+    // Integer-only packing makes Maxwell RN-even independent of that choice.
+    writeln!(s, "r[{dst}]=wl_i2f_rn_bits(r[{src}],{signed});").unwrap();
 }
 
 fn emit_leading_bit(s: &mut String, dst: u8, src: u8, signed: bool) {

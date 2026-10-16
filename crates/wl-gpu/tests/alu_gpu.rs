@@ -2367,3 +2367,351 @@ fn driver_vertex_leading_bit_controls_geometry() {
     eprintln!("VS FLO geometry {:?}", d.graphics_counters());
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+fn int_to_float_reference(word: u32, signed: bool) -> u32 {
+    // Independent oracle: binary-search adjacent positive binary32 numbers.
+    // Every u32/i32 and every candidate f32 is exact in f64. Choose the nearer
+    // candidate, then even encoding on ties. No production bit-packing steps
+    // or integer-to-f32 conversion are used to derive the expected result.
+    let value = if signed {
+        f64::from(word as i32)
+    } else {
+        f64::from(word)
+    };
+    let magnitude = value.abs();
+    let mut low = 0u32;
+    let mut high = 0x4f800000u32; // 2^32, includes rounded UINT_MAX.
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if f64::from(f32::from_bits(mid)) < magnitude {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    let upper = low;
+    let bits = if upper == 0 || f64::from(f32::from_bits(upper)) == magnitude {
+        upper
+    } else {
+        let lower = upper - 1;
+        let down = magnitude - f64::from(f32::from_bits(lower));
+        let up = f64::from(f32::from_bits(upper)) - magnitude;
+        if down < up || (down == up && lower & 1 == 0) {
+            lower
+        } else {
+            upper
+        }
+    };
+    bits | if value < 0.0 { 0x80000000 } else { 0 }
+}
+
+fn int_to_float_draw(
+    d: &mut GpuDriver,
+    c: ChannelId,
+    b: BackingId,
+    data: &mut [u8],
+    words: &[u32],
+    value: u32,
+    expected: u32,
+) {
+    let mut bytes = [0u8; 8];
+    bytes[..4].copy_from_slice(&value.to_le_bytes());
+    bytes[4..].copy_from_slice(&expected.to_le_bytes());
+    d.write_backing(b, 0x50, &bytes, &mut mem(data)).unwrap();
+    let r = submit(d, c, b, data, words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    d.publish(c, &mut mem(data)).unwrap();
+    check(
+        data,
+        if expected == int_to_float_reference(value, false) {
+            [64, 128, 191, 255]
+        } else {
+            [0, 128, 191, 255]
+        },
+        false,
+    );
+    d.retire(r.token).unwrap();
+}
+
+#[test]
+#[ignore = "requires actual GPU; variable-latency I2F RN32 exact signed/unsigned rounding, RZ and aliases"]
+fn driver_int_to_float_dynamic_words_and_wait_coherence() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/int-to-float.bin");
+    data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x2144, 0x600),
+        (0x214c, 7),
+        (0x2380, 24),
+        (0x2384, 0),
+        (0x2388, 0x40040),
+        (0x2490, 1),
+    ] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let original = u64::from_le_bytes(bin[0x68..0x70].try_into().unwrap());
+    assert_eq!(original, 0x5cb8000000470a04);
+    let draw_words = draw();
+    let mut values = vec![
+        0,
+        u32::MAX,
+        0x80000000,
+        0x7fffffff,
+        0xfeffffff,
+        0xfefffffd,
+        0xfdfffffe,
+        0xfdfffffa,
+    ];
+    for bit in 0..32 {
+        values.push(1 << bit);
+        values.push(!(1 << bit));
+        values.push(((1u64 << bit) - 1) as u32);
+    }
+    // Half-ULP ties above 2^24: even, odd and significand carry. Include the
+    // last adjacent integer on each side; u64 prevents generating overflow.
+    for exponent in 24..32 {
+        let unit = 1u64 << (exponent - 23);
+        let base = 1u64 << exponent;
+        for candidate in [
+            base + unit / 2,
+            base + unit + unit / 2,
+            (1u64 << (exponent + 1)) - unit / 2,
+        ] {
+            for value in [candidate - 1, candidate, candidate + 1] {
+                if let Ok(word) = u32::try_from(value) {
+                    values.push(word);
+                }
+            }
+        }
+    }
+    let mut seed = 0x49324631u32;
+    for _ in 0..32 {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        values.push(seed);
+    }
+    let mut first = true;
+    for signed in [false, true] {
+        let op = original | (u64::from(signed) << 13);
+        d.write_backing(b, 0x4668, &op.to_le_bytes(), &mut mem(&mut data))
+            .unwrap();
+        let mut identity = None;
+        for &value in &values {
+            let expected = int_to_float_reference(value, signed);
+            let mut bytes = [0u8; 8];
+            bytes[..4].copy_from_slice(&value.to_le_bytes());
+            bytes[4..].copy_from_slice(&expected.to_le_bytes());
+            d.write_backing(b, 0x50, &bytes, &mut mem(&mut data))
+                .unwrap();
+            let r = submit(
+                &mut d,
+                c,
+                b,
+                &mut data,
+                if first { &words } else { &draw_words },
+            );
+            first = false;
+            assert!(
+                r.fault.is_none(),
+                "value={value:#x} signed={signed}: {:?}",
+                r.fault
+            );
+            assert_eq!(r.progress.draws_submitted, 1);
+            d.publish(c, &mut mem(&mut data)).unwrap();
+            check(&data, [64, 128, 191, 255], false);
+            d.retire(r.token).unwrap();
+            let n = d.graphics_counters();
+            let now = [
+                n.shader_decodes,
+                n.shader_module_allocations,
+                n.pipeline_allocations,
+            ];
+            if let Some(old) = identity {
+                assert_eq!(now, old);
+            }
+            identity = Some(now);
+        }
+    }
+    // Restore unsigned I2F and deliberately provide an incorrect reference.
+    d.write_backing(b, 0x4668, &original.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    int_to_float_draw(&mut d, c, b, &mut data, &draw_words, 0x89abcdef, 0);
+    let before = d.graphics_counters();
+    int_to_float_draw(
+        &mut d,
+        c,
+        b,
+        &mut data,
+        &draw_words,
+        0x89abcdef,
+        int_to_float_reference(0x89abcdef, false),
+    );
+    assert_eq!(d.graphics_counters().shader_decodes, before.shader_decodes);
+    // RZ still requires the validated scoreboard wait. Both signed modes
+    // produce positive zero, independently of the nonzero guest input.
+    for signed in [false, true] {
+        let op = (original & !(255 << 20)) | (255 << 20) | (u64::from(signed) << 13);
+        d.write_backing(b, 0x4668, &op.to_le_bytes(), &mut mem(&mut data))
+            .unwrap();
+        let mut bytes = [0u8; 8];
+        bytes[..4].copy_from_slice(&0x89abcdefu32.to_le_bytes());
+        bytes[4..].copy_from_slice(&0u32.to_le_bytes());
+        d.write_backing(b, 0x50, &bytes, &mut mem(&mut data))
+            .unwrap();
+        let r = submit(&mut d, c, b, &mut data, &draw_words);
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert_eq!(r.progress.draws_submitted, 1);
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        check(&data, [64, 128, 191, 255], false);
+        d.retire(r.token).unwrap();
+    }
+    let bytes: Vec<_> = draw_words.iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let start = std::time::Instant::now();
+    for _ in 0..32 {
+        let r = submit_existing(&mut d, c, &mut data, 8);
+        assert!(r.fault.is_none());
+        assert_eq!(r.progress.draws_submitted, 1);
+    }
+    let elapsed = start.elapsed();
+    let after = d.graphics_counters();
+    assert_eq!(after.draw_commands - before.draw_commands, 32);
+    assert_eq!(after.submissions - before.submissions, 32);
+    assert_eq!(
+        [
+            after.shader_binary_bytes,
+            after.vertex_shader_bytes,
+            after.shader_decodes,
+            after.vertex_shader_decodes,
+            after.descriptor_reads,
+            after.vertex_guest_bytes,
+            after.index_guest_bytes,
+            after.constant_guest_bytes,
+            after.guest_texture_bytes,
+            after.render_target_guest_bytes,
+            after.upload_bytes,
+            after.upload_calls,
+            after.shader_module_allocations,
+            after.pipeline_allocations,
+            after.readback_operations,
+            after.synchronization_points
+        ],
+        [
+            before.shader_binary_bytes,
+            before.vertex_shader_bytes,
+            before.shader_decodes,
+            before.vertex_shader_decodes,
+            before.descriptor_reads,
+            before.vertex_guest_bytes,
+            before.index_guest_bytes,
+            before.constant_guest_bytes,
+            before.guest_texture_bytes,
+            before.render_target_guest_bytes,
+            before.upload_bytes,
+            before.upload_calls,
+            before.shader_module_allocations,
+            before.pipeline_allocations,
+            before.readback_operations,
+            before.synchronization_points
+        ]
+    );
+    // Remove only the consumer's wait. A fault must not replay/append work and
+    // must leave all 32 previously accepted GPU draws available for publication.
+    let ctl = u64::from_le_bytes(bin[0x70..0x78].try_into().unwrap());
+    d.write_backing(
+        b,
+        0x4670,
+        &(ctl & !(1 << 11)).to_le_bytes(),
+        &mut mem(&mut data),
+    )
+    .unwrap();
+    let failed = submit(&mut d, c, b, &mut data, &draw_words);
+    assert!(failed.fault.is_some());
+    assert_eq!(d.graphics_counters().draw_commands, after.draw_commands);
+    assert_eq!(d.graphics_counters().submissions, after.submissions);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [64, 128, 191, 255], false);
+    eprintln!(
+        "I2F {} raw words per signed mode, warm32 CPU={elapsed:?} before={before:?} after={after:?}",
+        values.len()
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+
+#[test]
+#[ignore = "requires actual GPU; signed I2F of raw vertex X selects finite geometry through guest predicates"]
+fn driver_vertex_int_to_float_controls_geometry() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/vertex-int-to-float.bin");
+    data[0x4800..0x4800 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [(0x2044, 0x800), (0x204c, 9), (0x2144, 0x400)] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    assert_eq!(
+        int_to_float_reference(POS[0][0].to_bits(), true),
+        0xce816666
+    );
+    assert_eq!(
+        int_to_float_reference(POS[1][0].to_bits(), true),
+        0x4e7c6666
+    );
+    assert_eq!(
+        int_to_float_reference(POS[2][0].to_bits(), true),
+        0xce836666
+    );
+    let r = submit(&mut d, c, b, &mut data, &words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_conditional_geometry(&data, 0.5);
+    d.retire(r.token).unwrap();
+    assert_eq!(
+        int_to_float_reference((-0.6f32).to_bits(), true),
+        0xce81cccd
+    );
+    d.write_backing(b, 0x3000, &(-0.6f32).to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let background: Vec<_> = (0..W * H).flat_map(|_| BG).collect();
+    d.write_backing(b, RT as u64, &background, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none());
+    assert_eq!(r.progress.draws_submitted, 1);
+    let after = d.graphics_counters();
+    assert_eq!(after.vertex_shader_decodes, before.vertex_shader_decodes);
+    assert_eq!(after.pipeline_allocations, before.pipeline_allocations);
+    assert_eq!(after.vertex_upload_bytes - before.vertex_upload_bytes, 72);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_conditional_geometry(&data, f64::from(-0.6f32));
+    eprintln!("VS I2F geometry {:?}", d.graphics_counters());
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+
+#[test]
+fn integer_conversion_reference_has_exact_rn_even_boundaries() {
+    for (word, signed, bits) in [
+        (0, false, 0),
+        (0, true, 0),
+        (0xffffffff, false, 0x4f800000),
+        (0xffffffff, true, 0xbf800000),
+        (0x7fffffff, true, 0x4f000000),
+        (0x80000000, true, 0xcf000000),
+        (0x01000001, false, 0x4b800000),
+        (0x01000003, false, 0x4b800002),
+        (0xfeffffff, true, 0xcb800000),
+        (0xfefffffd, true, 0xcb800002),
+    ] {
+        assert_eq!(int_to_float_reference(word, signed), bits);
+    }
+}

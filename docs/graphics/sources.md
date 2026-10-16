@@ -9,7 +9,7 @@ dependency checksums and actual selected versions are recorded in `Cargo.lock`.
 |---|---|---|
 | wgpu 26.0.1 / Naga 26 | [`0c978d0d46c7eaf68f6d1ecf2ea1bd03a96b7c47`](https://github.com/gfx-rs/wgpu/tree/0c978d0d46c7eaf68f6d1ecf2ea1bd03a96b7c47) | MIT/Apache-2.0 native backend and controlled WGSL validation. wgpu declares Rust 1.84, compatible with this workspace's Rust 1.85 floor. |
 | tegra_swizzle 0.4.0 | [`6fb9dfef9e6630bd155632802b3ead5ce5c656c8`](https://github.com/ScanMountGoat/tegra_swizzle/tree/6fb9dfef9e6630bd155632802b3ead5ce5c656c8) | MIT safe Rust Tegra X1 tiling. Reuse the library behind bounded geometry/input checks instead of maintaining another converter. |
-| stats_alloc 0.1.10 | [instrumented allocator source](https://docs.rs/stats_alloc/0.1.10/src/stats_alloc/lib.rs.html) | MIT development-only process-wide Rust allocation measurement; no custom unsafe allocator in this project. |
+| stats_alloc 0.1.10 | [instrumented allocator source](https://docs.rs/stats_alloc/0.1.10/src/stats_alloc/lib.rs.html) | MIT development-only Rust allocation measurement. Calibrated test-thread scopes forward allocation to the system allocator and exclude unrelated harness threads. |
 
 wgpu remains actively developed: inspected upstream trunk was
 [`1f3a1fbb4747a13cd63eeeeb1784788e295c21b9`](https://github.com/gfx-rs/wgpu/commit/1f3a1fbb4747a13cd63eeeeb1784788e295c21b9).
@@ -1173,3 +1173,36 @@ The existing single-barrier WB0/wait1 contract is mandatory. SH bit 41 is
 excluded because its zero-result behavior is not resolved by the examined
 references; inversion bit 40, CC bit 47, execution predicates and other source forms
 are also outside the accepted subset. No general FLO/CLZ support is implied.
+
+## SM50 I2F RN32 and host conversion precision
+
+The pinned [GM107 opcode table](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/gm107.c),
+[NAK SM50 OpI2F encoder](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs#L1842-L1880)
+and original MaxAs grammar at `54eda7af086a46c9dae1688b691968235d560164`
+agree on GPR opcode 5cb8, destination bits 7:0, source bits 27:20 and signed-source
+bit 13. Bits 9:8 and 11:10 encode destination and source widths; both equal 2
+for F32 <- U32/S32. These fields must not be interpreted as a source register.
+The strict unconditional RN base is `5cb8000000070a00`, variable mask
+`000000000ff020ff`. Original envyas independently assembles all three fixtures;
+MaxAs independently matches their conversion words. NAK and pinned UAM latency
+classification require scoreboard readiness; the bounded WB0/wait1 contract
+is retained, including RZ and destination/source aliases. Other widths, rounding
+modes, byte suboperations, NEG, ABS, CC, execution predicates and non-GPR source
+forms remain excluded.
+
+[CUDA 8 PTX rounding modifiers](https://docs.nvidia.com/cuda/archive/8.0/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cvt)
+define RN as nearest with even ties. However,
+[WGSL numeric conversion](https://www.w3.org/TR/2026/CRD-WGSL-20260921/#numeric-scalar-conversion-to-floating-point)
+permits either adjacent floating-point value for inexact integer conversion.
+A bare `f32(integer)` therefore does not establish Maxwell RN semantics.
+The shared lowering packs binary32 using only bounded unsigned integer
+operations: signed magnitude, leading bit, discarded-bit comparison, even tie
+selection and significand carry. Zero produces positive zero; INT_MIN is handled
+without signed overflow. All 32-bit integer inputs convert to finite normal
+values or zero, avoiding subnormal and NaN-payload ambiguities.
+
+The pixel-test oracle independently searches adjacent IEEE binary32 encodings
+using exact f64 distances, rather than reproducing the packing algorithm. A
+separate exact rational oracle also verifies boundary and seeded cases. Only
+semantic/encoding evidence is used from the referenced compilers; no compiler
+implementation or restrictive-license assembler source is imported.

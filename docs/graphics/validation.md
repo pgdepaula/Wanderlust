@@ -2592,3 +2592,73 @@ test binaries. A nested cmd/PowerShell launch was additionally attempted, but
 WSL interop again failed at UtilAcceptVsock/accept4 before GPU startup; no new
 D3D12/Vulkan execution passes are claimed. These are synthetic independently
 assembled programs, not original-game GPU commands or frames.
+
+## I2F RN32: integer conversion through hardware-selected shaders
+
+Original-envyas unsigned/signed fragment programs and a signed vertex program
+execute I2F through `GpuDriver`, guest GPFIFO entries, B06F/B197 and real wgpu
+rasterization. The fragment checks 208 raw words per signed mode, including
+power boundaries, even/odd half-ULP ties, significand carry, negative ties,
+INT_MIN/INT_MAX, UINT_MAX and a deterministic xorshift corpus. An independent
+binary32-neighbor search using exact f64 distances supplies expected raw bits;
+it does not reproduce the production integer-packing algorithm. Each result
+is compared by guest ISETP/SEL before outputting [64,128,191,255]. Deliberately
+incorrect reference data produces [0,128,191,255]. Both RZ modes explicitly
+produce positive zero despite a nonzero guest source buffer.
+
+The vertex program converts raw position-X bits only for an integer predicate;
+converted large values are never clip positions. Only the first initial vertex
+moves to finite X=.5. Mutating that guest X from-.8 to-.6 disables the move.
+Independent analytic coverage checks distinguish the two triangles; the vertex
+resource uploads 72 additional bytes, with no new vertex decode or pipeline.
+Missing the fragment consumer's wait faults before another draw/queue submission,
+while all earlier deferred output remains publishable without replay.
+
+Executed checks for a faithful ordinary source snapshot of `17cec29` plus the
+ten candidate Rust/WGSL/assembly/binary files, preserving Cargo.lock and the
+previous source-built homebrew fixtures:
+
+- `cargo fmt -p wl-gpu --check`: passed.
+- Strict package and workspace Clippy: passed.
+- GPU tests without default features: 265 passed, zero failures.
+- GPU tests with default features: 266 passed, zero failures, 122 GPU tests ignored.
+- Explicit WSL OpenGL run: 122 passed, zero failures or skips, llvmpipe LLVM23.1.1,
+  Mesa26.2.4. The new fragment and vertex scenarios are included.
+- `cargo test --workspace --locked --no-fail-fast`: 493 passed, three known
+  CLI/Horizon failures, 122 ignored GPU tests. These are the same preexisting
+  heap-ratio and timeout expectations; the snapshot does not include unfinished
+  runtime/AOT changes.
+- Whole-workspace formatting reports existing runtime/CLI formatting differences;
+  those files are not reformatted by this graphics change.
+
+Forty Windows GPU test executables compiled from the identical candidate bytes.
+Native execution was attempted rather than inferred: the PowerShell file launch
+was blocked by the host's script-signing policy; direct executable launch and
+launch through cmd, including an exact temporary copy on the Windows filesystem,
+failed in the WSL interoperability broker with `accept4` error110 before GPU
+adapter acquisition. No execution policy was changed, no shared WSL restart
+was attempted, and no D3D12/Vulkan pass is claimed for this candidate.
+
+Before the warm loop, the controlled fragment workload records 420 draws,
+840 queue submissions, five fragment decodes/1040 shader bytes, 3360 constant
+bytes read/2980 uploaded, eight shader modules, twelve pipelines, one target
+allocation and 419 reuses. Its 420 intentional oracle publications transfer
+3,124,800 readback bytes and 2,533,440 guest framebuffer bytes. The 32 warm draws
+add 32 queue submissions and no resource reads/uploads, shader modules,
+pipelines, target allocations, readbacks or waits. This is ordered deferred
+execution, not host draw batching or zero-copy rendering. Command acquisition
+still borrows 1280 additional bytes, including 1024 command bytes; its entry
+decode counter increases by64. Warm CPU wall time
+was 17.092ms in the full run versus 44.321ms in an earlier focused run with four
+fewer corpus words; CPU load, compiler/cache state and debug instrumentation
+were uncontrolled. Neither value is GPU time or game-frame performance. Rust
+allocator traffic is not instrumented in this new draw workload.
+
+Separately, the identical integer-only WGSL helper passed a private real OpenGL
+kernel probe for 20,792 inputs/41,584 unsigned-plus-signed results against an
+exact rational adjacent-float oracle. It used 249,504 upload bytes, 166,336
+readback bytes, one dispatch/submission and one completion wait. That isolated
+probe is mathematical/backend corroboration; it does not imply guest compute
+shader support. The delivered acceptance path is the Maxwell graphics path
+above. Only independently assembled synthetic programs are used; no original
+TOTK GPU stream or frame has been demonstrated.
