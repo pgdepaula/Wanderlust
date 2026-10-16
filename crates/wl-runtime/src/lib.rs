@@ -276,12 +276,7 @@ impl Memory {
                 return Ok(0x8c97728);
             } else if address >= 0x208e900000
                 && address < 0x208ea00000
-                && (address & 0xff == 0x38
-                    || address & 0xff == 0x88
-                    || address & 0xff == 0x48
-                    || address & 0xff == 0x68
-                    || address & 0xff == 0xb8
-                    || address & 0xff == 0x08)
+                && (address & 0xff == 0x38 || address & 0xff == 0xb8)
                 && result == 0
             {
                 return Ok(0x208e012000);
@@ -300,6 +295,8 @@ impl Memory {
                 let buf_size = 0x70fe0000u64;
                 if sub == 0x00 {
                     return Ok(0xb906d18);
+                } else if sub == 0x18 && result == 0 {
+                    return Ok(0x208e012000);
                 } else if sub == 0x28 && result == 0 {
                     return Ok(buf_start);
                 } else if sub == 0x30 && result == 0 {
