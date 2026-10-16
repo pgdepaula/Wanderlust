@@ -127,6 +127,14 @@ pub enum Operation {
         width: u8,
         signed: bool,
     },
+    /// SM50 LOP3.LUT, three GPR/RZ sources, discarded PT predicate output.
+    TernaryLogic {
+        dst: u8,
+        first: u8,
+        second: u8,
+        third: u8,
+        lut: u8,
+    },
     /// Raw 32-bit immediate logic; immediate bits are not GPR operands.
     LogicImmediate {
         dst: u8,
@@ -694,6 +702,24 @@ impl Program {
                         bits,
                         operator,
                     }
+                } else if word & !0x00007f8ffff0ffff == 0x5be7000000070000 {
+                    let first = ((word >> 8) & 255) as u8;
+                    let second = ((word >> 20) & 255) as u8;
+                    let third = ((word >> 39) & 255) as u8;
+                    if write_barrier != 7
+                        || [first, second, third]
+                            .iter()
+                            .any(|r| !initialized[*r as usize] || pending[*r as usize])
+                    {
+                        return Err(fail("unready LOP3 operand or unsupported schedule"));
+                    }
+                    Operation::TernaryLogic {
+                        dst,
+                        first,
+                        second,
+                        third,
+                        lut: ((word >> 28) & 255) as u8,
+                    }
                 } else if word & !0x0001000ffff0ffff == 0x3800000000070000 {
                     let src = ((word >> 8) & 255) as u8;
                     let offset = ((word >> 20) & 255) as u8;
@@ -948,6 +974,16 @@ impl Program {
                     Operation::Integer { left, right, .. } => {
                         multiply_result[left as usize] || multiply_result[right as usize]
                     }
+                    Operation::TernaryLogic {
+                        first,
+                        second,
+                        third,
+                        ..
+                    } => {
+                        multiply_result[first as usize]
+                            || multiply_result[second as usize]
+                            || multiply_result[third as usize]
+                    }
                     Operation::Float {
                         operator: FloatOperator::Multiply,
                         ..
@@ -1029,6 +1065,20 @@ impl Program {
                 } => {
                     largest = largest.max(u16::from(dst));
                     for r in [left, right] {
+                        if r != 255 {
+                            largest = largest.max(u16::from(r));
+                        }
+                    }
+                }
+                Operation::TernaryLogic {
+                    dst,
+                    first,
+                    second,
+                    third,
+                    ..
+                } => {
+                    largest = largest.max(u16::from(dst));
+                    for r in [first, second, third] {
                         if r != 255 {
                             largest = largest.max(u16::from(r));
                         }
@@ -1148,6 +1198,9 @@ impl Program {
                 }
                 Operation::BitfieldExtract { dst, src, offset, width, signed } => {
                     emit_bitfield(&mut s, dst, src, offset, width, signed);
+                }
+                Operation::TernaryLogic { dst, first, second, third, lut } => {
+                    emit_ternary(&mut s, dst, first, second, third, lut);
                 }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
@@ -1355,6 +1408,15 @@ impl VertexProgram {
                 } => {
                     emit_bitfield(&mut s, dst, src, offset, width, signed);
                 }
+                Operation::TernaryLogic {
+                    dst,
+                    first,
+                    second,
+                    third,
+                    lut,
+                } => {
+                    emit_ternary(&mut s, dst, first, second, third, lut);
+                }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
                 Operation::ConditionalMove { dst, src, invert } => {
@@ -1372,6 +1434,35 @@ impl VertexProgram {
         }
         s
     }
+}
+
+fn emit_ternary(s: &mut String, dst: u8, first: u8, second: u8, third: u8, lut: u8) {
+    use std::fmt::Write;
+    // Snapshot every operand before writing the destination, which may alias
+    // any of them. LUT bit index is (A_bit<<2)|(B_bit<<1)|C_bit.
+    writeln!(
+        s,
+        "{{ let a=r[{first}]; let b=r[{second}]; let c=r[{third}];"
+    )
+    .unwrap();
+    write!(s, "r[{dst}]=").unwrap();
+    let mut any = false;
+    for index in 0..8 {
+        if lut & (1 << index) != 0 {
+            let a = if index & 4 != 0 { "a" } else { "~a" };
+            let b = if index & 2 != 0 { "b" } else { "~b" };
+            let c = if index & 1 != 0 { "c" } else { "~c" };
+            if any {
+                s.push_str(" | ");
+            }
+            write!(s, "({a} & {b} & {c})").unwrap();
+            any = true;
+        }
+    }
+    if !any {
+        s.push_str("0u");
+    }
+    s.push_str("; }\n");
 }
 
 fn emit_bitfield(s: &mut String, dst: u8, src: u8, offset: u8, width: u8, signed: bool) {

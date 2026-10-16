@@ -308,3 +308,23 @@ previously validated stage headers. SHA-256 including SPH:
 - vertex-bitfield.bin:6b2c7c3dfc8a368141200a3766bf5946a56ba3175b1e16312ea36bd3612bb90b
 
 These are synthetic hardware programs without proprietary shader contents.
+
+`ternary` uses the validated PS header and 160 code bytes assembled with original
+pinned envyas. Four LDC words provide A/B/C and an independent expected word.
+LOP3 majority LUT E8 writes R4, deliberately aliasing A. ISETP.EQ compares raw
+bits, then another LOP3 with LUT00 discards its predicate output to PT and must
+preserve P0 before SEL exports red .25 on success. Green .5, blue .75 and alpha
+1 are fixed. The first LOP3 is at PC0x88; ISETP is PC0x98 and the P0 preservation
+instruction PC0xa0. Changing only LUT bits35:28 exercises every table with
+F0F0F0F0/CCCCCCCC/AAAAAAAA operands and expected `LUT * 01010101`.
+
+`vertex-ternary` has 96 code bytes: MOV32I supplies mask7FFFFFFF and LOP3 LUT C0
+computes Xbits & mask with a destination/source alias, then ordinary AST exports
+position and UV. Both programs retain validated stage headers. Their LOP3
+encodings also match the separately pinned original MaxAs assembler.
+SHA-256 including SPH:
+
+- ternary.bin:6da7d78140e0c8813f4dff98b40d48a28a06caad391e87cc5c803fbe15816d1c
+- vertex-ternary.bin:f49b1e55b1605acdf8fd9e025ffcfe8848b1b6d9197b08e96c6dd893e18933c4
+
+These contain only independently assembled synthetic shader instructions.

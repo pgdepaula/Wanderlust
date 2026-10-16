@@ -1475,3 +1475,19 @@ provenance is conservatively retained, including full-width identities and
 zero-width outputs. Extraction clears direct-LDC texture-handle, PositionW and
 reciprocal proofs; these uses require separately validated dataflow. Mutable guest
 source words remain ordinary runtime data, independent of the shader cache key.
+
+## Three-source bitwise truth tables
+
+Both stages accept all 256 LOP3.LUT tables with three ready GPR/RZ operands,
+unconditional execution, discarded PT predicate output and canonical six-cycle
+scheduling. The WGSL lowering snapshots all three source words before its one
+destination assignment, so the destination may alias any source. The result is
+the selected truth-table bit independently at each of the 32 bit positions.
+PT discard preserves existing P0 state; it does not initialize P0.
+
+All operands must be statically initialized and ready even for constant or
+identity tables. Multiplication hazards propagate from every operand. Ordinary
+pending-destination rejection applies, while TEX/PositionW/reciprocal proofs are
+cleared. Alternate predicate outputs, T/Z/NZ modes, X, CC, execution predicates
+and immediate/cbuf source forms remain unsupported. No new runtime-facing API
+or guest memory representation is introduced.

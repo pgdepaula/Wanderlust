@@ -1536,3 +1536,288 @@ fn driver_vertex_bitfield_controls_finite_position_bits() {
     eprintln!("VS BFE geometry {:?}", d.graphics_counters());
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+fn ternary_reference(a: u32, b: u32, c: u32, lut: u8) -> u32 {
+    // Independent scalar table lookup, not production's vector minterms.
+    (0..32).fold(0u32, |out, bit| {
+        let index = (((a >> bit) & 1) << 2) | (((b >> bit) & 1) << 1) | ((c >> bit) & 1);
+        out | (u32::from((lut >> index) & 1) << bit)
+    })
+}
+fn ternary_draw(
+    d: &mut GpuDriver,
+    c: ChannelId,
+    b: BackingId,
+    data: &mut [u8],
+    words: &[u32],
+    input: [u32; 4],
+    color: [u8; 4],
+) {
+    let mut bytes = [0u8; 16];
+    for (chunk, word) in bytes.chunks_exact_mut(4).zip(input) {
+        chunk.copy_from_slice(&word.to_le_bytes());
+    }
+    d.write_backing(b, 0x50, &bytes, &mut mem(data)).unwrap();
+    let r = submit(d, c, b, data, words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    d.publish(c, &mut mem(data)).unwrap();
+    check(data, color, false);
+    d.retire(r.token).unwrap();
+}
+#[test]
+#[ignore = "requires actual GPU; all256 Maxwell LOP3 LUTs, dynamic operands, aliasing and pending faults"]
+fn driver_ternary_all_tables_aliases_and_runtime_coherence() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/ternary.bin");
+    data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x2144, 0x600),
+        (0x214c, 9),
+        (0x2380, 32),
+        (0x2384, 0),
+        (0x2388, 0x40040),
+        (0x2490, 1),
+    ] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let original = u64::from_le_bytes(bin[0x88..0x90].try_into().unwrap());
+    assert_eq!(original, 0x5be7030e80570404);
+    let draw_words = draw();
+    let start = std::time::Instant::now();
+    for lut in 0..=255u8 {
+        let op = (original & !(255 << 28)) | (u64::from(lut) << 28);
+        d.write_backing(b, 0x4688, &op.to_le_bytes(), &mut mem(&mut data))
+            .unwrap();
+        // These three words enumerate ALL eight truth-table indices in each
+        // byte. Expected repeated LUT bytes follow from that independent fact.
+        let input = [
+            0xf0f0f0f0,
+            0xcccccccc,
+            0xaaaaaaaa,
+            u32::from(lut) * 0x01010101,
+        ];
+        let before = d.graphics_counters();
+        ternary_draw(
+            &mut d,
+            c,
+            b,
+            &mut data,
+            if lut == 0 { &words } else { &draw_words },
+            input,
+            [64, 128, 191, 255],
+        );
+        assert_eq!(
+            d.graphics_counters().shader_decodes,
+            before.shader_decodes + 1
+        );
+    }
+    let table_time = start.elapsed();
+    d.write_backing(b, 0x4600, bin, &mut mem(&mut data))
+        .unwrap();
+    let mut triples = vec![
+        [0, 0, 0],
+        [u32::MAX, u32::MAX, u32::MAX],
+        [0x80000000, 0x7fffffff, 1],
+        [0xaaaaaaaa, 0x55555555, 0xf0f0f0f0],
+    ];
+    let mut seed = 0x4c4f5033u32;
+    for _ in 0..32 {
+        let mut t = [0; 3];
+        for v in &mut t {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            *v = seed;
+        }
+        triples.push(t);
+    }
+    let mut identity = None;
+    for [a, z, q] in triples {
+        ternary_draw(
+            &mut d,
+            c,
+            b,
+            &mut data,
+            &draw_words,
+            [a, z, q, ternary_reference(a, z, q, 0xe8)],
+            [64, 128, 191, 255],
+        );
+        let n = d.graphics_counters();
+        let now = [
+            n.shader_decodes,
+            n.shader_module_allocations,
+            n.pipeline_allocations,
+        ];
+        if let Some(old) = identity {
+            assert_eq!(now, old);
+        }
+        identity = Some(now);
+    }
+    let a = 0x89abcdef;
+    let z = 0xaaaaaaaa;
+    let q = 0x55555555;
+    let before = d.graphics_counters();
+    ternary_draw(
+        &mut d,
+        c,
+        b,
+        &mut data,
+        &draw_words,
+        [a, z, q, ternary_reference(a, z, q, 0xe8) ^ 1],
+        [0, 128, 191, 255],
+    );
+    assert_eq!(d.graphics_counters().shader_decodes, before.shader_decodes);
+    let mut code = bin.to_vec();
+    let compare = u64::from_le_bytes(code[0x98..0xa0].try_into().unwrap());
+    for lut in [0x96u8, 0xe8, 0xca] {
+        for dst in [5u8, 6] {
+            let op = (original & !(255 | (255 << 28))) | u64::from(dst) | (u64::from(lut) << 28);
+            code[0x88..0x90].copy_from_slice(&op.to_le_bytes());
+            code[0x98..0xa0]
+                .copy_from_slice(&((compare & !(255 << 8)) | (u64::from(dst) << 8)).to_le_bytes());
+            d.write_backing(b, 0x4600, &code, &mut mem(&mut data))
+                .unwrap();
+            ternary_draw(
+                &mut d,
+                c,
+                b,
+                &mut data,
+                &draw_words,
+                [a, z, q, ternary_reference(a, z, q, lut)],
+                [64, 128, 191, 255],
+            );
+        }
+    }
+    d.write_backing(b, 0x4600, bin, &mut mem(&mut data))
+        .unwrap();
+    ternary_draw(
+        &mut d,
+        c,
+        b,
+        &mut data,
+        &draw_words,
+        [a, z, q, ternary_reference(a, z, q, 0xe8)],
+        [64, 128, 191, 255],
+    );
+    let bytes: Vec<_> = draw_words.iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let start = std::time::Instant::now();
+    for _ in 0..32 {
+        let r = submit_existing(&mut d, c, &mut data, 8);
+        assert!(r.fault.is_none());
+        assert_eq!(r.progress.draws_submitted, 1);
+    }
+    let elapsed = start.elapsed();
+    let after = d.graphics_counters();
+    assert_eq!(after.draw_commands - before.draw_commands, 32);
+    assert_eq!(after.submissions - before.submissions, 32);
+    assert_eq!(
+        [
+            after.shader_binary_bytes,
+            after.vertex_shader_bytes,
+            after.shader_decodes,
+            after.vertex_shader_decodes,
+            after.descriptor_reads,
+            after.vertex_guest_bytes,
+            after.index_guest_bytes,
+            after.constant_guest_bytes,
+            after.guest_texture_bytes,
+            after.render_target_guest_bytes,
+            after.upload_bytes,
+            after.upload_calls,
+            after.shader_module_allocations,
+            after.pipeline_allocations,
+            after.readback_operations,
+            after.synchronization_points
+        ],
+        [
+            before.shader_binary_bytes,
+            before.vertex_shader_bytes,
+            before.shader_decodes,
+            before.vertex_shader_decodes,
+            before.descriptor_reads,
+            before.vertex_guest_bytes,
+            before.index_guest_bytes,
+            before.constant_guest_bytes,
+            before.guest_texture_bytes,
+            before.render_target_guest_bytes,
+            before.upload_bytes,
+            before.upload_calls,
+            before.shader_module_allocations,
+            before.pipeline_allocations,
+            before.readback_operations,
+            before.synchronization_points
+        ]
+    );
+    d.write_backing(
+        b,
+        0x4688,
+        &(original | (1 << 38)).to_le_bytes(),
+        &mut mem(&mut data),
+    )
+    .unwrap();
+    assert!(submit(&mut d, c, b, &mut data, &draw_words).fault.is_some());
+    assert_eq!(d.graphics_counters().draw_commands, after.draw_commands);
+    assert_eq!(d.graphics_counters().submissions, after.submissions);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [64, 128, 191, 255], false);
+    eprintln!(
+        "LOP3 all256 CPU={table_time:?}, warm32 CPU={elapsed:?} before={before:?} after={after:?}"
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+
+#[test]
+#[ignore = "requires actual GPU; three-source Maxwell LUT controls guest vertex clip positions"]
+fn driver_vertex_ternary_alias_controls_geometry() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/vertex-ternary.bin");
+    data[0x4800..0x4800 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [(0x2044, 0x800), (0x204c, 7), (0x2144, 0x400)] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let r = submit(&mut d, c, b, &mut data, &words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_positions(
+        &data,
+        [255, 0, 0, 255],
+        POS.map(|p| [f64::from(p[0]).abs(), f64::from(p[1])]),
+    );
+    d.retire(r.token).unwrap();
+    d.write_backing(b, 0x3000, &(-0.4f32).to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let background: Vec<_> = (0..W * H).flat_map(|_| BG).collect();
+    d.write_backing(b, RT as u64, &background, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none());
+    assert_eq!(r.progress.draws_submitted, 1);
+    let after = d.graphics_counters();
+    assert_eq!(after.vertex_shader_decodes, before.vertex_shader_decodes);
+    assert_eq!(after.pipeline_allocations, before.pipeline_allocations);
+    assert_eq!(after.vertex_upload_bytes - before.vertex_upload_bytes, 72);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_positions(
+        &data,
+        [255, 0, 0, 255],
+        [
+            [f64::from(0.4f32), f64::from(POS[0][1])],
+            [f64::from(POS[1][0]), f64::from(POS[1][1])],
+            [f64::from(POS[2][0]).abs(), f64::from(POS[2][1])],
+        ],
+    );
+    eprintln!("VS LOP3 geometry {:?}", d.graphics_counters());
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

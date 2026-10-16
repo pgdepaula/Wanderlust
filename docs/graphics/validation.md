@@ -2430,3 +2430,54 @@ compiled; the unchanged WSL interop failure prevents native process startup,
 so no new D3D12/Vulkan execution passes are claimed. Concurrent runtime changes
 were excluded, and synthetic shader results do not establish original-game
 GPU execution.
+
+## Three-source ternary logic
+
+Original pinned envyas independently reassembles the 240-byte fragment and
+176-byte vertex fixtures exactly. All 256 LUT encodings and the three fixture
+LOP3 words also match the separately pinned MaxAs assembler. Seven CPU tests
+cover all truth tables, destination aliasing with each source, RZ, high third
+register bits, register allocation, readiness and strict modifier rejection.
+Constant and identity tables retain all source readiness and FMUL hazards, and
+clear texture, PositionW and reciprocal proofs. The discarded PT output does
+not initialize or overwrite P0. An independent per-bit oracle additionally
+checks 19,712 scalar truth-table cases.
+
+The indexed GpuDriver/GPFIFO fragment workload executes every LUT. The patterns
+F0F0F0F0, CCCCCCCC and AAAAAAAA enumerate every three-bit input combination,
+so the independently expected result is the LUT byte repeated four times.
+Mutable guest constants, 36 boundary/seeded input triples, source aliases and
+a deliberately wrong reference verify actual instruction dataflow. Correct
+results produce [64,128,191,255]; the incorrect reference changes red to zero
+without shader recompilation. A second LOP3 preserves the comparison predicate
+used by SEL. Unsupported X faults without another draw or queue submission,
+while earlier accepted output remains explicitly publishable.
+
+Before the warm sequence, 300 draws account for 600 queue submissions, 264
+fragment decodes reading 63,360 bytes, 267 shader modules and 530 pipelines.
+The 300 intentional oracle publications transfer 2,232,000 readback bytes and
+1,809,600 guest framebuffer bytes. Constant reads total 4,800 bytes and uploads
+4,780 bytes. One target allocation is reused 299 times. Thirty-two unchanged
+deferred draws add 32 queue submissions and no shader/resource reads, uploads,
+modules, pipelines, readbacks or waits. Final publication remains explicit.
+The final GL debug CPU observations were 3.467 seconds for all 256 tables and
+22.364 ms for 32 warm draws. An earlier focused run observed 17.138 seconds
+and 29.383 ms respectively; driver/disk cache state was uncontrolled. These
+are neither strictly cold compilation timings nor GPU/game performance. Rust
+allocator traffic was not separately instrumented.
+
+The vertex fixture performs guest-bitwise absolute X through LUT C0 with RZ,
+producing independently calculated asymmetric coverage. Changing the first
+guest X changes coverage with one bounded 72-byte vertex update and no shader
+or pipeline replacement. Both draws use actual guest indexed geometry.
+
+A faithful ordinary 6776b02 snapshot plus seven exact candidate Rust/fixture
+files and unchanged Cargo.lock passed GPU formatting, strict package/workspace
+Clippy, 243 graphics CPU tests per configuration and all 116 actual WSL OpenGL
+GPU scenarios, with zero GPU failures or skips. Workspace execution produced
+470 passes, the same three Horizon/CLI expectation failures and 116 ignored GPU
+tests. Concurrent runtime diagnostics were excluded; the live workspace is not
+reported green. All 40 native Windows GPU executables compiled, but the WSL
+interop startup failure still prevents actual D3D12/Vulkan execution. These
+results establish synthetic Maxwell execution, not original-game GPU commands
+or a rendered game frame.

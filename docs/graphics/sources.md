@@ -1098,3 +1098,27 @@ assembled zero-width regression uses nonzero offset 31. Explicitly encoded
 immediate-zero decoder cases are not represented as assembler-produced fixtures.
 The translation and scalar per-bit oracle are independently derived; reference
 implementation source was examined for semantics rather than copied.
+
+## SM50 three-input logic tables
+
+[CUDA 8 PTX LOP3](https://docs.nvidia.com/cuda/archive/8.0/parallel-thread-execution/index.html#logic-and-shift-instructions-lop3)
+requires SM50 and defines an eight-bit truth table with input patterns F0, CC,
+AA. Per result bit its index is `(A_bit << 2) | (B_bit << 1) | C_bit`.
+The original GM107 opcode table and the independent MIT
+[MaxAs grammar at 54eda7af086a46c9dae1688b691968235d560164](https://github.com/NervanaSystems/maxas/blob/54eda7af086a46c9dae1688b691968235d560164/lib/MaxAs/MaxAsGrammar.pm#L329)
+agree on all 256 all-GPR encodings, verified by both assemblers. MaxAs's x32T
+classification also corroborates conservative six-cycle latency. Pinned NAK's
+SM50 encoder does not implement this opcode; its SM70 encoder is not used as
+Maxwell encoding evidence.
+
+The strict form is base `5be7000000070000`, mask `00007f8ffff0ffff`:
+destination bits 7:0, A bits 15:8, B bits 27:20, LUT bits 35:28 and C bits
+46:39. C's high bits are register data, not operand modifiers. Predicate output
+bits 50:48 are fixed to discarded PT; modes 37:36, X bit 38, CC bit 47 and
+execution predication remain excluded. Every LUT value is valid in this form.
+
+The CUDA 8 example for `((a & b) | c) ^ a` contains a LUT typo; the truth-table
+equation and the corrected later PTX example give 1A. Fixtures and oracles use
+the equation rather than copying the typo. Reference implementations establish
+encoding and semantics; the minterm lowering and scalar per-bit oracle are
+independently written. No MaxAs implementation is imported into the renderer.
