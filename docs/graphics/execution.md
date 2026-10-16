@@ -1409,3 +1409,22 @@ read on false execution. Fixed scheduling and ordinary barrier waits remain
 mandatory. Multiplication hazards survive through either candidate value or the
 predicate producer. Conditional moves erase texture-handle and perspective
 proofs, including identity moves, until stronger path-sensitive proofs exist.
+
+## Ordered floating predicates
+
+Vertex and fragment programs additionally accept GPR FSETP LT, EQ, LE, GT, NE
+and GE into P0, with the complementary result discarded to PT and AND PT as
+the boolean input. Execution is unconditional. FTZ, operand modifiers, other
+predicate outputs/accumulators, unordered modes and immediate/constant operand
+forms remain unsupported. The conservative predicate latency is thirteen cycles;
+ordinary readiness and wait checks apply. Predicate writes do not modify GPR R7
+despite the instruction's low-byte predicate-pair encoding.
+
+The translation classifies IEEE binary32 input bits using integer operations,
+normalizes both signed zeros, and compares monotonic unsigned keys. Any NaN
+operand makes every ordered relation false, including NE. Subnormal bits retain
+their numerical order without relying on host floating-point flush or NaN modes.
+This exact comparison path does not establish exceptional-value equivalence for
+the separate floating arithmetic instructions. Multiplication dependencies in
+either comparison operand propagate through the resulting predicate into SEL
+and conditional MOV; existing unfused-rounding restrictions remain enforced.

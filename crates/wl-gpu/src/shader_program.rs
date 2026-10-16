@@ -12,6 +12,16 @@ pub enum FloatOperator {
     Add,
     Multiply,
 }
+/// Ordered IEEE f32 comparisons; any NaN operand makes every relation false.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatComparison {
+    Less,
+    Equal,
+    LessEqual,
+    Greater,
+    NotEqual,
+    GreaterEqual,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogicalOperator {
     And,
@@ -70,6 +80,13 @@ pub enum Operation {
         left: u8,
         right: u8,
         comparison: IntegerComparison,
+    },
+    /// Unconditional FSETP into P0, complementary output discarded to PT.
+    /// AND PT, no FTZ or source modifiers, GPR operands only.
+    FloatPredicateCompare {
+        left: u8,
+        right: u8,
+        comparison: FloatComparison,
     },
     /// Unconditionally select GPR bits using initialized P0 or its inversion.
     Select {
@@ -243,9 +260,15 @@ impl Program {
                     pending.fill(false);
                 }
                 let word = u64::from_le_bytes(b.try_into().unwrap());
-                // Predicate-producing ISETP has its own conservative fixed latency.
+                // Predicate-producing SETP has its own conservative fixed latency.
                 // Do not generalize the new stall encoding to other instructions.
-                if schedule & 31 != if word >> 52 == 0x5b6 { 13 } else { 6 } {
+                if schedule & 31
+                    != if matches!(word >> 52, 0x5b6 | 0x5bb) {
+                        13
+                    } else {
+                        6
+                    }
+                {
                     return Err(fail("unsupported instruction fixed-latency schedule"));
                 }
                 if exited {
@@ -334,6 +357,38 @@ impl Program {
                     });
                     // Predicate pair bits are not a GPR destination. In particular,
                     // do not initialize/clear R7 metadata from the low-byte value 7.
+                    continue;
+                }
+                if word & !0x000f00000ff0ff00 == 0x5bb0038000070007 {
+                    let comparison = match (word >> 48) & 15 {
+                        1 => FloatComparison::Less,
+                        2 => FloatComparison::Equal,
+                        3 => FloatComparison::LessEqual,
+                        4 => FloatComparison::Greater,
+                        5 => FloatComparison::NotEqual,
+                        6 => FloatComparison::GreaterEqual,
+                        _ => return Err(fail("unsupported ordered floating comparison mode")),
+                    };
+                    let left = ((word >> 8) & 255) as u8;
+                    let right = ((word >> 20) & 255) as u8;
+                    if write_barrier != 7
+                        || [left, right]
+                            .iter()
+                            .any(|r| !initialized[*r as usize] || pending[*r as usize])
+                    {
+                        return Err(fail(
+                            "unready floating predicate operand or unsupported schedule",
+                        ));
+                    }
+                    predicate_initialized = true;
+                    predicate_multiply =
+                        multiply_result[left as usize] || multiply_result[right as usize];
+                    out.operations.push(Operation::FloatPredicateCompare {
+                        left,
+                        right,
+                        comparison,
+                    });
+                    // The low byte is the P0/PT output pair, not GPR R7.
                     continue;
                 }
                 let dst = (word & 255) as u8;
@@ -909,7 +964,8 @@ impl Program {
                 } => {
                     largest = largest.max(u16::from(dst)).max(u16::from(multiplier));
                 }
-                Operation::PredicateCompare { left, right, .. } => {
+                Operation::PredicateCompare { left, right, .. }
+                | Operation::FloatPredicateCompare { left, right, .. } => {
                     for r in [left, right] {
                         if r != 255 {
                             largest = largest.max(u16::from(r));
@@ -978,6 +1034,7 @@ impl Program {
             matches!(
                 op,
                 Operation::PredicateCompare { .. }
+                    | Operation::FloatPredicateCompare { .. }
                     | Operation::Select { .. }
                     | Operation::ConditionalMove { .. }
             )
@@ -1011,6 +1068,9 @@ impl Program {
                 }
 
                 Operation::PredicateCompare { left, right, comparison } => emit_comparison(&mut s, left, right, comparison),
+                Operation::FloatPredicateCompare { left, right, comparison } => {
+                    emit_float_comparison(&mut s, left, right, comparison);
+                }
                 Operation::Select { dst, left, right, invert } => {
                     let condition = if invert { "!p0" } else { "p0" };
                     writeln!(s, "r[{dst}]=select(r[{right}],r[{left}],{condition});").unwrap();
@@ -1114,6 +1174,7 @@ impl VertexProgram {
             matches!(
                 op,
                 Operation::PredicateCompare { .. }
+                    | Operation::FloatPredicateCompare { .. }
                     | Operation::Select { .. }
                     | Operation::ConditionalMove { .. }
             )
@@ -1167,6 +1228,11 @@ impl VertexProgram {
                     right,
                     comparison,
                 } => emit_comparison(&mut s, left, right, comparison),
+                Operation::FloatPredicateCompare {
+                    left,
+                    right,
+                    comparison,
+                } => emit_float_comparison(&mut s, left, right, comparison),
                 Operation::Select {
                     dst,
                     left,
@@ -1352,6 +1418,28 @@ fn emit_comparison(s: &mut String, left: u8, right: u8, comparison: IntegerCompa
     } else {
         writeln!(s, "p0=r[{left}] {symbol} r[{right}];").unwrap();
     }
+}
+
+fn emit_float_comparison(s: &mut String, left: u8, right: u8, comparison: FloatComparison) {
+    use std::fmt::Write;
+    let symbol = match comparison {
+        FloatComparison::Less => "<",
+        FloatComparison::Equal => "==",
+        FloatComparison::LessEqual => "<=",
+        FloatComparison::Greater => ">",
+        FloatComparison::NotEqual => "!=",
+        FloatComparison::GreaterEqual => ">=",
+    };
+    // Integer classification preserves every subnormal and signaling-NaN bit
+    // independently of host floating comparison/flush modes. Signed zeros are
+    // equal; complementing negative encodings reverses their magnitude order.
+    writeln!(s, "{{ let a=r[{left}]; let b=r[{right}];").unwrap();
+    s.push_str("let nan=(a & 0x7fffffffu)>0x7f800000u || (b & 0x7fffffffu)>0x7f800000u;\n");
+    s.push_str(
+        "let an=select(a,0u,(a & 0x7fffffffu)==0u); let bn=select(b,0u,(b & 0x7fffffffu)==0u);\n",
+    );
+    s.push_str("let ak=select(an ^ 0x80000000u,~an,(an & 0x80000000u)!=0u); let bk=select(bn ^ 0x80000000u,~bn,(bn & 0x80000000u)!=0u);\n");
+    writeln!(s, "p0=!nan && (ak {symbol} bk); }}").unwrap();
 }
 
 fn constant_input(constants: &mut Vec<ConstantRef>, reference: ConstantRef) -> Option<u8> {

@@ -1037,3 +1037,27 @@ describes suppression of operand reads and destination writes on false
 predication. This is conditional execution, not an unconditional SEL. Requiring
 both possible GPR values ready is a conservative translation limit, not a claim
 that hardware faults on a suppressed read. No scheduling bits are ignored.
+
+## Ordered FSETP
+
+The pinned GM107 table and UAM emitter above corroborate GPR FSETP base
+`5bb0038000070007`, variable mask `000f00000ff0ff00`, mode bits 51:48,
+left GPR bits 15:8 and right GPR bits 27:20. Modes 1 through 6 are ordered
+LT/EQ/LE/GT/NE/GE. FTZ is bit 47 and remains excluded, along with source
+absolute/negate, execution predicates and noncanonical boolean/output fields.
+Original envyas independently assembles all sixteen comparison encodings;
+the implemented decoder accepts only the six verified ordered forms.
+
+NVIDIA's [CUDA 8 PTX comparison definitions](https://docs.nvidia.com/cuda/archive/8.0/parallel-thread-execution/index.html#comparison-and-selection-instructions-setp)
+define NaN rejection for all ordered relations, signed-zero equality, and
+subnormal preservation without FTZ. The [PTX 12.8.1 definitions](https://docs.nvidia.com/cuda/archive/12.8.1/parallel-thread-execution/index.html#comparison-and-selection-instructions-setp)
+corroborate the ordered/unordered distinction. This semantic evidence is separate
+from the Maxwell binary encoding proof. Integer classification and ordering
+avoid depending on host f32 exceptional-value behavior.
+
+Pinned UAM's `SchedDataCalculatorGM107::recordWr` records predicate readiness at
+cycle + 13. [Pinned NAK SM50](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs)
+also assigns thirteen-cycle predicate latency; its IR classifies FSetP as fixed
+latency. This supports a conservative accepted schedule, not a measured hardware
+minimum or a general scoreboard implementation. Reference implementations were
+examined for semantics; the bit-order lowering is independently derived.

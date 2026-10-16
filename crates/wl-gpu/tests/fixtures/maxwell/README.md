@@ -250,3 +250,20 @@ SHA-256 including80-byte SPH:
 - vertex-conditional-move.bin:2db8619e3b21e456e5cea295d098d0b91aa92e48b53ec854995ebec5a60254c3
 
 These are independently assembled synthetic programs, without commercial data.
+
+`float-predicate` retains the validated PS header and 352 bytes of original
+envyas code. Two LDC operands feed all six ordered FSETP comparisons. SEL and
+exact dyadic FADD accumulate each answer with weights 1/64 through 1/2 into
+red. LT, equal, GT and NaN pairs independently produce red 84, 151, 223 and 0
+after UNORM quantization; green is 64, blue 191 and alpha 255. Expected results
+are not supplied to the guest shader. Signed-zero, subnormal, infinity and NaN
+inputs remain raw constant-buffer data. Each predicate producer uses stall 13.
+`vertex-float-predicate` has 96 code bytes: X < -.5 conditionally replaces X
+with .5; changing only guest X changes the predicate and rasterized geometry.
+Both code sections exactly reassemble with the unmodified pinned tools.
+SHA-256 including the 80-byte SPH:
+
+- float-predicate.bin:712221ead79ceb859e02b211332f89529aa133abdba64c6d3a79d5ef63aac5e3
+- vertex-float-predicate.bin:5d7cec8cd3c0c90de3e5a8f4babef487aa248a7c3d357c988aa328c9bfa079ca
+
+These fixtures contain no commercial shader code or assets.

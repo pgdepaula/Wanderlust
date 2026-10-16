@@ -2254,3 +2254,55 @@ GPU artifacts were removed before rebuilding the final frozen source. The
 runtime deliveries through a209972 are preserved in shared main but excluded from
 this snapshot's validation scope. Commit45e6254 contains the exact tested GPU
 source/fixture hashes. No original-game GPU submission is established.
+
+## Ordered floating predicates: IEEE edge cases
+
+Seven CPU tests validate the six ordered GPR FSETP encodings, both shader
+stages, all sixteen mode classifications, strict predicate/boolean/modifier
+fields, thirteen-cycle scheduling, real waits, RZ sources, predicate/GPR7
+metadata separation, multiplication hazards and preserved unrelated resource
+proofs. Both fixture code sections independently reassemble exactly with the
+original pinned envyas. The integer-key lowering is independent of the numeric
+binary64 oracle used for expected pixels.
+
+The fragment GpuDriver/GPFIFO fixture executes all six relations for 67 input
+pairs: signed zeros, positive/negative subnormal boundaries, infinities, quiet
+and signaling NaN payloads of both signs, and deterministic general bit patterns.
+Exact dyadic weights encode all six answers into red. Less/equal/greater pairs
+produce `[84,64,191,255]`, `[151,64,191,255]`, `[223,64,191,255]`; every pair
+containing NaN produces `[0,64,191,255]`. Mutable guest constants preserve shader
+and pipeline identity. Changing only the first LT to GT yields
+`[80,64,191,255]` for -1 versus 1. A subsequent unsupported FTZ faults without
+stale execution or replay, leaving accepted output publishable. The vertex
+fixture compares guest X against -.5; a guest X mutation changes geometry
+without recompilation and uploads exactly 72 vertex bytes.
+
+The fragment workload records 68 draws, 136 queue submissions, 3 decode attempts
+(one rejected), 1,296 shader bytes, 5 modules, 6 pipelines, 544 constant guest
+bytes and 492 constant upload bytes. Sixty-eight intentional oracle publications
+perform 68 readbacks/waits, 505,920 readback bytes and 410,176 guest write bytes.
+One target allocation is reused 67 times. Thirty-two unchanged vertex draws add
+32 queues with no extra resource reads/uploads, decodes, modules, pipelines,
+readbacks or waits. The GL debug CPU observation was 41.702 ms; it is not GPU
+timing or a game benchmark. Allocator traffic was not separately measured here.
+
+A faithful ordinary `e271fb5` snapshot plus seven exact candidate Rust/fixture
+files and unchanged Cargo.lock passed GPU formatting, strict GPU and workspace
+Clippy, 228 graphics CPU tests per configuration and all 108 actual WSL OpenGL
+GPU scenarios, with zero GPU failures/skips. Final hashes matched the frozen
+manifest. The full workspace initially lacked the deliberately untracked ExeFS
+fixtures. Rebuilding all three from committed C with installed devkitA64/libnx
+and running with `--no-fail-fast` produced 452 passes, 3 failures and 108 ignored
+GPU scenarios. The remaining Horizon/CLI expectations use the former heap ratio
+or expect now-implemented time:u to be absent. Workspace formatting also differs
+in runtime/CLI files. Those files and test expectations were not changed for this
+GPU delivery; the workspace is not reported green.
+
+All 40 native Windows GPU executables compiled from the same frozen source.
+Native execution remained unavailable: both existing WSL interop brokers and
+automatic broker selection failed before launching Windows programs with
+`UtilAcceptVsock:273: accept4 failed 110`, including a bounded `cmd.exe /c ver`
+startup check. Consequently this feature has no new D3D12/Vulkan execution
+result yet; compilation and historical backend results are not counted as native
+passes. The earlier conditional-MOV matrix remains independently verified.
+No original-game GPU command or frame is established by these synthetic tests.
