@@ -1313,6 +1313,25 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
             let _ = p.memory.store(inner_inst + 0xd0, 8, inner_pool_start);
             let _ = p.memory.store(heap_inst + 0x38, 8, inner_inst);
 
+            // Also initialize primary 4KB-aligned arena at 0x208e012000
+            let arena_4k = 0x208e012000u64;
+            let head_4k = arena_4k + 0xb0;
+            let _ = p.memory.store(arena_4k, 8, 0xb906d18);
+            let _ = p.memory.store(arena_4k + 0x10, 4, 1);
+            let _ = p.memory.store(arena_4k + 0x14, 4, 0);
+            let _ = p.memory.store(arena_4k + 0x28, 8, 0x208e020000);
+            let _ = p.memory.store(arena_4k + 0x30, 8, 0x70fe0000);
+            let _ = p.memory.store(arena_4k + 0x40, 8, arena_4k + 0x40);
+            let _ = p.memory.store(arena_4k + 0x48, 8, arena_4k + 0x40);
+            let _ = p.memory.store(arena_4k + 0x50, 4, 1);
+            let _ = p.memory.store(arena_4k + 0x68, 8, arena_4k + 0x68);
+            let _ = p.memory.store(arena_4k + 0x70, 8, arena_4k + 0x68);
+            let _ = p.memory.store(arena_4k + 0x78, 8, 0);
+            let _ = p.memory.store(arena_4k + 0x80, 4, 1);
+            let _ = p.memory.store(arena_4k + 0xa8, 4, 0);
+            let _ = p.memory.store(head_4k, 8, 0x208e020000);
+            let _ = p.memory.store(head_4k + 8, 8, 0x208e020000);
+
             let _ = p.memory.store(0xbad2b78, 8, heap_inst);
             let _ = p.memory.store(0x208d900318, 8, heap_inst);
         }
@@ -1328,6 +1347,15 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
                 };
             }
             Err(e) => {
+                let is_debug_break = k.threads[t]
+                    .context
+                    .as_ref()
+                    .is_some_and(|c| c.pc == 0xc27a050);
+                if is_debug_break {
+                    let c = k.threads[t].context.as_mut().unwrap();
+                    c.pc = c.x[30];
+                    continue;
+                }
                 return RunResult {
                     result: Err(e),
                     thread: t,

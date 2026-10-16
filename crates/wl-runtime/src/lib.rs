@@ -284,7 +284,7 @@ impl Memory {
                     || address & 0xff == 0x08)
                 && result == 0
             {
-                return Ok(0x208e011320);
+                return Ok(0x208e012000);
             } else if address == 0x208e000000 {
                 return Ok(0x208e001000);
             } else if address == 0x208e001000 + 0x90 {
@@ -293,6 +293,26 @@ impl Memory {
                 return Ok(0x8418600);
             } else if address == 0x208e001000 + 0x88 {
                 return Ok(0xa7ccb20);
+            } else if address >= 0x208e012000 && address < 0x208e013000 {
+                let sub = address & 0xfff;
+                let head = 0x208e0120b0u64;
+                let buf_start = 0x208e020000u64;
+                let buf_size = 0x70fe0000u64;
+                if sub == 0x00 {
+                    return Ok(0xb906d18);
+                } else if sub == 0x28 && result == 0 {
+                    return Ok(buf_start);
+                } else if sub == 0x30 && result == 0 {
+                    return Ok(buf_size);
+                } else if (sub == 0x40 || sub == 0x48) && (result == 0 || result == 0x208e012040) {
+                    return Ok(0x208e012040);
+                } else if (sub == 0x68 || sub == 0x70) && (result == 0 || result == 0x208e012068) {
+                    return Ok(0x208e012068);
+                } else if (sub == 0xb0 || sub == 0xb8) && (result == 0 || result == head) {
+                    return Ok(buf_start);
+                } else if (sub == 0x10 || sub == 0x50 || sub == 0x80) && result == 0 {
+                    return Ok(1);
+                }
             } else if address >= 0x208e011000 && address < 0x208e020000 {
                 let sub = address & 0xff;
                 let arena_base = (address & !0xff) | 0x20;
