@@ -2719,3 +2719,70 @@ cache/compiler state were uncontrolled. These are debug CPU observations,
 not GPU times, game performance, full batching or zero-copy claims. Rust
 allocator traffic is not instrumented in this workload. The independently
 assembled programs are synthetic; no original TOTK GPU stream/frame is implied.
+
+The completed FSET workspace snapshot run reports507 passed, three existing
+CLI/Horizon failures and124 ignored GPU tests. This is the `16d0234` plus
+nine-file snapshot described above, not a live-worktree workspace pass.
+
+## ISCADD: five-bit shifts, wrapping addition and retry-safe publication
+
+The indexed guest-shader workload enters through `GpuDriver`, GPFIFO and
+B06F/B197. Forty-eight raw operand pairs, including32 deterministic seeded
+pairs, exercise all32 shifts:1536 arithmetic results. The independent oracle
+multiplies in u64 by2^shift, adds the second operand, and truncates to32 bits.
+The guest shader checks raw results with ISETP before exporting
+[64,128,191,255]; a wrong reference produces[0,128,191,255]. Additional real
+draws exercise right-destination aliasing and poisoned-source RZ combinations.
+The independent auxiliary ISCADD must preserve P0.
+
+The vertex fixture changes asymmetric analytic coverage through the decoded
+arithmetic. Guest X mutation uploads72 additional vertex bytes without shader
+retranslation. Subsequent instruction/expected-immediate mutation causes one
+new vertex decode/pipeline without another vertex upload or fragment decode.
+Coverage is checked analytically with a47x29 viewport on a52x29 target,
+including covered and uncovered pixels; this fixture does not clip a primitive.
+
+For failure injection, guest RAM first holds red0 while accepted pending GPU
+work produces red64. Thirty-two warm draws leave RAM unchanged. Unsupported
+CC faults without appending a draw or queue submission. An injected atomic
+write failure leaves the red0 RAM image and visibility tokens unchanged;
+retry publishes red64 without replaying any draw. Readback may repeat after
+failed publication; this test does not claim readback caching.
+
+Executed live-worktree graphics gates use the identical candidate source:
+
+- GPU formatting and strict all-target package Clippy: passed.
+- Without default features:279 CPU tests passed, zero failures.
+- Default features:280 CPU tests passed, zero failures;126 GPU tests ignored.
+- Explicit WSL OpenGL:126 actual GPU scenarios passed, zero failures/skips,
+  llvmpipe LLVM23.1.1/Mesa26.2.4, including both new ISCADD scenarios.
+
+These Linux builds disable debug information to reduce repeated link costs while
+retaining unoptimized code, overflow checks and debug assertions. The faithful
+workspace/native source snapshot is `2b7d93c` plus seven exact candidate code,
+assembly and binary files, unchanged Cargo.lock and preserved source-built
+homebrew fixtures. Whole-workspace formatting reports peer-owned differences; strict workspace
+Clippy reports six runtime diagnostics (five range comparisons and identical
+branches), including the newer committed `d0e0394` change. Graphics-only
+results do not imply whole-workspace success.
+
+Before warm repetition the fragment workload records1558 draws,3115 queue
+submissions,45 fragment decodes/9360 shader bytes,18696 constant bytes read and
+17616 uploaded,48 shader modules,92 pipelines and one target allocation with
+1557 reuses. The1557 intentional oracle publications read11,584,080 bytes and
+publish9,391,824 packed guest bytes. The32 warm draws add32 queue submissions,
+1280 command-source borrowed bytes including1024 command bytes, and64 entry
+decodes, with no additional resource uploads/reads, shader modules, pipelines,
+target allocations, readbacks or waits. Full-suite warm CPU wall time was
+23.218ms versus81.713ms focused under uncontrolled concurrent host load.
+These are CPU/debug observations, not GPU time, game performance, full batching
+or zero-copy evidence. Rust allocator traffic is not instrumented for this
+new draw workload. Only independently assembled synthetic shaders execute;
+no original TOTK GPU command stream or frame is demonstrated.
+
+The updated Windows `alu_gpu` executable compiled with debug information from
+identical frozen candidate bytes. Actual D3D12 and Vulkan launches were attempted independently;
+both fail in the WSL interoperability broker with `accept4` error110 before
+adapter acquisition. Zero native executions passed in this milestone. The
+other unchanged native test targets are not rebuilt or counted as executed.
+No Windows policy or shared WSL process was changed to conceal this limitation.

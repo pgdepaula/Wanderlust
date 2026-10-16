@@ -1237,3 +1237,23 @@ FTZ, CC, execution predicates, non-PT logical inputs, OR/XOR combiners and
 immediate/cbuf forms remain unsupported. Only semantic/encoding evidence is
 used from these MIT sources; their compiler/assembler implementation is not
 imported into Wanderlust.
+
+## SM50 GPR ISCADD scaled integer addition
+
+Pinned GM107 envytools `f102b82381f3f11cee113d16374c87091db039d9` and
+[UAM Maxwell ISCADD emission](https://github.com/devkitPro/uam/blob/5a5afc2bae8b55409ab36ba45be63fcb73f68993/mesa-imported/codegen/nv50_ir_emit_gm107.cpp#L1871-L1898)
+establish GPR base `5c18000000070000`, variable mask `00000f800ff0ffff`,
+destination bits7:0, shifted source15:8, addend27:20 and shift43:39.
+UAM emits a five-bit immediate at39 for OP_SHLADD. The accepted operation is
+unsigned bit-vector `(A << shift) + B`, truncated modulo2^32. Bit43 is the
+high shift bit, not IADD's extended-carry flag. NEG49/48 and CC47 remain outside
+the supported subset, as do reserved44..46 and execution predicates.
+
+Original pinned envyas reassembles both fixtures exactly and all32 shift forms.
+Pinned MaxAs `54eda7af086a46c9dae1688b691968235d560164` independently matches
+those32 words; its permissive `i39w8` immediate grammar does not establish
+shift32..255 semantics. The pinned NAK SM50 encoder has no ISCADD/LEA encoding
+and is not used as opcode evidence. The fixed six-cycle GPR scheduling subset
+uses no write barrier and requires ready inputs/destination, while honoring
+supported incoming waits. Only semantic and encoding evidence is used from
+these MIT sources; no compiler implementation is imported.

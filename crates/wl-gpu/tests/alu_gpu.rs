@@ -3046,3 +3046,425 @@ fn driver_vertex_float_set_controls_geometry() {
     eprintln!("VS FSET modes/mutation {:?}", d.graphics_counters());
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+fn scaled_add_reference(left: u32, right: u32, shift: u8) -> u32 {
+    assert!(shift < 32);
+    // Independent oracle: multiply in u64, add, then retain the low 32 bits.
+    // Largest intermediate is (2^32-1)*2^31+(2^32-1), below 2^64.
+    (u64::from(left) * (1u64 << shift) + u64::from(right)) as u32
+}
+fn scaled_add_draw(
+    d: &mut GpuDriver,
+    c: ChannelId,
+    b: BackingId,
+    data: &mut [u8],
+    words: &[u32],
+    payload: [u32; 3],
+    matches: bool,
+) {
+    let [left, right, expected] = payload;
+    let mut bytes = [0u8; 12];
+    bytes[..4].copy_from_slice(&left.to_le_bytes());
+    bytes[4..8].copy_from_slice(&right.to_le_bytes());
+    bytes[8..].copy_from_slice(&expected.to_le_bytes());
+    d.write_backing(b, 0x50, &bytes, &mut mem(data)).unwrap();
+    let r = submit(d, c, b, data, words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    d.publish(c, &mut mem(data)).unwrap();
+    check(
+        data,
+        if matches {
+            [64, 128, 191, 255]
+        } else {
+            [0, 128, 191, 255]
+        },
+        false,
+    );
+    d.retire(r.token).unwrap();
+}
+struct ScaledAddFailWrite<'a> {
+    bytes: &'a mut [u8],
+    calls: usize,
+}
+impl GuestMemory for ScaledAddFailWrite<'_> {
+    fn read(&self, address: GuestAddress, length: usize) -> wl_gpu::Result<&[u8]> {
+        let start = usize::try_from(address.0).map_err(|_| wl_gpu::Error("offset".into()))?;
+        let end = start
+            .checked_add(length)
+            .ok_or_else(|| wl_gpu::Error("overflow".into()))?;
+        self.bytes
+            .get(start..end)
+            .ok_or_else(|| wl_gpu::Error("unmapped".into()))
+    }
+}
+impl GuestMemoryWrite for ScaledAddFailWrite<'_> {
+    fn validate_write(&self, address: GuestAddress, length: usize) -> wl_gpu::Result<()> {
+        self.read(address, length).map(|_| ())
+    }
+    fn write(&mut self, _: GuestAddress, _: &[u8]) -> wl_gpu::Result<()> {
+        self.calls += 1;
+        Err(wl_gpu::Error(
+            "injected scaled-add publication failure".into(),
+        ))
+    }
+}
+#[test]
+#[ignore = "requires actual GPU; all32 ISCADD shifts, wrapping arithmetic, aliases and retry-safe deferred output"]
+fn driver_scaled_add_all_shifts_aliases_and_fault_publication() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/scaled-add.bin");
+    data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x2144, 0x600),
+        (0x214c, 8),
+        (0x2380, 28),
+        (0x2384, 0),
+        (0x2388, 0x40040),
+        (0x2490, 1),
+    ] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let original = u64::from_le_bytes(bin[0x78..0x80].try_into().unwrap());
+    let compare = u64::from_le_bytes(bin[0x80..0x88].try_into().unwrap());
+    assert_eq!(original, 0x5c18018000570404);
+    assert_eq!(compare, 0x5b64038000770407);
+    assert_eq!(
+        u64::from_le_bytes(bin[0x88..0x90].try_into().unwrap()),
+        0x5c180f800ff7ff04
+    );
+    let draw_words = draw();
+    let mut pairs = vec![
+        (0, 0),
+        (0, u32::MAX),
+        (u32::MAX, 0),
+        (u32::MAX, 1),
+        (u32::MAX, u32::MAX),
+        (1, u32::MAX),
+        (0x80000000, 0),
+        (0x80000000, 1),
+        (0x7fffffff, 1),
+        (0x7fffffff, 0x80000000),
+        (0x80000001, 0x7fffffff),
+        (0x55555555, 0xaaaaaaaa),
+        (0xaaaaaaaa, 0x55555555),
+        (0x12345678, 0x89abcdef),
+        (1, 1),
+        (0x10000, 0xffff0000),
+    ];
+    let mut seed = 0x49534341u32;
+    for _ in 0..32 {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        let left = seed;
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        pairs.push((left, seed));
+    }
+    let mut first = true;
+    for shift in 0..32u8 {
+        let op = (original & !(31u64 << 39)) | (u64::from(shift) << 39);
+        d.write_backing(b, 0x4678, &op.to_le_bytes(), &mut mem(&mut data))
+            .unwrap();
+        let mut identity = None;
+        for &(left, right) in &pairs {
+            scaled_add_draw(
+                &mut d,
+                c,
+                b,
+                &mut data,
+                if first { &words } else { &draw_words },
+                [left, right, scaled_add_reference(left, right, shift)],
+                true,
+            );
+            first = false;
+            let n = d.graphics_counters();
+            let current = [
+                n.shader_decodes,
+                n.shader_module_allocations,
+                n.pipeline_allocations,
+            ];
+            if let Some(previous) = identity {
+                assert_eq!(current, previous);
+            }
+            identity = Some(current);
+        }
+    }
+    // Destination aliases the addend. Patch the guest comparison input too;
+    // source A remains R4 and the independently assembled auxiliary ISCADD
+    // zeroes R4 after ISETP, proving P0 is preserved before SEL.
+    let compare_right = (compare & !(255u64 << 8)) | (5u64 << 8);
+    d.write_backing(b, 0x4680, &compare_right.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    for shift in [0, 3, 31u8] {
+        let op = (original & !(255u64 | (31u64 << 39))) | 5 | (u64::from(shift) << 39);
+        d.write_backing(b, 0x4678, &op.to_le_bytes(), &mut mem(&mut data))
+            .unwrap();
+        for (left, right) in [(0x12345678, 0x89abcdef), (u32::MAX, 1), (1, u32::MAX)] {
+            scaled_add_draw(
+                &mut d,
+                c,
+                b,
+                &mut data,
+                &draw_words,
+                [left, right, scaled_add_reference(left, right, shift)],
+                true,
+            );
+        }
+    }
+    d.write_backing(b, 0x4680, &compare.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    // Poison both guest source words: replacing either/both source fields with
+    // RZ must read architectural zero, never an accidentally adjacent GPR.
+    for shift in [0, 3, 31u8] {
+        for (left_reg, right_reg) in [(255u8, 5u8), (4, 255), (255, 255)] {
+            let op = (original & !((255u64 << 8) | (255u64 << 20) | (31u64 << 39)))
+                | (u64::from(left_reg) << 8)
+                | (u64::from(right_reg) << 20)
+                | (u64::from(shift) << 39);
+            d.write_backing(b, 0x4678, &op.to_le_bytes(), &mut mem(&mut data))
+                .unwrap();
+            let left = 0x89abcdef;
+            let right = 0x76543210;
+            let expected = scaled_add_reference(
+                if left_reg == 255 { 0 } else { left },
+                if right_reg == 255 { 0 } else { right },
+                shift,
+            );
+            scaled_add_draw(
+                &mut d,
+                c,
+                b,
+                &mut data,
+                &draw_words,
+                [left, right, expected],
+                true,
+            );
+        }
+    }
+    d.write_backing(b, 0x4678, &original.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let expected = scaled_add_reference(0x12345678, 0x89abcdef, 3);
+    assert_eq!(expected, 0x1b4e81af);
+    scaled_add_draw(
+        &mut d,
+        c,
+        b,
+        &mut data,
+        &draw_words,
+        [0x12345678, 0x89abcdef, expected ^ 1],
+        false,
+    );
+    let before_correct = d.graphics_counters();
+    scaled_add_draw(
+        &mut d,
+        c,
+        b,
+        &mut data,
+        &draw_words,
+        [0x12345678, 0x89abcdef, expected],
+        true,
+    );
+    assert_eq!(
+        d.graphics_counters().shader_decodes,
+        before_correct.shader_decodes
+    );
+    // Publish a visibly different image before pending warm work. Losing
+    // pending output or treating failed publication as success must therefore
+    // leave red0 and fail the final expected red64 verification.
+    scaled_add_draw(
+        &mut d,
+        c,
+        b,
+        &mut data,
+        &draw_words,
+        [0x12345678, 0x89abcdef, expected ^ 1],
+        false,
+    );
+    let mut payload = [0u8; 12];
+    payload[..4].copy_from_slice(&0x12345678u32.to_le_bytes());
+    payload[4..8].copy_from_slice(&0x89abcdefu32.to_le_bytes());
+    payload[8..].copy_from_slice(&expected.to_le_bytes());
+    d.write_backing(b, 0x50, &payload, &mut mem(&mut data))
+        .unwrap();
+    // Prime the correct GPU-only image and its resource uploads BEFORE the
+    // warm baseline; guest RAM must retain the previously published red0.
+    let priming = submit(&mut d, c, b, &mut data, &draw_words);
+    assert!(priming.fault.is_none(), "{:?}", priming.fault);
+    assert_eq!(priming.progress.draws_submitted, 1);
+    assert!(!d.query(priming.token).unwrap().guest_visible);
+    check(&data, [0, 128, 191, 255], false);
+    let before = d.graphics_counters();
+    let start = std::time::Instant::now();
+    let mut last = None;
+    for _ in 0..32 {
+        let r = submit_existing(&mut d, c, &mut data, 8);
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert_eq!(r.progress.draws_submitted, 1);
+        last = Some(r.token);
+    }
+    let elapsed = start.elapsed();
+    let after = d.graphics_counters();
+    assert_eq!(after.draw_commands - before.draw_commands, 32);
+    assert_eq!(after.submissions - before.submissions, 32);
+    assert_eq!(
+        [
+            after.shader_binary_bytes,
+            after.vertex_shader_bytes,
+            after.shader_decodes,
+            after.vertex_shader_decodes,
+            after.descriptor_reads,
+            after.vertex_guest_bytes,
+            after.index_guest_bytes,
+            after.constant_guest_bytes,
+            after.guest_texture_bytes,
+            after.render_target_guest_bytes,
+            after.upload_bytes,
+            after.upload_calls,
+            after.shader_module_allocations,
+            after.pipeline_allocations,
+            after.render_target_allocations,
+            after.readback_operations,
+            after.synchronization_points
+        ],
+        [
+            before.shader_binary_bytes,
+            before.vertex_shader_bytes,
+            before.shader_decodes,
+            before.vertex_shader_decodes,
+            before.descriptor_reads,
+            before.vertex_guest_bytes,
+            before.index_guest_bytes,
+            before.constant_guest_bytes,
+            before.guest_texture_bytes,
+            before.render_target_guest_bytes,
+            before.upload_bytes,
+            before.upload_calls,
+            before.shader_module_allocations,
+            before.pipeline_allocations,
+            before.render_target_allocations,
+            before.readback_operations,
+            before.synchronization_points
+        ]
+    );
+    let last = last.unwrap();
+    assert!(!d.query(last).unwrap().guest_visible);
+    assert!(!d.query(priming.token).unwrap().guest_visible);
+    check(&data, [0, 128, 191, 255], false);
+    // Unsupported CC must not append a draw or replay any accepted draw.
+    d.write_backing(
+        b,
+        0x4678,
+        &(original | (1 << 47)).to_le_bytes(),
+        &mut mem(&mut data),
+    )
+    .unwrap();
+    let failed = submit(&mut d, c, b, &mut data, &draw_words);
+    assert!(failed.fault.is_some());
+    assert_eq!(failed.progress.draws_submitted, 0);
+    assert_eq!(d.graphics_counters().draw_commands, after.draw_commands);
+    assert_eq!(d.graphics_counters().submissions, after.submissions);
+    let old_guest = data[RT..RT + SIZE].to_vec();
+    let guest_bytes = d.graphics_counters().guest_framebuffer_write_bytes;
+    {
+        let mut rejecting = ScaledAddFailWrite {
+            bytes: &mut data,
+            calls: 0,
+        };
+        assert!(d.publish(c, &mut rejecting).is_err());
+        assert_eq!(rejecting.calls, 1);
+    }
+    assert_eq!(&data[RT..RT + SIZE], old_guest.as_slice());
+    assert_eq!(
+        d.graphics_counters().guest_framebuffer_write_bytes,
+        guest_bytes
+    );
+    assert_eq!(d.graphics_counters().draw_commands, after.draw_commands);
+    assert!(!d.query(last).unwrap().guest_visible);
+    assert!(!d.query(priming.token).unwrap().guest_visible);
+    check(&data, [0, 128, 191, 255], false);
+    // Retry visibility, never command submission. Readback may repeat on a
+    // failed atomic write; no claim of readback caching is made here.
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [64, 128, 191, 255], false);
+    assert!(d.query(last).unwrap().guest_visible);
+    assert!(d.query(priming.token).unwrap().guest_visible);
+    assert_eq!(d.graphics_counters().draw_commands, after.draw_commands);
+    eprintln!(
+        "ISCADD {} pairs x32 shifts, warm32 CPU={elapsed:?} before={before:?} after={after:?}",
+        pairs.len()
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+#[test]
+#[ignore = "requires actual GPU; scaled-add of raw guest vertex X controls finite geometry and code changes"]
+fn driver_vertex_scaled_add_controls_geometry_and_code_mutation() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/vertex-scaled-add.bin");
+    data[0x4800..0x4800 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [(0x2044, 0x800), (0x204c, 9), (0x2144, 0x400)] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    assert_eq!(scaled_add_reference(POS[0][0].to_bits(), 0, 1), 0x7e99999a);
+    assert_eq!(scaled_add_reference(POS[1][0].to_bits(), 0, 1), 0x7e333334);
+    assert_eq!(scaled_add_reference(POS[2][0].to_bits(), 0, 1), 0x7c99999a);
+    let r = submit(&mut d, c, b, &mut data, &words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_conditional_geometry(&data, 0.5);
+    d.retire(r.token).unwrap();
+    assert_eq!(scaled_add_reference((-0.6f32).to_bits(), 0, 1), 0x7e333334);
+    d.write_backing(b, 0x3000, &(-0.6f32).to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let background: Vec<_> = (0..W * H).flat_map(|_| BG).collect();
+    d.write_backing(b, RT as u64, &background, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    let after = d.graphics_counters();
+    assert_eq!(after.vertex_shader_decodes, before.vertex_shader_decodes);
+    assert_eq!(after.pipeline_allocations, before.pipeline_allocations);
+    assert_eq!(after.vertex_upload_bytes - before.vertex_upload_bytes, 72);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_conditional_geometry(&data, f64::from(-0.6f32));
+    d.retire(r.token).unwrap();
+    // Change the real vertex program to shift0 and compare against first
+    // vertex's unchanged raw -.6 bits. It now matches and moves to finite .5.
+    // Both opcode and expected MOV32I are guest code writes, not host geometry.
+    let op = u64::from_le_bytes(bin[0x78..0x80].try_into().unwrap()) & !(31u64 << 39);
+    let reference = 0x010000000007f007u64 | (u64::from((-0.6f32).to_bits()) << 20);
+    d.write_backing(b, 0x4878, &op.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    d.write_backing(b, 0x4868, &reference.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    d.write_backing(b, RT as u64, &background, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    let after = d.graphics_counters();
+    assert_eq!(
+        after.vertex_shader_decodes,
+        before.vertex_shader_decodes + 1
+    );
+    assert_eq!(after.shader_decodes, before.shader_decodes);
+    assert_eq!(after.vertex_upload_bytes, before.vertex_upload_bytes);
+    assert!(after.pipeline_allocations > before.pipeline_allocations);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_conditional_geometry(&data, 0.5);
+    d.retire(r.token).unwrap();
+    eprintln!("VS ISCADD geometry {:?}", d.graphics_counters());
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

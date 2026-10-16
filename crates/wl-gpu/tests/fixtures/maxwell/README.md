@@ -410,3 +410,23 @@ linkage, without exporting a NaN mask as a clip position. SHA-256 including SPH:
 
 These are independently assembled synthetic instructions only. FSET modifiers,
 FTZ and non-PT predicate combiners are outside this fixture's supported subset.
+
+`scaled-add` and `vertex-scaled-add` retain the validated 80-byte stage
+headers plus128 original-envyas-assembled code bytes each. Fragment ISCADD at
+PC0x78 aliases R4 with `(R4 << 3) + R5`, wrapping to32 bits, then ISETP checks
+an independently supplied expected word. A second ISCADD at PC0x88 uses RZ/RZ
+with shift31 and must preserve P0 before SEL exports red .25. Green .5, blue
+.75 and alpha1 are fixed. Both sources and expected bits come from guest LDC.
+
+The vertex fixture shifts raw guest X bits once, adds RZ and compares against
+7E99999A. Only initial X=-.8 matches and moves to finite+.5. Mutating that
+vertex to-.6 disables the move. Changing binary shift1 to0 and its expected
+MOV32I word to raw-.6 restores finite+.5 without changing vertex data. The raw
+arithmetic is never exported as a clip position. SHA-256 including SPH:
+
+- scaled-add.bin:324c0e3ce2dd900ab14760fb1213f8ca129dddf5edf8f85be3ad684afd25b2b5
+- vertex-scaled-add.bin:5902847960d817d7423b5108f8304ba8a403df7593b770871f2a9268dafc7c3f
+
+Only synthetic independently assembled instructions are included. The fixture
+supports the verified five-bit shift field; permissive assembler grammar for
+larger immediates is not evidence for reserved bits or instruction modifiers.

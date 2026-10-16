@@ -153,6 +153,13 @@ pub enum Operation {
         comparison: FloatComparison,
         float_result: bool,
     },
+    /// Unmodified SM50 ISCADD GPR, wrapping (left << shift) + right.
+    ScaledAdd {
+        dst: u8,
+        left: u8,
+        right: u8,
+        shift: u8,
+    },
     /// SM50 LOP3.LUT, three GPR/RZ sources, discarded PT predicate output.
     TernaryLogic {
         dst: u8,
@@ -728,6 +735,23 @@ impl Program {
                         bits,
                         operator,
                     }
+                } else if word & !0x00000f800ff0ffff == 0x5c18000000070000 {
+                    let left = ((word >> 8) & 255) as u8;
+                    let right = ((word >> 20) & 255) as u8;
+                    if write_barrier != 7
+                        || [left, right]
+                            .iter()
+                            .any(|r| !initialized[*r as usize] || pending[*r as usize])
+                    {
+                        return Err(fail("unready ISCADD operand or unsupported schedule"));
+                    }
+                    // ISCADD bit43 is the high shift bit, not IADD's X flag.
+                    Operation::ScaledAdd {
+                        dst,
+                        left,
+                        right,
+                        shift: ((word >> 39) & 31) as u8,
+                    }
                 } else if word & !0x001f00000ff0ffff == 0x5800038000070000 {
                     let comparison = match (word >> 48) & 15 {
                         0 => FloatComparison::False,
@@ -1089,7 +1113,8 @@ impl Program {
                             || predicate_multiply
                     }
                     Operation::Integer { left, right, .. }
-                    | Operation::FloatSet { left, right, .. } => {
+                    | Operation::FloatSet { left, right, .. }
+                    | Operation::ScaledAdd { left, right, .. } => {
                         multiply_result[left as usize] || multiply_result[right as usize]
                     }
                     Operation::TernaryLogic {
@@ -1185,6 +1210,9 @@ impl Program {
                     dst, left, right, ..
                 }
                 | Operation::FloatSet {
+                    dst, left, right, ..
+                }
+                | Operation::ScaledAdd {
                     dst, left, right, ..
                 } => {
                     largest = largest.max(u16::from(dst));
@@ -1341,6 +1369,9 @@ impl Program {
                 }
                 Operation::TernaryLogic { dst, first, second, third, lut } => {
                     emit_ternary(&mut s, dst, first, second, third, lut);
+                }
+                Operation::ScaledAdd { dst, left, right, shift } => {
+                    emit_scaled_add(&mut s, dst, left, right, shift);
                 }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
@@ -1576,6 +1607,14 @@ impl VertexProgram {
                 } => {
                     emit_float_set(&mut s, dst, left, right, comparison, float_result);
                 }
+                Operation::ScaledAdd {
+                    dst,
+                    left,
+                    right,
+                    shift,
+                } => {
+                    emit_scaled_add(&mut s, dst, left, right, shift);
+                }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
                 Operation::ConditionalMove { dst, src, invert } => {
@@ -1610,6 +1649,13 @@ fn stage_source(operations: &[Operation], header: &str) -> String {
     source.push_str(helper);
     source.push_str(header);
     source
+}
+
+fn emit_scaled_add(s: &mut String, dst: u8, left: u8, right: u8, shift: u8) {
+    use std::fmt::Write;
+    // Both operands are read before a potentially aliased destination is stored.
+    // The decoded count is 0..31 and u32 arithmetic wraps modulo 2^32.
+    writeln!(s, "r[{dst}]=(r[{left}] << {shift}u)+r[{right}];").unwrap();
 }
 
 fn emit_int_to_float(s: &mut String, dst: u8, src: u8, signed: bool) {

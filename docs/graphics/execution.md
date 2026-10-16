@@ -1558,3 +1558,18 @@ selection is a binary instruction property, not a specialization on mutable
 constants. Comparisons use raw-bit IEEE classification/order, including signed
 zeros, subnormals, infinities and arbitrary NaN encodings. Unsupported modifiers,
 logical predicates/combiners and source forms fail explicitly.
+
+## Scaled integer addition
+
+Vertex and fragment translation accept unmodified GPR ISCADD with all32
+five-bit immediate shifts. Both ready source words are read before any aliased
+destination is stored; shift/addition wrap modulo2^32. RZ is a valid source,
+while a RZ destination remains outside the supported decoder subset. Fixed
+stall6/no-write-barrier scheduling and supported incoming waits are validated.
+
+The operation does not initialize or change P0. It clears texture-handle and
+position-W/reciprocal proofs, including identity forms, and conservatively
+propagates the existing FMUL rounding hazard from either input. Mutable guest
+operands remain runtime data, independent of shader/pipeline identity. Other
+source forms, carry/negation modifiers, CC, reserved shift bits and execution
+predicates are rejected explicitly. Driver and submission APIs are unchanged.
