@@ -119,6 +119,14 @@ pub enum Operation {
         bits: u32,
         negate_src: bool,
     },
+    /// Immediate BFE control: contained field, no BREV or condition-code output.
+    BitfieldExtract {
+        dst: u8,
+        src: u8,
+        offset: u8,
+        width: u8,
+        signed: bool,
+    },
     /// Raw 32-bit immediate logic; immediate bits are not GPR operands.
     LogicImmediate {
         dst: u8,
@@ -686,6 +694,23 @@ impl Program {
                         bits,
                         operator,
                     }
+                } else if word & !0x0001000ffff0ffff == 0x3800000000070000 {
+                    let src = ((word >> 8) & 255) as u8;
+                    let offset = ((word >> 20) & 255) as u8;
+                    let width = ((word >> 28) & 255) as u8;
+                    if offset >= 32 || width > 32 || u16::from(offset) + u16::from(width) > 32 {
+                        return Err(fail("unsupported BFE field outside source word"));
+                    }
+                    if write_barrier != 7 || !initialized[src as usize] || pending[src as usize] {
+                        return Err(fail("unready BFE source or unsupported schedule"));
+                    }
+                    Operation::BitfieldExtract {
+                        dst,
+                        src,
+                        offset,
+                        width,
+                        signed: word & (1 << 48) != 0,
+                    }
                 } else if matches!(
                     word & !(255 | (255u64 << 8) | (255u64 << 20)),
                     0x5c58000000070000 | 0x5c68000000070000
@@ -932,6 +957,7 @@ impl Program {
                         ..
                     } => true,
                     Operation::Move { src, .. }
+                    | Operation::BitfieldExtract { src, .. }
                     | Operation::LogicImmediate { src, .. }
                     | Operation::AddImmediate { src, .. } => multiply_result[src as usize],
                     _ => false,
@@ -1009,6 +1035,7 @@ impl Program {
                     }
                 }
                 Operation::Move { dst, src }
+                | Operation::BitfieldExtract { dst, src, .. }
                 | Operation::ConditionalMove { dst, src, .. }
                 | Operation::LogicImmediate { dst, src, .. }
                 | Operation::AddImmediate { dst, src, .. }
@@ -1118,6 +1145,9 @@ impl Program {
                 }
                 Operation::AddImmediate { dst, src, bits, negate_src } => {
                     emit_add_immediate(&mut s, dst, src, bits, negate_src);
+                }
+                Operation::BitfieldExtract { dst, src, offset, width, signed } => {
+                    emit_bitfield(&mut s, dst, src, offset, width, signed);
                 }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
@@ -1316,6 +1346,15 @@ impl VertexProgram {
                 } => {
                     emit_add_immediate(&mut s, dst, src, bits, negate_src);
                 }
+                Operation::BitfieldExtract {
+                    dst,
+                    src,
+                    offset,
+                    width,
+                    signed,
+                } => {
+                    emit_bitfield(&mut s, dst, src, offset, width, signed);
+                }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
                 Operation::ConditionalMove { dst, src, invert } => {
@@ -1332,6 +1371,26 @@ impl VertexProgram {
             s = s.replace("@interpolate(linear)", "@interpolate(perspective,center)");
         }
         s
+    }
+}
+
+fn emit_bitfield(s: &mut String, dst: u8, src: u8, offset: u8, width: u8, signed: bool) {
+    use std::fmt::Write;
+    if width == 0 {
+        writeln!(s, "r[{dst}]=0u;").unwrap();
+    } else if width == 32 {
+        writeln!(s, "r[{dst}]=r[{src}];").unwrap();
+    } else if signed {
+        let left = 32 - offset - width;
+        let right = 32 - width;
+        writeln!(
+            s,
+            "r[{dst}]=bitcast<u32>(bitcast<i32>(r[{src}] << {left}u) >> {right}u);"
+        )
+        .unwrap();
+    } else {
+        let mask = u32::MAX >> (32 - width);
+        writeln!(s, "r[{dst}]=(r[{src}] >> {offset}u) & {mask}u;").unwrap();
     }
 }
 

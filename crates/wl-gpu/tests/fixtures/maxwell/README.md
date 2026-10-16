@@ -287,3 +287,24 @@ mode to verified NAN and changes only its MOV32I comparison constant. NaN never
 reaches clip-space outputs: a true predicate moves all X coordinates to finite
 .5, producing a degenerate primitive; numeric constants retain the original
 asymmetric triangle. These remain synthetic hardware programs.
+
+`bitfield` retains the validated PS header with 256 independently assembled code
+bytes. Five LDC words provide a runtime source and four independent scalar
+reference results. Unsigned/signed offset5-width11, unsigned full-width and
+signed offset31-width1 BFE feed ISETP.EQ/SEL, exporting `[64,128,191,255]` when
+all answers match. Deliberately changing the first reference produces red zero.
+Changing the first BFE to offset31-width0 tests assembled zero-width semantics;
+enabling BREV remains an explicit unsupported-form fault. Each BFE uses the
+ordinary six-cycle schedule; predicate production retains thirteen cycles.
+
+`vertex-bitfield` has 64 independently assembled code bytes. BFE clears only
+the X sign bit with offset0-width31, moving the guest asymmetric triangle into
+positive X. Independent analytic coverage uses the absolute value of guest X.
+Changing only the first guest X changes coverage without recompiling either stage.
+Both fixtures exactly reassemble with original pinned envyas and retain the
+previously validated stage headers. SHA-256 including SPH:
+
+- bitfield.bin:4b38e74391e293370da7051835f5b125dc6c4a931148ee550eb957e18147ffc5
+- vertex-bitfield.bin:6b2c7c3dfc8a368141200a3766bf5946a56ba3175b1e16312ea36bd3612bb90b
+
+These are synthetic hardware programs without proprietary shader contents.

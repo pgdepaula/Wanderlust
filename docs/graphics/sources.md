@@ -1071,3 +1071,30 @@ also assigns thirteen-cycle predicate latency; its IR classifies FSetP as fixed
 latency. This supports a conservative accepted schedule, not a measured hardware
 minimum or a general scoreboard implementation. Reference implementations were
 examined for semantics; the bit-order lowering is independently derived.
+
+## Contained immediate BFE fields
+
+The same pinned [GM107 table](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/gm107.c),
+[NAK SM50 encoder](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs#L1160)
+and [UAM emitter](https://github.com/devkitPro/uam/blob/5a5afc2bae8b55409ab36ba45be63fcb73f68993/mesa-imported/codegen/nv50_ir_emit_gm107.cpp#L2294)
+corroborate immediate BFE base `3800000000070000`, destination bits 7:0,
+source bits 15:8, low-byte offset bits 27:20, next-byte width bits 35:28 and
+signed-result bit 48. The accepted mask is `0001000ffff0ffff`. The original
+signed20 immediate also has high payload bits 38:36 and sign bit **56**, not
+38; this subset excludes those irrelevant control bits rather than guessing
+their meaning. BREV bit 40, CC bit 47 and execution predicates remain excluded.
+
+[CUDA 8 PTX BFE](https://docs.nvidia.com/cuda/archive/8.0/parallel-thread-execution/index.html#integer-arithmetic-instructions-bfe)
+defines extraction and signed extension. Pinned UAM constant folding independently
+corroborates contained fields, but its native shifts do not safely establish
+all out-of-range SASS cases. Consequently supported offsets are below 32,
+widths at most 32 and offset plus width at most 32; dynamic GPR/cbuf controls and
+overrunning fields remain unsupported. Width zero returns zero; full width
+preserves the raw source. Ordinary six-cycle GPR scheduling is retained.
+
+Unmodified pinned envyas independently assembles the complete PS/VS fixtures.
+Textual immediate zero canonicalizes to a GPR-RZ control instruction, so the
+assembled zero-width regression uses nonzero offset 31. Explicitly encoded
+immediate-zero decoder cases are not represented as assembler-produced fixtures.
+The translation and scalar per-bit oracle are independently derived; reference
+implementation source was examined for semantics rather than copied.

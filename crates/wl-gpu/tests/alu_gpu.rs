@@ -170,6 +170,9 @@ fn check(data: &[u8], color: [u8; 4], transformed: bool) {
             p.map(f64::from)
         }
     });
+    check_positions(data, color, v);
+}
+fn check_positions(data: &[u8], color: [u8; 4], v: [[f64; 2]; 3]) {
     let area = edge(v[0], v[1], v[2]);
     for y in 0..H {
         for x in 0..W {
@@ -1305,5 +1308,231 @@ fn driver_vertex_nan_predicate_controls_primitive_coverage() {
         d.retire(r.token).unwrap();
     }
     eprintln!("VS NAN finite-output coverage {:?}", d.graphics_counters());
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+
+fn reference_field(value: u32, offset: u8, width: u8, signed: bool) -> u32 {
+    // Independent scalar oracle builds each destination bit, instead of using
+    // production's paired shift/sign-extension or extraction mask.
+    let sign = signed && width != 0 && (value >> (offset + width - 1)) & 1 != 0;
+    (0..32).fold(0u32, |out, bit| {
+        let set = if bit < u32::from(width) {
+            (value >> (u32::from(offset) + bit)) & 1 != 0
+        } else {
+            sign
+        };
+        out | (u32::from(set) << bit)
+    })
+}
+fn field_inputs(value: u32) -> Vec<u8> {
+    [
+        value,
+        reference_field(value, 5, 11, false),
+        reference_field(value, 5, 11, true),
+        value,
+        reference_field(value, 31, 1, true),
+    ]
+    .into_iter()
+    .flat_map(u32::to_le_bytes)
+    .collect()
+}
+#[test]
+#[ignore = "requires actual GPU; signed/unsigned BFE with guest runtime words and independent bit oracle"]
+fn driver_bitfield_extraction_guest_data_and_code_coherence() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/bitfield.bin");
+    data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x2144, 0x600),
+        (0x214c, 11),
+        (0x2380, 48),
+        (0x2384, 0),
+        (0x2388, 0x40040),
+        (0x2490, 1),
+    ] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let mut values = vec![
+        0, 1, 0x80000000, 0xffffffff, 0x7fffffff, 0x89abcdef, 0xaaaaaaaa, 0x55555555,
+    ];
+    let mut seed = 0x42464531u32;
+    for _ in 0..32 {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        values.push(seed);
+    }
+    values.push(0x89abcdef);
+    let count = values.len();
+    let mut identity = None;
+    for value in values {
+        d.write_backing(b, 0x50, &field_inputs(value), &mut mem(&mut data))
+            .unwrap();
+        let r = submit(&mut d, c, b, &mut data, &words);
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert_eq!(r.progress.draws_submitted, 1);
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        check(&data, [64, 128, 191, 255], false);
+        d.retire(r.token).unwrap();
+        let n = d.graphics_counters();
+        let now = [
+            n.shader_decodes,
+            n.shader_module_allocations,
+            n.pipeline_allocations,
+        ];
+        if let Some(old) = identity {
+            assert_eq!(now, old);
+        }
+        identity = Some(now);
+    }
+    // A deliberately incorrect expected word proves the guest comparison path
+    // can report failure; it cannot simply render an unconditional pass color.
+    let mut input = field_inputs(0x89abcdef);
+    input[4] ^= 1;
+    d.write_backing(b, 0x50, &input, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none());
+    assert_eq!(r.progress.draws_submitted, 1);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [0, 128, 191, 255], false);
+    d.retire(r.token).unwrap();
+    assert_eq!(d.graphics_counters().shader_decodes, before.shader_decodes);
+    let mut code = bin.to_vec();
+    let off = 0x98;
+    let word = u64::from_le_bytes(code[off..off + 8].try_into().unwrap());
+    assert_eq!(word, 0x38000000b057040a);
+    code[off..off + 8].copy_from_slice(&((word & !(0xffff << 20)) | (0x1f << 20)).to_le_bytes());
+    input[4..8].copy_from_slice(&0u32.to_le_bytes());
+    d.write_backing(b, 0x50, &input, &mut mem(&mut data))
+        .unwrap();
+    d.write_backing(b, 0x4600, &code, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none());
+    assert_eq!(r.progress.draws_submitted, 1);
+    assert_eq!(
+        d.graphics_counters().shader_decodes,
+        before.shader_decodes + 1
+    );
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [64, 128, 191, 255], false);
+    d.retire(r.token).unwrap();
+    let bytes: Vec<_> = draw().iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let start = std::time::Instant::now();
+    for _ in 0..32 {
+        let r = submit_existing(&mut d, c, &mut data, 8);
+        assert!(r.fault.is_none());
+        assert_eq!(r.progress.draws_submitted, 1);
+    }
+    let elapsed = start.elapsed();
+    let after = d.graphics_counters();
+    assert_eq!(after.draw_commands - before.draw_commands, 32);
+    assert_eq!(after.submissions - before.submissions, 32);
+    assert_eq!(
+        [
+            after.shader_binary_bytes,
+            after.vertex_shader_bytes,
+            after.shader_decodes,
+            after.vertex_shader_decodes,
+            after.descriptor_reads,
+            after.vertex_guest_bytes,
+            after.index_guest_bytes,
+            after.constant_guest_bytes,
+            after.guest_texture_bytes,
+            after.render_target_guest_bytes,
+            after.upload_bytes,
+            after.upload_calls,
+            after.shader_module_allocations,
+            after.pipeline_allocations,
+            after.readback_operations,
+            after.synchronization_points
+        ],
+        [
+            before.shader_binary_bytes,
+            before.vertex_shader_bytes,
+            before.shader_decodes,
+            before.vertex_shader_decodes,
+            before.descriptor_reads,
+            before.vertex_guest_bytes,
+            before.index_guest_bytes,
+            before.constant_guest_bytes,
+            before.guest_texture_bytes,
+            before.render_target_guest_bytes,
+            before.upload_bytes,
+            before.upload_calls,
+            before.shader_module_allocations,
+            before.pipeline_allocations,
+            before.readback_operations,
+            before.synchronization_points
+        ]
+    );
+    let word = u64::from_le_bytes(code[off..off + 8].try_into().unwrap());
+    code[off..off + 8].copy_from_slice(&(word | (1 << 40)).to_le_bytes());
+    d.write_backing(b, 0x4600, &code, &mut mem(&mut data))
+        .unwrap();
+    assert!(submit(&mut d, c, b, &mut data, &draw()).fault.is_some());
+    assert_eq!(d.graphics_counters().draw_commands, after.draw_commands);
+    assert_eq!(d.graphics_counters().submissions, after.submissions);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [64, 128, 191, 255], false);
+    eprintln!("BFE {count} raw words, warm32 CPU={elapsed:?} before={before:?} after={after:?}");
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+
+#[test]
+#[ignore = "requires actual GPU; guest vertex BFE clears the sign bit and moves asymmetric geometry"]
+fn driver_vertex_bitfield_controls_finite_position_bits() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/vertex-bitfield.bin");
+    data[0x4800..0x4800 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [(0x2044, 0x800), (0x204c, 6), (0x2144, 0x400)] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let r = submit(&mut d, c, b, &mut data, &words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_positions(
+        &data,
+        [255, 0, 0, 255],
+        POS.map(|p| [f64::from(p[0]).abs(), f64::from(p[1])]),
+    );
+    d.retire(r.token).unwrap();
+    let before = d.graphics_counters();
+    d.write_backing(b, 0x3000, &(-0.4f32).to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let background: Vec<_> = (0..W * H).flat_map(|_| BG).collect();
+    d.write_backing(b, RT as u64, &background, &mut mem(&mut data))
+        .unwrap();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none());
+    assert_eq!(r.progress.draws_submitted, 1);
+    let after = d.graphics_counters();
+    assert_eq!(after.vertex_shader_decodes, before.vertex_shader_decodes);
+    assert_eq!(after.pipeline_allocations, before.pipeline_allocations);
+    assert_eq!(after.vertex_upload_bytes - before.vertex_upload_bytes, 72);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_positions(
+        &data,
+        [255, 0, 0, 255],
+        [
+            [f64::from(0.4f32), f64::from(POS[0][1])],
+            [f64::from(POS[1][0]), f64::from(POS[1][1])],
+            [f64::from(POS[2][0]).abs(), f64::from(POS[2][1])],
+        ],
+    );
+    eprintln!("VS BFE geometry {:?}", d.graphics_counters());
     d.close(c, &mut mem(&mut data)).unwrap();
 }

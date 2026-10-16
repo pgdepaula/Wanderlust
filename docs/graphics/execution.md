@@ -1457,3 +1457,21 @@ publication or grant external-write permission.
 Notification counters describe accepted ranges and their summed byte lengths,
 not transferred bytes. Existing memory adapters, mappings, shader/resource
 caches, submission tokens and completion semantics remain unchanged.
+
+## Immediate bitfield extraction
+
+Vertex and fragment programs accept unconditional signed/unsigned BFE from one
+ready GPR or RZ, with canonical immediate offset/width. Offset must be below 32,
+width at most 32 and their sum at most 32. Signed extraction extends the field's
+top bit. Zero width returns zero and full width preserves all source bits;
+dedicated lowering avoids any host shift by 32. Source/destination aliasing is
+supported, while pending destinations, unready sources, noncanonical scheduling,
+BREV, CC, execution predicates, noncanonical high immediate bits, dynamic controls
+and out-of-range fields fail explicitly. Some rejected forms are valid hardware
+configurations beyond this bounded implementation.
+
+Static readiness remains mandatory even for zero-width extraction. Multiplication
+provenance is conservatively retained, including full-width identities and
+zero-width outputs. Extraction clears direct-LDC texture-handle, PositionW and
+reciprocal proofs; these uses require separately validated dataflow. Mutable guest
+source words remain ordinary runtime data, independent of the shader cache key.

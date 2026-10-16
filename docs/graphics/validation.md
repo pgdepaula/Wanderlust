@@ -2387,3 +2387,46 @@ Windows startup attempt still failed at WSL interop `UtilAcceptVsock:273:
 accept4 failed 110`, before launching a Windows GPU test. No new D3D12/Vulkan
 passes are claimed. This remains independently assembled synthetic Maxwell
 execution; no original-game GPU submission or frame is established.
+
+## Signed and unsigned immediate bitfields
+
+Original pinned envyas independently reassembles both complete fixtures exactly:
+336-byte PS and 144-byte VS. Six CPU tests cover every contained offset/width
+combination, full-width and zero-width cases, RZ, aliasing, register allocation,
+pending source/destination, scheduling, unsupported forms and preserved FMUL
+hazards. Full-width extraction intentionally clears TEX, PositionW and reciprocal
+proofs; negative tests establish that the rejection follows a valid wait, rather
+than an unrelated unready operand. A separate per-bit oracle checks the emitted
+contained-field arithmetic across 44,800 scalar cases.
+
+The GpuDriver/GPFIFO PS test checks 41 raw source words against independent
+per-bit signed/unsigned reference values, producing `[64,128,191,255]`. Flipping
+one reference bit changes only red to zero without recompilation, ruling out an
+unconditional pass color. Changing the first BFE to zero width changes guest
+semantics and recompiles exactly once. Thirty-two warm deferred draws add 32
+queues and no extra shader/resource reads, uploads, modules, pipelines, readbacks
+or waits. A subsequent unsupported BREV faults without another draw or queue;
+the previously accepted output remains publishable.
+
+Before the warm sequence, 43 deliberate oracle publications transfer 319,920
+readback bytes and 259,376 guest framebuffer bytes. Two fragment decodes read
+672 bytes, while constants account for 860 guest bytes and 788 upload bytes.
+One target allocation is reused 42 times. The warm GL debug CPU observation is
+39.403 ms; allocator traffic is not separately measured and this is not GPU
+timing or a game benchmark. Final guest visibility remains explicit.
+
+The vertex fixture clears guest X's sign bit and produces an asymmetric triangle
+with 25 independently calculated interior validation samples. Changing only the
+first guest X yields 47 interior samples, one bounded 72-byte vertex update and
+no shader/pipeline replacement. Both draws use actual indexed guest geometry.
+
+A faithful ordinary `d7104db` snapshot plus seven exact candidate Rust/fixture
+files and unchanged Cargo.lock passed GPU formatting, strict package/workspace
+Clippy, 236 graphics CPU tests per configuration and all 114 actual WSL OpenGL
+GPU scenarios, with no GPU failures or skips. Full workspace execution produced
+463 passes, the same three Horizon/CLI expectation failures and 114 ignored GPU
+tests; the workspace is not reported green. All 40 Windows GPU executables
+compiled; the unchanged WSL interop failure prevents native process startup,
+so no new D3D12/Vulkan execution passes are claimed. Concurrent runtime changes
+were excluded, and synthetic shader results do not establish original-game
+GPU execution.
