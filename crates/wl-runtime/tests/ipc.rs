@@ -838,12 +838,12 @@ fn applet_oe_application_startup() {
     control(&mut p, 0, &[]);
     send(&mut p, &mut c, am);
     assert_eq!(reply_u32(&p, 0x20), 1);
-    // am has no pointer buffer.
+    // am has a 0x1000-byte pointer buffer.
     control(&mut p, 3, &[]);
     send(&mut p, &mut c, am);
     assert_eq!(
         (reply_u32(&p, 0x18), &reply(&p)[0x20..0x22]),
-        (0, &[0, 0][..])
+        (0, &[0x00, 0x10][..])
     );
     // OpenApplicationProxy: process ID, the current-process pseudo-handle copied.
     domain_request_with(&mut p, 1, 0, true, &[CURRENT_PROCESS], &[0; 8]);

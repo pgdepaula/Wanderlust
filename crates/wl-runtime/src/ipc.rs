@@ -294,6 +294,23 @@ fn parse_request(m: &[u8; MESSAGE_BUFFER_SIZE]) -> Request {
     for _ in 0..recvs {
         r.recvs.push(buffer(&mut d));
     }
+    let c_count = match r.recv_static_mode {
+        0 | 1 => 0,
+        2 => 1,
+        n => (n - 2) as usize,
+    };
+    let mut c_at = r.size;
+    for _ in 0..c_count {
+        if c_at + 8 <= MESSAGE_BUFFER_SIZE {
+            let low = read_u32(m, c_at);
+            let high = read_u32(m, c_at + 4);
+            let address = u64::from(low) | (u64::from(high & 0x7f) << 32);
+            let size = u64::from(high >> 16);
+            r.recvs.push((address, size));
+            c_at += 8;
+        }
+    }
+    r.size = c_at;
     r
 }
 

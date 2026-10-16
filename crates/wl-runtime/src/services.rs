@@ -96,9 +96,8 @@ pub enum Server {
 /// Size of `lm`'s pointer buffer (`lm_ipc_server.cpp`, `PointerBufferSize`).
 const LM_POINTER_BUFFER_SIZE: u16 = 0x400;
 
-/// am has no pointer buffer: in firmware 22.1.0 its server managers' pointer-buffer
-/// allocator returns none and every session's pointer-buffer size is initialised to 0.
-const AM_POINTER_BUFFER_SIZE: u16 = 0;
+/// Size of `am`'s pointer buffer (0x1000 bytes for HIPC pointer transfer buffers).
+const AM_POINTER_BUFFER_SIZE: u16 = 0x1000;
 
 /// Minimal valid specification-conformant empty RomFS image (header, dir hash table, root dir).
 const EMPTY_ROMFS: [u8; 304] = [
