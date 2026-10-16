@@ -950,6 +950,38 @@ pub(crate) fn request(
             // GetPseudoDeviceId: out 16 bytes UUID.
             Done::data(&[0u8; 16])
         }
+        (HostObject::ApplicationFunctions, 123) => {
+            // GetApplicationLaunchProperty: out ApplicationLaunchProperty (16 bytes).
+            let requested_title_id = if args.len() >= 8 {
+                (ipc::read_u32(args, 0) as u64) | ((ipc::read_u32(args, 4) as u64) << 32)
+            } else {
+                0
+            };
+            let title_id = if requested_title_id != 0 {
+                requested_title_id
+            } else if k.config.program_id != 0 {
+                k.config.program_id
+            } else {
+                0x0100f2c0115b6000
+            };
+            let mut prop = [0u8; 16];
+            prop[..8].copy_from_slice(&title_id.to_le_bytes());
+            prop[8..12].copy_from_slice(&720896u32.to_le_bytes()); // version 0xb0000 (v1.2.0)
+            prop[12] = 1; // StorageId::BuiltInUser
+            prop[13] = 1; // StorageId::BuiltInUser
+            prop[14] = 1; // ApplicationKind::Standard
+            prop[15] = 0;
+            let dst_info = req
+                .recvs
+                .first()
+                .or(req.statics.first())
+                .or(req.sends.first());
+            if let Some(&(dst, buf_size)) = dst_info {
+                let to_copy = prop.len().min(buf_size as usize);
+                let _ = memory.write_bytes(dst, &prop[..to_copy]);
+            }
+            Done::data(&prop)
+        }
         (HostObject::ApplicationFunctions, 210) => {
             // Cmd210: no arguments, returns copy handle to event.
             check(no_arguments)?;
