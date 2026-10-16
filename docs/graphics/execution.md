@@ -1573,3 +1573,22 @@ propagates the existing FMUL rounding hazard from either input. Mutable guest
 operands remain runtime data, independent of shader/pipeline identity. Other
 source forms, carry/negation modifiers, CC, reserved shift bits and execution
 predicates are rejected explicitly. Driver and submission APIs are unchanged.
+
+## Low-lane integer widening
+
+Vertex and fragment translation accept four unmodified GPR I2I forms:
+U8 to U32, U16 to U32, S8 to S32 and S16 to S32. Only the low source byte or
+halfword participates; upper source bits are discarded. Unsigned inputs are
+zero-extended, signed inputs are sign-extended as raw 32-bit values. No host
+floating-point conversion is involved. Source aliasing and RZ are supported;
+RZ destinations remain outside the decoder subset.
+
+These conversions require write barrier zero and a supported consumer wait,
+even when the input is zero. The conservative single-barrier decoder requires
+all earlier pending results to be ready before assigning that barrier. Type
+fields are not register indices. I2I neither initializes nor changes P0 and
+cannot preserve a texture handle or position-W/reciprocal proof. Existing
+FMUL rounding-hazard metadata propagates from the source. Mutable guest data
+does not specialize generated code. Other destination widths, cross-signed
+conversion, byte selectors, saturation, source modifiers, CC, execution
+predicates and immediate/constant-memory forms are rejected explicitly.

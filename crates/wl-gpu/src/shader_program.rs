@@ -145,6 +145,13 @@ pub enum Operation {
         src: u8,
         signed: bool,
     },
+    /// Scoreboarded SM50 I2I: low 8/16 bits widened to like-signed 32 bits.
+    IntWiden {
+        dst: u8,
+        src: u8,
+        bits: u8,
+        signed: bool,
+    },
     /// GPR FSET, unmodified F32 operands, AND PT, mask or float result.
     FloatSet {
         dst: u8,
@@ -788,6 +795,31 @@ impl Program {
                         comparison,
                         float_result: word & (1 << 52) != 0,
                     }
+                } else if matches!(
+                    word & !0x000000000ff000ff,
+                    0x5ce0000000070200
+                        | 0x5ce0000000070600
+                        | 0x5ce0000000073200
+                        | 0x5ce0000000073600
+                ) {
+                    // Only U8/U16 -> U32 and S8/S16 -> S32, low source lane.
+                    // Bits15:8 are types; the source GPR is bits27:20.
+                    let src = ((word >> 20) & 255) as u8;
+                    if write_barrier != 0
+                        || pending.iter().any(|v| *v)
+                        || !initialized[src as usize]
+                    {
+                        return Err(fail(
+                            "I2I requires ready source and unused write barrier zero",
+                        ));
+                    }
+                    pending[dst as usize] = true;
+                    Operation::IntWiden {
+                        dst,
+                        src,
+                        bits: if word & (1 << 10) == 0 { 8 } else { 16 },
+                        signed: word & (1 << 13) != 0,
+                    }
                 } else if word & !0x000000000ff020ff == 0x5cb8000000070a00 {
                     // Bits 15:8 describe destination/source types, not a GPR.
                     // Only F32 <- U32/S32, RN, ordinary GPR/RZ is supported.
@@ -1085,6 +1117,7 @@ impl Program {
                             | Operation::CountBits { .. }
                             | Operation::LeadingBit { .. }
                             | Operation::IntToFloat { .. }
+                            | Operation::IntWiden { .. }
                             | Operation::Integer {
                                 operator: IntegerOperator::Multiply,
                                 ..
@@ -1139,6 +1172,7 @@ impl Program {
                     | Operation::CountBits { src, .. }
                     | Operation::LeadingBit { src, .. }
                     | Operation::IntToFloat { src, .. }
+                    | Operation::IntWiden { src, .. }
                     | Operation::BitfieldExtract { src, .. }
                     | Operation::LogicImmediate { src, .. }
                     | Operation::AddImmediate { src, .. } => multiply_result[src as usize],
@@ -1240,6 +1274,7 @@ impl Program {
                 | Operation::CountBits { dst, src, .. }
                 | Operation::LeadingBit { dst, src, .. }
                 | Operation::IntToFloat { dst, src, .. }
+                | Operation::IntWiden { dst, src, .. }
                 | Operation::BitfieldExtract { dst, src, .. }
                 | Operation::ConditionalMove { dst, src, .. }
                 | Operation::LogicImmediate { dst, src, .. }
@@ -1363,6 +1398,9 @@ impl Program {
                 }
                 Operation::IntToFloat { dst, src, signed } => {
                     emit_int_to_float(&mut s, dst, src, signed);
+                }
+                Operation::IntWiden { dst, src, bits, signed } => {
+                    emit_int_widen(&mut s, dst, src, bits, signed);
                 }
                 Operation::FloatSet { dst, left, right, comparison, float_result } => {
                     emit_float_set(&mut s, dst, left, right, comparison, float_result);
@@ -1598,6 +1636,14 @@ impl VertexProgram {
                 Operation::IntToFloat { dst, src, signed } => {
                     emit_int_to_float(&mut s, dst, src, signed);
                 }
+                Operation::IntWiden {
+                    dst,
+                    src,
+                    bits,
+                    signed,
+                } => {
+                    emit_int_widen(&mut s, dst, src, bits, signed);
+                }
                 Operation::FloatSet {
                     dst,
                     left,
@@ -1649,6 +1695,23 @@ fn stage_source(operations: &[Operation], header: &str) -> String {
     source.push_str(helper);
     source.push_str(header);
     source
+}
+
+fn emit_int_widen(s: &mut String, dst: u8, src: u8, bits: u8, signed: bool) {
+    use std::fmt::Write;
+    // Decode restricts bits to8/16. Shift counts are bounded16/24; a signed
+    // right shift sign-extends the low source lane after discarding upper bits.
+    if signed {
+        let shift = 32 - bits;
+        writeln!(
+            s,
+            "r[{dst}]=bitcast<u32>(bitcast<i32>(r[{src}] << {shift}u) >> {shift}u);"
+        )
+        .unwrap();
+    } else {
+        let mask = (1u32 << bits) - 1;
+        writeln!(s, "r[{dst}]=r[{src}] & {mask}u;").unwrap();
+    }
 }
 
 fn emit_scaled_add(s: &mut String, dst: u8, left: u8, right: u8, shift: u8) {

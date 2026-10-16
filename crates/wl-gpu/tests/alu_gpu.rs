@@ -3468,3 +3468,345 @@ fn driver_vertex_scaled_add_controls_geometry_and_code_mutation() {
     eprintln!("VS ISCADD geometry {:?}", d.graphics_counters());
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+fn widen_reference(word: u32, bits: u8, signed: bool) -> u32 {
+    // Independent byte interpretation, not the production mask/shift lowering.
+    let b = word.to_le_bytes();
+    match (bits, signed) {
+        (8, false) => u32::from(b[0]),
+        (8, true) => i32::from(i8::from_le_bytes([b[0]])) as u32,
+        (16, false) => u32::from(u16::from_le_bytes([b[0], b[1]])),
+        (16, true) => i32::from(i16::from_le_bytes([b[0], b[1]])) as u32,
+        _ => panic!("unsupported oracle mode"),
+    }
+}
+fn widen_draw(
+    d: &mut GpuDriver,
+    c: ChannelId,
+    b: BackingId,
+    data: &mut [u8],
+    words: &[u32],
+    payload: [u32; 2],
+    matches: bool,
+) {
+    let mut bytes = [0u8; 8];
+    bytes[..4].copy_from_slice(&payload[0].to_le_bytes());
+    bytes[4..].copy_from_slice(&payload[1].to_le_bytes());
+    d.write_backing(b, 0x50, &bytes, &mut mem(data)).unwrap();
+    let r = submit(d, c, b, data, words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    d.publish(c, &mut mem(data)).unwrap();
+    check(
+        data,
+        if matches {
+            [64, 128, 191, 255]
+        } else {
+            [0, 128, 191, 255]
+        },
+        false,
+    );
+    d.retire(r.token).unwrap();
+}
+#[test]
+#[ignore = "requires actual GPU; four scoreboarded I2I widening forms, raw sign/zero extension and deferred visibility"]
+fn driver_integer_widening_types_data_and_wait_coherence() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let variants: [(u8, bool, &[u8]); 4] = [
+        (
+            8,
+            false,
+            include_bytes!("fixtures/maxwell/integer-widen-u8.bin"),
+        ),
+        (
+            16,
+            false,
+            include_bytes!("fixtures/maxwell/integer-widen-u16.bin"),
+        ),
+        (
+            8,
+            true,
+            include_bytes!("fixtures/maxwell/integer-widen-s8.bin"),
+        ),
+        (
+            16,
+            true,
+            include_bytes!("fixtures/maxwell/integer-widen-s16.bin"),
+        ),
+    ];
+    let bin = variants[0].2;
+    data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x2144, 0x600),
+        (0x214c, 7),
+        (0x2380, 24),
+        (0x2384, 0),
+        (0x2388, 0x40040),
+        (0x2490, 1),
+    ] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let draw_words = draw();
+    let mut values = vec![
+        0,
+        u32::MAX,
+        0x80000000,
+        0x7fffffff,
+        0x7f,
+        0x80,
+        0xff,
+        0x100,
+        0x7fff,
+        0x8000,
+        0xffff,
+        0x10000,
+        0x12345678,
+        0x89abcdef,
+        0xffffff7f,
+        0xffffff80,
+        0xffff7fff,
+        0xffff8000,
+        0x12345680,
+        0xdead8000,
+        0x000080ff,
+        0x80000080,
+    ];
+    let mut seed = 0x49324931u32;
+    for _ in 0..32 {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        values.push(seed);
+    }
+    let mut first = true;
+    for (bits, signed, fixture) in variants {
+        let op = u64::from_le_bytes(fixture[0x68..0x70].try_into().unwrap());
+        d.write_backing(b, 0x4668, &op.to_le_bytes(), &mut mem(&mut data))
+            .unwrap();
+        let mut identity = None;
+        for &raw in &values {
+            widen_draw(
+                &mut d,
+                c,
+                b,
+                &mut data,
+                if first { &words } else { &draw_words },
+                [raw, widen_reference(raw, bits, signed)],
+                true,
+            );
+            first = false;
+            let n = d.graphics_counters();
+            let current = [
+                n.shader_decodes,
+                n.shader_module_allocations,
+                n.pipeline_allocations,
+            ];
+            if let Some(old) = identity {
+                assert_eq!(current, old);
+            }
+            identity = Some(current);
+        }
+    }
+    // Both raw source storage and signedness are poisoned independently of RZ.
+    for (_, _, fixture) in variants {
+        let op = (u64::from_le_bytes(fixture[0x68..0x70].try_into().unwrap()) & !(255u64 << 20))
+            | (255u64 << 20);
+        d.write_backing(b, 0x4668, &op.to_le_bytes(), &mut mem(&mut data))
+            .unwrap();
+        widen_draw(&mut d, c, b, &mut data, &draw_words, [0x89abcdef, 0], true);
+    }
+    let signed = variants[3].2;
+    let op = u64::from_le_bytes(signed[0x68..0x70].try_into().unwrap());
+    d.write_backing(b, 0x4668, &op.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let expected = widen_reference(0x89abcdef, 16, true);
+    assert_eq!(expected, 0xffffcdef);
+    // Wrong expected bits must visibly fail; they also establish different RAM
+    // contents for the subsequent pending-output publication proof.
+    widen_draw(
+        &mut d,
+        c,
+        b,
+        &mut data,
+        &draw_words,
+        [0x89abcdef, expected ^ 1],
+        false,
+    );
+    let mut bytes = [0u8; 8];
+    bytes[..4].copy_from_slice(&0x89abcdefu32.to_le_bytes());
+    bytes[4..].copy_from_slice(&expected.to_le_bytes());
+    d.write_backing(b, 0x50, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let priming = submit(&mut d, c, b, &mut data, &draw_words);
+    assert!(priming.fault.is_none(), "{:?}", priming.fault);
+    assert_eq!(priming.progress.draws_submitted, 1);
+    assert!(!d.query(priming.token).unwrap().guest_visible);
+    check(&data, [0, 128, 191, 255], false);
+    let unchanged = |n: wl_gpu::Counters| {
+        [
+            n.shader_binary_bytes,
+            n.vertex_shader_bytes,
+            n.shader_decodes,
+            n.vertex_shader_decodes,
+            n.descriptor_reads,
+            n.vertex_guest_bytes,
+            n.index_guest_bytes,
+            n.constant_guest_bytes,
+            n.guest_texture_bytes,
+            n.render_target_guest_bytes,
+            n.upload_bytes,
+            n.upload_calls,
+            n.shader_module_allocations,
+            n.pipeline_allocations,
+            n.render_target_allocations,
+            n.readback_operations,
+            n.synchronization_points,
+        ]
+    };
+    let before = d.graphics_counters();
+    let start = std::time::Instant::now();
+    let mut last = None;
+    for _ in 0..32 {
+        let r = submit_existing(&mut d, c, &mut data, 8);
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert_eq!(r.progress.draws_submitted, 1);
+        last = Some(r.token);
+    }
+    let elapsed = start.elapsed();
+    let after = d.graphics_counters();
+    assert_eq!(after.draw_commands - before.draw_commands, 32);
+    assert_eq!(after.submissions - before.submissions, 32);
+    assert_eq!(unchanged(after), unchanged(before));
+    check(&data, [0, 128, 191, 255], false);
+    let last = last.unwrap();
+    assert!(!d.query(last).unwrap().guest_visible);
+    // Remove the first I2I consumer wait, leaving the auxiliary's independent
+    // WB0/wait1 intact. This must fault before drawing and retain red64 GPU output.
+    let control = u64::from_le_bytes(signed[0x70..0x78].try_into().unwrap());
+    d.write_backing(
+        b,
+        0x4670,
+        &(control & !(1 << 11)).to_le_bytes(),
+        &mut mem(&mut data),
+    )
+    .unwrap();
+    let failed = submit(&mut d, c, b, &mut data, &draw_words);
+    assert!(failed.fault.is_some());
+    assert_eq!(failed.progress.draws_submitted, 0);
+    assert_eq!(d.graphics_counters().draw_commands, after.draw_commands);
+    assert_eq!(d.graphics_counters().submissions, after.submissions);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [64, 128, 191, 255], false);
+    assert!(d.query(last).unwrap().guest_visible);
+    assert!(d.query(priming.token).unwrap().guest_visible);
+    assert_eq!(d.graphics_counters().draw_commands, after.draw_commands);
+    eprintln!(
+        "I2I {} raw words x4 types, warm32 CPU={elapsed:?} before={before:?} after={after:?}",
+        values.len()
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+#[test]
+#[ignore = "requires actual GPU; signed low-halfword widening predicates finite guest geometry"]
+fn driver_vertex_integer_widening_controls_geometry() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/vertex-integer-widen.bin");
+    data[0x4800..0x4800 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [(0x2044, 0x800), (0x204c, 9), (0x2144, 0x400)] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    for (x, expected) in [
+        (-0.8f32, 0xffffcccd),
+        (0.6f32, 0xffff999a),
+        (-0.2f32, 0xffffcccd),
+        (0.57f32, 0xffffeb85),
+    ] {
+        assert_eq!(widen_reference(x.to_bits(), 16, true), expected);
+    }
+    let r = submit(&mut d, c, b, &mut data, &words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_positions(
+        &data,
+        [255, 0, 0, 255],
+        [
+            POS[0].map(f64::from),
+            [0.5, f64::from(POS[1][1])],
+            POS[2].map(f64::from),
+        ],
+    );
+    d.retire(r.token).unwrap();
+    // The unique low EB85 field is negative under S16 and positive under U16.
+    // These literal checks make both later code changes necessary for restoration.
+    assert_eq!(0.57f32.to_bits(), 0x3f11eb85);
+    assert_eq!(widen_reference(0x3f11eb85, 16, true), 0xffffeb85);
+    assert_eq!(widen_reference(0x3f11eb85, 16, false), 0x0000eb85);
+    d.write_backing(b, 0x3018, &0.57f32.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let background: Vec<_> = (0..W * H).flat_map(|_| BG).collect();
+    d.write_backing(b, RT as u64, &background, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    let after = d.graphics_counters();
+    assert_eq!(after.vertex_shader_decodes, before.vertex_shader_decodes);
+    assert_eq!(after.pipeline_allocations, before.pipeline_allocations);
+    assert_eq!(after.vertex_upload_bytes - before.vertex_upload_bytes, 72);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_positions(
+        &data,
+        [255, 0, 0, 255],
+        [
+            POS[0].map(f64::from),
+            [f64::from(0.57f32), f64::from(POS[1][1])],
+            POS[2].map(f64::from),
+        ],
+    );
+    d.retire(r.token).unwrap();
+    // U16 plus expected0000EB85 selects only the second vertex again. Changing
+    // the expected literal alone leaves FFFFEB85 unmatched; changing the type
+    // alone leaves old FFFF999A unmatched. No vertex bytes change in this step.
+    let unsigned = u64::from_le_bytes(bin[0x78..0x80].try_into().unwrap()) & !0x3000;
+    assert_eq!(unsigned, 0x5ce0000000070606);
+    let expected = 0x010000000007f007u64 | (0xeb85u64 << 20);
+    d.write_backing(b, 0x4878, &unsigned.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    d.write_backing(b, 0x4868, &expected.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    d.write_backing(b, RT as u64, &background, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    let after = d.graphics_counters();
+    assert_eq!(
+        after.vertex_shader_decodes,
+        before.vertex_shader_decodes + 1
+    );
+    assert_eq!(after.shader_decodes, before.shader_decodes);
+    assert_eq!(after.vertex_upload_bytes, before.vertex_upload_bytes);
+    assert!(after.pipeline_allocations > before.pipeline_allocations);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_positions(
+        &data,
+        [255, 0, 0, 255],
+        [
+            POS[0].map(f64::from),
+            [0.5, f64::from(POS[1][1])],
+            POS[2].map(f64::from),
+        ],
+    );
+    d.retire(r.token).unwrap();
+    eprintln!("VS I2I geometry {:?}", d.graphics_counters());
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

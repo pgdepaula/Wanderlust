@@ -2786,3 +2786,75 @@ both fail in the WSL interoperability broker with `accept4` error110 before
 adapter acquisition. Zero native executions passed in this milestone. The
 other unchanged native test targets are not rebuilt or counted as executed.
 No Windows policy or shared WSL process was changed to conceal this limitation.
+
+The completed ISCADD workspace snapshot reports514 passing tests, three
+existing CLI/Horizon failures and126 ignored GPU tests. The failures are the
+homebrew heap-ratio expectation in two tests and absent-service exit status
+in one; graphics results remain green. This is the frozen `2b7d93c` plus
+seven-file source snapshot, not a live-worktree workspace pass.
+
+## I2I: exact low-lane widening and shader-controlled vertex coverage
+
+The four guest-selected integer-widening variants execute through `GpuDriver`,
+GPFIFO, B06F/B197 and actual wgpu indexed rasterization. Fifty-four raw source
+words per type (22 boundary/poison cases plus32 deterministic seeded words)
+provide216 result checks. An independent oracle interprets little-endian low
+bytes as u8/i8 or u16/i16, then numerically widens them to32 bits. The guest
+shader compares those expected raw bits with ISETP before exporting
+[64,128,191,255]; an incorrect reference exports[0,128,191,255]. Four additional
+poisoned-source RZ draws and an auxiliary I2I verify zero-register semantics
+and P0 isolation. Changing constant data does not recreate compiled shaders.
+
+The vertex program changes the second X from+.6 to finite+.5. Changing only
+guest X to+.57 (raw3F11EB85) gives signedFFFFEB85 and disables the substitution.
+Changing I2I to U16 plus its expected literal to0000EB85 restores second-only
++.5 with one new vertex decode and no additional vertex upload or fragment
+decode. Both binary changes are necessary to restore that predicate. Independent
+analytic coverage on the47x29 viewport/52x29 target has ten unambiguous pixels
+distinguishing+.57 from+.5 after edge exclusion. This is geometry execution,
+not host-injected positioning or an exported integer masquerading as a float.
+
+The pending-output test first publishes red0 RAM, then accepts correct red64
+GPU work. Thirty-two unchanged draws leave RAM red0. Removing the first I2I
+consumer wait faults without another draw or queue submission. Explicit
+publication still produces red64 and updates the prior tokens' visibility,
+without replaying accepted commands. Existing failed-atomic-publication,
+layout, alias/remap and channel regressions remain separate acceptance cases.
+
+The focused live run passed seven CPU tests and two actual OpenGL scenarios.
+Before warm repetition the fragment workload records222 draws,443 queue
+submissions, nine fragment decodes/1872 shader bytes,1776 constant bytes read
+and1724 uploaded, twelve shader modules, twenty pipelines and one target
+allocation/221 reuses. Its221 intentional oracle publications read1,644,240
+bytes and publish1,333,072 packed guest bytes. The32 warm draws add32 queues,
+1280 command-source borrowed bytes including1024 command bytes, and64 entry
+decodes, with no additional resource reads/uploads, shaders, pipelines, target
+allocations, readbacks or waits. Warm CPU wall time was24.965ms focused versus53.508ms in the full suite
+under uncontrolled host load. This is not GPU time, game performance, full batching,
+zero-copy rendering or an allocation-free claim. Rust allocation traffic is
+not instrumented in this new draw workload.
+
+Executed live-worktree I2I regression gates:
+
+- GPU formatting and strict all-target package Clippy: passed.
+- Without default features:286 CPU tests passed, zero failures.
+- Default features:287 CPU tests passed, zero failures;128 GPU tests ignored.
+- Explicit WSL OpenGL:128 actual GPU scenarios passed, zero failures/skips,
+  llvmpipe LLVM23.1.1/Mesa26.2.4, including both new I2I scenarios.
+
+Linux builds retain unoptimized code, debug assertions and overflow checks,
+with debug information disabled. The faithful workspace/native snapshot is
+`22d4c81` plus thirteen exact candidate code/assembly/binary files, unchanged
+Cargo.lock and preserved source-built homebrew fixtures. Workspace validation
+is separate from the passing live GPU gates. Whole-workspace formatting
+reports peer-owned differences and strict Clippy reports six runtime errors;
+those files are unchanged by this graphics delivery.
+
+The updated Windows `alu_gpu` executable compiled with debug information from
+identical frozen candidate bytes. D3D12 and Vulkan were each actually launched;
+both fail in the WSL broker with `accept4` error110 before adapter acquisition.
+Zero native GPU executions passed in this milestone; compilation is not pixel
+validation. Unchanged native targets are not counted as rerun. No execution
+policy or shared WSL process was changed. The tested shader programs remain
+independently assembled synthetic inputs; no original TOTK GPU submission or
+frame has been demonstrated.

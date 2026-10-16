@@ -430,3 +430,27 @@ arithmetic is never exported as a clip position. SHA-256 including SPH:
 Only synthetic independently assembled instructions are included. The fixture
 supports the verified five-bit shift field; permissive assembler grammar for
 larger immediates is not evidence for reserved bits or instruction modifiers.
+
+`integer-widen-u8`, `integer-widen-u16`, `integer-widen-s8`,
+`integer-widen-s16` and `vertex-integer-widen` each contain a validated
+80-byte stage header plus128 code bytes from the original pinned envyas.
+The fragment variants alias R4 at PC0x68, consuming its low8/16 bits and
+writing zero/sign-extended raw32 bits. An explicit wait precedes ISETP against
+guest expected bits. An auxiliary I2I from RZ into R4 at PC0x80, with its own
+WB0/wait1, must preserve P0 before SEL exports the comparison color.
+
+The signed-halfword vertex fixture compares converted X bits against
+FFFF999A. Only the SECOND initial vertex X=+.6 matches and moves to finite+.5;
+the first/third low halfwords are CCCD. Guest second X=+.57 has unique low
+EB85 and disables the move. Changing the binary to U16 plus expected0000EB85
+restores second-only+.5 without another vertex-data change. The raw converted
+value is never exported as a clip position. SHA-256 including SPH:
+
+- integer-widen-u8.bin:25d263f4f7ffdc57f59a43681dbfa98b41648d7803a94f6c6817407ece4b0d47
+- integer-widen-u16.bin:2c7b074a3caa1d3dbfe029490af0701caace93b8a8dc923864707a6af7b8e905
+- integer-widen-s8.bin:f2e75e97ab11eed14608be3a92dd43f45c30a62e87806eb2d875b24dce74be9a
+- integer-widen-s16.bin:ab5527eb7406f122c4043cd812da8b201355240ccc019539c68f7926c6456547
+- vertex-integer-widen.bin:30f9ac2497d6f1e13deffa9eeef2165a3e8e70bb69b7b55ec3fc5134549044ec
+
+All programs are synthetic and independently assembled. Narrow destinations,
+cross-signed conversion, modifiers and other source lanes are not implied.

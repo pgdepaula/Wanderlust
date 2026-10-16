@@ -1,6 +1,7 @@
 # Graphics source assessment
 
-Sources inspected on 2026-10-11. Commit links identify the source considered;
+Initial sources inspected on 2026-10-11; later sections record additional
+implemented hardware subsets. Commit links identify the source considered;
 dependency checksums and actual selected versions are recorded in `Cargo.lock`.
 
 ## Adopted implementations
@@ -37,8 +38,10 @@ subchannel, payload count, immediate data and secondary opcodes. They provide th
 field specification for the independent `fifo` decoder; no header code was copied.
 The [libnx channel interface](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/include/switch/nvidia/gpu_channel.h)
 at revision `feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973` separates GPFIFO entries,
-channel submission and fences. The current decoder handles pushbuffer methods,
-not those channel/service operations. Method-span overflow is rejected as a
+channel submission and fences. The original packet decoder handles method
+words; later sections describe the implemented bounded GPFIFO/driver boundary.
+Horizon service dispatch and guest fence compatibility are separate contracts.
+Method-span overflow is rejected as a
 Wanderlust validation policy; hardware fault behavior was not established.
 
 The Ryubing repository endpoints attempted from this environment were unavailable
@@ -1257,3 +1260,25 @@ and is not used as opcode evidence. The fixed six-cycle GPR scheduling subset
 uses no write barrier and requires ready inputs/destination, while honoring
 supported incoming waits. Only semantic and encoding evidence is used from
 these MIT sources; no compiler implementation is imported.
+
+## SM50 low-byte and low-halfword I2I widening
+
+The pinned MIT GM107 table, [NAK SM50 I2I encoder](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs#L1883-L1926)
+and [UAM Maxwell I2I emission](https://github.com/devkitPro/uam/blob/5a5afc2bae8b55409ab36ba45be63fcb73f68993/mesa-imported/codegen/nv50_ir_emit_gm107.cpp#L893-L930)
+agree on register opcode5ce0, destination bits7:0 and source27:20. The
+validated decoder uses register mask `000000000ff000ff` and four exact fixed
+bases: `5ce0000000070200` (U32 from U8), `5ce0000000070600` (U32 from U16),
+`5ce0000000073200` (S32 from S8), `5ce0000000073600` (S32 from S16).
+Bits9:8 encode destination size,11:10 source size,12 destination signedness
+and13 source signedness. The four-base check accepts only the documented
+like-signed widening subset; it does not generalize other conversion semantics.
+
+The source lane selector41:42 is fixed zero. NEG45, CC47, ABS49 and SAT50 are
+unsupported. NAK/UAM classify conversion instructions as variable latency;
+Wanderlust's bounded schedule assigns WB0 and requires a matching wait before
+consumption, including RZ and aliases. Original pinned envyas independently
+assembles all five fixtures; pinned MaxAs independently agrees on all four
+type encodings and RZ operands. The reference oracle reads the low bytes using
+signed/unsigned byte interpretation, separately from WGSL's bounded mask or
+shift-based sign extension. Only encoding/semantic evidence is used; no
+compiler implementation is imported.
