@@ -19,10 +19,10 @@
 //!
 //! Requests the model does not cover (domains, unknown commands, a request layout that
 //! differs from the command's) are explicit faults rather than replies.
-use crate::horizon::{self, Kernel, result};
+use crate::horizon::{self, result, Kernel};
 use crate::ipc::{Endpoint, Request};
 use crate::threads;
-use crate::{Memory, ipc};
+use crate::{ipc, Memory};
 
 /// An object behind a session to a hosted service.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -74,6 +74,7 @@ pub enum HostObject {
     /// `vi` IApplicationRootService, IApplicationDisplayService (vi process).
     ViUser,
     ViDisplayService,
+    HosBinderDriver,
 }
 
 /// The process serving a hosted object; domain object IDs are allocated per server.
@@ -121,20 +122,13 @@ const EMPTY_ROMFS: [u8; 304] = [
     0xff, 0xff, 0xff, 0xff, // next_hash: none
     0x00, 0x00, 0x00, 0x00, // name_len: 0
     // 0x70: file hash table (4 bytes bucket + 4 bytes padding)
-    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00,
-    // 0x78..0x100: empty padding
-    0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, // 0x78..0x100: empty padding
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 
 /// `lm::LogDestination_TargetManager`, the destination before any SetDestination.
@@ -184,6 +178,8 @@ pub struct HostState {
     pub nvdrv_event: Option<usize>,
     /// vi VsyncEvent: never signalled.
     pub vi_vsync_event: Option<usize>,
+    /// hosbinder BinderEvent.
+    pub binder_event: Option<usize>,
     /// aoc:u AddOnContentListChangedEvent: never signalled, as DLCs are static.
     pub aoc_list_changed_event: Option<usize>,
     /// Settings recorded by ISelfController and IWindowController.
@@ -290,6 +286,7 @@ impl HostObject {
             HostObject::NvDrvServices => ("nvdrv INvDrvServices", 0),
             HostObject::ViUser => ("vi:u IApplicationRootService", 0),
             HostObject::ViDisplayService => ("vi IApplicationDisplayService", 0),
+            HostObject::HosBinderDriver => ("nns::hosbinder::IHOSBinderDriver", 0),
         }
     }
     fn server(&self) -> Server {
@@ -308,7 +305,9 @@ impl HostObject {
                 Server::Fs
             }
             HostObject::NvDrvServices => Server::NvDrv,
-            HostObject::ViUser | HostObject::ViDisplayService => Server::Vi,
+            HostObject::ViUser | HostObject::ViDisplayService | HostObject::HosBinderDriver => {
+                Server::Vi
+            }
             _ => Server::Am,
         }
     }
@@ -1179,10 +1178,10 @@ pub(crate) fn request(
         (HostObject::FileSystem, _) => Done::ok(),
         (HostObject::Storage, 0) => {
             // Read(u64 offset, u64 size, OutBuffer)
-            let offset = (ipc::read_u32(args, 0) as usize)
-                | ((ipc::read_u32(args, 4) as usize) << 32);
-            let size = (ipc::read_u32(args, 8) as usize)
-                | ((ipc::read_u32(args, 12) as usize) << 32);
+            let offset =
+                (ipc::read_u32(args, 0) as usize) | ((ipc::read_u32(args, 4) as usize) << 32);
+            let size =
+                (ipc::read_u32(args, 8) as usize) | ((ipc::read_u32(args, 12) as usize) << 32);
             let dst_info = req
                 .recvs
                 .first()
@@ -1241,43 +1240,127 @@ pub(crate) fn request(
         }
         (HostObject::NvDrvServices, _) => Done::data(&0u32.to_le_bytes()),
 
-        (HostObject::ViUser, 0 | 1 | 2) => {
+        (HostObject::ViUser, 0..=2) => {
             // GetDisplayService: out object IApplicationDisplayService
             Done::object(HostObject::ViDisplayService)
         }
         (HostObject::ViUser, _) => Done::ok(),
 
-        (HostObject::ViDisplayService, 100 | 102) => {
-            // OpenDisplay / OpenDefaultDisplay: out u64 display_id (1)
-            Done::data(&1u64.to_le_bytes())
+        (HostObject::ViDisplayService, 100) => {
+            // GetRelayService: out object IHOSBinderDriver
+            Done::object(HostObject::HosBinderDriver)
+        }
+        (HostObject::ViDisplayService, 101) => {
+            // GetSystemDisplayService: out object IApplicationDisplayService
+            Done::object(HostObject::ViDisplayService)
+        }
+        (HostObject::ViDisplayService, 102) => {
+            // GetManagerDisplayService: out object IApplicationDisplayService
+            Done::object(HostObject::ViDisplayService)
         }
         (HostObject::ViDisplayService, 103) => {
+            // GetIndirectDisplayTransactionService: out object IHOSBinderDriver
+            Done::object(HostObject::HosBinderDriver)
+        }
+        (HostObject::ViDisplayService, 1000) => {
+            // ListDisplays: out u64 count (1)
+            Done::data(&1u64.to_le_bytes())
+        }
+        (HostObject::ViDisplayService, 1010) => {
+            // OpenDisplay: out u64 display_id (1)
+            Done::data(&1u64.to_le_bytes())
+        }
+        (HostObject::ViDisplayService, 1020) => {
+            // CloseDisplay
+            Done::ok()
+        }
+        (HostObject::ViDisplayService, 1102) => {
             // GetDisplayResolution: out u64 width (1920), out u64 height (1080)
             let mut data = [0u8; 16];
             data[..8].copy_from_slice(&1920u64.to_le_bytes());
             data[8..16].copy_from_slice(&1080u64.to_le_bytes());
             Done::data(&data)
         }
-        (HostObject::ViDisplayService, 210) => {
+        (HostObject::ViDisplayService, 210 | 5202) => {
             // GetDisplayVsyncEvent: copy handle to event
             let e = host_event(k, |h| &mut h.vi_vsync_event, true);
             copy_event(k, e)
         }
-        (HostObject::ViDisplayService, 203) => {
-            // CreateStrayLayer: out u64 layer_id (1), out u64 parcel_size (0)
-            let mut data = [0u8; 16];
-            data[..8].copy_from_slice(&1u64.to_le_bytes());
-            Done::data(&data)
-        }
         (HostObject::ViDisplayService, 2020) => {
-            // OpenLayer: out u64 parcel_size (0)
-            Done::data(&0u64.to_le_bytes())
+            // OpenLayer: writes parcel into output buffer, returns out u64 parcel_size
+            let parcel = make_native_window_parcel();
+            let dst_info = req
+                .recvs
+                .first()
+                .or(req.statics.first())
+                .or(req.sends.first());
+            if let Some(&(dst, buf_size)) = dst_info {
+                let to_copy = parcel.len().min(buf_size as usize);
+                let _ = memory.write_bytes(dst, &parcel[..to_copy]);
+            }
+            Done::data(&(parcel.len() as u64).to_le_bytes())
         }
         (HostObject::ViDisplayService, 2021) => {
             // CloseLayer
             Done::ok()
         }
+        (HostObject::ViDisplayService, 2030) => {
+            // CreateStrayLayer: out u64 layer_id (1), out u64 parcel_size
+            let parcel = make_native_window_parcel();
+            let dst_info = req
+                .recvs
+                .first()
+                .or(req.statics.first())
+                .or(req.sends.first());
+            if let Some(&(dst, buf_size)) = dst_info {
+                let to_copy = parcel.len().min(buf_size as usize);
+                let _ = memory.write_bytes(dst, &parcel[..to_copy]);
+            }
+            let mut data = [0u8; 16];
+            data[..8].copy_from_slice(&1u64.to_le_bytes());
+            data[8..16].copy_from_slice(&(parcel.len() as u64).to_le_bytes());
+            Done::data(&data)
+        }
+        (HostObject::ViDisplayService, 2031 | 2101) => {
+            // DestroyStrayLayer, SetLayerScalingMode
+            Done::ok()
+        }
         (HostObject::ViDisplayService, _) => Done::ok(),
+
+        (HostObject::HosBinderDriver, 0 | 3) => {
+            // TransactParcel / TransactParcelAuto: write reply parcel into recv buffer
+            // Default reply parcel: 1280x720, transform 0, pending 0, result 0
+            let reply = make_parcel(
+                &[
+                    0x00, 0x05, 0x00, 0x00, // 1280
+                    0xd0, 0x02, 0x00, 0x00, // 720
+                    0x00, 0x00, 0x00, 0x00, // 0
+                    0x00, 0x00, 0x00, 0x00, // 0
+                    0x00, 0x00, 0x00, 0x00, // 0 (result = SUCCESS)
+                ],
+                &[],
+            );
+            let dst_info = req
+                .recvs
+                .first()
+                .or(req.statics.first())
+                .or(req.sends.first());
+            if let Some(&(dst, buf_size)) = dst_info {
+                let to_copy = reply.len().min(buf_size as usize);
+                let _ = memory.write_bytes(dst, &reply[..to_copy]);
+            }
+            Done::ok()
+        }
+        (HostObject::HosBinderDriver, 1) => {
+            // AdjustRefcount: no output
+            Done::ok()
+        }
+        (HostObject::HosBinderDriver, 2) => {
+            // GetNativeHandle: copy handle to event
+            let e = host_event(k, |h| &mut h.binder_event, true);
+            copy_event(k, e)
+        }
+        (HostObject::HosBinderDriver, _) => Done::ok(),
         _ => return unsupported("an unknown command"),
     };
     if k.host.calls.len() < CALL_TRACE_LIMIT {
@@ -1358,6 +1441,28 @@ fn copy_event(k: &mut Kernel, e: usize) -> Done {
         },
         Err(code) => Done::failure(code),
     }
+}
+
+fn make_parcel(data: &[u8], objs: &[u8]) -> Vec<u8> {
+    let mut p = Vec::with_capacity(16 + data.len() + objs.len());
+    p.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    p.extend_from_slice(&0x10u32.to_le_bytes());
+    p.extend_from_slice(&(objs.len() as u32).to_le_bytes());
+    p.extend_from_slice(&((data.len() + 0x10) as u32).to_le_bytes());
+    p.extend_from_slice(data);
+    p.extend_from_slice(objs);
+    p
+}
+
+fn make_native_window_parcel() -> Vec<u8> {
+    let mut data = Vec::with_capacity(40);
+    data.extend_from_slice(&2u32.to_le_bytes()); // Type: BINDER_TYPE_WEAK_BINDER
+    data.extend_from_slice(&0u32.to_le_bytes()); // Flags: 0
+    data.extend_from_slice(&0x20u64.to_le_bytes()); // Id: 0x20
+    data.extend_from_slice(&0u64.to_le_bytes()); // Cookie: 0
+    data.extend_from_slice(b"dispdrv\0"); // Name: dispdrv
+    data.extend_from_slice(&0u64.to_le_bytes()); // Pad: 0
+    make_parcel(&data, &[0, 0, 0, 0])
 }
 
 /// Obtains or creates the shared memory object backing time:u GetSharedMemoryNativeHandle.

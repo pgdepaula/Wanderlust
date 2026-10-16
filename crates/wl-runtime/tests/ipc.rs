@@ -180,11 +180,9 @@ fn register_client_then_lookup_and_registration() {
     assert_eq!(reply_result(&p), sm_result::OUT_OF_SESSIONS);
     // Requests to a guest-hosted service are not modelled: explicit fault.
     c.x[0] = u64::from(client);
-    assert!(
-        dispatch(&mut c, &mut p, 0x21)
-            .unwrap_err()
-            .contains("hosted by the guest")
-    );
+    assert!(dispatch(&mut c, &mut p, 0x21)
+        .unwrap_err()
+        .contains("hosted by the guest"));
     // Unregister: success, then NotRegistered.
     request(&mut p, 3, false, &name("wl:svc"));
     send(&mut p, &mut c, sm);
@@ -262,11 +260,9 @@ fn control_close_and_invalid_requests() {
     // Buffer descriptors to sm are not modelled: explicit fault.
     p.write_bytes(t, &[4, 0, 0x10, 0, 0x0A, 0, 0, 0]).unwrap();
     c.x[0] = u64::from(sm);
-    assert!(
-        dispatch(&mut c, &mut p, 0x21)
-            .unwrap_err()
-            .contains("descriptors")
-    );
+    assert!(dispatch(&mut c, &mut p, 0x21)
+        .unwrap_err()
+        .contains("descriptors"));
     // An unknown command: the server closes the session; every later request fails.
     request(&mut p, 99, false, &[0; 8]);
     assert_eq!(send(&mut p, &mut c, sm).0, result::SESSION_CLOSED);
@@ -571,18 +567,14 @@ fn hosted_service_control_requests_and_limits() {
     assert_eq!(send(&mut p, &mut c, logger), (result::SUCCESS, None));
     p.write_bytes(t, &m).unwrap();
     c.x[0] = u64::from(logger);
-    assert!(
-        dispatch(&mut c, &mut p, 0x21)
-            .unwrap_err()
-            .contains("converting a domain session")
-    );
+    assert!(dispatch(&mut c, &mut p, 0x21)
+        .unwrap_err()
+        .contains("converting a domain session"));
     request(&mut p, 9, false, &[]);
     c.x[0] = u64::from(clone);
-    assert!(
-        dispatch(&mut c, &mut p, 0x21)
-            .unwrap_err()
-            .contains("unknown command")
-    );
+    assert!(dispatch(&mut c, &mut p, 0x21)
+        .unwrap_err()
+        .contains("unknown command"));
     // The name cannot be registered by the guest; CMIF Close ends the session.
     let sm = connect(&mut p, &mut c);
     tipc_register_client(&mut p, &mut c, sm);
@@ -721,6 +713,9 @@ fn service(p: &mut Process, c: &mut Cpu, sm: u32, service: &str) -> u32 {
 fn reply_u32(p: &Process, at: usize) -> u32 {
     u32::from_le_bytes(reply(p)[at..at + 4].try_into().unwrap())
 }
+fn reply_u64(p: &Process, at: usize) -> u64 {
+    u64::from_le_bytes(reply(p)[at..at + 8].try_into().unwrap())
+}
 
 #[test]
 fn apm_performance_mode_and_configuration() {
@@ -762,11 +757,9 @@ fn apm_performance_mode_and_configuration() {
     }
     control(&mut p, 3, &[]);
     c.x[0] = u64::from(apm);
-    assert!(
-        dispatch(&mut c, &mut p, 0x21)
-            .unwrap_err()
-            .contains("pointer-buffer size")
-    );
+    assert!(dispatch(&mut c, &mut p, 0x21)
+        .unwrap_err()
+        .contains("pointer-buffer size"));
 }
 
 #[test]
@@ -1143,4 +1136,28 @@ fn nvdrv_and_vi_service_startup() {
     assert_eq!(reply_result(&p), result::SUCCESS);
     let disp = reply_handle(&p);
     assert_ne!(disp, 0);
+
+    // GetRelayService (cmd 100) -> IHOSBinderDriver
+    request(&mut p, 100, false, &[]);
+    assert_eq!(send(&mut p, &mut c, disp), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+    let binder = reply_handle(&p);
+    assert_ne!(binder, 0);
+
+    // OpenDisplay (cmd 1010) -> display_id = 1
+    request(&mut p, 1010, false, &[]);
+    assert_eq!(send(&mut p, &mut c, disp), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+    assert_eq!(reply_u64(&p, 0x20), 1);
+
+    // OpenLayer (cmd 2020) -> parcel_size = 60
+    request(&mut p, 2020, false, &[]);
+    assert_eq!(send(&mut p, &mut c, disp), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+    assert_eq!(reply_u64(&p, 0x20), 60);
+
+    // AdjustRefcount (cmd 1) on binder
+    request(&mut p, 1, false, &[]);
+    assert_eq!(send(&mut p, &mut c, binder), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
 }
