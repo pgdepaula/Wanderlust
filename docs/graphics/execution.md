@@ -1428,3 +1428,25 @@ This exact comparison path does not establish exceptional-value equivalence for
 the separate floating arithmetic instructions. Multiplication dependencies in
 either comparison operand propagate through the resulting predicate into SEL
 and conditional MOV; existing unfused-rounding restrictions remain enforced.
+
+## External CPU writes at a serialized runtime boundary
+
+`GpuDriver::notify_cpu_write(backing, offset, length)` invalidates the exact
+canonical range after a runtime-owned CPU write, without reading, copying or
+writing those bytes again. Backing identity, bounds, integer overflow, journal
+capacity and instrumentation overflow are checked before the journal changes.
+Rejected notifications change neither journal nor notification counters.
+
+The caller must exclusively own driver and backing throughout this sequence:
+publish any GPU-newer output **before** externally changing RAM, perform the CPU
+write, then notify its range before submitting more GPU commands. Checking only
+after an external write is too late. The method rejects every pending attachment
+and cannot undo an external write if notification fails. This is a deliberately
+serialized adapter contract, not asynchronous CPU/GPU sharing or automatic AOT
+dirty tracking. `write_backing` remains the checked atomic path for CPU patches
+while GPU output is pending. Host completion alone does not establish guest
+publication or grant external-write permission.
+
+Notification counters describe accepted ranges and their summed byte lengths,
+not transferred bytes. Existing memory adapters, mappings, shader/resource
+caches, submission tokens and completion semantics remain unchanged.

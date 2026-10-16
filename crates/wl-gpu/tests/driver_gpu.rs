@@ -191,6 +191,172 @@ fn setup_driver() -> (
     }
     (d, space, channel, backing, maps)
 }
+
+#[test]
+#[ignore = "requires actual GPU; externally written CPU data and checked cache notification"]
+fn external_cpu_writes_invalidate_without_recopying_guest_memory() {
+    let (mut data, words, image) = fixture();
+    let (mut d, _, c, b, _) = setup_driver();
+    put(&mut data, 0x10000, &words);
+    d.notify_cpu_write(b, 0x10000, words.len() * 4).unwrap();
+    let h = header(1);
+    let e = entry(0xb0000, words.len());
+    let r = d
+        .submit(c, KICKOFF_PB, &h, Some(&e), &mut mem(&mut data))
+        .unwrap();
+    assert!(r.fault.is_none());
+    let untouched = data.clone();
+    let before = (
+        d.counters.cpu_write_notifications,
+        d.counters.cpu_notified_bytes,
+    );
+    assert!(d.notify_cpu_write(b, 0x1000, 4).is_err());
+    assert_eq!(
+        (
+            d.counters.cpu_write_notifications,
+            d.counters.cpu_notified_bytes
+        ),
+        before
+    );
+    assert_eq!(data, untouched);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data[RT..RT + SIZE], &image, None, BG);
+    d.retire(r.token).unwrap();
+
+    // Caller establishes publication BEFORE touching RAM. AOT/runtime would
+    // perform this write itself; notification only advances canonical history.
+    let desc = TextureImage::decode(TIC_RGBA)
+        .unwrap()
+        .with_sampler(TextureSampler::decode(TSC_NEAREST).unwrap());
+    let (surface, _) = rgba_surface(desc);
+    assert_eq!(surface.len(), 6144);
+    let color = [77, 137, 199, 255];
+    for pixel in data[0x1000..0x1000 + surface.len()].chunks_exact_mut(4) {
+        pixel.copy_from_slice(&color);
+    }
+    let after_cpu_write = data.clone();
+    d.notify_cpu_write(b, 0x1000, surface.len()).unwrap();
+    assert_eq!(data, after_cpu_write); // The notification itself owns no RAM.
+    let draw = [0x20010586, 4, 0x200105f7, 0, 0x200105f8, 3, 0x20010585, 0];
+    put(&mut data, 0x10000, &draw);
+    d.notify_cpu_write(b, 0x10000, draw.len() * 4).unwrap();
+    let e = entry(0xb0000, draw.len());
+    let before = d.graphics_counters();
+    let r = d
+        .submit(c, KICKOFF_PB, &h, Some(&e), &mut mem(&mut data))
+        .unwrap();
+    assert!(r.fault.is_none());
+    assert_eq!(r.progress.draws_submitted, 1);
+    let after = d.graphics_counters();
+    assert_eq!(after.shader_decodes, before.shader_decodes);
+    assert_eq!(after.vertex_shader_decodes, before.vertex_shader_decodes);
+    assert_eq!(
+        after.shader_module_allocations,
+        before.shader_module_allocations
+    );
+    assert_eq!(after.pipeline_allocations, before.pipeline_allocations);
+    assert_eq!(
+        after.guest_texture_bytes - before.guest_texture_bytes,
+        surface.len() as u64
+    );
+    assert_eq!(after.upload_bytes - before.upload_bytes, 37 * 19 * 4);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data[RT..RT + SIZE], &image, Some(color), BG);
+    d.retire(r.token).unwrap();
+
+    // Inject exhausted instrumentation before a valid notification overlapping
+    // cached shader code. Rejection must precede dirty-history mutation.
+    let bytes = d.counters.cpu_notified_bytes;
+    d.counters.cpu_notified_bytes = u64::MAX;
+    assert!(d.notify_cpu_write(b, 0x4000, 4).is_err());
+    d.counters.cpu_notified_bytes = bytes;
+    for (offset, length) in [(0u64, 0usize), (0x18000, 1), (u64::MAX, 4)] {
+        assert!(d.notify_cpu_write(b, offset, length).is_err());
+    }
+    let before = d.graphics_counters();
+    let r = d
+        .submit(c, KICKOFF_PB, &h, Some(&e), &mut mem(&mut data))
+        .unwrap();
+    assert!(r.fault.is_none());
+    let after = d.graphics_counters();
+    assert_eq!(after.shader_binary_bytes, before.shader_binary_bytes);
+    assert_eq!(after.vertex_shader_bytes, before.vertex_shader_bytes);
+    assert_eq!(after.upload_bytes, before.upload_bytes);
+    assert_eq!(after.pipeline_allocations, before.pipeline_allocations);
+    assert_eq!(r.progress.draws_submitted, 1);
+    assert_eq!(after.draw_commands - before.draw_commands, 1);
+    assert_eq!(d.counters.cpu_write_notifications, 3);
+    assert_eq!(d.counters.cpu_notified_bytes, 6812);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data[RT..RT + SIZE], &image, Some(color), BG);
+    eprintln!(
+        "external CPU write driver={:?}, graphics={:?}",
+        d.counters,
+        d.graphics_counters()
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+
+#[test]
+#[ignore = "requires actual wgpu device; external notification bounds, lifetime and allocation measurements"]
+fn external_cpu_notification_bounds_lifetime_and_bookkeeping() {
+    let mut d = GpuDriver::new().unwrap();
+    let b = d.register_backing(GuestAddress(0), PAGE_SIZE).unwrap();
+    let mut foreign = MemoryManager::default();
+    let f = foreign
+        .register_backing(GuestAddress(0), PAGE_SIZE)
+        .unwrap();
+    assert!(d.notify_cpu_write(f, 0, 4).is_err());
+    for (offset, length) in [(0u64, 0usize), (PAGE_SIZE, 1), (u64::MAX, 4)] {
+        assert!(d.notify_cpu_write(b, offset, length).is_err());
+    }
+    d.notify_cpu_write(b, PAGE_SIZE - 4, 4).unwrap();
+    let region = Region::new(ALLOCATOR);
+    let start = std::time::Instant::now();
+    for _ in 0..1000 {
+        d.notify_cpu_write(b, 0, 4).unwrap();
+    }
+    let elapsed = start.elapsed();
+    let stats = region.change();
+    assert_eq!(d.counters.cpu_write_notifications, 1001);
+    assert_eq!(d.counters.cpu_notified_bytes, 4004);
+    assert_eq!(d.graphics_counters().submissions, 0);
+    assert_eq!(d.graphics_counters().upload_bytes, 0);
+    assert_eq!(d.graphics_counters().readback_bytes, 0);
+    eprintln!(
+        "1000 CPU notifications: {elapsed:?}, allocations {}, reallocations {}",
+        stats.allocations, stats.reallocations
+    );
+    assert_eq!(stats.allocations, 0);
+    assert_eq!(stats.reallocations, 0);
+    // The registry owns identities, not bytes: a huge canonical range tests
+    // overflow without allocating an enormous synthetic guest memory buffer.
+    let huge = d
+        .register_backing(GuestAddress(PAGE_SIZE), 1u64 << 63)
+        .unwrap();
+    d.notify_cpu_write(huge, 0, 1usize << 63).unwrap();
+    let before = (
+        d.counters.cpu_write_notifications,
+        d.counters.cpu_notified_bytes,
+    );
+    assert!(d.notify_cpu_write(huge, 0, 1usize << 63).is_err());
+    assert_eq!(
+        (
+            d.counters.cpu_write_notifications,
+            d.counters.cpu_notified_bytes
+        ),
+        before
+    );
+    d.notify_cpu_write(b, 0, 4).unwrap();
+    d.release_backing(huge).unwrap();
+    assert!(d.notify_cpu_write(huge, 0, 4).is_err());
+    let count = d.counters.cpu_write_notifications;
+    d.counters.cpu_write_notifications = u64::MAX;
+    assert!(d.notify_cpu_write(b, 0, 4).is_err());
+    d.counters.cpu_write_notifications = count;
+    d.release_backing(b).unwrap();
+    assert!(d.notify_cpu_write(b, 0, 4).is_err());
+}
 #[test]
 #[ignore = "requires actual wgpu adapter and pixel readback"]
 fn driver_completion_publication_and_mapping_lifetime() {

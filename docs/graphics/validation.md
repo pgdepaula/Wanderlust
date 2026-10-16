@@ -2306,3 +2306,39 @@ startup check. Consequently this feature has no new D3D12/Vulkan execution
 result yet; compilation and historical backend results are not counted as native
 passes. The earlier conditional-MOV matrix remains independently verified.
 No original-game GPU command or frame is established by these synthetic tests.
+
+## External CPU write notification
+
+`driver_gpu` exercises `GpuDriver::notify_cpu_write` through real GPFIFO indexed
+draws. An externally modified Tegra texture is invalidated by canonical byte
+range without recopying RAM through `write_backing`. Covered pixels change to
+`[77,137,199,255]`, uncovered background remains intact, and shader/pipeline
+identities are reused. The 6,144-byte guest texture footprint causes one bounded
+2,812-byte host texture update. Three accepted notifications cover 6,812 bytes;
+three actual draws submit six queues and perform three explicit oracle
+publications. A rejected counter-overflow notification overlapping cached shader
+code leaves the next actual draw free of extra shader reads or resource uploads.
+
+Foreign/stale backing identities, zero lengths, end bounds, address overflow,
+pending output and notification-counter overflow are rejected. A synthetic
+registered 2^63-byte range owns no RAM and makes byte-counter exhaustion directly
+testable. In a separate serial allocator measurement, 1,000 four-byte
+notifications used zero Rust allocations/reallocations and no GPU submissions,
+uploads or readbacks; the final GL debug CPU observation was 557.872 microseconds.
+This is bookkeeping measurement, not a zero-copy GPU or game-performance claim.
+
+A faithful ordinary `ebeb288` snapshot plus the two candidate Rust files and
+unchanged Cargo.lock passed GPU formatting, strict package Clippy, 228 graphics
+CPU tests per feature configuration and all 110 actual WSL OpenGL GPU scenarios.
+The final strengthened footprint, draw-count and notification-total assertions
+also passed all five `driver_gpu` scenarios. Full workspace execution produced
+454 passes, three Horizon/CLI expectation failures and 110 ignored GPU tests;
+workspace Clippy reports `manual_range_patterns` in runtime `services.rs`.
+These peer-owned failures were preserved and reported, not hidden by changes to
+the test expectations. The snapshot excludes the later display-layer commit.
+
+All 40 native Windows GPU executables compiled, but the existing WSL interop
+failure still prevents Windows process startup. No new D3D12/Vulkan execution
+passes are claimed. The notifier is a serialized runtime integration contract;
+it neither installs automatic AOT dirty tracking nor connects Horizon NVDRV to
+the renderer, and does not equate host completion with guest publication.

@@ -43,6 +43,10 @@ pub struct DriverCounters {
     pub completion_waits: u64,
     /// Successful explicit publications that had GPU-newer attachments pending.
     pub visibility_barriers: u64,
+    /// Accepted external CPU write notifications with no GPU output pending.
+    pub cpu_write_notifications: u64,
+    /// Sum of notified canonical byte lengths, not copied or uploaded bytes.
+    pub cpu_notified_bytes: u64,
 }
 #[derive(Clone)]
 struct HostFence {
@@ -63,7 +67,8 @@ struct Context {
 pub const MAX_COMPLETIONS: usize = 64;
 /// Owns the renderer, mapping registry and canonical dirty journal. The runtime
 /// must not mutate/recycle registered backing except through the checked write
-/// boundary (or with equivalent exclusive notification). No guest borrows escape.
+/// boundary or the exclusive external-write notification contract below.
+/// No guest borrows escape.
 /// One channel may own pending output. Mapping mutation and channel switching are
 /// rejected until publication; these restrictions are stricter than real nvhost.
 pub struct GpuDriver {
@@ -366,6 +371,51 @@ impl GpuDriver {
         memory.validate_write(address, bytes.len())?;
         memory.write(address, bytes)?;
         self.changes.mark_write(address, bytes.len())?;
+        Ok(())
+    }
+    /// Records a completed external CPU write without reading, copying or writing
+    /// guest RAM. The range is relative to the registered canonical backing.
+    ///
+    /// The caller must hold exclusive ownership of the driver AND backing memory
+    /// throughout this sequence: first ensure no GPU output is pending (publish
+    /// it before the external RAM write), complete the external write, then notify
+    /// its exact byte range before any further submission. Checking for pending
+    /// output only after writing is too late. A failed notification cannot undo
+    /// that external write; the caller must resolve the failure before submitting.
+    ///
+    /// Pending-output CPU patches must use [`Self::write_backing`] instead. This
+    /// method rejects every pending attachment, including unrelated ranges.
+    /// Rejected notifications change neither the dirty journal nor counters.
+    pub fn notify_cpu_write(
+        &mut self,
+        backing: BackingId,
+        offset: u64,
+        length: usize,
+    ) -> Result<()> {
+        if self.renderer.target_pending {
+            return Err(invalid(
+                "publish GPU output before external CPU write notification",
+            ));
+        }
+        let address = self.memory.backing_range(backing, offset, length)?;
+        let bytes = u64::try_from(length)
+            .map_err(|_| invalid("CPU write notification length exceeds u64"))?;
+        // Counter overflow must fail before marking the journal, even when a
+        // large registered virtual backing makes that condition reachable.
+        let notifications = self
+            .counters
+            .cpu_write_notifications
+            .checked_add(1)
+            .ok_or_else(|| invalid("CPU write notification count overflow"))?;
+        let notified_bytes = self
+            .counters
+            .cpu_notified_bytes
+            .checked_add(bytes)
+            .ok_or_else(|| invalid("CPU write notification byte counter overflow"))?;
+        self.changes.can_mark_write_at(address, length)?;
+        self.changes.mark_write(address, length)?;
+        self.counters.cpu_write_notifications = notifications;
+        self.counters.cpu_notified_bytes = notified_bytes;
         Ok(())
     }
     /// Close is drain + publish, not cancellation. Failure keeps the channel and
