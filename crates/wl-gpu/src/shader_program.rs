@@ -127,6 +127,12 @@ pub enum Operation {
         width: u8,
         signed: bool,
     },
+    /// Variable-latency SM50 POPC, GPR/RZ source with optional bit inversion.
+    CountBits {
+        dst: u8,
+        src: u8,
+        invert: bool,
+    },
     /// SM50 LOP3.LUT, three GPR/RZ sources, discarded PT predicate output.
     TernaryLogic {
         dst: u8,
@@ -702,6 +708,24 @@ impl Program {
                         bits,
                         operator,
                     }
+                } else if word & !0x000001000ff000ff == 0x5c08000000070000 {
+                    let src = ((word >> 20) & 255) as u8;
+                    // POPC is scoreboarded on SM50. A stall count alone does
+                    // not establish readiness, including for RZ or aliases.
+                    if write_barrier != 0
+                        || pending.iter().any(|v| *v)
+                        || !initialized[src as usize]
+                    {
+                        return Err(fail(
+                            "POPC requires ready source and unused write barrier zero",
+                        ));
+                    }
+                    pending[dst as usize] = true;
+                    Operation::CountBits {
+                        dst,
+                        src,
+                        invert: word & (1 << 40) != 0,
+                    }
                 } else if word & !0x00007f8ffff0ffff == 0x5be7000000070000 {
                     let first = ((word >> 8) & 255) as u8;
                     let second = ((word >> 20) & 255) as u8;
@@ -944,6 +968,7 @@ impl Program {
                     && !matches!(
                         op,
                         Operation::Constant { .. }
+                            | Operation::CountBits { .. }
                             | Operation::Integer {
                                 operator: IntegerOperator::Multiply,
                                 ..
@@ -993,6 +1018,7 @@ impl Program {
                         ..
                     } => true,
                     Operation::Move { src, .. }
+                    | Operation::CountBits { src, .. }
                     | Operation::BitfieldExtract { src, .. }
                     | Operation::LogicImmediate { src, .. }
                     | Operation::AddImmediate { src, .. } => multiply_result[src as usize],
@@ -1085,6 +1111,7 @@ impl Program {
                     }
                 }
                 Operation::Move { dst, src }
+                | Operation::CountBits { dst, src, .. }
                 | Operation::BitfieldExtract { dst, src, .. }
                 | Operation::ConditionalMove { dst, src, .. }
                 | Operation::LogicImmediate { dst, src, .. }
@@ -1198,6 +1225,9 @@ impl Program {
                 }
                 Operation::BitfieldExtract { dst, src, offset, width, signed } => {
                     emit_bitfield(&mut s, dst, src, offset, width, signed);
+                }
+                Operation::CountBits { dst, src, invert } => {
+                    emit_count_bits(&mut s, dst, src, invert);
                 }
                 Operation::TernaryLogic { dst, first, second, third, lut } => {
                     emit_ternary(&mut s, dst, first, second, third, lut);
@@ -1417,6 +1447,9 @@ impl VertexProgram {
                 } => {
                     emit_ternary(&mut s, dst, first, second, third, lut);
                 }
+                Operation::CountBits { dst, src, invert } => {
+                    emit_count_bits(&mut s, dst, src, invert);
+                }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
                 Operation::ConditionalMove { dst, src, invert } => {
@@ -1434,6 +1467,12 @@ impl VertexProgram {
         }
         s
     }
+}
+
+fn emit_count_bits(s: &mut String, dst: u8, src: u8, invert: bool) {
+    use std::fmt::Write;
+    let modifier = if invert { "~" } else { "" };
+    writeln!(s, "r[{dst}]=countOneBits({modifier}r[{src}]);").unwrap();
 }
 
 fn emit_ternary(s: &mut String, dst: u8, first: u8, second: u8, third: u8, lut: u8) {

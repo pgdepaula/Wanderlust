@@ -1491,3 +1491,20 @@ pending-destination rejection applies, while TEX/PositionW/reciprocal proofs are
 cleared. Alternate predicate outputs, T/Z/NZ modes, X, CC, execution predicates
 and immediate/cbuf source forms remain unsupported. No new runtime-facing API
 or guest memory representation is introduced.
+
+## Population count
+
+Both shader stages accept unconditional GPR/RZ POPC with optional source bit
+inversion. The result is a raw u32 count from zero through 32; destination may
+alias the source. This SM50 instruction has variable latency. It requires an
+unused write barrier zero and a ready source. Consumers, overwrites and exports
+must explicitly wait for that barrier; six encoded stalls do not replace the
+wait, including for RZ. Only one outstanding barrier is supported. Immediate
+and cbuf forms, execution predicates, alternate barriers and extra modifiers
+remain unsupported.
+
+Register allocation includes the real source in bits27:20. Multiplication
+hazards remain conservative, while texture-handle and perspective proofs are
+cleared. POPC neither initializes nor overwrites P0. WGSL countOneBits operates
+on the raw source, after optional bit inversion, in both entry points. No GPU
+driver/runtime API or completion semantics change.

@@ -2481,3 +2481,52 @@ reported green. All 40 native Windows GPU executables compiled, but the WSL
 interop startup failure still prevents actual D3D12/Vulkan execution. These
 results establish synthetic Maxwell execution, not original-game GPU commands
 or a rendered game frame.
+
+## Scoreboarded population count
+
+Both 208-byte fixtures exactly reassemble using original pinned envyas; ordinary
+POPC words also match independently pinned MaxAs. Seven CPU tests cover GPR/RZ,
+inversion, high register metadata, destination/source aliases, explicit waits,
+barrier reuse, pending destination overwrite, unready exports, unsupported modes,
+predicate initialization and conservative FMUL/resource proofs.
+
+The GpuDriver/GPFIFO fragment workload tests 129 raw words for each plain/inverted
+form: every count from zero through 32, every single-bit/complement pattern and
+32 seeded words. A separate scalar sum predicts the exact expected count.
+ISETP/SEL yields [64,128,191,255] when the guest result matches; deliberately
+wrong reference data changes red to zero without recompilation. Both RZ and
+inverted RZ additionally execute an asserted draw and produce counts zero/32.
+The original focused VS test exposed an invalid test method before any draw;
+its corrected hardware program selection now verifies actual vertex execution.
+
+Before the warm sequence, 262 draws account for 524 queue submissions, five
+fragment decodes reading 1,040 bytes, 2,096 constant guest bytes and 2,032
+constant upload bytes. The 262 deliberate oracle publications transfer
+1,949,280 readback bytes and 1,580,384 guest framebuffer bytes. One target is
+allocated and reused 261 times. Thirty-two unchanged deferred draws add 32
+queues, with no shader/resource reads, uploads, modules, pipelines, readbacks
+or waits. Removing only the consumer wait faults without another draw/queue;
+previously accepted output remains explicitly publishable. Final full-suite GL
+debug CPU observation for the warm draws was 27.822 ms; a separately strengthened
+focused run observed 41.701 ms. Allocator traffic and GPU time were not measured,
+and cache/driver state was uncontrolled.
+
+The vertex program's independent raw-bit counts select only the first vertex:
+-.8 has 19 set bits and moves to finite X=.5; changing guest X to -.6 gives
+18 and leaves X=-.6. Analytic asymmetric triangle coverage verifies both actual
+indexed draws. Only a bounded 72-byte vertex update is needed; shader/pipeline
+identity remains unchanged.
+
+A faithful ordinary 4452b15 snapshot plus seven candidate Rust/fixture files
+and unchanged Cargo.lock passed GPU formatting, strict package/workspace
+Clippy, 250 CPU tests per configuration and all 118 actual WSL OpenGL GPU
+scenarios, zero failures/skips. Workspace execution produced 477 passes, the
+same three Horizon/CLI expectation failures and 118 ignored GPU tests. After
+adding explicit draw-count assertions to both RZ cases, both focused GPU
+scenarios passed again and package Clippy was rerun. Concurrent runtime/NSO
+changes were excluded; the live workspace is not reported green. Native Windows
+GPU test executables compiled. A native cmd.exe version query succeeded, but
+subsequent PowerShell-suite and direct D3D12 starts failed at WSL interop
+UtilAcceptVsock/accept4 before GPU execution. No new D3D12/Vulkan passes are
+claimed. No original-game submission or frame is established by these synthetic
+programs.

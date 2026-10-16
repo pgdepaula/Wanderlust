@@ -1122,3 +1122,26 @@ equation and the corrected later PTX example give 1A. Fixtures and oracles use
 the equation rather than copying the typo. Reference implementations establish
 encoding and semantics; the minterm lowering and scalar per-bit oracle are
 independently written. No MaxAs implementation is imported into the renderer.
+
+## SM50 population count and scoreboard readiness
+
+The pinned GM107 table defines GPR POPC with opcode 5c08, destination bits7:0,
+source bits27:20 and optional inversion bit40. The strict unconditional base is
+`5c08000000070000`, variable mask `000001000ff000ff`. Original envyas and pinned
+MaxAs independently agree on the fixture's ordinary GPR words and RZ/alias
+forms. MaxAs does not describe the inverted spelling; inversion is separately
+corroborated by GM107 and the
+[NAK SM50 OpPopC encoder](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs#L1616).
+
+[NAK folding and latency classification](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/ir.rs)
+corroborate bit inversion before population count and variable latency. MaxAs's
+s2r scoreboard class independently agrees; its guessed barrier-latency number
+is not treated as a measured hardware minimum. The accepted scheduling subset
+uses write barrier zero and explicit wait1 before consuming the result. This
+extends existing bounded scoreboard validation, rather than treating POPC as
+ordinary fixed-latency arithmetic. Immediate/cbuf forms remain excluded.
+
+The scalar test oracle sums individual bits independently of the host intrinsic.
+Only encoding/semantic evidence is used from reference implementations; no
+assembler/compiler implementation is imported. FLO and its disputed SH zero
+behavior are not implied by this instruction's support.

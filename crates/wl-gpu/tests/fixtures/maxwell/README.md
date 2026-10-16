@@ -328,3 +328,22 @@ SHA-256 including SPH:
 - vertex-ternary.bin:f49b1e55b1605acdf8fd9e025ffcfe8848b1b6d9197b08e96c6dd893e18933c4
 
 These contain only independently assembled synthetic shader instructions.
+
+`popcount` and `vertex-popcount` retain the validated stage headers, each with
+128 code bytes assembled by original pinned envyas. The fragment program loads
+a runtime source and independently expected count through LDC, performs POPC
+R4,R4 at PC0x68, then compares after explicit wait1 at PC0x78. Success exports
+[64,128,191,255]. Incorrect reference data makes red zero.
+
+The vertex program counts raw guest position-X bits at PC0x78 into R6 using
+barrier zero. An ISETP after wait1 compares against 19; only matching vertices
+move to finite X=.5 before ordinary position/UV exports. Initial X=-.8 has
+19 set bits; changing only that guest X to -.6 gives 18 and changes analytic
+triangle coverage without shader recompilation. No NaN clip positions are used.
+Ordinary POPC words independently match pinned MaxAs; inversion/RZ variants
+also have independently assembled GM107 evidence. SHA-256 including SPH:
+
+- popcount.bin:f5719b4ac6288e6b35480dbe79ac6b8101fc90b124f10ee12619b239bfa4dc86
+- vertex-popcount.bin:bee5997189994b80fa718fc8406b2de9ac01ef6314fa36cc4a7327cb03c5b5e4
+
+These contain independently assembled synthetic instructions only.
