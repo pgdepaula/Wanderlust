@@ -62,9 +62,10 @@ pub enum HostObject {
     TimeSystemClock,
     TimeSteadyClock,
     TimeZoneService,
-    /// `acc:u0` IAccountServiceForApplication and profile (account process).
+    /// `acc:u0` IAccountServiceForApplication, profile, and session object (account process).
     AccUser,
     AccProfile,
+    AccSession,
     /// `fsp-srv` IFileSystemProxy, IFileSystem, IStorage (fssrv process).
     FileSystemProxy,
     FileSystem,
@@ -279,6 +280,7 @@ impl HostObject {
             HostObject::TimeZoneService => ("time:u ITimeZoneService", 0),
             HostObject::AccUser => ("acc:u0 IAccountServiceForApplication", 0),
             HostObject::AccProfile => ("acc:u0 IProfile", 0),
+            HostObject::AccSession => ("acc:u0 ISessionObject", 0),
             HostObject::FileSystemProxy => ("fsp-srv IFileSystemProxy", 0),
             HostObject::FileSystem => ("fsp-srv IFileSystem", 0),
             HostObject::Storage => ("fsp-srv IStorage", 0),
@@ -299,7 +301,7 @@ impl HostObject {
             | HostObject::TimeSystemClock
             | HostObject::TimeSteadyClock
             | HostObject::TimeZoneService => Server::Time,
-            HostObject::AccUser | HostObject::AccProfile => Server::Acc,
+            HostObject::AccUser | HostObject::AccProfile | HostObject::AccSession => Server::Acc,
             HostObject::FileSystemProxy | HostObject::FileSystem | HostObject::Storage => {
                 Server::Fs
             }
@@ -1186,17 +1188,87 @@ pub(crate) fn request(
             // ListAllUsers: 1 user (16 bytes UID).
             let mut uid = [0u8; 16];
             uid[0] = 1;
-            Done::data(&uid)
-        }
-        (HostObject::AccUser, 3) => {
-            // OpenUser: out object.
-            Done::object(HostObject::AccProfile)
-        }
-        (HostObject::AccUser, 100) => {
-            // InitializeApplicationInfo.
+            let dst_info = req.recvs.first().or(req.statics.first());
+            if let Some(&(dst, buf_size)) = dst_info {
+                let to_copy = uid.len().min(buf_size as usize);
+                let _ = memory.write_bytes(dst, &uid[..to_copy]);
+            }
             Done::ok()
         }
+        (HostObject::AccUser, 3) => {
+            // ListOpenUsers: 1 user (16 bytes UID) into out buffer
+            let mut uid = [0u8; 16];
+            uid[0] = 1;
+            let dst_info = req.recvs.first().or(req.statics.first());
+            if let Some(&(dst, buf_size)) = dst_info {
+                let to_copy = uid.len().min(buf_size as usize);
+                let _ = memory.write_bytes(dst, &uid[..to_copy]);
+            }
+            Done::ok()
+        }
+        (HostObject::AccUser, 4) => {
+            // GetLastOpenedUser: out 16-byte UID.
+            let mut uid = [0u8; 16];
+            uid[0] = 1;
+            Done::data(&uid)
+        }
+        (HostObject::AccUser, 5) => {
+            // GetProfile: in 16-byte UID, out object AccProfile.
+            Done::object(HostObject::AccProfile)
+        }
+        (HostObject::AccUser, 100 | 160) => {
+            // InitializeApplicationInfo / InitializeApplicationInfoV2
+            Done::ok()
+        }
+        (HostObject::AccUser, 130) => {
+            // ActivateOpenContextRetention: returns ISessionObject
+            Done::object(HostObject::AccSession)
+        }
+        (HostObject::AccUser, 131) => {
+            // ListOpenContextStoredUsers: write user UID to out buffer
+            let mut uid = [0u8; 16];
+            uid[0] = 1;
+            let dst_info = req.recvs.first().or(req.statics.first());
+            if let Some(&(dst, buf_size)) = dst_info {
+                let to_copy = uid.len().min(buf_size as usize);
+                let _ = memory.write_bytes(dst, &uid[..to_copy]);
+            }
+            Done::ok()
+        }
+        (HostObject::AccUser, 150) => {
+            // IsUserAccountSwitchLocked: out bool (false)
+            Done::data(&[0u8])
+        }
         (HostObject::AccUser, _) => Done::ok(),
+        (HostObject::AccSession, _) => Done::ok(),
+        (HostObject::AccProfile, 0) => {
+            // Get: out ProfileBase (0x38 bytes) and out UserData (0x80 bytes to buffer)
+            let mut profile = [0u8; 0x38];
+            profile[0] = 1; // uid
+            profile[0x10..0x10 + 4].copy_from_slice(b"Link");
+            let dst_info = req.recvs.first().or(req.statics.first());
+            if let Some(&(dst, buf_size)) = dst_info {
+                let user_data = [0u8; 0x80];
+                let to_copy = user_data.len().min(buf_size as usize);
+                let _ = memory.write_bytes(dst, &user_data[..to_copy]);
+            }
+            Done::data(&profile)
+        }
+        (HostObject::AccProfile, 1) => {
+            // GetBase: out ProfileBase (0x38 bytes)
+            let mut profile = [0u8; 0x38];
+            profile[0] = 1; // uid
+            profile[0x10..0x10 + 4].copy_from_slice(b"Link");
+            Done::data(&profile)
+        }
+        (HostObject::AccProfile, 10) => {
+            // GetImageSize: out u32 size (0)
+            Done::data(&0u32.to_le_bytes())
+        }
+        (HostObject::AccProfile, 11) => {
+            // LoadImage: out image bytes to buffer
+            Done::ok()
+        }
         (HostObject::AccProfile, _) => Done::ok(),
         (HostObject::FileSystemProxy, 1) => {
             // Initialize(u64 reserved, ClientProcessId, copied process handle).
