@@ -69,6 +69,11 @@ pub enum HostObject {
     FileSystemProxy,
     FileSystem,
     Storage,
+    /// `nvdrv` INvDrvServices (nvservices process).
+    NvDrvServices,
+    /// `vi` IApplicationRootService, IApplicationDisplayService (vi process).
+    ViUser,
+    ViDisplayService,
 }
 
 /// The process serving a hosted object; domain object IDs are allocated per server.
@@ -83,6 +88,8 @@ pub enum Server {
     Time,
     Acc,
     Fs,
+    NvDrv,
+    Vi,
 }
 
 /// Size of `lm`'s pointer buffer (`lm_ipc_server.cpp`, `PointerBufferSize`).
@@ -156,6 +163,8 @@ pub struct HostState {
     pub time_domain_ids: DomainIds,
     pub acc_domain_ids: DomainIds,
     pub fs_domain_ids: DomainIds,
+    pub nvdrv_domain_ids: DomainIds,
+    pub vi_domain_ids: DomainIds,
     /// Cached time:u shared memory index.
     pub time_shared_memory: Option<usize>,
     /// The application's AppletMessage queue and the event signalled while it is not
@@ -171,6 +180,10 @@ pub struct HostState {
     pub delay_time_to_abort_on_gpu_error: Option<u64>,
     /// IApplicationFunctions' Cmd210 event: never signalled.
     pub application_event_210: Option<usize>,
+    /// nvdrv QueryEvent: never signalled.
+    pub nvdrv_event: Option<usize>,
+    /// vi VsyncEvent: never signalled.
+    pub vi_vsync_event: Option<usize>,
     /// aoc:u AddOnContentListChangedEvent: never signalled, as DLCs are static.
     pub aoc_list_changed_event: Option<usize>,
     /// Settings recorded by ISelfController and IWindowController.
@@ -233,6 +246,10 @@ pub fn lookup(name: &[u8; 8]) -> Option<HostObject> {
         b"time:u\0\0" => Some(HostObject::TimeStaticService),
         b"acc:u0\0\0" => Some(HostObject::AccUser),
         b"fsp-srv\0" => Some(HostObject::FileSystemProxy),
+        b"nvdrv\0\0\0" | b"nvdrv:a\0" | b"nvdrv:s\0" | b"nvdrv:t\0" => {
+            Some(HostObject::NvDrvServices)
+        }
+        b"vi:u\0\0\0\0" | b"vi:m\0\0\0\0" | b"vi:s\0\0\0\0" => Some(HostObject::ViUser),
         _ => None,
     }
 }
@@ -270,6 +287,9 @@ impl HostObject {
             HostObject::FileSystemProxy => ("fsp-srv IFileSystemProxy", 0),
             HostObject::FileSystem => ("fsp-srv IFileSystem", 0),
             HostObject::Storage => ("fsp-srv IStorage", 0),
+            HostObject::NvDrvServices => ("nvdrv INvDrvServices", 0),
+            HostObject::ViUser => ("vi:u IApplicationRootService", 0),
+            HostObject::ViDisplayService => ("vi IApplicationDisplayService", 0),
         }
     }
     fn server(&self) -> Server {
@@ -287,6 +307,8 @@ impl HostObject {
             HostObject::FileSystemProxy | HostObject::FileSystem | HostObject::Storage => {
                 Server::Fs
             }
+            HostObject::NvDrvServices => Server::NvDrv,
+            HostObject::ViUser | HostObject::ViDisplayService => Server::Vi,
             _ => Server::Am,
         }
     }
@@ -300,7 +322,9 @@ impl HostObject {
             | Server::Pctl
             | Server::Time
             | Server::Acc
-            | Server::Fs => Some(AM_POINTER_BUFFER_SIZE),
+            | Server::Fs
+            | Server::NvDrv
+            | Server::Vi => Some(AM_POINTER_BUFFER_SIZE),
             Server::Ptm => None,
         }
     }
@@ -359,6 +383,8 @@ impl HostState {
             Server::Time => &mut self.time_domain_ids,
             Server::Acc => &mut self.acc_domain_ids,
             Server::Fs => &mut self.fs_domain_ids,
+            Server::NvDrv => &mut self.nvdrv_domain_ids,
+            Server::Vi => &mut self.vi_domain_ids,
         }
     }
     /// Registers `object` in domain `d` under a newly allocated ID of its server (`lm`
@@ -1166,6 +1192,67 @@ pub(crate) fn request(
             Done::data(&(EMPTY_ROMFS.len() as u64).to_le_bytes())
         }
         (HostObject::Storage, _) => Done::ok(),
+        (HostObject::NvDrvServices, 3) => {
+            // Initialize(u32 transfer_mem_size, copy_handle proc, copy_handle tmem): out u32 error_code (0)
+            Done::data(&0u32.to_le_bytes())
+        }
+        (HostObject::NvDrvServices, 0) => {
+            // Open(DeviceName in buffer): out u32 fd, out u32 error_code (0)
+            let mut out = [0u8; 8];
+            out[..4].copy_from_slice(&1u32.to_le_bytes()); // fd 1
+            out[4..8].copy_from_slice(&0u32.to_le_bytes()); // error_code 0
+            Done::data(&out)
+        }
+        (HostObject::NvDrvServices, 1 | 11 | 12) => {
+            // Ioctl, Ioctl2, Ioctl3: out u32 error_code (0)
+            Done::data(&0u32.to_le_bytes())
+        }
+        (HostObject::NvDrvServices, 2) => {
+            // Close: out u32 error_code (0)
+            Done::data(&0u32.to_le_bytes())
+        }
+        (HostObject::NvDrvServices, 4) => {
+            // QueryEvent: out copy handle, out u32 error_code (0)
+            let e = host_event(k, |h| &mut h.nvdrv_event, false);
+            let mut done = copy_event(k, e);
+            done.data = 0u32.to_le_bytes().to_vec();
+            done
+        }
+        (HostObject::NvDrvServices, 8) => {
+            // SetAruid: out u32 error_code (0)
+            Done::data(&0u32.to_le_bytes())
+        }
+        (HostObject::NvDrvServices, _) => Done::data(&0u32.to_le_bytes()),
+
+        (HostObject::ViUser, 0 | 1 | 2) => {
+            // GetDisplayService: out object IApplicationDisplayService
+            Done::object(HostObject::ViDisplayService)
+        }
+        (HostObject::ViUser, _) => Done::ok(),
+
+        (HostObject::ViDisplayService, 100 | 102) => {
+            // OpenDisplay / OpenDefaultDisplay: out u64 display_id (1)
+            Done::data(&1u64.to_le_bytes())
+        }
+        (HostObject::ViDisplayService, 103) => {
+            // GetDisplayResolution: out u64 width (1920), out u64 height (1080)
+            let mut data = [0u8; 16];
+            data[..8].copy_from_slice(&1920u64.to_le_bytes());
+            data[8..16].copy_from_slice(&1080u64.to_le_bytes());
+            Done::data(&data)
+        }
+        (HostObject::ViDisplayService, 210) => {
+            // GetDisplayVsyncEvent: copy handle to event
+            let e = host_event(k, |h| &mut h.vi_vsync_event, false);
+            copy_event(k, e)
+        }
+        (HostObject::ViDisplayService, 203) => {
+            // CreateStrayLayer: out u64 layer_id (1), out u64 parcel_size (0)
+            let mut data = [0u8; 16];
+            data[..8].copy_from_slice(&1u64.to_le_bytes());
+            Done::data(&data)
+        }
+        (HostObject::ViDisplayService, _) => Done::ok(),
         _ => return unsupported("an unknown command"),
     };
     if k.host.calls.len() < CALL_TRACE_LIMIT {

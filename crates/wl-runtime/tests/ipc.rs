@@ -1111,3 +1111,32 @@ fn fsp_srv_service_startup() {
     let storage = reply_handle(&p);
     assert_ne!(storage, 0);
 }
+
+#[test]
+fn nvdrv_and_vi_service_startup() {
+    let (mut p, mut c) = process(&[(false, "*")]);
+    let sm = connect(&mut p, &mut c);
+    tipc_register_client(&mut p, &mut c, sm);
+
+    // nvdrv
+    let nv = service(&mut p, &mut c, sm, "nvdrv");
+    // Initialize (cmd 3)
+    request(&mut p, 3, false, &[0; 4]);
+    assert_eq!(send(&mut p, &mut c, nv), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+    // Open (cmd 0) -> fd 1, err 0
+    request(&mut p, 0, false, &[]);
+    assert_eq!(send(&mut p, &mut c, nv), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+    assert_eq!(reply_u32(&p, 0x20), 1); // fd
+    assert_eq!(reply_u32(&p, 0x24), 0); // err
+
+    // vi:u
+    let vi = service(&mut p, &mut c, sm, "vi:u");
+    // GetDisplayService (cmd 0) -> IApplicationDisplayService
+    request(&mut p, 0, false, &[0; 4]);
+    assert_eq!(send(&mut p, &mut c, vi), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+    let disp = reply_handle(&p);
+    assert_ne!(disp, 0);
+}
