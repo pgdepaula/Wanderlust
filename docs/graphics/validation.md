@@ -2662,3 +2662,60 @@ probe is mathematical/backend corroboration; it does not imply guest compute
 shader support. The delivered acceptance path is the Maxwell graphics path
 above. Only independently assembled synthetic programs are used; no original
 TOTK GPU stream or frame has been demonstrated.
+
+## GPR FSET: exact comparison results and predicate isolation
+
+Guest-selected FSET programs execute through `GpuDriver`, GPFIFO, B06F/B197
+and wgpu. All32 comparison/result combinations are exercised with67 independently
+specified IEEE pairs each: 2144 raw-result checks covering ordered/unordered
+relations, classification, F/T, signed zeros, subnormals, infinities and multiple
+signaling/quiet NaN payloads. The oracle uses numeric binary64 relations, which
+embed binary32 exactly, independently of production's integer-key comparison.
+The guest shader compares each mask/float encoding using ISETP before exporting
+[64,128,191,255]. Wrong reference bits produce [0,128,191,255]. A second FSET.F
+between ISETP and SEL must preserve P0, directly exposing accidental predicate
+clobber. Right-destination aliasing and both poisoned-source RZ modes are also
+verified through real draws.
+
+The vertex fixture moves only X=-.8 to finite+.5 using FSET.BF.LT against-.5.
+Changing guest X to-.4 changes analytic triangle coverage, uploads72 additional
+vertex bytes and preserves the compiled vertex shader/pipeline. Changing the
+binary to mask output plus its expected MOV32I value restores equivalent
+coverage: exactly one new vertex decode/pipeline and no fragment decode.
+Both result modes are observed as raw GPR bits, never exported NaN masks.
+Unsupported CC faults without another draw/queue submission; earlier deferred
+output is explicitly published without replay.
+
+The faithful ordinary source snapshot is `16d0234` plus nine candidate
+Rust/assembly/binary files, unchanged Cargo.lock and preserved source-built
+homebrew fixtures. It includes the newer committed runtime/presentation changes,
+unlike the preceding I2F snapshot. Executed graphics gates:
+
+- GPU formatting and strict all-target package Clippy: passed.
+- Without default features: 272 CPU tests passed, zero failures.
+- Default features: 273 CPU tests passed, zero failures;124 GPU tests ignored.
+- Explicit WSL OpenGL:124 real GPU scenarios passed, zero failures/skips,
+  llvmpipe LLVM23.1.1/Mesa26.2.4, including both new FSET scenarios.
+- Whole-workspace Clippy fails five `manual_range_contains` diagnostics in the
+  newly committed runtime `lib.rs`; whole-workspace formatting reports changes
+  outside the GPU package. Graphics code is not modified to hide these failures.
+
+Forty native Windows GPU executables compiled from identical candidate bytes.
+D3D12 and Vulkan launches were attempted independently through cmd; both fail
+in the WSL broker with `accept4` error110 before adapter acquisition. Neither
+backend is counted as a pass, skip or shader-validation result. Host policies
+and shared WSL processes are unchanged.
+
+Before warm repetition, the controlled fragment workload records2150 draws,
+4300 queue submissions,37 fragment decodes/7696 shader bytes,25800 constant
+bytes read/17340 uploaded,40 shader modules,76 pipelines and one target
+allocation/2149 reuses. Its2150 intentional oracle publications read15,996,000
+bytes, including row padding and timestamp records, and publish12,968,800
+packed guest bytes. The32 warm draws add32 queues,1280 borrowed command-source
+bytes including1024 command bytes, and64 entry decodes; no additional resource
+reads/uploads, target allocations, modules, pipelines, readbacks or waits occur.
+CPU wall time was43.607ms in the full run versus25.351ms focused; host load and
+cache/compiler state were uncontrolled. These are debug CPU observations,
+not GPU times, game performance, full batching or zero-copy claims. Rust
+allocator traffic is not instrumented in this workload. The independently
+assembled programs are synthetic; no original TOTK GPU stream/frame is implied.

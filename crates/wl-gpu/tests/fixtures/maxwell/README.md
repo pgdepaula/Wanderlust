@@ -388,3 +388,25 @@ SHA-256 including SPH:
 
 Only synthetic independently assembled instructions are included. Other type
 widths and conversion modes are not implied by these fixtures.
+
+`float-set`, `float-set-float` and `vertex-float-set` each have a validated
+80-byte stage header plus128 original-envyas-assembled code bytes. The fragment
+variants load two raw operands and expected result through LDC, execute FSET.LT
+R4,R4,R5 at PC0x78, then compare raw bits with ISETP. A second FSET.F into R7
+must preserve the already established P0 before MOV32I/SEL export red .25 on
+success. Green .5, blue .75 and alpha1 are fixed. Both mask and BF variants are
+retained; the main condition/result bits can be changed independently of the
+P0 preservation instruction.
+
+The vertex fixture uses FSET.BF.LT R6,R0,R7 at PC0x78 with R7=-.5. An integer
+comparison against1.0 bits controls a finite X=.5 move. Only initial X=-.8
+matches; mutating that guest X to-.4 disables the move. Changing the binary's
+BF bit and the expected immediate to FFFFFFFF verifies equivalent mask-result
+linkage, without exporting a NaN mask as a clip position. SHA-256 including SPH:
+
+- float-set.bin:690f13cfd245d6e9f95b1699c4cb7785df7c0779b0c4063a13eb0eb9c736a07a
+- float-set-float.bin:9a42b2fb9385f766c33be938a7833cd8a0efb8ae7d2f8a6767defca2ea0026e5
+- vertex-float-set.bin:d39b7653dae14bd90f1d78275c5a204487ede2f9601dd0f493cee1b8ec1072bd
+
+These are independently assembled synthetic instructions only. FSET modifiers,
+FTZ and non-PT predicate combiners are outside this fixture's supported subset.

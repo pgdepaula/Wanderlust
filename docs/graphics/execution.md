@@ -1541,3 +1541,20 @@ position-W/reciprocal proofs. Conservative unfused-rounding hazard tracking
 remains intact. Mutable constants and vertex data do not specialize the helper
 or shader cache key. Other type widths, rounding modes, byte selections,
 execution predicates, modifiers and immediate/cbuf conversion forms are rejected.
+
+## Floating comparisons producing GPR values
+
+Vertex and fragment translation accept unmodified GPR FSET, AND PT, with all
+sixteen comparison modes and mask/float result selection. False writes raw
+zero; true writes FFFFFFFF or 3F800000 respectively. Sources must be initialized
+and ready, incoming supported waits are respected, and a pending destination
+cannot be overwritten. This fixed six-cycle operation does not allocate a
+scoreboard barrier or initialize/change P0.
+
+Both operands are observed before an aliased destination is written. Result
+registers lose texture-handle and position-W/reciprocal proofs, while the
+conservative FMUL rounding hazard propagates from either source. Float-result
+selection is a binary instruction property, not a specialization on mutable
+constants. Comparisons use raw-bit IEEE classification/order, including signed
+zeros, subnormals, infinities and arbitrary NaN encodings. Unsupported modifiers,
+logical predicates/combiners and source forms fail explicitly.

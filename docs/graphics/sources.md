@@ -1206,3 +1206,34 @@ using exact f64 distances, rather than reproducing the packing algorithm. A
 separate exact rational oracle also verifies boundary and seeded cases. Only
 semantic/encoding evidence is used from the referenced compilers; no compiler
 implementation or restrictive-license assembler source is imported.
+
+## SM50 GPR FSET comparison results
+
+Pinned GM107, [NAK SM50 OpFSet](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs#L828-L864)
+and [UAM Maxwell FSET emission](https://github.com/devkitPro/uam/blob/5a5afc2bae8b55409ab36ba45be63fcb73f68993/mesa-imported/codegen/nv50_ir_emit_gm107.cpp#L1539-L1585)
+agree on unmodified GPR FSET: base `5800038000070000`, variable mask
+`001f00000ff0ffff`; destination bits7:0, left operand15:8, right27:20,
+comparison51:48 and float-result bit52. The logical operation is fixed to
+AND PT, without inversion. The destination is a GPR; this instruction does
+not write predicate P0. The fixed six-cycle GPR schedule differs from the
+conservative thirteen-cycle SETP schedule.
+
+[CUDA8 set semantics](https://docs.nvidia.com/cuda/archive/8.0/parallel-thread-execution/index.html#comparison-and-selection-instructions-set)
+corroborate the ordered/unordered and classification semantics, preserved
+subnormals, false=00000000 and true=FFFFFFFF for mask output or 3F800000 for
+float output. Hardware F/T encodings are established separately by GM107/UAM
+and independent assembly, rather than attributed to the PTX set syntax.
+Raw integer classification/order implements signed-zero equality and NaN
+handling independently of host FTZ/NaN comparison behavior. The existing FSETP
+condition emitter is shared through an explicitly named destination; FSET uses
+a scoped local boolean and leaves P0 unchanged.
+
+Original pinned envyas independently assembled all32 comparison/result forms
+and the three fixtures. MaxAs independently matches fourteen unmodified
+nonconstant mask-result forms; its pinned grammar lacks F/T/BF spelling.
+Its shared modifier table disagrees with the corroborated FSET left-ABS and
+right-NEG fields, and is not used as modifier evidence. Source modifiers,
+FTZ, CC, execution predicates, non-PT logical inputs, OR/XOR combiners and
+immediate/cbuf forms remain unsupported. Only semantic/encoding evidence is
+used from these MIT sources; their compiler/assembler implementation is not
+imported into Wanderlust.

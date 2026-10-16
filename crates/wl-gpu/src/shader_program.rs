@@ -145,6 +145,14 @@ pub enum Operation {
         src: u8,
         signed: bool,
     },
+    /// GPR FSET, unmodified F32 operands, AND PT, mask or float result.
+    FloatSet {
+        dst: u8,
+        left: u8,
+        right: u8,
+        comparison: FloatComparison,
+        float_result: bool,
+    },
     /// SM50 LOP3.LUT, three GPR/RZ sources, discarded PT predicate output.
     TernaryLogic {
         dst: u8,
@@ -720,6 +728,42 @@ impl Program {
                         bits,
                         operator,
                     }
+                } else if word & !0x001f00000ff0ffff == 0x5800038000070000 {
+                    let comparison = match (word >> 48) & 15 {
+                        0 => FloatComparison::False,
+                        1 => FloatComparison::Less,
+                        2 => FloatComparison::Equal,
+                        3 => FloatComparison::LessEqual,
+                        4 => FloatComparison::Greater,
+                        5 => FloatComparison::NotEqual,
+                        6 => FloatComparison::GreaterEqual,
+                        7 => FloatComparison::Numeric,
+                        8 => FloatComparison::Nan,
+                        9 => FloatComparison::LessUnordered,
+                        10 => FloatComparison::EqualUnordered,
+                        11 => FloatComparison::LessEqualUnordered,
+                        12 => FloatComparison::GreaterUnordered,
+                        13 => FloatComparison::NotEqualUnordered,
+                        14 => FloatComparison::GreaterEqualUnordered,
+                        _ => FloatComparison::True, // Remaining four-bit mode is 15.
+                    };
+                    let left = ((word >> 8) & 255) as u8;
+                    let right = ((word >> 20) & 255) as u8;
+                    if write_barrier != 7
+                        || [left, right]
+                            .iter()
+                            .any(|r| !initialized[*r as usize] || pending[*r as usize])
+                    {
+                        return Err(fail("unready FSET operand or unsupported schedule"));
+                    }
+                    // Low byte is a real GPR destination. P0 stays untouched.
+                    Operation::FloatSet {
+                        dst,
+                        left,
+                        right,
+                        comparison,
+                        float_result: word & (1 << 52) != 0,
+                    }
                 } else if word & !0x000000000ff020ff == 0x5cb8000000070a00 {
                     // Bits 15:8 describe destination/source types, not a GPR.
                     // Only F32 <- U32/S32, RN, ordinary GPR/RZ is supported.
@@ -1044,7 +1088,8 @@ impl Program {
                             || multiply_result[src as usize]
                             || predicate_multiply
                     }
-                    Operation::Integer { left, right, .. } => {
+                    Operation::Integer { left, right, .. }
+                    | Operation::FloatSet { left, right, .. } => {
                         multiply_result[left as usize] || multiply_result[right as usize]
                     }
                     Operation::TernaryLogic {
@@ -1137,6 +1182,9 @@ impl Program {
                     dst, left, right, ..
                 }
                 | Operation::Float {
+                    dst, left, right, ..
+                }
+                | Operation::FloatSet {
                     dst, left, right, ..
                 } => {
                     largest = largest.max(u16::from(dst));
@@ -1287,6 +1335,9 @@ impl Program {
                 }
                 Operation::IntToFloat { dst, src, signed } => {
                     emit_int_to_float(&mut s, dst, src, signed);
+                }
+                Operation::FloatSet { dst, left, right, comparison, float_result } => {
+                    emit_float_set(&mut s, dst, left, right, comparison, float_result);
                 }
                 Operation::TernaryLogic { dst, first, second, third, lut } => {
                     emit_ternary(&mut s, dst, first, second, third, lut);
@@ -1516,6 +1567,15 @@ impl VertexProgram {
                 Operation::IntToFloat { dst, src, signed } => {
                     emit_int_to_float(&mut s, dst, src, signed);
                 }
+                Operation::FloatSet {
+                    dst,
+                    left,
+                    right,
+                    comparison,
+                    float_result,
+                } => {
+                    emit_float_set(&mut s, dst, left, right, comparison, float_result);
+                }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
                 Operation::ConditionalMove { dst, src, invert } => {
@@ -1734,10 +1794,41 @@ fn emit_comparison(s: &mut String, left: u8, right: u8, comparison: IntegerCompa
     }
 }
 
+fn emit_float_set(
+    s: &mut String,
+    dst: u8,
+    left: u8,
+    right: u8,
+    comparison: FloatComparison,
+    float_result: bool,
+) {
+    use std::fmt::Write;
+    // Scoped condition preserves P0 and snapshots both inputs before a possibly
+    // aliased destination is written. Mask true is raw FFFFFFFF, not NaN math.
+    s.push_str("{ var condition:bool;\n");
+    emit_float_condition(s, left, right, comparison, "condition");
+    let bits = if float_result {
+        0x3f800000u32
+    } else {
+        u32::MAX
+    };
+    writeln!(s, "r[{dst}]=select(0u,{bits}u,condition); }}").unwrap();
+}
+
 fn emit_float_comparison(s: &mut String, left: u8, right: u8, comparison: FloatComparison) {
+    emit_float_condition(s, left, right, comparison, "p0");
+}
+
+fn emit_float_condition(
+    s: &mut String,
+    left: u8,
+    right: u8,
+    comparison: FloatComparison,
+    target: &str,
+) {
     use std::fmt::Write;
     if matches!(comparison, FloatComparison::False | FloatComparison::True) {
-        writeln!(s, "p0={};", comparison == FloatComparison::True).unwrap();
+        writeln!(s, "{target}={};", comparison == FloatComparison::True).unwrap();
         return;
     }
     // Integer classification preserves every subnormal and signaling-NaN bit
@@ -1751,7 +1842,7 @@ fn emit_float_comparison(s: &mut String, left: u8, right: u8, comparison: FloatC
         } else {
             ""
         };
-        writeln!(s, "p0={inversion}nan; }}").unwrap();
+        writeln!(s, "{target}={inversion}nan; }}").unwrap();
         return;
     }
     let (symbol, unordered) = match comparison {
@@ -1774,7 +1865,7 @@ fn emit_float_comparison(s: &mut String, left: u8, right: u8, comparison: FloatC
     );
     s.push_str("let ak=select(an ^ 0x80000000u,~an,(an & 0x80000000u)!=0u); let bk=select(bn ^ 0x80000000u,~bn,(bn & 0x80000000u)!=0u);\n");
     let guard = if unordered { "nan ||" } else { "!nan &&" };
-    writeln!(s, "p0={guard} (ak {symbol} bk); }}").unwrap();
+    writeln!(s, "{target}={guard} (ak {symbol} bk); }}").unwrap();
 }
 
 fn constant_input(constants: &mut Vec<ConstantRef>, reference: ConstantRef) -> Option<u8> {
