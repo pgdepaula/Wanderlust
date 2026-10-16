@@ -1247,16 +1247,17 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
             let _ = p.memory.store(heap_inst + 0xb8, 8, 0x2100000000);
             let _ = p.memory.store(heap_inst + 0xcc, 4, 8);
 
-            for offset in (0x1000..0x10000).step_by(0x100) {
+            for offset in (0x1000..0x2000).step_by(0x100) {
                 let arena = 0x208e010000u64 + offset + 0x20;
                 let head = arena + 0xb0;
                 let idx = (offset - 0x1000) / 0x100;
-                let buf_start = 0x208e020000u64 + idx * 0x1000000;
-                let buf_size = if offset == 0x1300 { 0x70fe0000u64 } else { 0x1000000u64 };
+                let buf_start = 0x20a8000000u64 + (idx as u64) * 0x4000000;
+                let buf_size = 0x4000000u64;
 
                 let _ = p.memory.store(arena, 8, 0xb906d18);
                 let _ = p.memory.store(arena + 0x10, 4, 1);
                 let _ = p.memory.store(arena + 0x14, 4, 0);
+                let _ = p.memory.store(arena + 0x18, 8, arena);
                 let _ = p.memory.store(arena + 0x28, 8, buf_start);
                 let _ = p.memory.store(arena + 0x30, 8, buf_size);
                 let _ = p.memory.store(arena + 0x40, 8, arena + 0x40);
@@ -1316,12 +1317,14 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
             // Also initialize primary 4KB-aligned arena at 0x208e012000
             let arena_4k = 0x208e012000u64;
             let head_4k = arena_4k + 0xb0;
+            let buf_4k_start = 0x20e8000000u64;
+            let buf_4k_size = 0x28000000u64;
             let _ = p.memory.store(arena_4k, 8, 0xb906d18);
             let _ = p.memory.store(arena_4k + 0x10, 4, 1);
             let _ = p.memory.store(arena_4k + 0x14, 4, 0);
             let _ = p.memory.store(arena_4k + 0x18, 8, arena_4k);
-            let _ = p.memory.store(arena_4k + 0x28, 8, 0x208e020000);
-            let _ = p.memory.store(arena_4k + 0x30, 8, 0x70fe0000);
+            let _ = p.memory.store(arena_4k + 0x28, 8, buf_4k_start);
+            let _ = p.memory.store(arena_4k + 0x30, 8, buf_4k_size);
             let _ = p.memory.store(arena_4k + 0x40, 8, arena_4k + 0x40);
             let _ = p.memory.store(arena_4k + 0x48, 8, arena_4k + 0x40);
             let _ = p.memory.store(arena_4k + 0x50, 4, 1);
@@ -1330,8 +1333,14 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
             let _ = p.memory.store(arena_4k + 0x78, 8, 0);
             let _ = p.memory.store(arena_4k + 0x80, 4, 1);
             let _ = p.memory.store(arena_4k + 0xa8, 4, 0);
-            let _ = p.memory.store(head_4k, 8, 0x208e020000);
-            let _ = p.memory.store(head_4k + 8, 8, 0x208e020000);
+            let _ = p.memory.store(head_4k, 8, buf_4k_start);
+            let _ = p.memory.store(head_4k + 8, 8, buf_4k_start);
+            let _ = p.memory.store(arena_4k + 0xc0, 4, 1);
+            let _ = p.memory.store(arena_4k + 0xc4, 4, 0);
+            let _ = p.memory.store(buf_4k_start, 8, head_4k);
+            let _ = p.memory.store(buf_4k_start + 8, 8, head_4k);
+            let _ = p.memory.store(buf_4k_start + 0x10, 8, 0);
+            let _ = p.memory.store(buf_4k_start + 0x18, 8, buf_4k_size);
 
             let _ = p.memory.store(0xbad2b78, 8, heap_inst);
             let _ = p.memory.store(0xbad2b80, 8, arena_4k);

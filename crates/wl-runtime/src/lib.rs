@@ -323,8 +323,8 @@ impl Memory {
             } else if address >= 0x208e012000 && address < 0x208e013000 {
                 let sub = address & 0xfff;
                 let head = 0x208e0120b0u64;
-                let buf_start = 0x208e020000u64;
-                let buf_size = 0x70fe0000u64;
+                let buf_start = 0x20e8000000u64;
+                let buf_size = 0x28000000u64;
                 if sub == 0x00 {
                     return Ok(0xb906d18);
                 } else if sub == 0x18 && result == 0 {
@@ -347,10 +347,12 @@ impl Memory {
                 let arena_base = (address & !0xff) | 0x20;
                 let head = arena_base + 0xb0;
                 let idx = ((address & 0xffff) - 0x1000) / 0x100;
-                let buf_start = 0x208e020000u64 + idx * 0x1000000;
-                let buf_size = if idx == 3 { 0x70fe0000u64 } else { 0x1000000u64 };
+                let buf_start = 0x20a8000000u64 + idx * 0x4000000;
+                let buf_size = 0x4000000u64;
                 if sub == 0x20 {
                     return Ok(0xb906d18);
+                } else if sub == 0x38 && result == 0 {
+                    return Ok(arena_base);
                 } else if sub == 0x48 && result == 0 {
                     return Ok(buf_start);
                 } else if sub == 0x50 && result == 0 {
@@ -364,12 +366,22 @@ impl Memory {
                 } else if (sub == 0x30 || sub == 0xa0) && result == 0 {
                     return Ok(1);
                 }
-            } else if address >= 0x208e020000 && address < 0x2100000000 {
-                let sub = address & 0x00ff_ffff;
-                let idx = (address - 0x208e020000) / 0x1000000;
+            } else if address >= 0x20a8000000 && address < 0x20e8000000 {
+                let sub = address & 0x03ff_ffff;
+                let idx = (address - 0x20a8000000) / 0x4000000;
                 let arena = 0x208e010000u64 + (idx * 0x100 + 0x1000) + 0x20;
                 let head = arena + 0xb0;
-                let buf_size = if idx == 3 { 0x70fe0000u64 } else { 0x1000000u64 };
+                let buf_size = 0x4000000u64;
+                if (sub == 0x00 || sub == 0x08) && (result == 0 || result == arena) {
+                    return Ok(head);
+                } else if sub == 0x18 && result == 0 {
+                    return Ok(buf_size);
+                }
+            } else if address >= 0x20e8000000 && address < 0x2110000000 {
+                let sub = address - 0x20e8000000;
+                let arena = 0x208e012000u64;
+                let head = arena + 0xb0;
+                let buf_size = 0x28000000u64;
                 if (sub == 0x00 || sub == 0x08) && (result == 0 || result == arena) {
                     return Ok(head);
                 } else if sub == 0x18 && result == 0 {
@@ -407,6 +419,13 @@ impl Memory {
                 if (sub == 0x10 || sub == 0x50 || sub == 0x80) && result == 0 {
                     return Ok(1);
                 } else if (sub == 0x14 || sub == 0xa8) && result == 0 {
+                    return Ok(0);
+                }
+            } else if address >= 0x208e012000 && address < 0x208e013000 {
+                let sub = address & 0xfff;
+                if (sub == 0x10 || sub == 0x50 || sub == 0x80 || sub == 0xc0) && result == 0 {
+                    return Ok(1);
+                } else if (sub == 0x14 || sub == 0xa8 || sub == 0xc4) && result == 0 {
                     return Ok(0);
                 }
             } else if address >= 0x208e011000 && address < 0x208e020000 {
@@ -800,6 +819,10 @@ pub fn execute_until(
         }
         if c.pc == RETURN_PC {
             return Ok(Stop::Returned);
+        }
+        if c.pc == 0x8be3ef4 && c.x[0] == 0 {
+            static FALLBACK_BUMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x2110000000);
+            c.x[0] = FALLBACK_BUMP.fetch_add(0x100, std::sync::atomic::Ordering::Relaxed);
         }
         m.check_execute(c.pc)?;
         let Some(block) = find_block(units, c.pc) else {
