@@ -929,7 +929,10 @@ fn applet_oe_application_startup() {
     domain_request(&mut p, 1, 9, 210, false, &[]);
     send(&mut p, &mut c, am);
     assert_eq!((reply_u32(&p, 8), reply_u32(&p, 0x28)), (1 << 1, 0));
-    // IApplicationFunctions commands 20, 21, 22, 23, 40.
+    // IApplicationFunctions commands 1, 2, 20, 21, 22, 23, 40, 50.
+    assert_eq!(call(&mut p, &mut c, am, 9, 1, &[1, 0, 0, 0]).0, 0x480);
+    assert_eq!(call(&mut p, &mut c, am, 9, 2, &[]).0, 0);
+    assert_eq!(call(&mut p, &mut c, am, 9, 50, &[]).0, 0);
     assert_eq!(call(&mut p, &mut c, am, 9, 20, &[]).0, 0);
     assert_eq!(call(&mut p, &mut c, am, 9, 21, &[]).0, 0);
     assert_eq!(&reply(&p)[0x30..0x38], b"en-US\0\0\0");

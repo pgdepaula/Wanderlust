@@ -937,6 +937,19 @@ pub(crate) fn request(
                 Some(u64::from_le_bytes(args[..8].try_into().unwrap_or_default()));
             Done::ok()
         }
+        (HostObject::ApplicationFunctions, 1) => {
+            // PopLaunchParameter(u32 kind): out IStorage.
+            // When no launch parameter is present in the channel, return ResultNoDataInChannel (0x480).
+            Done::failure(0x480)
+        }
+        (HostObject::ApplicationFunctions, 2) => {
+            // CreateFeatureStorage: out IStorage.
+            Done::object(HostObject::Storage)
+        }
+        (HostObject::ApplicationFunctions, 50) => {
+            // GetPseudoDeviceId: out 16 bytes UUID.
+            Done::data(&[0u8; 16])
+        }
         (HostObject::ApplicationFunctions, 210) => {
             // Cmd210: no arguments, returns copy handle to event.
             check(no_arguments)?;
