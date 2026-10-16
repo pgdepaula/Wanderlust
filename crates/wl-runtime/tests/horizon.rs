@@ -601,3 +601,44 @@ fn shared_memory_map_and_unmap() {
     );
     assert_eq!(info(&p, target).state, state::FREE);
 }
+
+#[test]
+fn transfer_memory_creation_and_close() {
+    let (mut p, mut c) = process();
+    let target = 0x20_0000_0000u64;
+
+    // Unaligned address.
+    assert_eq!(
+        svc(&mut p, &mut c, 0x15, &[0, target + 1, PAGE, 0]),
+        result::INVALID_ADDRESS
+    );
+    // Zero size.
+    assert_eq!(
+        svc(&mut p, &mut c, 0x15, &[0, target, 0, 0]),
+        result::INVALID_SIZE
+    );
+    // Unaligned size.
+    assert_eq!(
+        svc(&mut p, &mut c, 0x15, &[0, target, PAGE + 1, 0]),
+        result::INVALID_SIZE
+    );
+    // Valid creation.
+    assert_eq!(
+        svc(&mut p, &mut c, 0x15, &[0, target, PAGE * 4, 0]),
+        result::SUCCESS
+    );
+    let handle = c.x[1] as u32;
+    assert_ne!(handle, 0);
+
+    // Verify handle table and kernel state.
+    let k = p.kernel.as_ref().unwrap();
+    assert!(matches!(
+        k.handles.get(handle),
+        Some(Object::TransferMemory(_))
+    ));
+
+    // Close handle.
+    assert_eq!(svc(&mut p, &mut c, 0x16, &[u64::from(handle)]), result::SUCCESS);
+    let k = p.kernel.as_ref().unwrap();
+    assert_eq!(k.handles.get(handle), None);
+}

@@ -231,6 +231,8 @@ pub enum Object {
     WritableEvent(usize),
     /// Shared memory block (`SharedMemory`).
     SharedMemory(usize),
+    /// Transfer memory block (`TransferMemory`).
+    TransferMemory(usize),
 }
 /// Handle table with the Mesosphere encoding: `index | linear_id << 15`; linear ids start at
 /// 1 and free indices are handed out from the top of the table down.
@@ -349,6 +351,14 @@ pub struct SharedMemory {
     pub bytes: Vec<u8>,
 }
 
+/// Horizon KTransferMemory kernel object.
+#[derive(Clone, Debug)]
+pub struct TransferMemory {
+    pub address: u64,
+    pub size: u64,
+    pub permission: u32,
+}
+
 #[derive(Debug)]
 pub struct Kernel {
     pub config: ProcessConfig,
@@ -364,6 +374,7 @@ pub struct Kernel {
     /// svcMapMemory stack aliases.
     pub aliases: Vec<Alias>,
     pub shared_memories: Vec<SharedMemory>,
+    pub transfer_memories: Vec<TransferMemory>,
     /// Deterministic virtual clock in nanoseconds: one per retired guest instruction plus
     /// time skipped while every thread waits for a timeout.
     pub time_ns: u64,
@@ -407,6 +418,21 @@ impl Kernel {
         });
         let index = self.shared_memories.len() - 1;
         self.handles.add(Object::SharedMemory(index))
+    }
+
+    pub fn create_transfer_memory(
+        &mut self,
+        address: u64,
+        size: u64,
+        permission: u32,
+    ) -> Result<u32, u32> {
+        self.transfer_memories.push(TransferMemory {
+            address,
+            size,
+            permission,
+        });
+        let index = self.transfer_memories.len() - 1;
+        self.handles.add(Object::TransferMemory(index))
     }
 }
 
@@ -494,6 +520,7 @@ impl Process {
             tls_pages: Vec::new(),
             aliases: Vec::new(),
             shared_memories: Vec::new(),
+            transfer_memories: Vec::new(),
             time_ns: 0,
             slice_start: 0,
             total_steps: 0,
@@ -870,7 +897,7 @@ pub fn used_memory(memory: &Memory) -> u64 {
 /// X1 upward.
 fn outputs(id: u16) -> (bool, usize) {
     match id {
-        0x01 | 0x06 | 0x08 | 0x0C | 0x18 | 0x1F | 0x24 | 0x25 | 0x29 => (true, 1),
+        0x01 | 0x06 | 0x08 | 0x0C | 0x15 | 0x18 | 0x1F | 0x24 | 0x25 | 0x29 => (true, 1),
         0x0E | 0x45 => (true, 2),
         0x0B | 0x1D => (false, 0),
         _ => (true, 0),
@@ -1061,6 +1088,17 @@ pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<S
             match r {
                 Ok(code) => set_result(c, code),
                 Err(e) => return Err(format!("{e}; guest_pc={:#x}", c.pc)),
+            }
+            None
+        }
+        0x15 => {
+            let (address, size, perm) = (c.x[1], c.x[2], c.x[3] as u32);
+            match create_transfer_memory(k, address, size, perm) {
+                Ok(handle) => {
+                    set_result(c, result::SUCCESS);
+                    c.x[1] = u64::from(handle);
+                }
+                Err(code) => set_result(c, code),
             }
             None
         }
@@ -1490,6 +1528,27 @@ fn unmap_shared_memory(
         !parts.contains(&(index - 1))
     });
     Ok(result::SUCCESS)
+}
+/// `svcCreateTransferMemory` (0x15): creates a transfer memory object from a process memory region.
+fn create_transfer_memory(
+    k: &mut Kernel,
+    address: u64,
+    size: u64,
+    permission: u32,
+) -> Result<u32, u32> {
+    if address % PAGE != 0 {
+        return Err(result::INVALID_ADDRESS);
+    }
+    if size == 0 || size % PAGE != 0 {
+        return Err(result::INVALID_SIZE);
+    }
+    let Some(end) = address.checked_add(size) else {
+        return Err(result::INVALID_CURRENT_MEMORY);
+    };
+    if end > k.layout.address_space_end {
+        return Err(result::INVALID_CURRENT_MEMORY);
+    }
+    k.create_transfer_memory(address, size, permission)
 }
 /// `svcSetHeapSize`: grows or shrinks the Normal-state RW heap at the heap region start.
 /// Growth maps zeroed pages after the current heap; shrinking requires the released range to

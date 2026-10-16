@@ -155,7 +155,8 @@ pub fn close_handle(k: &mut Kernel, object: Object) {
         Object::Thread(_)
         | Object::ReadableEvent(_)
         | Object::WritableEvent(_)
-        | Object::SharedMemory(_) => {}
+        | Object::SharedMemory(_)
+        | Object::TransferMemory(_) => {}
     }
 }
 
