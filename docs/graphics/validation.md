@@ -2212,3 +2212,45 @@ Exclusive artifact directories and final source hashes matched the validation
 manifest. Unfinished runtime files were excluded and preserved. Exceptional
 floating-point equivalence and portable fused multiply-add remain unproven; no
 general predication, general shader coverage or original-game graphics is claimed.
+
+## P0/!P0 conditional MOV execution
+
+Eight CPU tests cover independently assembled MOV predicates in both stages,
+false-path destination readiness, RZ sources, self moves, strict full-lane masks,
+P1-P6/!PT rejection, preserved unconditional PT, real barrier waits, register
+accounting, multiplication hazards from both values and predicate producers,
+and texture-handle/position-W proof erasure. Original envyas reassembly matches
+both committed instruction streams exactly. The supported static readiness rule
+is deliberately stricter than hardware's false-predicate operand suppression.
+
+Two actual GpuDriver/GPFIFO indexed scenes exercise the translation. Unsigned
+runtime predicates select `[255,128,191,255]` or `[64,128,0,255]`; equality and
+high-bit pairs distinguish signed or floating comparisons. False MOVs retain
+their original quarter/three-quarter values. Constant changes preserve shader
+and pipeline identity. Inverting the first MOV in guest code yields
+`[64,128,191,255]`; a later unsupported P1 faults without stale execution,
+additional draw/submission or replay, while accepted output remains publishable.
+The vertex fixture conditionally replaces only the first X with .5. Changing
+its guest X to -.6 changes the geometry under an independent barycentric oracle,
+uploads exactly72vertex bytes and preserves shader/pipeline identity.
+
+The fragment workload records7draws,14queues,3decode attempts (one rejected),
+624shader bytes,5modules/6pipelines,56constant read/upload bytes,7intentional
+oracle readbacks/waits,52080readback bytes and42224guest write bytes. One target
+is reused6times. Thirty-two unchanged vertex draws each report one accepted
+draw, add32queues and no resource reads/uploads, decodes, modules, pipelines,
+readbacks or waits. Debug CPU observations were28.699ms onOpenGL,50.539ms on
+D3D12 and13.842ms onVulkan; these are not GPU timings or game benchmarks.
+Allocator traffic was not separately measured for this feature.
+
+A faithful ordinary6817c28 snapshot plus exactly seven candidate source/fixture
+files and unchanged Cargo.lock passed formatting, strict workspace Clippy,
+221graphics CPU tests per configuration and440workspace CPU tests (106GPU
+scenarios ignored). All106GPU scenarios actually passed on each WSL OpenGL,
+native Windows D3D12 and native Windows Vulkan:318passes,zero failures/skips,
+40native executables per backend. Final source hashes matched the frozen
+manifest. An initial checkout-scoped focused invocation is excluded; affected
+GPU artifacts were removed before rebuilding the final frozen source. The
+runtime deliveries through a209972 are preserved in shared main but excluded from
+this snapshot's validation scope. Commit45e6254 contains the exact tested GPU
+source/fixture hashes. No original-game GPU submission is established.
