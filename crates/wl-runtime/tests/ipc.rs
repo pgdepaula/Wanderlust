@@ -180,9 +180,11 @@ fn register_client_then_lookup_and_registration() {
     assert_eq!(reply_result(&p), sm_result::OUT_OF_SESSIONS);
     // Requests to a guest-hosted service are not modelled: explicit fault.
     c.x[0] = u64::from(client);
-    assert!(dispatch(&mut c, &mut p, 0x21)
-        .unwrap_err()
-        .contains("hosted by the guest"));
+    assert!(
+        dispatch(&mut c, &mut p, 0x21)
+            .unwrap_err()
+            .contains("hosted by the guest")
+    );
     // Unregister: success, then NotRegistered.
     request(&mut p, 3, false, &name("wl:svc"));
     send(&mut p, &mut c, sm);
@@ -260,9 +262,11 @@ fn control_close_and_invalid_requests() {
     // Buffer descriptors to sm are not modelled: explicit fault.
     p.write_bytes(t, &[4, 0, 0x10, 0, 0x0A, 0, 0, 0]).unwrap();
     c.x[0] = u64::from(sm);
-    assert!(dispatch(&mut c, &mut p, 0x21)
-        .unwrap_err()
-        .contains("descriptors"));
+    assert!(
+        dispatch(&mut c, &mut p, 0x21)
+            .unwrap_err()
+            .contains("descriptors")
+    );
     // An unknown command: the server closes the session; every later request fails.
     request(&mut p, 99, false, &[0; 8]);
     assert_eq!(send(&mut p, &mut c, sm).0, result::SESSION_CLOSED);
@@ -567,14 +571,18 @@ fn hosted_service_control_requests_and_limits() {
     assert_eq!(send(&mut p, &mut c, logger), (result::SUCCESS, None));
     p.write_bytes(t, &m).unwrap();
     c.x[0] = u64::from(logger);
-    assert!(dispatch(&mut c, &mut p, 0x21)
-        .unwrap_err()
-        .contains("converting a domain session"));
+    assert!(
+        dispatch(&mut c, &mut p, 0x21)
+            .unwrap_err()
+            .contains("converting a domain session")
+    );
     request(&mut p, 9, false, &[]);
     c.x[0] = u64::from(clone);
-    assert!(dispatch(&mut c, &mut p, 0x21)
-        .unwrap_err()
-        .contains("unknown command"));
+    assert!(
+        dispatch(&mut c, &mut p, 0x21)
+            .unwrap_err()
+            .contains("unknown command")
+    );
     // The name cannot be registered by the guest; CMIF Close ends the session.
     let sm = connect(&mut p, &mut c);
     tipc_register_client(&mut p, &mut c, sm);
@@ -754,9 +762,11 @@ fn apm_performance_mode_and_configuration() {
     }
     control(&mut p, 3, &[]);
     c.x[0] = u64::from(apm);
-    assert!(dispatch(&mut c, &mut p, 0x21)
-        .unwrap_err()
-        .contains("pointer-buffer size"));
+    assert!(
+        dispatch(&mut c, &mut p, 0x21)
+            .unwrap_err()
+            .contains("pointer-buffer size")
+    );
 }
 
 #[test]
@@ -938,18 +948,20 @@ fn applet_oe_application_startup() {
     assert_eq!(call(&mut p, &mut c, am, controller, 13, &[1, 0, 1]).0, 0);
     assert_eq!(call(&mut p, &mut c, am, controller, 11, &[1]).0, 0);
     assert_eq!(call(&mut p, &mut c, am, controller, 12, &[1]).0, 0);
+    assert_eq!(call(&mut p, &mut c, am, controller, 14, &[1]).0, 0);
     let h = &p.kernel.as_ref().unwrap().host;
     assert_eq!(h.focus_handling_mode, Some([true, false, true]));
     assert_eq!(
         (
             h.operation_mode_notification,
-            h.performance_mode_notification
+            h.performance_mode_notification,
+            h.restart_message_enabled,
         ),
-        (Some(true), Some(true))
+        (Some(true), Some(true), Some(true))
     );
     assert!(h.foreground_rights && h.request_exit_to_library_applet_at_execute_next_program);
     assert_eq!(h.delay_time_to_abort_on_gpu_error, Some(5));
-    assert_eq!(h.calls.last(), Some(&("am ISelfController", 12, 0)));
+    assert_eq!(h.calls.last(), Some(&("am ISelfController", 14, 0)));
 }
 
 #[test]

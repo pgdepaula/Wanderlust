@@ -19,10 +19,10 @@
 //!
 //! Requests the model does not cover (domains, unknown commands, a request layout that
 //! differs from the command's) are explicit faults rather than replies.
-use crate::horizon::{self, result, Kernel};
+use crate::horizon::{self, Kernel, result};
 use crate::ipc::{Endpoint, Request};
 use crate::threads;
-use crate::{ipc, Memory};
+use crate::{Memory, ipc};
 
 /// An object behind a session to a hosted service.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,6 +131,7 @@ pub struct HostState {
     pub operation_mode_notification: Option<bool>,
     pub performance_mode_notification: Option<bool>,
     pub focus_handling_mode: Option<[bool; 3]>,
+    pub restart_message_enabled: Option<bool>,
     pub out_of_focus_suspending: Option<bool>,
     pub foreground_rights: bool,
     pub request_exit_to_library_applet_at_execute_next_program: bool,
@@ -769,9 +770,9 @@ pub(crate) fn request(
             check(no_arguments)?;
             Done::data(&[FOCUS_IN_FOCUS])
         }
-        (HostObject::SelfController, 11 | 12 | 16) => {
+        (HostObject::SelfController, 11 | 12 | 14 | 16) => {
             // SetOperationModeChangedNotification, SetPerformanceModeChangedNotification,
-            // SetOutOfFocusSuspendingEnabled: one bool.
+            // SetRestartMessageEnabled, SetOutOfFocusSuspendingEnabled: one bool.
             check(Shape {
                 in_data: 1,
                 ..no_arguments
@@ -780,6 +781,7 @@ pub(crate) fn request(
             match command {
                 11 => k.host.operation_mode_notification = enabled,
                 12 => k.host.performance_mode_notification = enabled,
+                14 => k.host.restart_message_enabled = enabled,
                 _ => k.host.out_of_focus_suspending = enabled,
             }
             Done::ok()
