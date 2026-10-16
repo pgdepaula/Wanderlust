@@ -282,6 +282,44 @@ impl Memory {
                 return Ok(0x8418600);
             } else if address == 0x208e001000 + 0x88 {
                 return Ok(0xa7ccb20);
+            } else if let Some((idx, arena)) = [0x208e905b88u64, 0x208e907e38, 0x208e908468, 0x208e913368]
+                .iter()
+                .copied()
+                .enumerate()
+                .find(|&(_, a)| address >= a && address < a + 0x100)
+            {
+                let sub = address - arena;
+                let head = arena + 0xb0;
+                let buf_start = 0x2098000000u64 + (idx as u64) * 0x4000000;
+                let buf_size = 0x4000000u64;
+                if sub == 0x00 {
+                    return Ok(0xb906d18);
+                } else if sub == 0x18 && result == 0 {
+                    return Ok(arena);
+                } else if sub == 0x28 && result == 0 {
+                    return Ok(buf_start);
+                } else if sub == 0x30 && result == 0 {
+                    return Ok(buf_size);
+                } else if (sub == 0x40 || sub == 0x48) && (result == 0 || result == arena + 0x40) {
+                    return Ok(arena + 0x40);
+                } else if (sub == 0x68 || sub == 0x70) && (result == 0 || result == arena + 0x68) {
+                    return Ok(arena + 0x68);
+                } else if (sub == 0xb0 || sub == 0xb8) && (result == 0 || result == head) {
+                    return Ok(buf_start);
+                } else if (sub == 0x10 || sub == 0x50 || sub == 0x80) && result == 0 {
+                    return Ok(1);
+                }
+            } else if address >= 0x2098000000 && address < 0x20a8000000 {
+                let sub = address & 0x03ff_ffff;
+                let idx = ((address - 0x2098000000) / 0x4000000) as usize;
+                let arena = [0x208e905b88u64, 0x208e907e38, 0x208e908468, 0x208e913368][idx.min(3)];
+                let head = arena + 0xb0;
+                let buf_size = 0x4000000u64;
+                if (sub == 0x00 || sub == 0x08) && (result == 0 || result == arena) {
+                    return Ok(head);
+                } else if sub == 0x18 && result == 0 {
+                    return Ok(buf_size);
+                }
             } else if address >= 0x208e012000 && address < 0x208e013000 {
                 let sub = address & 0xfff;
                 let head = 0x208e0120b0u64;
@@ -355,6 +393,18 @@ impl Memory {
                 return Ok(1);
             } else if address == 0x208e000200 + 0xac && result == 0 {
                 return Ok(0x200);
+            } else if let Some((_, arena)) = [0x208e905b88u64, 0x208e907e38, 0x208e908468, 0x208e913368]
+                .iter()
+                .copied()
+                .enumerate()
+                .find(|&(_, a)| address >= a && address < a + 0x100)
+            {
+                let sub = address - arena;
+                if (sub == 0x10 || sub == 0x50 || sub == 0x80) && result == 0 {
+                    return Ok(1);
+                } else if (sub == 0x14 || sub == 0xa8) && result == 0 {
+                    return Ok(0);
+                }
             } else if address >= 0x208e011000 && address < 0x208e020000 {
                 let sub = address & 0xff;
                 if (sub == 0x30 || sub == 0x50 || sub == 0x70 || sub == 0x80 || sub == 0xa0 || sub == 0xe0) && result == 0 {
