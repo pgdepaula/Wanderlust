@@ -1074,3 +1074,36 @@ fn time_and_acc_services() {
     assert_eq!(reply_result(&p), result::SUCCESS);
     assert_eq!(reply_u32(&p, 0x20), 1);
 }
+
+#[test]
+fn fsp_srv_service_startup() {
+    let (mut p, mut c) = process(&[(false, "*")]);
+    let sm = connect(&mut p, &mut c);
+    tipc_register_client(&mut p, &mut c, sm);
+    let fs = service(&mut p, &mut c, sm, "fsp-srv");
+
+    // Initialize (cmd 1).
+    request(&mut p, 1, false, &[0; 8]);
+    assert_eq!(send(&mut p, &mut c, fs), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+
+    // GetGlobalAccessLogMode (cmd 1006): out u32 (0).
+    request(&mut p, 1006, false, &[]);
+    assert_eq!(send(&mut p, &mut c, fs), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+    assert_eq!(reply_u32(&p, 0x20), 0);
+
+    // OpenRomFileSystemByCurrentProcess (cmd 203): returns IFileSystem.
+    request(&mut p, 203, false, &[]);
+    assert_eq!(send(&mut p, &mut c, fs), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+    let romfs = reply_handle(&p);
+    assert_ne!(romfs, 0);
+
+    // OpenDataStorageByCurrentProcess (cmd 200): returns IStorage.
+    request(&mut p, 200, false, &[]);
+    assert_eq!(send(&mut p, &mut c, fs), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+    let storage = reply_handle(&p);
+    assert_ne!(storage, 0);
+}

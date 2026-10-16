@@ -65,6 +65,10 @@ pub enum HostObject {
     /// `acc:u0` IAccountServiceForApplication and profile (account process).
     AccUser,
     AccProfile,
+    /// `fsp-srv` IFileSystemProxy, IFileSystem, IStorage (fssrv process).
+    FileSystemProxy,
+    FileSystem,
+    Storage,
 }
 
 /// The process serving a hosted object; domain object IDs are allocated per server.
@@ -78,6 +82,7 @@ pub enum Server {
     Pctl,
     Time,
     Acc,
+    Fs,
 }
 
 /// Size of `lm`'s pointer buffer (`lm_ipc_server.cpp`, `PointerBufferSize`).
@@ -112,6 +117,7 @@ pub struct HostState {
     pub pctl_domain_ids: DomainIds,
     pub time_domain_ids: DomainIds,
     pub acc_domain_ids: DomainIds,
+    pub fs_domain_ids: DomainIds,
     /// Cached time:u shared memory index.
     pub time_shared_memory: Option<usize>,
     /// The application's AppletMessage queue and the event signalled while it is not
@@ -186,6 +192,7 @@ pub fn lookup(name: &[u8; 8]) -> Option<HostObject> {
         }
         b"time:u\0\0" => Some(HostObject::TimeStaticService),
         b"acc:u0\0\0" => Some(HostObject::AccUser),
+        b"fsp-srv\0" => Some(HostObject::FileSystemProxy),
         _ => None,
     }
 }
@@ -220,6 +227,9 @@ impl HostObject {
             HostObject::TimeZoneService => ("time:u ITimeZoneService", 0),
             HostObject::AccUser => ("acc:u0 IAccountServiceForApplication", 0),
             HostObject::AccProfile => ("acc:u0 IProfile", 0),
+            HostObject::FileSystemProxy => ("fsp-srv IFileSystemProxy", 0),
+            HostObject::FileSystem => ("fsp-srv IFileSystem", 0),
+            HostObject::Storage => ("fsp-srv IStorage", 0),
         }
     }
     fn server(&self) -> Server {
@@ -234,6 +244,9 @@ impl HostObject {
             | HostObject::TimeSteadyClock
             | HostObject::TimeZoneService => Server::Time,
             HostObject::AccUser | HostObject::AccProfile => Server::Acc,
+            HostObject::FileSystemProxy | HostObject::FileSystem | HostObject::Storage => {
+                Server::Fs
+            }
             _ => Server::Am,
         }
     }
@@ -241,9 +254,13 @@ impl HostObject {
     fn pointer_buffer_size(&self) -> Option<u16> {
         match self.server() {
             Server::Lm => Some(LM_POINTER_BUFFER_SIZE),
-            Server::Am | Server::Ns | Server::Glue | Server::Pctl | Server::Time | Server::Acc => {
-                Some(AM_POINTER_BUFFER_SIZE)
-            }
+            Server::Am
+            | Server::Ns
+            | Server::Glue
+            | Server::Pctl
+            | Server::Time
+            | Server::Acc
+            | Server::Fs => Some(AM_POINTER_BUFFER_SIZE),
             Server::Ptm => None,
         }
     }
@@ -301,6 +318,7 @@ impl HostState {
             Server::Pctl => &mut self.pctl_domain_ids,
             Server::Time => &mut self.time_domain_ids,
             Server::Acc => &mut self.acc_domain_ids,
+            Server::Fs => &mut self.fs_domain_ids,
         }
     }
     /// Registers `object` in domain `d` under a newly allocated ID of its server (`lm`
@@ -587,12 +605,15 @@ pub(crate) fn request(
                     in_data: if command == 4 { 4 } else { 0 },
                     ..no_arguments
                 })?;
-                if domain.is_some() {
-                    return unsupported("cloning a domain session");
-                }
                 let endpoint = k.sessions[s].endpoint;
+                let domain = k.sessions[s].domain;
                 Ok(Outcome::Reply(match ipc::open_session(k, endpoint) {
-                    Ok(h) => reply(0, result::SUCCESS, &[], &[h], None),
+                    Ok(h) => {
+                        if let Some(crate::horizon::Object::Session(new_s)) = k.handles.get(h) {
+                            k.sessions[new_s].domain = domain;
+                        }
+                        reply(0, result::SUCCESS, &[], &[h], None)
+                    }
                     Err(e) => reply(0, e, &[], &[], None),
                 }))
             }
@@ -1045,6 +1066,33 @@ pub(crate) fn request(
         }
         (HostObject::AccUser, _) => Done::ok(),
         (HostObject::AccProfile, _) => Done::ok(),
+        (HostObject::FileSystemProxy, 1) => {
+            // Initialize(u64 reserved, ClientProcessId, copied process handle).
+            Done::ok()
+        }
+        (HostObject::FileSystemProxy, 18 | 51 | 52 | 203) => {
+            // MountSaveData / OpenSaveDataFileSystem / OpenDirectoryFileSystem / OpenRomFileSystemByCurrentProcess
+            Done::object(HostObject::FileSystem)
+        }
+        (HostObject::FileSystemProxy, 200 | 202) => {
+            // OpenDataStorageByCurrentProcess / OpenDataStorageByDataId
+            Done::object(HostObject::Storage)
+        }
+        (HostObject::FileSystemProxy, 1005) => {
+            // SetGlobalAccessLogMode(u32 mode)
+            Done::ok()
+        }
+        (HostObject::FileSystemProxy, 1006) => {
+            // GetGlobalAccessLogMode: out u32 mode
+            Done::data(&0u32.to_le_bytes())
+        }
+        (HostObject::FileSystemProxy, _) => Done::ok(),
+        (HostObject::FileSystem, _) => Done::ok(),
+        (HostObject::Storage, 1) => {
+            // GetSize: out u64 size
+            Done::data(&0u64.to_le_bytes())
+        }
+        (HostObject::Storage, _) => Done::ok(),
         _ => return unsupported("an unknown command"),
     };
     if k.host.calls.len() < CALL_TRACE_LIMIT {
