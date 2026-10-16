@@ -772,3 +772,59 @@ fn thread_core_masks() {
     assert_eq!(svc(&mut p, &mut c, 0x0F, &[me, no_update, 0b011]).0, 0);
     assert_eq!(get(&mut p, &mut c), (0, 0, 0b011));
 }
+
+#[test]
+fn address_arbitration_wait_and_signal() {
+    let (mut p, mut c) = process();
+    let (a, _) = spawn(&mut p, &mut c, 44, 1);
+    let addr = CODE + 0x1000; // writable data page
+    let memory = &mut p.memory;
+    memory.store(addr, 4, 10).unwrap();
+
+    // 1. Validation: unaligned address.
+    assert_eq!(
+        svc(&mut p, &mut c, 0x34, &[addr + 1, 2, 10, u64::MAX]).0,
+        result::INVALID_ADDRESS
+    );
+    assert_eq!(
+        svc(&mut p, &mut c, 0x35, &[addr + 1, 0, 0, 1]).0,
+        result::INVALID_ADDRESS
+    );
+
+    // 2. WaitIfEqual (arb_type=2): when value doesn't match (e.g. expected 99, got 10), returns success immediately without blocking.
+    let (res, stop) = svc(&mut p, &mut c, 0x34, &[addr, 2, 99, u64::MAX]);
+    assert_eq!(res, 0);
+    assert_eq!(stop, None);
+
+    // 3. Timeout == 0 when condition holds returns TIMED_OUT immediately.
+    let (res, stop) = svc(&mut p, &mut c, 0x34, &[addr, 2, 10, 0]);
+    assert_eq!(res, result::TIMED_OUT);
+    assert_eq!(stop, None);
+
+    // 4. Thread A waits on address: WaitIfEqual when value matches and timeout is infinite (-1).
+    switch(&mut p, &mut c, a);
+    let (_, stop) = svc(&mut p, &mut c, 0x34, &[addr, 2, 10, u64::MAX]);
+    assert_eq!(stop, Some(Stop::Reschedule));
+    assert_eq!(k(&mut p).threads[a].state, ThreadState::Waiting);
+
+    // 5. Thread 0 signals address: wakes Thread A (returns Reschedule due to wakeup).
+    switch(&mut p, &mut c, 0);
+    let (res, stop) = svc(&mut p, &mut c, 0x35, &[addr, 0, 0, 1]);
+    assert_eq!(res, 0);
+    assert_eq!(stop, Some(Stop::Reschedule));
+    assert_eq!(k(&mut p).threads[a].state, ThreadState::Runnable);
+
+    // Switching back to Thread A confirms it received SUCCESS.
+    switch(&mut p, &mut c, a);
+    assert_eq!(c.x[0], 0);
+
+    // 6. SignalAndIncrementIfEqual:
+    let (res, _) = svc(&mut p, &mut c, 0x35, &[addr, 1, 10, 1]);
+    assert_eq!(res, 0);
+    assert_eq!(p.memory.load(addr, 4).unwrap(), 11);
+
+    // 7. SynchronizePreemptionState (0x36): no-op.
+    let (res, stop) = svc(&mut p, &mut c, 0x36, &[]);
+    assert_eq!(res, 0);
+    assert_eq!(stop, None);
+}

@@ -899,7 +899,7 @@ fn outputs(id: u16) -> (bool, usize) {
     match id {
         0x01 | 0x06 | 0x08 | 0x0C | 0x15 | 0x18 | 0x1F | 0x24 | 0x25 | 0x29 => (true, 1),
         0x0E | 0x45 => (true, 2),
-        0x0B | 0x1D => (false, 0),
+        0x0B | 0x1D | 0x36 => (false, 0),
         _ => (true, 0),
     }
 }
@@ -1268,6 +1268,32 @@ pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<S
                 }
                 Err(code) => set_result(c, code),
             }
+            None
+        }
+        0x34 => match threads::wait_for_address(memory, k, c) {
+            Ok(None) => {
+                set_result(c, result::SUCCESS);
+                None
+            }
+            Ok(blocked) => blocked,
+            Err(code) => {
+                set_result(c, code);
+                None
+            }
+        },
+        0x35 => {
+            let (address, signal_type, value, count) = (
+                c.x[0],
+                c.x[1] as u32,
+                c.x[2] as u32 as i32,
+                c.x[3] as u32 as i32,
+            );
+            let code = threads::signal_to_address(memory, k, address, signal_type, value, count);
+            set_result(c, code);
+            None
+        }
+        0x36 => {
+            // svcSynchronizePreemptionState: sets thread preemption state (no-op).
             None
         }
         _ => {

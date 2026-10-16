@@ -77,6 +77,12 @@ pub enum Wait {
         order: u64,
         deadline: Option<u64>,
     },
+    /// svcWaitForAddress at `address`.
+    Address {
+        address: u64,
+        order: u64,
+        deadline: Option<u64>,
+    },
 }
 impl std::fmt::Display for Wait {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -85,6 +91,7 @@ impl std::fmt::Display for Wait {
             Wait::Sleep { .. } => write!(f, "svcSleepThread"),
             Wait::Lock { address, .. } => write!(f, "a user lock at {address:#x}"),
             Wait::CondVar { key, .. } => write!(f, "a condition variable at {key:#x}"),
+            Wait::Address { address, .. } => write!(f, "svcWaitForAddress at {address:#x}"),
             Wait::Service { name, .. } => {
                 let text: String = name
                     .iter()
@@ -104,7 +111,8 @@ impl Wait {
         match *self {
             Wait::Objects { deadline, .. }
             | Wait::Lock { deadline, .. }
-            | Wait::CondVar { deadline, .. } => deadline,
+            | Wait::CondVar { deadline, .. }
+            | Wait::Address { deadline, .. } => deadline,
             Wait::Sleep { deadline } => Some(deadline),
             Wait::Service { .. } => None,
         }
@@ -903,6 +911,150 @@ pub fn signal_condition(memory: &mut Memory, k: &mut Kernel, key: u64, count: i3
     if take == waiters.len() {
         let _ = write_u32(memory, key, 0);
     }
+}
+
+/// svcWaitForAddress (0x34): X0 address, W1 arb_type, X2 value, X3 timeout.
+pub fn wait_for_address(
+    memory: &mut Memory,
+    k: &mut Kernel,
+    c: &mut Cpu,
+) -> Result<Option<Stop>, u32> {
+    let (address, arb_type, value, timeout) = (c.x[0], c.x[1] as u32, c.x[2], c.x[3] as i64);
+    if address >= KERNEL_ADDRESS_BASE
+        || (arb_type == 3 && address % 8 != 0)
+        || (arb_type != 3 && address % 4 != 0)
+    {
+        return Err(result::INVALID_ADDRESS);
+    }
+    let should_wait = match arb_type {
+        0 => {
+            // WaitIfLessThan
+            let cur = read_u32(memory, address).ok_or(result::INVALID_CURRENT_MEMORY)?;
+            (cur as i32) < (value as i32)
+        }
+        1 => {
+            // DecrementAndWaitIfLessThan
+            let cur = read_u32(memory, address).ok_or(result::INVALID_CURRENT_MEMORY)?;
+            let new_val = cur.wrapping_sub(1);
+            if !write_u32(memory, address, new_val) {
+                return Err(result::INVALID_CURRENT_MEMORY);
+            }
+            (new_val as i32) < (value as i32)
+        }
+        2 => {
+            // WaitIfEqual
+            let cur = read_u32(memory, address).ok_or(result::INVALID_CURRENT_MEMORY)?;
+            cur == (value as u32)
+        }
+        3 => {
+            // WaitIfEqual64
+            let cur = memory
+                .load(address, 8)
+                .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
+            cur == value
+        }
+        _ => return Err(result::INVALID_ENUM_VALUE),
+    };
+    if !should_wait {
+        return Ok(None);
+    }
+    if timeout == 0 {
+        return Err(result::TIMED_OUT);
+    }
+    let deadline = if timeout > 0 {
+        Some(deadline_after(ticks(now_ns(k, c)), timeout).unwrap_or(u64::MAX))
+    } else {
+        None
+    };
+    let order = next_order(k);
+    Ok(block(
+        k,
+        c,
+        0x34,
+        Wait::Address {
+            address,
+            order,
+            deadline,
+        },
+    ))
+}
+
+/// svcSignalToAddress (0x35): X0 address, W1 signal_type, W2 value, W3 count.
+pub fn signal_to_address(
+    memory: &mut Memory,
+    k: &mut Kernel,
+    address: u64,
+    signal_type: u32,
+    value: i32,
+    count: i32,
+) -> u32 {
+    if address >= KERNEL_ADDRESS_BASE || address % 4 != 0 {
+        return result::INVALID_ADDRESS;
+    }
+    let mut waiters: Vec<(u8, u64, usize)> = k
+        .threads
+        .iter()
+        .enumerate()
+        .filter_map(|(i, th)| match th.wait {
+            Some(Wait::Address {
+                address: wa, order, ..
+            }) if wa == address && th.state == ThreadState::Waiting => {
+                Some((effective_priority(k, i), order, i))
+            }
+            _ => None,
+        })
+        .collect();
+    waiters.sort();
+    let num_waiters = waiters.len();
+
+    match signal_type {
+        0 => {
+            // SignalType_Signal
+        }
+        1 => {
+            // SignalType_SignalAndIncrementIfEqual
+            let cur = match read_u32(memory, address) {
+                Some(v) => v,
+                None => return result::INVALID_CURRENT_MEMORY,
+            };
+            if cur as i32 == value {
+                let new_val = cur.wrapping_add(1);
+                if !write_u32(memory, address, new_val) {
+                    return result::INVALID_CURRENT_MEMORY;
+                }
+            }
+        }
+        2 => {
+            // SignalType_SignalAndModifyBasedOnWaitingThreadCountIfEqual
+            let cur = match read_u32(memory, address) {
+                Some(v) => v,
+                None => return result::INVALID_CURRENT_MEMORY,
+            };
+            if cur as i32 == value {
+                let new_val = if num_waiters == 0 || count <= 0 || num_waiters <= count as usize {
+                    (value as u32).wrapping_sub(1)
+                } else {
+                    (value as u32).wrapping_sub(2)
+                };
+                if !write_u32(memory, address, new_val) {
+                    return result::INVALID_CURRENT_MEMORY;
+                }
+            }
+        }
+        _ => return result::INVALID_ENUM_VALUE,
+    }
+
+    let take = if count <= 0 {
+        num_waiters
+    } else {
+        (count as usize).min(num_waiters)
+    };
+
+    for &(_, _, t) in &waiters[..take] {
+        end_wait(k, t, result::SUCCESS, None);
+    }
+
+    result::SUCCESS
 }
 
 // ---------------------------------------------------------------- scheduler
