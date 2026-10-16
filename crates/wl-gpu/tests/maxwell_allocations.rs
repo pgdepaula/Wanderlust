@@ -1,12 +1,14 @@
+#[path = "common/allocations.rs"]
+mod allocations;
 mod common;
-use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
-use std::alloc::System;
+use allocations::{Measurement, ThreadAllocator};
+use stats_alloc::{INSTRUMENTED_SYSTEM, Region};
 use wl_gpu::{
     fifo::{Decoder, MethodWrite},
     maxwell::{CLASS, Maxwell3d},
 };
 #[global_allocator]
-static ALLOCATOR: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
+static ALLOCATOR: ThreadAllocator = ThreadAllocator;
 #[test]
 fn fifo_and_engine_method_hot_path_allocate_nothing() {
     use common::maxwell::*;
@@ -22,7 +24,8 @@ fn fifo_and_engine_method_hot_path_allocate_nothing() {
         bytes: &bytes,
     };
     let resolved_engine = configured();
-    let region = Region::new(ALLOCATOR);
+    let measurement = Measurement::start();
+    let region = Region::new(&INSTRUMENTED_SYSTEM);
     let mut fifo = Decoder::default();
     let mut engine = Maxwell3d::default();
     let mut writes = 0;
@@ -62,6 +65,7 @@ fn fifo_and_engine_method_hot_path_allocate_nothing() {
         );
     }
     let stats = region.change();
+    drop(measurement);
     assert_eq!(writes, 6000);
     assert_eq!(stats.allocations, 0);
     assert_eq!(stats.reallocations, 0);
