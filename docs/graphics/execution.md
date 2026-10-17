@@ -1674,3 +1674,22 @@ replaces prior arithmetic/provenance metadata and can supply the verified TEX
 handle source. P0 is preserved. Partial lane masks, execution predicates, the
 ambiguous high offset bit and vertex-stage constant resources remain explicitly
 unsupported. No driver or runtime-facing API changes.
+
+## Fragment floating-point constant operands
+
+Unmodified fragment FADD/FMUL can read one GPR/RZ source and one directly bound
+constant-buffer word. Nonnegative aligned offsets through7FFC and slots0..31
+reuse the existing checked resource resolver and64-reference uniform budget.
+The typed FloatConstant operation stores a uniform reference, never mutable
+constant contents or an immediate specialization. MOV, LDC and arithmetic
+references deduplicate within that budget.
+
+Fixed stall6/no write barrier, initialized/ready source and no pending destination write
+are validated. Multiplication marks the existing unfused-rounding hazard;
+addition rejects a product-derived GPR source. This applies across GPR, full
+and short immediate, and constant-memory operand forms. Fresh raw constant
+loads can replace old data and its hazard. P0 is preserved and arithmetic
+clears texture-handle/position-W/reciprocal provenance. Vertex resources, high
+offset ambiguity, modifiers, alternate rounding/denormal modes and fused
+arithmetic remain unsupported. Lowering inherits the existing bounded F32
+accuracy contract; it does not establish new all-input exact-IEEE guarantees.

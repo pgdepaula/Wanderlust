@@ -548,3 +548,14 @@ SHA-256 including SPH:
 
 - move-constant.bin:4f0d7b0884d077f3c020163bcd03c127119c84a02b62127fb814707155ffb763
 - tex-move-constant.bin:df4ac110f8ac97c63a852477b07ffd17ff8fe5128f620716d09e9d4ec404fcc2
+
+`float-constant` has the validated80-byte fragment SPH and64 code bytes fully
+assembled by original envyas. MOV R4,c3[10] is at58; FADD R0,R4,c3[14] is
+at60 (`4c58000c00570400`), FMUL R1,R4,c3[18] at68
+(`4c68000c00670401`), MOV R2,c3[1c] at78, alpha1 at80 and EXIT at88.
+All scheduling fields are07E6. MaxAs independently agrees with instruction
+words; this does not claim MaxAs assembles the SPH or scheduled complete binary.
+
+SHA-256 including SPH:
+
+- float-constant.bin:ecab5c4606d2b90378ef3cd687d7cc18f13dd35d30da0d0b0984975b6a681ae6

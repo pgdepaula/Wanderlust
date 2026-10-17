@@ -1392,3 +1392,23 @@ scheduling without a write barrier. This is separate from scalar LDC's
 variable-latency barrier subset. No compiler code is imported. The existing
 ConstantRef/constant-memory resolver and WGSL uniform lowering are reused;
 vertex resource support is not inferred from shared decoder structures.
+
+## SM50 FADD/FMUL with a direct constant source
+
+Pinned MIT [GM107 entries2078/2080](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/gm107.c#L2078-L2080),
+[NAK FADD](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs#L481-L533),
+[NAK FMUL](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs#L639-L705)
+and [UAM emission](https://github.com/devkitPro/uam/blob/5a5afc2bae8b55409ab36ba45be63fcb73f68993/mesa-imported/codegen/nv50_ir_emit_gm107.cpp#L1254-L1345)
+corroborate direct constant-memory opcodes4C58/4C68, destination7:0 and GPR
+source15:8. The CB layout reuses word-offset33:20 and slot38:34. The same
+conservative nonnegative-offset subset as MOV excludes bit33: exact bases
+`4c58000000070000`/`4c68000000070000`, variable mask `0000007dfff0ffff`.
+
+Round-mode39..40 is fixed nearest, while FTZ44, CC47 and SAT50 remain zero.
+FADD source modifiers45/46/48/49 are excluded; FMUL's scale41..43, DNZ45 and
+shared NEG48 are excluded. PT and all other fixed fields remain checked.
+Original envyas assembles the complete fixture, and independent pinned MaxAs
+agrees on every instruction word and boundary/RZ examples. Fixed-six ALU
+scheduling uses no write barrier. Only semantic/encoding evidence is used;
+no compiler implementation is imported. The new source form lowers through
+the existing WGSL f32 arithmetic contract and adds no stronger precision claim.

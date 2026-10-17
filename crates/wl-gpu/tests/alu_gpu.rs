@@ -5720,3 +5720,144 @@ fn driver_move_constant_texture_handles_and_pending_visibility() {
     eprintln!("MOVC texture warm32 CPU={elapsed:?} before={before:?} after={after:?}");
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+#[test]
+#[ignore = "requires actual GPU; direct FADD/FMUL CB operands remain mutable resources and preserve deferred publication"]
+fn driver_float_constant_data_code_and_visibility() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/float-constant.bin");
+    data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x2144, 0x600),
+        (0x214c, 5),
+        (0x2380, 32),
+        (0x2384, 0),
+        (0x2388, 0x40040),
+        (0x2490, 0x31),
+    ] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let draw_words = draw();
+    let mut identity = None;
+    // Exact dyadic arithmetic and literal UNORM8 expectations, no renderer-derived oracle.
+    for (index, (input, color)) in [
+        ([0.125f32, 0.125, 4., 0.75], [64, 128, 191, 255]),
+        ([0.25, 0.25, 3., 0.25], [128, 191, 64, 255]),
+        ([-0.25, 0.5, -2., 0.5], [64, 128, 128, 255]),
+        ([0.5, -0.25, 1., 0.125], [64, 128, 32, 255]),
+        ([0.125, 0.125, 4., 0.75], [64, 128, 191, 255]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut bytes = [0u8; 16];
+        for (dst, value) in bytes.chunks_exact_mut(4).zip(input) {
+            dst.copy_from_slice(&value.to_le_bytes());
+        }
+        d.write_backing(b, 0x50, &bytes, &mut mem(&mut data))
+            .unwrap();
+        let r = submit(
+            &mut d,
+            c,
+            b,
+            &mut data,
+            if index == 0 { &words } else { &draw_words },
+        );
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert_eq!(r.progress.draws_submitted, 1);
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        check(&data, color, false);
+        d.retire(r.token).unwrap();
+        let n = d.graphics_counters();
+        let now = [
+            n.shader_decodes,
+            n.shader_module_allocations,
+            n.pipeline_allocations,
+        ];
+        if let Some(old) = identity {
+            assert_eq!(now, old);
+        }
+        identity = Some(now);
+    }
+    let mut bytes = [0u8; 16];
+    for (dst, value) in bytes.chunks_exact_mut(4).zip([0.25f32, 0.25, 3., 0.25]) {
+        dst.copy_from_slice(&value.to_le_bytes());
+    }
+    d.write_backing(b, 0x50, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let pending = submit(&mut d, c, b, &mut data, &draw_words);
+    assert!(pending.fault.is_none(), "{:?}", pending.fault);
+    assert_eq!(pending.progress.draws_submitted, 1);
+    assert!(!d.query(pending.token).unwrap().guest_visible);
+    check(&data, [64, 128, 191, 255], false);
+    let before = d.graphics_counters();
+    let start = std::time::Instant::now();
+    let mut last = pending.token;
+    for _ in 0..32 {
+        let r = submit_existing(&mut d, c, &mut data, 8);
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert_eq!(r.progress.draws_submitted, 1);
+        last = r.token;
+    }
+    let elapsed = start.elapsed();
+    let after = d.graphics_counters();
+    assert_eq!(after.draw_commands - before.draw_commands, 32);
+    assert_eq!(after.submissions - before.submissions, 32);
+    assert_eq!(
+        move_constant_resource_work(after),
+        move_constant_resource_work(before)
+    );
+    assert!(!d.query(last).unwrap().guest_visible);
+    check(&data, [64, 128, 191, 255], false);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [128, 191, 64, 255], false);
+    assert!(d.query(pending.token).unwrap().guest_visible);
+    assert!(d.query(last).unwrap().guest_visible);
+    // Change guest opcode FADD→FMUL with exactly the same runtime operands (.25×.25=.0625).
+    let original = u64::from_le_bytes(bin[0x60..0x68].try_into().unwrap());
+    assert_eq!(original, 0x4c58000c00570400);
+    let changed = original ^ (0x30u64 << 48);
+    assert_eq!(changed, 0x4c68000c00570400);
+    d.write_backing(b, 0x4660, &changed.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let before_code = d.graphics_counters();
+    let changed_draw = submit(&mut d, c, b, &mut data, &draw_words);
+    assert!(changed_draw.fault.is_none(), "{:?}", changed_draw.fault);
+    assert_eq!(changed_draw.progress.draws_submitted, 1);
+    let accepted = d.graphics_counters();
+    assert_eq!(accepted.shader_decodes, before_code.shader_decodes + 1);
+    assert_eq!(
+        accepted.vertex_shader_decodes,
+        before_code.vertex_shader_decodes
+    );
+    assert_eq!(
+        accepted.vertex_upload_bytes,
+        before_code.vertex_upload_bytes
+    );
+    assert!(accepted.pipeline_allocations > before_code.pipeline_allocations);
+    assert!(!d.query(changed_draw.token).unwrap().guest_visible);
+    check(&data, [128, 191, 64, 255], false);
+    // Unsupported FTZ fails without appending a draw or discarding the earlier accepted output.
+    d.write_backing(
+        b,
+        0x4660,
+        &(changed | (1 << 44)).to_le_bytes(),
+        &mut mem(&mut data),
+    )
+    .unwrap();
+    let failed = submit(&mut d, c, b, &mut data, &draw_words);
+    assert!(failed.fault.is_some());
+    assert_eq!(failed.progress.draws_submitted, 0);
+    assert_eq!(d.graphics_counters().draw_commands, accepted.draw_commands);
+    assert_eq!(d.graphics_counters().submissions, accepted.submissions);
+    check(&data, [128, 191, 64, 255], false);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [16, 191, 64, 255], false);
+    assert!(d.query(changed_draw.token).unwrap().guest_visible);
+    assert_eq!(d.graphics_counters().draw_commands, accepted.draw_commands);
+    eprintln!("FADD/FMUL.C warm32 CPU={elapsed:?} before={before:?} after={after:?}");
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

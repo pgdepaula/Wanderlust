@@ -3187,3 +3187,61 @@ package, and strict workspace Clippy reports13 committed-runtime diagnostics;
 no passing whole-workspace result is claimed. Only synthetic independently
 specified commands and shader fixtures execute here; original TOTK GPU
 submissions and game frames remain unproven.
+
+The completed preceding MOV-constant workspace snapshot reports556 passing
+tests, the same three CLI/Horizon failures and138 ignored GPU tests. Its
+source is the frozen12239fe-plus-seven-code-file image already described;
+this is separate from the live package and native per-case execution results.
+
+## Floating-point ALU constant-source resources
+
+Eight focused live CPU tests and one real OpenGL scenario passed. The CPU
+matrix checks both operations across every slot and offset boundaries,
+aliases, RZ/high registers, invalid fields, source/destination scheduling,
+shared-reference capacity/deduplication, P0, resource proofs and rounding
+hazards. Explicit short-immediate FADD/FMUL cases extend the cross-form
+hazard checks beyond GPR/full-immediate/CB forms. The complete144-byte shader
+fixture independently reassembles with original envyas.
+
+The GPU test enters through GpuDriver/GPFIFO/B06F/B197. Slot-three runtime
+constants produce five independently specified dyadic results, including
+negative finite operands. Examples are[64,128,191,255] and[128,191,64,255].
+Changing only constant contents leaves shader/pipeline counters unchanged.
+A literal FADD-to-FMUL opcode mutation with identical runtime operands changes
+red128 to16, causes one fragment retranslation and no vertex upload. Unsupported
+FTZ44 subsequently faults with no extra draw/submission; accepted red16 remains
+publishable while guest RAM still contains red128. No draw is replayed.
+
+Before warm repetition this workload records6 draws/11 queue submissions,
+one144-byte fragment decode,96 constant bytes read/uploaded, four shader
+modules/pipelines, one target allocation/five reuses, five intentional readbacks
+transferring37200 bytes and30160 packed guest write bytes. Thirty-two warm
+draws add32 queue submissions,1280 borrowed command-source bytes including1024
+command bytes and64 entry decodes; resource reads/uploads, modules/pipelines,
+target allocations, readbacks and waits remain unchanged. Focused warm CPU
+wall time was72.307ms under uncontrolled load, not GPU/game time, full batching,
+zero-copy or an allocation-free claim. Rust allocator traffic is not
+instrumented for this new draw workload.
+
+The FloatConstant Windows alu_gpu executable compiled successfully. Both
+focused native launch attempts failed in the WSL interop broker with accept4
+error110 before adapter acquisition, including the alternate existing socket.
+There are zero Windows execution passes for this candidate. The earlier
+MOV-constant native results above apply to their preceding revision only.
+No shared WSL processes, driver settings or host execution policy were changed.
+
+A faithful ordinary source snapshot uses committed72accf7 plus the five exact
+FloatConstant production/test/assembly/binary files, the unchanged Cargo.lock
+and preserved source-built homebrew fixtures. Concurrent uncommitted runtime
+and SDL files are excluded. Snapshot GPU formatting and strict all-target
+Clippy pass, with329 CPU passes without default features and330 with default
+features; the latter normally ignores139 GPU tests. Separate live evidence
+is the eight focused CPU tests, one focused OpenGL scenario and strict GPU
+Clippy above; snapshot results are not live-worktree workspace results.
+
+Explicit snapshot OpenGL execution passed all139 GPU scenarios, zero failures
+or skips, including the new constant-source program and existing coherence,
+publication-retry, depth, layout, channel and shader regressions. Whole-workspace
+formatting still reports differences outside the GPU package, and strict
+workspace Clippy reports13 committed-runtime diagnostics. No passing
+whole-workspace result is implied by these package gates.

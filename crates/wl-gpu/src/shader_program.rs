@@ -233,6 +233,13 @@ pub enum Operation {
         bits: u32,
         operator: FloatOperator,
     },
+    /// Fragment F32 ALU with a runtime constant-buffer source, not an immediate.
+    FloatConstant {
+        dst: u8,
+        src: u8,
+        input: u8,
+        operator: FloatOperator,
+    },
     Immediate {
         dst: u8,
         bits: u32,
@@ -775,6 +782,38 @@ impl Program {
                         dst,
                         src,
                         bits,
+                        operator,
+                    }
+                } else if !vertex
+                    && matches!(
+                        word & !0x0000007dfff0ffff,
+                        0x4c58000000070000 | 0x4c68000000070000
+                    )
+                {
+                    let src = ((word >> 8) & 255) as u8;
+                    if write_barrier != 7 || !initialized[src as usize] || pending[src as usize] {
+                        return Err(fail(
+                            "unready floating ALU constant operand or unsupported schedule",
+                        ));
+                    }
+                    let operator = if word & !0x0000007dfff0ffff == 0x4c58000000070000 {
+                        FloatOperator::Add
+                    } else {
+                        FloatOperator::Multiply
+                    };
+                    if operator == FloatOperator::Add && multiply_result[src as usize] {
+                        return Err(fail("FMUL-derived FADD requires unfused rounding control"));
+                    }
+                    let reference = ConstantRef {
+                        slot: ((word >> 34) & 31) as u8,
+                        offset: (((word >> 20) & 0x1fff) as u32) * 4,
+                    };
+                    let input = constant_input(&mut out.constants, reference)
+                        .ok_or_else(|| fail("too many constant references"))?;
+                    Operation::FloatConstant {
+                        dst,
+                        src,
+                        input,
                         operator,
                     }
                 } else if word & !0x00007f800ff0ffff == 0x5bc0000000070000
@@ -1341,6 +1380,10 @@ impl Program {
                     | Operation::FloatImmediate {
                         operator: FloatOperator::Multiply,
                         ..
+                    }
+                    | Operation::FloatConstant {
+                        operator: FloatOperator::Multiply,
+                        ..
                     } => true,
                     Operation::Move { src, .. }
                     | Operation::CountBits { src, .. }
@@ -1486,7 +1529,8 @@ impl Program {
                 | Operation::ConditionalMove { dst, src, .. }
                 | Operation::LogicImmediate { dst, src, .. }
                 | Operation::AddImmediate { dst, src, .. }
-                | Operation::FloatImmediate { dst, src, .. } => {
+                | Operation::FloatImmediate { dst, src, .. }
+                | Operation::FloatConstant { dst, src, .. } => {
                     largest = largest.max(u16::from(dst));
                     if src != 255 {
                         largest = largest.max(u16::from(src));
@@ -1584,6 +1628,9 @@ impl Program {
                 }
                 Operation::FloatImmediate { dst, src, bits, operator } => {
                     emit_float_immediate(&mut s, dst, src, bits, operator);
+                }
+                Operation::FloatConstant { dst, src, input, operator } => {
+                    emit_float_constant(&mut s, dst, src, input, operator);
                 }
                 Operation::Integer { dst, left, right, operator } => {
                     emit_integer(&mut s, dst, left, right, operator);
@@ -2357,6 +2404,21 @@ fn emit_add_immediate(s: &mut String, dst: u8, src: u8, bits: u32, negate_src: b
     } else {
         writeln!(s, "r[{dst}]=r[{src}]+{bits}u;").unwrap();
     }
+}
+
+fn emit_float_constant(s: &mut String, dst: u8, src: u8, input: u8, operator: FloatOperator) {
+    use std::fmt::Write;
+    let symbol = match operator {
+        FloatOperator::Add => "+",
+        FloatOperator::Multiply => "*",
+    };
+    writeln!(
+        s,
+        "r[{dst}]=bitcast<u32>(bitcast<f32>(r[{src}]) {symbol} bitcast<f32>(cb.words[{}][{}]));",
+        input / 4,
+        input % 4
+    )
+    .unwrap();
 }
 
 fn emit_float_immediate(s: &mut String, dst: u8, src: u8, bits: u32, operator: FloatOperator) {
