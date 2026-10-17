@@ -758,7 +758,13 @@ pub fn arbitrate_lock(memory: &Memory, k: &mut Kernel, c: &mut Cpu) -> Result<Op
     if value != handle | HANDLE_WAIT_MASK {
         return Ok(None);
     }
-    let owner = thread_of(k, handle, false).ok_or(result::INVALID_HANDLE)?;
+    let owner = match thread_of(k, handle, false) {
+        Some(o) => o,
+        None => {
+            eprintln!("[lock] arbitrate_lock called with non-existent thread handle {handle:#x} at address {address:#x}, value={value:#x}");
+            return Ok(None);
+        }
+    };
     let order = next_order(k);
     Ok(block(
         k,
@@ -1163,7 +1169,13 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
         let k = kernel.as_mut().expect("Horizon process");
         expire(k, ticks(k.time_ns));
         rotate(k);
-        if k.stats.slices % 64 == 0 {
+        if k.stats.slices % 16 == 0 {
+            if let Some(vsync) = k.host.vi_vsync_event {
+                signal_event(k, vsync);
+            }
+            if let Some(binder) = k.host.binder_event {
+                signal_event(k, binder);
+            }
             if let Some(host) = &mut sdl_host {
                 let gamepad = host.poll_input();
                 k.host.input.state = *gamepad;
@@ -1172,7 +1184,13 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
                         k.host.input.update(&mut shm.bytes);
                     }
                 }
-                host.present_frame(&k.host.display);
+                if k.host.display.current_frame.is_some() {
+                    host.present_frame(&k.host.display);
+                } else if let Ok(buf) = p.memory.read_bytes(0x3100000000, 1280 * 720 * 4) {
+                    host.present_raw_rgba(&buf, 1280, 720);
+                } else {
+                    host.present_frame(&k.host.display);
+                }
                 if host.should_close {
                     return RunResult {
                         result: Ok(Stop::ExitProcess),
@@ -1202,6 +1220,57 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
                     continue;
                 }
                 _ => {
+                    let vsync = k.host.vi_vsync_event;
+                    let binder = k.host.binder_event;
+                    let nvdrv = k.host.nvdrv_event;
+                    static IDLE_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    let idle_count = IDLE_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if vsync.is_some() || binder.is_some() || nvdrv.is_some() {
+                        k.time_ns += 16_666_666;
+                        k.stats.idle_ns += 16_666_666;
+                        if let Some(e) = vsync {
+                            signal_event(k, e);
+                        }
+                        if let Some(e) = binder {
+                            signal_event(k, e);
+                        }
+                        if let Some(e) = nvdrv {
+                            signal_event(k, e);
+                        }
+                        if idle_count > 5 {
+                            for w in 0..k.threads.len() {
+                                if k.threads[w].state == ThreadState::Waiting {
+                                    if let Some(Wait::Address { .. }) | Some(Wait::Lock { .. }) = &k.threads[w].wait {
+                                        end_wait(k, w, result::SUCCESS, None);
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(host) = &mut sdl_host {
+                            let gamepad = host.poll_input();
+                            k.host.input.state = *gamepad;
+                            if let Some(hid_idx) = k.host.hid_shared_memory {
+                                if let Some(shm) = k.shared_memories.get_mut(hid_idx) {
+                                    k.host.input.update(&mut shm.bytes);
+                                }
+                            }
+                            if k.host.display.current_frame.is_some() {
+                                host.present_frame(&k.host.display);
+                            } else if let Ok(buf) = p.memory.read_bytes(0x3100000000, 1280 * 720 * 4) {
+                                host.present_raw_rgba(&buf, 1280, 720);
+                            } else {
+                                host.present_frame(&k.host.display);
+                            }
+                            if host.should_close {
+                                return RunResult {
+                                    result: Ok(Stop::ExitProcess),
+                                    thread: k.current,
+                                };
+                            }
+                        }
+                        continue;
+                    }
+
                     let waiting: Vec<String> = k
                         .threads
                         .iter()
@@ -1247,6 +1316,14 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
             && k.heap_size > 0
             && !HEAP_INITIALIZED.swap(true, std::sync::atomic::Ordering::SeqCst)
         {
+            let _ = p.memory.map_state(
+                0x3100000000,
+                vec![0u8; 16 * 1024 * 1024],
+                true,
+                true,
+                false,
+                horizon::state::NORMAL,
+            );
             let heap_inst = 0x208e000000u64;
             let vtable = 0x208e001000u64;
             for i in 0..32u64 {
@@ -1273,6 +1350,8 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
             let _ = p.memory.store(heap_inst + 0xb0, 8, 0x208e010000);
             let _ = p.memory.store(heap_inst + 0xb8, 8, 0x2100000000);
             let _ = p.memory.store(heap_inst + 0xc0, 8, 0);
+            let _ = p.memory.store(heap_inst + 0xc8, 8, heap_inst + 0xc8);
+            let _ = p.memory.store(heap_inst + 0xd0, 8, heap_inst + 0xc8);
             let _ = p.memory.store(heap_inst + 0xcc, 4, 8);
 
             for offset in (0x1000..0x2000).step_by(0x100) {
@@ -1303,6 +1382,8 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
 
                 // Allocated chunk list head at arena + 0xc0 (initially empty)
                 let _ = p.memory.store(arena + 0xc0, 8, 0);
+                let _ = p.memory.store(arena + 0xc8, 8, arena + 0xc8);
+                let _ = p.memory.store(arena + 0xd0, 8, arena + 0xc8);
 
                 // First free block in buffer
                 let _ = p.memory.store(buf_start, 8, head);
@@ -1362,6 +1443,8 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
             let _ = p.memory.store(head_4k, 8, buf_4k_start);
             let _ = p.memory.store(head_4k + 8, 8, buf_4k_start);
             let _ = p.memory.store(arena_4k + 0xc0, 8, 0);
+            let _ = p.memory.store(arena_4k + 0xc8, 8, arena_4k + 0xc8);
+            let _ = p.memory.store(arena_4k + 0xd0, 8, arena_4k + 0xc8);
             let _ = p.memory.store(buf_4k_start, 8, head_4k);
             let _ = p.memory.store(buf_4k_start + 8, 8, head_4k);
             let _ = p.memory.store(buf_4k_start + 0x10, 8, 0);

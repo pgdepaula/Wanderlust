@@ -248,6 +248,41 @@ impl Memory {
                 eprintln!("[store] 0x208d900320 = {val:#x}");
             }
         }
+        if address >= 0x3000000000 && address < 0x3500000000 {
+            let end = address + bytes.len() as u64;
+            if self.locate(address, bytes.len(), true).is_none() {
+                let mut cur = address & !0xfff;
+                while cur < end {
+                    if self.region_index(cur).is_none() {
+                        let next_limit = self
+                            .regions
+                            .iter()
+                            .filter(|r| r.base > cur)
+                            .map(|r| r.base)
+                            .min()
+                            .unwrap_or(0x3500000000);
+                        let needed = ((end - cur + 0xfff) & !0xfff).max(0x10000);
+                        let sz = needed.min(next_limit - cur);
+                        if sz > 0 {
+                            let _ = self.map_state(
+                                cur,
+                                vec![0u8; sz as usize],
+                                true,
+                                true,
+                                false,
+                                horizon::state::NORMAL,
+                            );
+                            cur += sz;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        let i = self.region_index(cur).unwrap();
+                        cur = self.regions[i].end();
+                    }
+                }
+            }
+        }
         if let Some((i, at)) = self.locate(address, bytes.len(), true) {
             self.regions[i].bytes[at..at + bytes.len()].copy_from_slice(bytes);
             return Ok(());
@@ -351,7 +386,7 @@ impl Memory {
                     return Ok(0x208e012068);
                 } else if (sub == 0xb0 || sub == 0xb8) && result == 0 {
                     return Ok(buf_start);
-                } else if (sub == 0x10 || sub == 0x50 || sub == 0x80) && result == 0 {
+                } else if (sub == 0x50 || sub == 0x80) && result == 0 {
                     return Ok(1);
                 }
             } else if address >= 0x208e011000 && address < 0x208e020000 {
@@ -375,7 +410,7 @@ impl Memory {
                     return Ok(arena_base + 0x68);
                 } else if (sub == 0xd0 || sub == 0xd8) && result == 0 {
                     return Ok(buf_start);
-                } else if (sub == 0x30 || sub == 0xa0) && result == 0 {
+                } else if sub == 0xa0 && result == 0 {
                     return Ok(1);
                 }
             } else if address >= 0x20a8000000 && address < 0x20e8000000 {
@@ -467,7 +502,7 @@ impl Memory {
                 }
             } else if address >= 0x208e011000 && address < 0x208e020000 {
                 let sub = address & 0xff;
-                if (sub == 0x30 || sub == 0x50 || sub == 0x80 || sub == 0xa0 || sub == 0xe0) && result == 0 {
+                if (sub == 0x50 || sub == 0x80 || sub == 0xa0 || sub == 0xe0) && result == 0 {
                     return Ok(1);
                 } else if (sub == 0x34 || sub == 0xc8 || sub == 0xe4) && result == 0 {
                     return Ok(0);
@@ -571,9 +606,6 @@ impl Cpu {
         }
         self.steps += count;
         self.block = (start, count);
-        if self.steps > 60_323_000 {
-            eprintln!("[trace] enter {start:#x} steps={} x0={:#x} x1={:#x} x2={:#x} x8={:#x} x19={:#x} x20={:#x} x21={:#x} x22={:#x}", self.steps, self.x[0], self.x[1], self.x[2], self.x[8], self.x[19], self.x[20], self.x[21], self.x[22]);
-        }
         Ok(())
     }
     #[inline]
@@ -923,9 +955,28 @@ pub fn execute_until(
         if c.pc == 0x8cbe8b8 && c.x[20] == 0 {
             c.pc = 0x8cbe8c8;
         }
+        if c.pc == 0x8161680 {
+            c.pc = 135665040; // 0x8161590
+        }
+        if c.pc == 0x8cbda48 && c.x[2] == 0 {
+            eprintln!("[hook] 0x8cbda48 bypassed (x2=0), returning to {:#x}", c.x[30]);
+            c.pc = c.x[30];
+        }
+        if c.pc == 0x8cbda64 && c.x[2] == 0 {
+            c.pc = 147577476; // 0x8cbda84
+        }
+        if c.pc == 0x816a0e4 && c.x[19] == 0 {
+            c.pc = 135702308; // 0x816a724
+        }
         if (c.pc == 0x80709f4 || c.pc == 0x80751e4 || c.pc == 0x806ae84) && c.x[24] == 0 {
             static FALLBACK_BUMP_STACK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x3000000000);
-            let req_size = c.x[21].max(0x800);
+            let req_size = if c.x[1] > 0 && c.x[1] <= 4 * 1024 * 1024 {
+                c.x[1]
+            } else if c.x[21] > 0 && c.x[21] <= 4 * 1024 * 1024 {
+                c.x[21]
+            } else {
+                0x10000
+            };
             let sz = (req_size + 0xfff) & !0xfff;
             let ptr = FALLBACK_BUMP_STACK.fetch_add(sz, std::sync::atomic::Ordering::Relaxed);
             if m.load(ptr, 1).is_err() {
@@ -942,7 +993,7 @@ pub fn execute_until(
         }
         if c.pc == 0x82cf9e4 && c.x[0] == 0 {
             static DISPLAY_BUMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x3100000000);
-            let req_size = c.x[1].max(0x1000);
+            let req_size = if c.x[1] > 0 && c.x[1] <= 32 * 1024 * 1024 { c.x[1] } else { 0x400000 };
             let sz = (req_size + 0xfff) & !0xfff;
             let ptr = DISPLAY_BUMP.fetch_add(sz, std::sync::atomic::Ordering::Relaxed);
             if m.load(ptr, 1).is_err() {
@@ -960,7 +1011,13 @@ pub fn execute_until(
         }
         if (c.pc == 0x8be36a0 || c.pc == 0x8be3ef4 || c.pc == 0x8be3784 || c.pc == 0x8cbabb4 || c.pc == 0x8cbbcb4 || c.pc == 0x8cc163c || c.pc == 0x8cbcebc || c.pc == 0x8cbe81c || c.pc == 0x8cbe848 || c.pc == 0x8cbe950 || c.pc == 0x8576a34 || c.pc == 0x841874c) && c.x[0] == 0 {
             static FALLBACK_BUMP_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x3180000000);
-            let req_size = c.x[21].max(0x1000);
+            let req_size = if c.x[1] > 0 && c.x[1] <= 32 * 1024 * 1024 {
+                c.x[1]
+            } else if c.x[21] > 0 && c.x[21] <= 32 * 1024 * 1024 {
+                c.x[21]
+            } else {
+                0x1000
+            };
             let sz = (req_size + 0xfff) & !0xfff;
             let ptr = FALLBACK_BUMP_GEN.fetch_add(sz, std::sync::atomic::Ordering::Relaxed);
             if m.load(ptr, 1).is_err() {
@@ -983,7 +1040,7 @@ pub fn execute_until(
             let buf = m.load(c.x[8], 8).unwrap_or(0);
             if buf == 0 || (buf >= 0x208e000000 && buf < 0x208e020000) {
                 static STR_BUF: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x3200000000);
-                let ptr = STR_BUF.fetch_add(0x100, std::sync::atomic::Ordering::Relaxed);
+                let ptr = STR_BUF.fetch_add(0x1000, std::sync::atomic::Ordering::Relaxed);
                 let page = ptr & !0xfff;
                 if m.load(page, 1).is_err() {
                     let _ = m.map_state(page, vec![0u8; 0x1000], true, true, false, horizon::state::NORMAL);
@@ -999,7 +1056,7 @@ pub fn execute_until(
             }
             if c.x[0] >= 0x208e000000 && c.x[0] < 0x208e020000 {
                 static DUMMY_STR_BUF: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x3400000000);
-                let ptr = DUMMY_STR_BUF.fetch_add(0x100, std::sync::atomic::Ordering::Relaxed);
+                let ptr = DUMMY_STR_BUF.fetch_add(0x1000, std::sync::atomic::Ordering::Relaxed);
                 let page = ptr & !0xfff;
                 if m.load(page, 1).is_err() {
                     let _ = m.map_state(page, vec![0u8; 0x1000], true, true, false, horizon::state::NORMAL);

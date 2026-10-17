@@ -137,7 +137,21 @@ pub struct SdlApi {
 impl SdlApi {
     #[cfg(unix)]
     pub fn load() -> Option<Self> {
-        let names: [&[u8]; 4] = [
+        unsafe {
+            let sdl3_names: [&[u8]; 2] = [
+                b"/home/pedro/.local/lib/libSDL3.so.0\0",
+                b"libSDL3.so.0\0",
+            ];
+            for name in sdl3_names {
+                let h = dlopen(name.as_ptr() as *const c_char, 2 | 0x100);
+                if !h.is_null() {
+                    break;
+                }
+            }
+        }
+        let names: [&[u8]; 6] = [
+            b"/home/pedro/.local/lib/libSDL2-2.0.so.0\0",
+            b"/home/pedro/.local/lib/libSDL2.so\0",
             b"libSDL2-2.0.so.0\0",
             b"libSDL2-2.0.so\0",
             b"libSDL2.so\0",
@@ -152,6 +166,7 @@ impl SdlApi {
             }
         }
         if handle.is_null() {
+            eprintln!("[sdl] Could not locate SDL2 shared library");
             return None;
         }
 
@@ -218,6 +233,7 @@ impl SdlHost {
         let api = SdlApi::load()?;
         unsafe {
             if (api.init)(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS) != 0 {
+                eprintln!("[sdl] SDL_Init failed");
                 return None;
             }
             let c_title = CString::new(title).unwrap_or_default();
@@ -230,11 +246,16 @@ impl SdlHost {
                 SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE,
             );
             if window.is_null() {
+                eprintln!("[sdl] SDL_CreateWindow failed");
                 (api.quit)();
                 return None;
             }
-            let renderer = (api.create_renderer)(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+            let mut renderer = (api.create_renderer)(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
             if renderer.is_null() {
+                renderer = (api.create_renderer)(window, -1, 0);
+            }
+            if renderer.is_null() {
+                eprintln!("[sdl] SDL_CreateRenderer failed");
                 (api.destroy_window)(window);
                 (api.quit)();
                 return None;
@@ -247,11 +268,13 @@ impl SdlHost {
                 height as c_int,
             );
             if texture.is_null() {
+                eprintln!("[sdl] SDL_CreateTexture failed");
                 (api.destroy_renderer)(renderer);
                 (api.destroy_window)(window);
                 (api.quit)();
                 return None;
             }
+            eprintln!("[sdl] Presentation window opened: '{title}' ({width}x{height})");
 
             // Open first available GameController
             let mut controller = ptr::null_mut();
@@ -380,10 +403,10 @@ impl SdlHost {
 
     /// Presents the latest frame from the display server onto the SDL window.
     pub fn present_frame(&mut self, display: &DisplayServer) {
-        if let Some(frame) = &display.current_frame {
-            let rgba = frame.to_rgba8888();
-            let pitch = (frame.width * 4) as c_int;
-            unsafe {
+        unsafe {
+            if let Some(frame) = &display.current_frame {
+                let rgba = frame.to_rgba8888();
+                let pitch = (frame.width * 4) as c_int;
                 (self.api.update_texture)(
                     self.texture,
                     ptr::null(),
@@ -392,8 +415,26 @@ impl SdlHost {
                 );
                 (self.api.render_clear)(self.renderer);
                 (self.api.render_copy)(self.renderer, self.texture, ptr::null(), ptr::null());
-                (self.api.render_present)(self.renderer);
+            } else {
+                (self.api.render_clear)(self.renderer);
             }
+            (self.api.render_present)(self.renderer);
+        }
+    }
+
+    /// Presents a raw RGBA/BGRA byte slice (width * height * 4).
+    pub fn present_raw_rgba(&mut self, rgba: &[u8], width: u32, _height: u32) {
+        let pitch = (width * 4) as c_int;
+        unsafe {
+            (self.api.update_texture)(
+                self.texture,
+                ptr::null(),
+                rgba.as_ptr() as *const c_void,
+                pitch,
+            );
+            (self.api.render_clear)(self.renderer);
+            (self.api.render_copy)(self.renderer, self.texture, ptr::null(), ptr::null());
+            (self.api.render_present)(self.renderer);
         }
     }
 }
