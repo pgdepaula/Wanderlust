@@ -4992,3 +4992,416 @@ fn driver_vertex_three_source_addition_controls_geometry_and_code() {
     eprintln!("VS IADD3 geometry {:?}", d.graphics_counters());
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+fn multiply_add16_reference(a: u32, b: u32, c: u32, signed: bool) -> u32 {
+    let aa = a.to_le_bytes();
+    let bb = b.to_le_bytes();
+    if signed {
+        let x = i16::from_le_bytes([aa[0], aa[1]]);
+        let y = i16::from_le_bytes([bb[0], bb[1]]);
+        (i64::from(x) * i64::from(y) + i64::from(c)) as u32
+    } else {
+        let x = u16::from_le_bytes([aa[0], aa[1]]);
+        let y = u16::from_le_bytes([bb[0], bb[1]]);
+        (u64::from(x) * u64::from(y) + u64::from(c)) as u32
+    }
+}
+fn multiply_add16_draw(
+    d: &mut GpuDriver,
+    c: ChannelId,
+    b: BackingId,
+    data: &mut [u8],
+    words: &[u32],
+    payload: [u32; 4],
+    matches: bool,
+) {
+    let mut bytes = [0u8; 16];
+    for (dst, raw) in bytes.chunks_exact_mut(4).zip(payload) {
+        dst.copy_from_slice(&raw.to_le_bytes());
+    }
+    d.write_backing(b, 0x50, &bytes, &mut mem(data)).unwrap();
+    let r = submit(d, c, b, data, words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    d.publish(c, &mut mem(data)).unwrap();
+    check(
+        data,
+        if matches {
+            [64, 128, 191, 255]
+        } else {
+            [0, 128, 191, 255]
+        },
+        false,
+    );
+    d.retire(r.token).unwrap();
+}
+#[test]
+#[ignore = "requires actual GPU; like-signed low16 XMAD full32 addend, aliases, RZ, cache and deferred fault visibility"]
+fn driver_halfword_multiply_add_wraps_and_preserves_deferred_output() {
+    for signed in [false, true] {
+        let (mut data, mut words, _) = fixture();
+        let (mut d, c, _, b, _) = driver();
+        let bin = if signed {
+            include_bytes!("fixtures/maxwell/multiply-add16-signed.bin").as_slice()
+        } else {
+            include_bytes!("fixtures/maxwell/multiply-add16.bin").as_slice()
+        };
+        data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
+        let end = words.split_off(words.len() - 8);
+        for (m, v) in [
+            (0x2144, 0x600),
+            (0x214c, 8),
+            (0x2380, 32),
+            (0x2384, 0),
+            (0x2388, 0x40040),
+            (0x2490, 1),
+        ] {
+            method(&mut words, m, v);
+        }
+        words.extend(end);
+        let draw_words = draw();
+        let original = u64::from_le_bytes(bin[0x80..0x88].try_into().unwrap());
+        let comparison = u64::from_le_bytes(bin[0x88..0x90].try_into().unwrap());
+        assert_eq!(
+            original,
+            if signed {
+                0x5b03030000570404
+            } else {
+                0x5b00030000570404
+            }
+        );
+        assert_eq!(comparison, 0x5b64038000770407);
+        let mut cases = vec![
+            (0, 0, 0),
+            (1, 0, 1),
+            (0, 1, 2),
+            (1, 1, u32::MAX),
+            (0xffff, 0xffff, 0),
+            (0x8000, 0x8000, 0),
+            (0x8000, 0x7fff, 0),
+            (0xffff, 1, 0),
+            (0x7fff, 0x7fff, 0),
+            (0xdeadffff, 0xbeefffff, 0),
+            (0xffff0000, 0xffff0000, 0xdeadbeef),
+            (0x80000000, 0xffffffff, 0x12345678),
+            (0, 0, u32::MAX),
+            (1, 1, 0x7fffffff),
+            (1, 1, 0x80000000),
+            (2, 2, 0xfffffffc),
+            (0x8000, 0xffff, u32::MAX),
+            (0x7fff, 0xffff, 0x80000000),
+            (0xffff, 0xffff, 0xffffffff),
+            (0xffff, 0xffff, 0x0001ffff),
+            (0x7fff8000, 0x80007fff, 0x80000001),
+            (0x80007fff, 0x7fff8000, 0x7fffffff),
+            (0x80008000, 0x7fff8000, 0xc0000000),
+            (0x55555555, 0xaaaaaaaa, 0x01234567),
+            (0x00010001, 0xffff0001, 0x01020304),
+            (0x123400ff, 0x56780100, 0xffffff01),
+            (0x8080ff80, 0x7f7f0080, 0x11111111),
+            (0x0000ffff, 0xffff0000, 0xa5a5a5a5),
+            (0xffff0000, 0x0000ffff, 0x5a5a5a5a),
+            (0x12345678, 0x87654321, 0xa5a5a5a5),
+            (0x01230002, 0x45670003, 0x80000000),
+            (0xffffffff, 0xffffffff, 2),
+        ];
+        // Independent literal checks distinguish low-half extraction, signedness and full C.
+        assert_eq!(
+            multiply_add16_reference(0xffff, 0xffff, 0, false),
+            0xfffe0001
+        );
+        assert_eq!(multiply_add16_reference(0xffff, 0xffff, 0, true), 1);
+        assert_eq!(
+            multiply_add16_reference(0x8000, 0x7fff, 0, true),
+            0xc0008000
+        );
+        assert_eq!(multiply_add16_reference(0xffff, 1, 0, true), u32::MAX);
+        assert_eq!(
+            multiply_add16_reference(0xffff0000, 0xffff0000, 0xdeadbeef, signed),
+            0xdeadbeef
+        );
+        assert_eq!(multiply_add16_reference(2, 2, 0xfffffffc, signed), 0);
+        assert_eq!(
+            multiply_add16_reference(0xdeadffff, 0xbeefffff, 0, signed),
+            multiply_add16_reference(0xffff, 0xffff, 0, signed)
+        );
+        let mut seed = 0x584d4144u32;
+        for _ in 0..32 {
+            let mut raw = [0u32; 3];
+            for value in &mut raw {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                *value = seed;
+            }
+            cases.push((raw[0], raw[1], raw[2]));
+        }
+        assert_eq!(cases.len(), 64);
+        let mut identity = None;
+        for (index, &(a, bits_b, bits_c)) in cases.iter().enumerate() {
+            multiply_add16_draw(
+                &mut d,
+                c,
+                b,
+                &mut data,
+                if index == 0 { &words } else { &draw_words },
+                [
+                    a,
+                    bits_b,
+                    bits_c,
+                    multiply_add16_reference(a, bits_b, bits_c, signed),
+                ],
+                true,
+            );
+            let n = d.graphics_counters();
+            let now = [
+                n.shader_decodes,
+                n.shader_module_allocations,
+                n.pipeline_allocations,
+            ];
+            if let Some(old) = identity {
+                assert_eq!(now, old);
+            }
+            identity = Some(now);
+        }
+        // A aliases by construction. B and C also must read their old values before writing.
+        for dst in [5u8, 6] {
+            let op = (original & !255u64) | u64::from(dst);
+            let cmp = (comparison & !(255u64 << 8)) | (u64::from(dst) << 8);
+            d.write_backing(b, 0x4680, &op.to_le_bytes(), &mut mem(&mut data))
+                .unwrap();
+            d.write_backing(b, 0x4688, &cmp.to_le_bytes(), &mut mem(&mut data))
+                .unwrap();
+            for (a, bits_b, bits_c) in [
+                (u32::MAX, 1, 0),
+                (0x10203040, 0x807fff00, 0x01020304),
+                (u32::MAX, u32::MAX, u32::MAX),
+            ] {
+                multiply_add16_draw(
+                    &mut d,
+                    c,
+                    b,
+                    &mut data,
+                    &draw_words,
+                    [
+                        a,
+                        bits_b,
+                        bits_c,
+                        multiply_add16_reference(a, bits_b, bits_c, signed),
+                    ],
+                    true,
+                );
+            }
+        }
+        d.write_backing(b, 0x4688, &comparison.to_le_bytes(), &mut mem(&mut data))
+            .unwrap();
+        // Nonzero poisoned constant data must never leak through an RZ operand.
+        for zero_mask in 1..8u8 {
+            let regs = std::array::from_fn::<_, 3, _>(|slot| {
+                if zero_mask & (1 << slot) != 0 {
+                    255u8
+                } else {
+                    4 + slot as u8
+                }
+            });
+            let op = (original & !((255u64 << 8) | (255u64 << 20) | (255u64 << 39)))
+                | (u64::from(regs[0]) << 8)
+                | (u64::from(regs[1]) << 20)
+                | (u64::from(regs[2]) << 39);
+            d.write_backing(b, 0x4680, &op.to_le_bytes(), &mut mem(&mut data))
+                .unwrap();
+            let poison = [0x10203040, 0x807fff00, 0x01020304];
+            let actual =
+                std::array::from_fn::<_, 3, _>(
+                    |slot| if regs[slot] == 255 { 0 } else { poison[slot] },
+                );
+            multiply_add16_draw(
+                &mut d,
+                c,
+                b,
+                &mut data,
+                &draw_words,
+                [
+                    poison[0],
+                    poison[1],
+                    poison[2],
+                    multiply_add16_reference(actual[0], actual[1], actual[2], signed),
+                ],
+                true,
+            );
+        }
+        d.write_backing(b, 0x4680, &original.to_le_bytes(), &mut mem(&mut data))
+            .unwrap();
+        let raw = [0xfffffff0, 0x01020304, 0x807fff00];
+        let expected = multiply_add16_reference(raw[0], raw[1], raw[2], signed);
+        multiply_add16_draw(
+            &mut d,
+            c,
+            b,
+            &mut data,
+            &draw_words,
+            [raw[0], raw[1], raw[2], expected ^ 1],
+            false,
+        );
+        let mut payload = [0u8; 16];
+        for (dst, v) in payload
+            .chunks_exact_mut(4)
+            .zip([raw[0], raw[1], raw[2], expected])
+        {
+            dst.copy_from_slice(&v.to_le_bytes());
+        }
+        d.write_backing(b, 0x50, &payload, &mut mem(&mut data))
+            .unwrap();
+        let priming = submit(&mut d, c, b, &mut data, &draw_words);
+        assert!(priming.fault.is_none(), "{:?}", priming.fault);
+        assert_eq!(priming.progress.draws_submitted, 1);
+        assert!(!d.query(priming.token).unwrap().guest_visible);
+        check(&data, [0, 128, 191, 255], false);
+        let unchanged = |n: wl_gpu::Counters| {
+            [
+                n.shader_binary_bytes,
+                n.vertex_shader_bytes,
+                n.shader_decodes,
+                n.vertex_shader_decodes,
+                n.descriptor_reads,
+                n.vertex_guest_bytes,
+                n.index_guest_bytes,
+                n.constant_guest_bytes,
+                n.guest_texture_bytes,
+                n.render_target_guest_bytes,
+                n.upload_bytes,
+                n.upload_calls,
+                n.shader_module_allocations,
+                n.pipeline_allocations,
+                n.render_target_allocations,
+                n.readback_operations,
+                n.synchronization_points,
+            ]
+        };
+        let before = d.graphics_counters();
+        let start = std::time::Instant::now();
+        let mut last = None;
+        for _ in 0..32 {
+            let r = submit_existing(&mut d, c, &mut data, 8);
+            assert!(r.fault.is_none(), "{:?}", r.fault);
+            assert_eq!(r.progress.draws_submitted, 1);
+            last = Some(r.token);
+        }
+        let elapsed = start.elapsed();
+        let after = d.graphics_counters();
+        assert_eq!(after.draw_commands - before.draw_commands, 32);
+        assert_eq!(after.submissions - before.submissions, 32);
+        assert_eq!(unchanged(after), unchanged(before));
+        let last = last.unwrap();
+        assert!(!d.query(last).unwrap().guest_visible);
+        check(&data, [0, 128, 191, 255], false);
+        d.write_backing(
+            b,
+            0x4680,
+            &(original ^ (1 << 48)).to_le_bytes(),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+        let failed = submit(&mut d, c, b, &mut data, &draw_words);
+        assert!(failed.fault.is_some());
+        assert_eq!(failed.progress.draws_submitted, 0);
+        assert_eq!(d.graphics_counters().draw_commands, after.draw_commands);
+        assert_eq!(d.graphics_counters().submissions, after.submissions);
+        check(&data, [0, 128, 191, 255], false);
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        check(&data, [64, 128, 191, 255], false);
+        assert!(d.query(priming.token).unwrap().guest_visible);
+        assert!(d.query(last).unwrap().guest_visible);
+        assert_eq!(d.graphics_counters().draw_commands, after.draw_commands);
+        eprintln!(
+            "XMAD signed={signed} {} raw tuples, warm32 CPU={elapsed:?} before={before:?} after={after:?}",
+            cases.len()
+        );
+        d.close(c, &mut mem(&mut data)).unwrap();
+    }
+}
+#[test]
+#[ignore = "requires actual GPU; XMAD guest position/UV low halves select finite geometry in both signed modes"]
+fn driver_vertex_halfword_multiply_add_controls_geometry_and_code() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/vertex-multiply-add16.bin");
+    data[0x4800..0x4800 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [(0x2044, 0x800), (0x204c, 9), (0x2144, 0x400)] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let original = u64::from_le_bytes(bin[0x78..0x80].try_into().unwrap());
+    assert_eq!(original, 0x5b037f8000470006);
+    for (i, expected) in [(0, 0x0a3d5c29), (1, 0xd70a8f5c), (2, 0)] {
+        assert_eq!(
+            multiply_add16_reference(POS[i][0].to_bits(), UV[i][0].to_bits(), 0, true),
+            expected
+        );
+    }
+    let r = submit(&mut d, c, b, &mut data, &words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_conditional_geometry(&data, 0.5);
+    d.retire(r.token).unwrap();
+    assert_eq!(
+        multiply_add16_reference((-0.6f32).to_bits(), UV[0][0].to_bits(), 0, true),
+        0x147ab852
+    );
+    d.write_backing(b, 0x3000, &(-0.6f32).to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let background: Vec<_> = (0..W * H).flat_map(|_| BG).collect();
+    d.write_backing(b, RT as u64, &background, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    let after = d.graphics_counters();
+    assert_eq!(after.vertex_shader_decodes, before.vertex_shader_decodes);
+    assert_eq!(after.pipeline_allocations, before.pipeline_allocations);
+    assert_eq!(after.vertex_upload_bytes - before.vertex_upload_bytes, 72);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_conditional_geometry(&data, f64::from(-0.6f32));
+    d.retire(r.token).unwrap();
+    // Actual mode and expected-code mutation restores only first vertex with unchanged input buffer.
+    assert_eq!(
+        multiply_add16_reference((-0.6f32).to_bits(), UV[0][0].to_bits(), 0, false),
+        0x7ae1b852
+    );
+    assert_eq!(
+        multiply_add16_reference(POS[1][0].to_bits(), UV[1][0].to_bits(), 0, false),
+        0x3d708f5c
+    );
+    assert_eq!(
+        multiply_add16_reference(POS[2][0].to_bits(), UV[2][0].to_bits(), 0, false),
+        0
+    );
+    let unsigned = original & !(3u64 << 48);
+    let expected = 0x010000000007f007u64 | (0x7ae1b852u64 << 20);
+    d.write_backing(b, 0x4878, &unsigned.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    d.write_backing(b, 0x4868, &expected.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    d.write_backing(b, RT as u64, &background, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    let after = d.graphics_counters();
+    assert_eq!(
+        after.vertex_shader_decodes,
+        before.vertex_shader_decodes + 1
+    );
+    assert_eq!(after.shader_decodes, before.shader_decodes);
+    assert_eq!(after.vertex_upload_bytes, before.vertex_upload_bytes);
+    assert!(after.pipeline_allocations > before.pipeline_allocations);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_conditional_geometry(&data, 0.5);
+    d.retire(r.token).unwrap();
+    eprintln!("VS XMAD geometry {:?}", d.graphics_counters());
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

@@ -3052,3 +3052,63 @@ original-game GPU submissions, presentation or TOTK frames.
 The completed IADD3 workspace snapshot reports542 passing tests, the same
 three CLI/Horizon failures and134 ignored GPU tests. This is separate from
 the passing live graphics package and explicit134-scenario OpenGL execution.
+
+## Ordinary low-halfword XMAD
+
+Seven focused CPU tests and two actual OpenGL scenarios passed. Independent
+fixtures, all source/destination aliases and RZ subsets, high-register fields,
+strict mode/modifier rejection, every source dependency, pending destinations,
+P0, register requirements and provenance/rounding hazards are covered. The
+GPU tests enter through GpuDriver/GPFIFO/B06F/B197. A separate byte-array
+u16/i16 oracle computes widened u64/i64 products plus full C, then retains
+the low word. Each signedness executes64 tuples, including32 literal
+boundary/overflow/upper-half poison cases and32 seeded cases, six B/C aliases
+and seven nonempty RZ subsets. Mutable constants do not recompile the shader.
+
+The vertex fixture multiplies genuine guest position/UV low halfwords.
+Independent literal products identify only first X=-.8; it conditionally
+exports finite+.5. Guest first X=-.6 disables that selection. Changing only
+the XMAD opcode from signed to unsigned plus expected raw bits restores
+first-only+.5 with one new vertex decode, no new fragment decode or vertex
+upload. An analytic coverage oracle checks all three geometries.
+
+For each signedness, wrong reference bits publish[0,128,191,255]; correct
+GPU-pending work produces[64,128,191,255] while RAM retains the earlier red0.
+After32 warm draws, changing only one signedness bit to an unsupported mixed
+form faults without another draw/queue submission. Publication still exposes
+accepted red64 output and advances prior visibility tokens without replay.
+
+Each mode's pre-warm workload records79 draws,157 queue submissions,11
+fragment decodes/2640 shader bytes,1264 constant bytes read and1204 uploaded,
+14 shader modules,24 pipelines, one target allocation and78 reuses. Its78
+intentional oracle readbacks transfer580,320 bytes and publish470,496 guest
+bytes. Each32-draw warm sequence adds32 queue submissions,1280 borrowed
+command-source bytes including1024 command bytes, and64 entry decodes, with
+no additional resource reads/uploads, shader modules, pipelines, target
+allocations, readbacks or waits. Focused warm CPU wall times were38.892ms
+unsigned and48.866ms signed under uncontrolled host load. These are not
+GPU/game timings, full batching, zero-copy or allocation-free claims; this
+workload does not instrument Rust allocator traffic.
+
+Completed live XMAD regression gates passed: GPU formatting, strict all-target
+package Clippy,314 CPU tests without default features and315 with default
+features. The normal suite ignored136 GPU tests; explicit OpenGL execution
+ran all136, zero failures/skips, on llvmpipe LLVM23.1.1/Mesa26.2.4. Linux
+builds retain unoptimized code, overflow checks and debug assertions with
+debug information disabled.
+
+The faithful workspace/native source snapshot is committed `a87e5b5` plus
+nine exact candidate code/assembly/binary files, unchanged Cargo.lock and
+preserved source-built homebrew fixtures. It reports549 passes, the three
+existing CLI/Horizon heap-ratio/absent-service failures and136 GPU ignores.
+Whole-workspace formatting differences and nine committed-runtime Clippy
+diagnostics are separate from the passing GPU package gates. Later runtime
+changes in `a7344fc` are outside this snapshot; they do not change graphics
+sources, Cargo configuration or lockfile.
+
+The updated Windows alu_gpu executable compiled with debug information. Both
+D3D12 and Vulkan process launches failed in the WSL interoperability broker
+with `accept4` error110 before adapter acquisition. Zero current-XMAD native
+execution passes are claimed. No host execution policy, shared WSL process
+or driver configuration was changed. The shaders/commands are synthetic;
+original-game GPU submissions and real TOTK frames remain unproven.

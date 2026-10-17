@@ -1640,3 +1640,20 @@ texture-handle/position-W/reciprocal provenance is erased even for identity
 sums. Halfword selection, intermediate shifts, source negation, carry/CC,
 execution predicates and immediate/constant-memory forms remain unsupported.
 Driver, channel, resource and runtime-facing APIs are unchanged.
+
+## Low-halfword multiply-add
+
+Vertex and fragment translation accept ordinary GPR XMAD with both low
+halfwords unsigned or both signed, plus the untruncated third32-bit operand.
+The result wraps modulo2^32. Upper halfwords of the multiplicands do not
+participate. Signed products fit i32; lowering converts that product to raw
+u32 before adding C. Destination aliases snapshot all three input values.
+RZ inputs are supported; RZ destinations remain outside the subset.
+
+All three inputs and any earlier destination value must be ready. Fixed
+stall6/no-write-barrier scheduling and supported incoming waits are checked.
+P0 is preserved, all three sources contribute to register/rounding-hazard
+metadata, and texture-handle/position-W/reciprocal provenance is erased. Mixed
+signedness, high-halfword selectors, shifted/merged products, alternate C modes,
+carry/CC, execution predicates and immediate/constant-memory forms remain
+explicitly unsupported. Renderer, driver and runtime-facing APIs are unchanged.

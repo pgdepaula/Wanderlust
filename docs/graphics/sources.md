@@ -1346,3 +1346,29 @@ wrapping arithmetic, but its SM50 builder uses IAdd2 and provides no native
 IADD3 encoding evidence. UAM GM107 likewise has no IADD3 emitter. No compiler
 implementation is copied; lowering uses direct u32 addition, and the test
 oracle independently sums widened u64 values before retaining the low word.
+
+## SM50 ordinary low-halfword XMAD
+
+Pinned MIT [GM107 XMAD entry](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/gm107.c#L2031),
+its type/C-mode tables1457..1472 and independently matching [MaxAs grammar](https://github.com/NervanaSystems/maxas/blob/54eda7af086a46c9dae1688b691968235d560164/lib/MaxAs/MaxAsGrammar.pm#L340-L343)
+establish exact accepted bases `5b00000000070000` and `5b03000000070000`,
+variable register mask `00007f800ff0ffff`, destination7:0, A15:8, B27:20 and
+C46:39. Signedness is A48/B49; only UU and SS are accepted. A.H1=53, B.H1=35,
+PSL36, MRG37, X38, CC47 and C-mode50..52 remain fixed zero. C43..46 are data.
+Original envyas independently assembles the three committed fixtures; MaxAs
+independently agrees on their XMAD words, mixed-sign words and RZ/high registers.
+Mixed signedness is valid hardware but not implemented by this bounded subset.
+
+[UAM unsigned emission](https://github.com/devkitPro/uam/blob/5a5afc2bae8b55409ab36ba45be63fcb73f68993/mesa-imported/codegen/nv50_ir_emit_gm107.cpp#L1901-L1960)
+corroborates the GPR fields and unsigned form. Its signed flag emission is
+coupled to H1 and does not establish ordinary signed-low16 semantics. MaxAs
+x32T and [UAM latency](https://github.com/devkitPro/uam/blob/5a5afc2bae8b55409ab36ba45be63fcb73f68993/mesa-imported/codegen/nv50_ir_target_gm107.cpp#L330-L351)
+corroborate fixed-six scheduling, unlike scoreboarded IMUL.
+
+The [independent MIT Maxwell implementation](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Shader/Instructions/InstEmitIntegerArithmetic.cs#L565-L655)
+corroborates low16 sign/zero extension, multiplication and full C addition for
+ordinary Cfull with carry disabled. The signed product lies within
+[-1073709056,1073741824]; unsigned product is at most65535 squared. NAK has no
+XMAD encoding; its distinct IMAD opcode is not evidence. No compiler
+implementation is copied. The test oracle extracts little-endian bytes as
+u16/i16 and computes widened u64/i64 products independently of WGSL shifts.

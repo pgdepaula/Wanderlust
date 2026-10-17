@@ -511,3 +511,20 @@ SHA-256 including SPH:
 - vertex-integer-add-three.bin:91b7164d5b42d206f254535f35e6bed278cb92c509e128bd785658562b43077e
 
 Only ordinary full-width unmodified GPR IADD3 is implied.
+
+`multiply-add16` and `multiply-add16-signed` each retain an80-byte validated
+fragment header plus160 original-envyas code bytes. Main XMAD at PC80 uses
+R4,R4,R5,R6 (`5b00030000570404` or `5b03030000570404`), ISETP at88 compares
+LDC expected raw bits, and auxiliary all-RZ XMAD at98 checks P0 preservation.
+`vertex-multiply-add16` has the validated80-byte vertex header plus128 code
+bytes. At PC78, `5b037f8000470006` multiplies guest position-X/UV-X low
+halfwords with RZ addend. Only initial first vertex produces0A3D5C29 and
+selects finite+.5. Guest first X=-.6 disables it. Changing the instruction to
+unsigned and expected MOV at68 to7AE1B852 restores first-only+.5; second gives
+3D708F5C and third0. Arbitrary integer bits are not exported as positions.
+
+SHA-256 including SPH:
+
+- multiply-add16.bin:27293d88ea8f59bf415dab07cbf541d8681cd49d06d68bc89580d0ddd99394ab
+- multiply-add16-signed.bin:ced947f5cb45d28e4293756df3a5e5ce1eca89a9019990a92210769ada45559f
+- vertex-multiply-add16.bin:cc8b2285c358c1e2997114640046782127979697f0b0e029b074a8393870fc1d

@@ -194,6 +194,14 @@ pub enum Operation {
         middle: u8,
         right: u8,
     },
+    /// Ordinary GPR XMAD: like-signed low halfwords multiplied plus full C.
+    MultiplyAdd16 {
+        dst: u8,
+        left: u8,
+        middle: u8,
+        right: u8,
+        signed: bool,
+    },
     /// SM50 LOP3.LUT, three GPR/RZ sources, discarded PT predicate output.
     TernaryLogic {
         dst: u8,
@@ -796,6 +804,26 @@ impl Program {
                         right,
                         selector,
                     }
+                } else if word & !0x00007f800ff0ffff == 0x5b00000000070000
+                    || word & !0x00007f800ff0ffff == 0x5b03000000070000
+                {
+                    let left = ((word >> 8) & 255) as u8;
+                    let middle = ((word >> 20) & 255) as u8;
+                    let right = ((word >> 39) & 255) as u8;
+                    if write_barrier != 7
+                        || [left, middle, right]
+                            .iter()
+                            .any(|r| !initialized[*r as usize] || pending[*r as usize])
+                    {
+                        return Err(fail("unready XMAD operand or unsupported schedule"));
+                    }
+                    Operation::MultiplyAdd16 {
+                        dst,
+                        left,
+                        middle,
+                        right,
+                        signed: word & (1 << 48) != 0,
+                    }
                 } else if word & !0x00007f800ff0ffff == 0x5cc0000000070000 {
                     let left = ((word >> 8) & 255) as u8;
                     let middle = ((word >> 20) & 255) as u8;
@@ -1274,6 +1302,12 @@ impl Program {
                         right: third,
                         ..
                     }
+                    | Operation::MultiplyAdd16 {
+                        left: first,
+                        middle: second,
+                        right: third,
+                        ..
+                    }
                     | Operation::TernaryLogic {
                         first,
                         second,
@@ -1405,6 +1439,13 @@ impl Program {
                     left: first,
                     middle: second,
                     right: third,
+                }
+                | Operation::MultiplyAdd16 {
+                    dst,
+                    left: first,
+                    middle: second,
+                    right: third,
+                    ..
                 }
                 | Operation::TernaryLogic {
                     dst,
@@ -1569,6 +1610,9 @@ impl Program {
                 }
                 Operation::AddThree { dst, left, middle, right } => {
                     emit_add_three(&mut s, dst, left, middle, right);
+                }
+                Operation::MultiplyAdd16 { dst, left, middle, right, signed } => {
+                    emit_multiply_add16(&mut s, dst, left, middle, right, signed);
                 }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
@@ -1845,6 +1889,15 @@ impl VertexProgram {
                 } => {
                     emit_add_three(&mut s, dst, left, middle, right);
                 }
+                Operation::MultiplyAdd16 {
+                    dst,
+                    left,
+                    middle,
+                    right,
+                    signed,
+                } => {
+                    emit_multiply_add16(&mut s, dst, left, middle, right, signed);
+                }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
                 Operation::ConditionalMove { dst, src, invert } => {
@@ -1944,6 +1997,21 @@ fn emit_add_three(s: &mut String, dst: u8, left: u8, middle: u8, right: u8) {
     use std::fmt::Write;
     // All three u32 reads precede the aliased store; each addition wraps.
     writeln!(s, "r[{dst}]=(r[{left}]+r[{middle}])+r[{right}];").unwrap();
+}
+
+fn emit_multiply_add16(s: &mut String, dst: u8, left: u8, middle: u8, right: u8, signed: bool) {
+    use std::fmt::Write;
+    // Snapshot all inputs before an aliased store. The signed 16x16 product
+    // fits i32; add the untruncated third word as u32 to preserve wrapping.
+    if signed {
+        writeln!(s, "r[{dst}]=bitcast<u32>((bitcast<i32>(r[{left}] << 16u) >> 16u)*(bitcast<i32>(r[{middle}] << 16u) >> 16u))+r[{right}];").unwrap();
+    } else {
+        writeln!(
+            s,
+            "r[{dst}]=((r[{left}] & 65535u)*(r[{middle}] & 65535u))+r[{right}];"
+        )
+        .unwrap();
+    }
 }
 
 fn emit_int_to_float(s: &mut String, dst: u8, src: u8, signed: bool) {
