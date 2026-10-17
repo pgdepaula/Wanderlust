@@ -528,3 +528,23 @@ SHA-256 including SPH:
 - multiply-add16.bin:27293d88ea8f59bf415dab07cbf541d8681cd49d06d68bc89580d0ddd99394ab
 - multiply-add16-signed.bin:ced947f5cb45d28e4293756df3a5e5ce1eca89a9019990a92210769ada45559f
 - vertex-multiply-add16.bin:cc8b2285c358c1e2997114640046782127979697f0b0e029b074a8393870fc1d
+
+`move-constant` is an independently original-envyas-assembled144-byte fragment:
+80-byte validated SPH plus64 code bytes. PCs58/60/68/78 load c3[10/14/18/1c]
+into R0..3; every instruction uses stall6/no write barrier. Its first word is
+`4c98078c00470000`. MaxAs independently agrees with MOV words and128 field
+boundary cases, rather than assembling the SPH or complete scheduled fixture.
+
+`tex-move-constant` replaces the earlier TEX fixture's initial scalar LDC with
+`4c98078000070006`, MOV R6,c0[0], and first scheduling field0706 with07E6.
+The new32-byte prefix is independently assembled by original envyas; SPH and
+the old validated TEX bundle remain byte-identical. Full source assembly by
+that unmodified envyas is unavailable because of its already documented TEX
+dummy-operand spelling issue. No tool tables were patched. To reproduce the
+new prefix, assemble the first four source lines with gm107 envyas, then join
+old tex.bin bytes0..79, the32-byte prefix and old tex.bin bytes112..end.
+
+SHA-256 including SPH:
+
+- move-constant.bin:4f0d7b0884d077f3c020163bcd03c127119c84a02b62127fb814707155ffb763
+- tex-move-constant.bin:df4ac110f8ac97c63a852477b07ffd17ff8fe5128f620716d09e9d4ec404fcc2

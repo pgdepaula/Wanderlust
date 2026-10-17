@@ -5405,3 +5405,318 @@ fn driver_vertex_halfword_multiply_add_controls_geometry_and_code() {
     eprintln!("VS XMAD geometry {:?}", d.graphics_counters());
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+#[test]
+#[ignore = "requires actual GPU; MOV c3 data, code, ready scheduling and fault-safe publication"]
+fn driver_move_constant_slot_data_code_and_visibility() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/move-constant.bin");
+    data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x2144, 0x600),
+        (0x214c, 4),
+        (0x2380, 32),
+        (0x2384, 0),
+        (0x2388, 0x40040),
+        (0x2490, 0x31),
+    ] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let draw_words = draw();
+    let mut identity = None;
+    for (index, (input, color)) in [
+        ([0.25f32, 0.5, 0.75, 1.], [64, 128, 191, 255]),
+        ([0.75, 0.25, 0.5, 0.5], [191, 64, 128, 128]),
+        ([0.25, 0.5, 0.75, 1.], [64, 128, 191, 255]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let bytes: Vec<_> = input.into_iter().flat_map(f32::to_le_bytes).collect();
+        d.write_backing(b, 0x50, &bytes, &mut mem(&mut data))
+            .unwrap();
+        let r = submit(
+            &mut d,
+            c,
+            b,
+            &mut data,
+            if index == 0 { &words } else { &draw_words },
+        );
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert_eq!(r.progress.draws_submitted, 1);
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        check(&data, color, false);
+        d.retire(r.token).unwrap();
+        let n = d.graphics_counters();
+        let now = [
+            n.shader_decodes,
+            n.shader_module_allocations,
+            n.pipeline_allocations,
+        ];
+        if let Some(old) = identity {
+            assert_eq!(now, old);
+        }
+        identity = Some(now);
+    }
+    let bytes: Vec<_> = [0.75f32, 0.25, 0.5, 1.]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect();
+    d.write_backing(b, 0x50, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let pending = submit(&mut d, c, b, &mut data, &draw_words);
+    assert!(pending.fault.is_none(), "{:?}", pending.fault);
+    assert_eq!(pending.progress.draws_submitted, 1);
+    check(&data, [64, 128, 191, 255], false);
+    let before = d.graphics_counters();
+    let start = std::time::Instant::now();
+    let mut last = pending.token;
+    for _ in 0..32 {
+        let r = submit_existing(&mut d, c, &mut data, 8);
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert_eq!(r.progress.draws_submitted, 1);
+        last = r.token;
+    }
+    let elapsed = start.elapsed();
+    let after = d.graphics_counters();
+    assert_eq!(after.draw_commands - before.draw_commands, 32);
+    assert_eq!(after.submissions - before.submissions, 32);
+    assert_eq!(
+        move_constant_resource_work(after),
+        move_constant_resource_work(before)
+    );
+    assert!(!d.query(last).unwrap().guest_visible);
+    check(&data, [64, 128, 191, 255], false);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [191, 64, 128, 255], false);
+    assert!(d.query(pending.token).unwrap().guest_visible);
+    assert!(d.query(last).unwrap().guest_visible);
+    // Change only the binary offset: red now reads c3[0x14], the green word.
+    let old = u64::from_le_bytes(bin[0x58..0x60].try_into().unwrap());
+    assert_eq!(old, 0x4c98078c00470000);
+    let changed = (old & !(0x1fffu64 << 20)) | (5u64 << 20);
+    d.write_backing(b, 0x4658, &changed.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let before_code = d.graphics_counters();
+    let changed = submit(&mut d, c, b, &mut data, &draw_words);
+    assert!(changed.fault.is_none(), "{:?}", changed.fault);
+    assert_eq!(changed.progress.draws_submitted, 1);
+    assert_eq!(
+        d.graphics_counters().shader_decodes,
+        before_code.shader_decodes + 1
+    );
+    check(&data, [191, 64, 128, 255], false);
+    let accepted = d.graphics_counters();
+    let mut invalid = Vec::new();
+    method(&mut invalid, 0x2490, 0x30); // unbind actual referenced slot three
+    invalid.extend(draw_words);
+    let failed = submit(&mut d, c, b, &mut data, &invalid);
+    assert!(failed.fault.is_some());
+    assert_eq!(failed.progress.draws_submitted, 0);
+    assert_eq!(d.graphics_counters().draw_commands, accepted.draw_commands);
+    assert_eq!(d.graphics_counters().submissions, accepted.submissions);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [64, 64, 128, 255], false);
+    assert!(d.query(changed.token).unwrap().guest_visible);
+    assert_eq!(d.graphics_counters().draw_commands, accepted.draw_commands);
+    eprintln!("MOVC color warm32 CPU={elapsed:?} before={before:?} after={after:?}");
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+
+fn move_constant_resource_work(n: wl_gpu::Counters) -> [u64; 17] {
+    [
+        n.shader_binary_bytes,
+        n.vertex_shader_bytes,
+        n.shader_decodes,
+        n.vertex_shader_decodes,
+        n.descriptor_reads,
+        n.vertex_guest_bytes,
+        n.index_guest_bytes,
+        n.constant_guest_bytes,
+        n.guest_texture_bytes,
+        n.render_target_guest_bytes,
+        n.upload_bytes,
+        n.upload_calls,
+        n.shader_module_allocations,
+        n.pipeline_allocations,
+        n.render_target_allocations,
+        n.readback_operations,
+        n.synchronization_points,
+    ]
+}
+
+fn check_move_constant_texture(data: &[u8], image: &[u8]) {
+    // Independent f64 barycentric interpolation and nearest texel selection.
+    let v = POS.map(|p| p.map(f64::from));
+    let area = edge(v[0], v[1], v[2]);
+    let mut covered = 0;
+    let mut outside = 0;
+    for y in 0..H {
+        for x in 0..W {
+            let p = [
+                (x as f64 + 0.5) * 2. / 47. - 1.,
+                1. - (y as f64 + 0.5) * 2. / 29.,
+            ];
+            let bary = [
+                edge(v[1], v[2], p) / area,
+                edge(v[2], v[0], p) / area,
+                edge(v[0], v[1], p) / area,
+            ];
+            let actual = &data[RT + (y * W + x) * 4..RT + (y * W + x + 1) * 4];
+            if x < 47 && bary.iter().any(|v| v.abs() < 0.005) {
+                continue;
+            }
+            if x >= 47 || bary.iter().any(|v| *v < 0.) {
+                assert_eq!(actual, BG, "outside{x},{y}");
+                outside += 1;
+                continue;
+            }
+            let u = (0..3).map(|n| bary[n] * f64::from(UV[n][0])).sum::<f64>() * 37.;
+            let v = (0..3).map(|n| bary[n] * f64::from(UV[n][1])).sum::<f64>() * 19.;
+            // Exclude only interpolation/texel-boundary ambiguity, never interior samples.
+            if (u - u.round()).abs() < 0.02 || (v - v.round()).abs() < 0.02 {
+                continue;
+            }
+            let at =
+                (v.floor().clamp(0., 18.) as usize * 37 + u.floor().clamp(0., 36.) as usize) * 4;
+            for channel in 0..4 {
+                assert!(
+                    actual[channel].abs_diff(image[at + channel]) <= 1,
+                    "texture{x},{y}: {actual:?} != {:?}",
+                    &image[at..at + 4]
+                );
+            }
+            covered += 1;
+        }
+    }
+    assert!(covered > 100);
+    assert!(outside > 600);
+}
+
+#[test]
+#[ignore = "requires actual GPU; MOV constant handle selects actual independent TIC/TSC through guest state"]
+fn driver_move_constant_texture_handles_and_pending_visibility() {
+    let (mut data, mut words, image0) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/tex-move-constant.bin");
+    data[0x4a00..0x4a00 + bin.len()].copy_from_slice(bin);
+    let mut image1 = image0.clone();
+    for p in image1.chunks_exact_mut(4) {
+        p[0] = 255 - p[0];
+        p[1] ^= 0x5a;
+        p[2] ^= 0xc3;
+    }
+    let tile = common::tile_mip(&image1, 37, 19, wl_gpu::format::Format::Rgba8Unorm, 2);
+    assert!(tile.len() <= 0x4000);
+    data[0x12000..0x12000 + tile.len()].copy_from_slice(&tile);
+    let mut tic1 = TIC_RGBA;
+    tic1[1] = 0xd0000; // existing mapping resolves to guest canonical offset12000
+    for (at, descriptor) in [(0x100, TIC_RGBA), (0x120, tic1), (0x180, TSC_NEAREST)] {
+        for (dst, raw) in data[at..at + 32].chunks_exact_mut(4).zip(descriptor) {
+            dst.copy_from_slice(&raw.to_le_bytes());
+        }
+    }
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x2144, 0xa00),
+        (0x214c, 8),
+        (0x1578, 0x30100),
+        (0x157c, 1),
+        (0x1560, 0x31180),
+        (0x1564, 0),
+        (0x2380, 32),
+        (0x2384, 0),
+        (0x2388, 0x40200),
+        (0x2490, 1),
+    ] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let draw_words = draw();
+    let mut identity = None;
+    for (index, handle) in [1u32, 0, 1].into_iter().enumerate() {
+        d.write_backing(b, 0x200, &handle.to_le_bytes(), &mut mem(&mut data))
+            .unwrap();
+        let r = submit(
+            &mut d,
+            c,
+            b,
+            &mut data,
+            if index == 0 { &words } else { &draw_words },
+        );
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert_eq!(r.progress.draws_submitted, 1);
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        check_move_constant_texture(&data, if handle == 0 { &image0 } else { &image1 });
+        d.retire(r.token).unwrap();
+        let n = d.graphics_counters();
+        let now = [
+            n.shader_decodes,
+            n.shader_module_allocations,
+            n.pipeline_allocations,
+        ];
+        if let Some(old) = identity {
+            assert_eq!(now, old);
+        }
+        identity = Some(now);
+    }
+    let mut image2 = image1.clone();
+    for p in image2.chunks_exact_mut(4) {
+        p[0] ^= 0x40;
+        p[1] ^= 0x20;
+    }
+    let tile = common::tile_mip(&image2, 37, 19, wl_gpu::format::Format::Rgba8Unorm, 2);
+    d.write_backing(b, 0x12000, &tile, &mut mem(&mut data))
+        .unwrap();
+    let before_data = d.graphics_counters();
+    let pending = submit(&mut d, c, b, &mut data, &draw_words);
+    assert!(pending.fault.is_none(), "{:?}", pending.fault);
+    assert_eq!(pending.progress.draws_submitted, 1);
+    assert_eq!(
+        d.graphics_counters().shader_decodes,
+        before_data.shader_decodes
+    );
+    assert_eq!(
+        d.graphics_counters().pipeline_allocations,
+        before_data.pipeline_allocations
+    );
+    assert!(d.graphics_counters().guest_texture_bytes > before_data.guest_texture_bytes);
+    check_move_constant_texture(&data, &image1);
+    let before = d.graphics_counters();
+    let start = std::time::Instant::now();
+    let mut last = pending.token;
+    for _ in 0..32 {
+        let r = submit_existing(&mut d, c, &mut data, 8);
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert_eq!(r.progress.draws_submitted, 1);
+        last = r.token;
+    }
+    let elapsed = start.elapsed();
+    let after = d.graphics_counters();
+    assert_eq!(after.draw_commands - before.draw_commands, 32);
+    assert_eq!(after.submissions - before.submissions, 32);
+    assert_eq!(
+        move_constant_resource_work(after),
+        move_constant_resource_work(before)
+    );
+    assert!(!d.query(last).unwrap().guest_visible);
+    check_move_constant_texture(&data, &image1);
+    d.write_backing(b, 0x200, &2u32.to_le_bytes(), &mut mem(&mut data))
+        .unwrap(); // TIC2 exceeds literal pool limit1
+    let failed = submit(&mut d, c, b, &mut data, &draw_words);
+    assert!(failed.fault.is_some());
+    assert_eq!(failed.progress.draws_submitted, 0);
+    assert_eq!(d.graphics_counters().draw_commands, after.draw_commands);
+    assert_eq!(d.graphics_counters().submissions, after.submissions);
+    check_move_constant_texture(&data, &image1);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_move_constant_texture(&data, &image2);
+    assert!(d.query(pending.token).unwrap().guest_visible);
+    assert!(d.query(last).unwrap().guest_visible);
+    assert_eq!(d.graphics_counters().draw_commands, after.draw_commands);
+    eprintln!("MOVC texture warm32 CPU={elapsed:?} before={before:?} after={after:?}");
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

@@ -1657,3 +1657,20 @@ metadata, and texture-handle/position-W/reciprocal provenance is erased. Mixed
 signedness, high-halfword selectors, shifted/merged products, alternate C modes,
 carry/CC, execution predicates and immediate/constant-memory forms remain
 explicitly unsupported. Renderer, driver and runtime-facing APIs are unchanged.
+
+## Fragment MOV from constant memory
+
+Fragment translation accepts full-quad-lane, unpredicated MOV from a bound
+constant-buffer slot with a nonnegative aligned immediate byte offset through
+7FFC. Slots0..31 reuse the existing B197 bindings, checked guest GPU mappings,
+canonical dirty journal and fixed uniform image. Mutable words stay runtime
+data. References deduplicate with scalar LDC and share its64-reference budget.
+
+This direct MOV source uses word-offset encoding and fixed stall6/no write
+barrier. Its result is immediately ready; unrelated pending registers remain
+valid. An explicit destination-pending check protects the shared Constant IR
+path, whose LDC producer has different barrier rules. Fresh constant data
+replaces prior arithmetic/provenance metadata and can supply the verified TEX
+handle source. P0 is preserved. Partial lane masks, execution predicates, the
+ambiguous high offset bit and vertex-stage constant resources remain explicitly
+unsupported. No driver or runtime-facing API changes.

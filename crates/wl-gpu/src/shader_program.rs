@@ -1140,6 +1140,22 @@ impl Program {
                             _ => IntegerOperator::MaxSigned,
                         },
                     }
+                } else if !vertex && word & !0x0000007dfff000ff == 0x4c98078000070000 {
+                    // C34/O14 encodes word offsets, unlike LDC's byte field.
+                    // Exclude offset bit33 until signed/unsigned interpretations
+                    // agree; only the common nonnegative 0..0x7ffc range is used.
+                    if write_barrier != 7 || pending[dst as usize] {
+                        return Err(fail(
+                            "MOV constant requires ready destination and no write barrier",
+                        ));
+                    }
+                    let reference = ConstantRef {
+                        slot: ((word >> 34) & 31) as u8,
+                        offset: (((word >> 20) & 0x1fff) as u32) * 4,
+                    };
+                    let index = constant_input(&mut out.constants, reference)
+                        .ok_or_else(|| fail("too many constant references"))?;
+                    Operation::Constant { dst, input: index }
                 } else if !vertex && word & !ldc_mask == 0xef9400000007ff00 {
                     if write_barrier != 0 || pending.iter().any(|v| *v) {
                         return Err(fail("LDC requires an unused write barrier zero"));

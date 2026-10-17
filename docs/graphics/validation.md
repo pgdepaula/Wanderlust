@@ -3112,3 +3112,78 @@ with `accept4` error110 before adapter acquisition. Zero current-XMAD native
 execution passes are claimed. No host execution policy, shared WSL process
 or driver configuration was changed. The shaders/commands are synthetic;
 original-game GPU submissions and real TOTK frames remain unproven.
+
+## Direct constant-buffer MOV and texture handles
+
+Seven focused CPU tests and two actual OpenGL scenarios passed. Tests cover
+all32 slots with four offset boundaries, full destination fields, lane/predicate
+and high-offset rejection, pending-destination protection, unrelated pending
+work,64-reference capacity/deduplication with LDC, P0, fresh constant metadata
+and explicit vertex rejection. The color fixture loads c3[10..1c] through an
+actual B197 slot-three binding. Guest constants produce[64,128,191,255] and
+[191,64,128,128] without shader recompilation. Changing only the red MOV's
+binary offset changes its source to the green word. Unbinding slot three
+faults without another draw/submission; previously accepted output remains
+publishable without replay.
+
+The texture fixture uses MOV c0[0] as the TEX handle origin. Literal pools at
+GPU30100/31180 contain two TICs and one TSC. Guest handle1 selects TIC1 with
+TSC0, handle0 selects TIC0, and handle1 selects TIC1 again. An accidental
+shared texture/sampler index would exceed the sampler pool limit. TIC1 maps
+GPU D0000 to canonical guest12000; two nonuniform transformed images are
+packed by the independent scalar GOB test oracle. A separate f64 barycentric
+nearest-sampling oracle validates more than100 interior samples and600
+background pixels, excluding only edge/texel-boundary ambiguity. Guest texture
+changes update pixels without shader recompilation. Unsupported TIC2 faults
+while newer image2 output is pending; publication exposes the correct image
+and prior visibility tokens without replay.
+
+Each scenario performs32 unchanged deferred draws with32 additional host
+queue submissions,1280 borrowed command-source bytes including1024 command
+bytes and64 entry decodes. No new resource reads/uploads, shaders, pipelines,
+target allocations, readbacks or waits occur. Before warm repetition the color
+case records4 draws/7 queue submissions, one144-byte fragment decode,64
+constant bytes read and60 uploaded, three readbacks/22320 bytes and18096 guest
+write bytes. The texture case likewise records4/7, one144-byte fragment decode,
+12 constant bytes read/uploaded, six descriptor reads, four texture uploads
+and24576 guest texture bytes and the same three readbacks. Focused warm CPU times
+were45.994ms color and56.588ms texture under uncontrolled load, not GPU/game
+timings, full batching, zero-copy or allocation-free claims. Rust allocator
+traffic is not instrumented for these new workloads.
+
+Live MOV-constant gates passed: formatting, strict all-target GPU package
+Clippy,321 CPU tests without default features and322 with default features.
+The normal default suite ignored138 GPU tests; explicit WSL OpenGL ran all138,
+zero failures/skips. Linux builds retain unoptimized code, debug assertions
+and overflow checks with debug information disabled.
+
+The current Windows alu_gpu executable compiled with debug information. Two
+initial invocations each completed38 shader GPU scenarios on Intel UHD Vulkan
+(driver101.7076), zero failures/ignores, one CPU test filtered. One invocation
+was labelled D3D12 by its shell wrapper, but its actual adapter was Vulkan;
+it is not D3D12 evidence and duplicate runs do not broaden unique coverage.
+
+A native Rust process runner sets WGPU_BACKEND directly in child environments,
+confirming actual D3D12 and Vulkan adapters. The serialized D3D12 process
+completed23 individual scenarios, including both new MOV-constant tests;
+the Vulkan process completed17, also including both new tests. Each was
+subsequently terminated by the wrapper's90-second per-executable limit while
+still progressing through other scenarios. Neither has a passing terminal
+suite summary; these are partial execution results, not full-suite passes.
+
+All40 native GPU executables were then rebuilt from the same frozen candidate.
+Full-matrix attempts using a300-second per-executable runner failed in the
+WSL broker with accept4 error110 before their first adapter, through both
+existing interop connections. Thus current native validation includes real
+pixel execution of the new scenarios on both host APIs, but no completed
+full native matrix. No production test expectations, host execution policy,
+shared WSL process or driver configuration were changed.
+
+The faithful workspace/native source snapshot is committed `12239fe` plus
+seven exact candidate code/assembly/binary files, unchanged Cargo.lock and
+preserved source-built homebrew fixtures. Concurrent uncommitted runtime/SDL
+changes are excluded. Snapshot formatting reports differences outside the GPU
+package, and strict workspace Clippy reports13 committed-runtime diagnostics;
+no passing whole-workspace result is claimed. Only synthetic independently
+specified commands and shader fixtures execute here; original TOTK GPU
+submissions and game frames remain unproven.

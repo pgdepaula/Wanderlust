@@ -1372,3 +1372,23 @@ ordinary Cfull with carry disabled. The signed product lies within
 XMAD encoding; its distinct IMAD opcode is not evidence. No compiler
 implementation is copied. The test oracle extracts little-endian bytes as
 u16/i16 and computes widened u64/i64 products independently of WGSL shifts.
+
+## SM50 direct constant-buffer MOV
+
+Pinned MIT [GM107 MOV table](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/gm107.c#L2073),
+[NAK MOV encoding](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs#L1926-L1952)
+and [UAM emission](https://github.com/devkitPro/uam/blob/5a5afc2bae8b55409ab36ba45be63fcb73f68993/mesa-imported/codegen/nv50_ir_emit_gm107.cpp#L700-L754)
+establish opcode4C98, destination7:0, word-offset33:20, slot38:34 and lane
+mask42:39. NAK's constant source helper divides byte offsets by four. Envytools
+interprets the14-bit word offset as signed; NAK emits it unsigned. The accepted
+common subset excludes bit33, retaining byte offsets0..7FFC. This is a
+conservative implementation restriction, not a declaration that other valid
+hardware offsets are malformed. Exact base `4c98078000070000` and variable
+mask `0000007dfff000ff` retain all lanes, PT and zero unused fields.
+
+Original unmodified envyas and independent pinned MaxAs agree on128 combinations
+of all slots and four boundary offsets. MaxAs MOV x32T establishes fixed-six
+scheduling without a write barrier. This is separate from scalar LDC's
+variable-latency barrier subset. No compiler code is imported. The existing
+ConstantRef/constant-memory resolver and WGSL uniform lowering are reused;
+vertex resource support is not inferred from shared decoder structures.
