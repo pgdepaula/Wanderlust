@@ -85,7 +85,19 @@ pub enum IntegerComparison {
 /// Compatibility name for the original unsigned comparison variants.
 pub type UnsignedComparison = IntegerComparison;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PermutationSelector {
+    Immediate(u16),
+    Register(u8),
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
+    /// Generic SM50 PRMT: select bytes or replicate their sign bits.
+    PermuteBytes {
+        dst: u8,
+        left: u8,
+        right: u8,
+        selector: PermutationSelector,
+    },
     /// Compare into P0; the complementary predicate output is discarded to PT.
     PredicateCompare {
         left: u8,
@@ -750,6 +762,33 @@ impl Program {
                         bits,
                         operator,
                     }
+                } else if word & !0x00007f800ff0ffff == 0x5bc0000000070000
+                    || word & !0x00007f8ffff0ffff == 0x36c0000000070000
+                {
+                    let left = ((word >> 8) & 255) as u8;
+                    let right = ((word >> 39) & 255) as u8;
+                    let selector = if word >> 52 == 0x5bc {
+                        PermutationSelector::Register(((word >> 20) & 255) as u8)
+                    } else {
+                        PermutationSelector::Immediate(((word >> 20) & 0xffff) as u16)
+                    };
+                    let control = match selector {
+                        PermutationSelector::Register(r) => r,
+                        PermutationSelector::Immediate(_) => 255,
+                    };
+                    if write_barrier != 7
+                        || [left, right, control]
+                            .iter()
+                            .any(|r| !initialized[*r as usize] || pending[*r as usize])
+                    {
+                        return Err(fail("unready PRMT operand or unsupported schedule"));
+                    }
+                    Operation::PermuteBytes {
+                        dst,
+                        left,
+                        right,
+                        selector,
+                    }
                 } else if word & !0x00000f800ff0ffff == 0x5c18000000070000 {
                     let left = ((word >> 8) & 255) as u8;
                     let right = ((word >> 20) & 255) as u8;
@@ -1174,6 +1213,19 @@ impl Program {
                     return Err(fail("write to pending register"));
                 }
                 multiply_result[dst as usize] = match op {
+                    Operation::PermuteBytes {
+                        left,
+                        right,
+                        selector,
+                        ..
+                    } => {
+                        multiply_result[left as usize]
+                            || multiply_result[right as usize]
+                            || match selector {
+                                PermutationSelector::Register(r) => multiply_result[r as usize],
+                                PermutationSelector::Immediate(_) => false,
+                            }
+                    }
                     // Integer identities can disappear in host optimization.
                     // Retain the unfused-rounding hazard even across bit operations.
                     Operation::Select { left, right, .. } => {
@@ -1248,6 +1300,23 @@ impl Program {
         let mut largest = 3;
         for op in &self.operations {
             match *op {
+                Operation::PermuteBytes {
+                    dst,
+                    left,
+                    right,
+                    selector,
+                } => {
+                    largest = largest.max(u16::from(dst));
+                    let control = match selector {
+                        PermutationSelector::Register(r) => r,
+                        PermutationSelector::Immediate(_) => 255,
+                    };
+                    for r in [left, right, control] {
+                        if r != 255 {
+                            largest = largest.max(u16::from(r));
+                        }
+                    }
+                }
                 Operation::AttributeRead { dst, words, .. } => {
                     largest = largest.max(u16::from(dst) + u16::from(words) - 1)
                 }
@@ -1446,6 +1515,9 @@ impl Program {
                 }
                 Operation::IntWiden { dst, src, bits, signed } => {
                     emit_int_widen(&mut s, dst, src, bits, signed);
+                }
+                Operation::PermuteBytes { dst, left, right, selector } => {
+                    emit_byte_permutation(&mut s, dst, left, right, selector);
                 }
                 Operation::FloatSet { dst, left, right, comparison, float_result } => {
                     emit_float_set(&mut s, dst, left, right, comparison, float_result);
@@ -1692,6 +1764,14 @@ impl VertexProgram {
                 } => {
                     emit_int_widen(&mut s, dst, src, bits, signed);
                 }
+                Operation::PermuteBytes {
+                    dst,
+                    left,
+                    right,
+                    selector,
+                } => {
+                    emit_byte_permutation(&mut s, dst, left, right, selector);
+                }
                 Operation::FloatSet {
                     dst,
                     left,
@@ -1739,7 +1819,7 @@ impl VertexProgram {
 
 fn stage_source(operations: &[Operation], header: &str) -> String {
     // Global helper must precede both entry points; vertex headers already open
-    // the function body. Existing shader text stays identical without I2F.
+    // the function body. Existing shader text stays identical without helpers.
     let helper = if operations
         .iter()
         .any(|op| matches!(op, Operation::IntToFloat { .. }))
@@ -1748,10 +1828,45 @@ fn stage_source(operations: &[Operation], header: &str) -> String {
     } else {
         ""
     };
-    let mut source = String::with_capacity(helper.len() + header.len());
+    let permutation = if operations
+        .iter()
+        .any(|op| matches!(op, Operation::PermuteBytes { .. }))
+    {
+        include_str!("prmt.wgsl")
+    } else {
+        ""
+    };
+    let mut source = String::with_capacity(helper.len() + permutation.len() + header.len());
     source.push_str(helper);
+    source.push_str(permutation);
     source.push_str(header);
     source
+}
+
+fn emit_byte_permutation(
+    s: &mut String,
+    dst: u8,
+    left: u8,
+    right: u8,
+    selector: PermutationSelector,
+) {
+    use std::fmt::Write;
+    // All function arguments are values, snapshotted before any aliased write.
+    match selector {
+        PermutationSelector::Immediate(control) => {
+            writeln!(
+                s,
+                "r[{dst}]=permute_bytes(r[{left}],r[{right}],{control}u);"
+            )
+        }
+        PermutationSelector::Register(control) => {
+            writeln!(
+                s,
+                "r[{dst}]=permute_bytes(r[{left}],r[{right}],r[{control}]);"
+            )
+        }
+    }
+    .unwrap();
 }
 
 fn emit_int_widen(s: &mut String, dst: u8, src: u8, bits: u8, signed: bool) {

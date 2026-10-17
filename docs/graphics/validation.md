@@ -2936,3 +2936,63 @@ interop socket. Thus the native result remains30 actual Vulkan passes and
 zero D3D12 passes; full native coverage is unavailable in this run. No host
 execution policy or shared WSL process was changed. Only synthetic independently
 assembled shaders execute; original TOTK GPU submission/presentation is unproven.
+
+The completed ISET workspace snapshot reports528 passing tests, three failing
+CLI/Horizon tests and130 ignored GPU tests. The failures are the existing
+libnx/rebuilt-fixture heap-ratio expectations and absent-service exit status.
+This is separate from the passing live GPU package and actual native Vulkan run.
+
+## Generic PRMT selectors and raw-byte results
+
+Seven focused CPU tests cover independent fixtures, all64 lane/nibble choices,
+high register fields, register aliases, RZ, all three readiness dependencies,
+scheduling rejection, P0 preservation and provenance erasure. Two real GPU
+scenarios enter through GpuDriver/GPFIFO/B06F/B197. An independent byte-array
+oracle uses signed-byte interpretation for replication and eight explicit
+reference vectors. The fragment workload checks476 dynamic cases, twelve
+destination aliases, five RZ combinations and twenty immediate cases. High
+selector bits are poisoned independently. Mutable guest constants change raw
+results without recompiling shaders. A wrong reference produces[0,128,191,255];
+correct results produce[64,128,191,255].
+
+The vertex program permutes initial first X=-.8 into a raw comparison, then
+conditionally exports finite+.5. Changing guest X to-.6 disables that move.
+Changing only selector/expected shader immediates restores first-only coverage
+without another vertex upload. The analytic coverage oracle distinguishes the
+geometry independently. Unsupported PRMT mode1 faults after prior accepted
+work without another draw; explicit publication preserves that pending work
+and advances its visibility tokens without replay.
+
+Before warm repetition the fragment workload records515 draws,1029 queue
+submissions,19 fragment decodes/4240 shader bytes,8160 constant bytes read and
+4568 uploaded,22 shader modules,40 pipelines, one target allocation and514
+reuses. Its514 intentional oracle readbacks transfer3,824,160 bytes and publish
+3,100,448 guest bytes. Thirty-two warm draws add32 queue submissions,1280
+borrowed command-source bytes including1024 command bytes and64 entry decodes,
+with no resource reads/uploads, shader modules, pipelines, target allocations,
+readbacks or waits. CPU wall time was39.548ms focused and30.961ms in the full
+suite under uncontrolled host load. These are unoptimized CPU measurements,
+not GPU/game timings, full batching, zero-copy or allocation-free claims; Rust
+allocator traffic is not instrumented for this workload.
+
+Executed live graphics gates: formatting and strict package Clippy passed;
+300 CPU tests without default features and301 with default features passed.
+The default suite ignored132 GPU tests; explicit WSL OpenGL execution ran all
+132, zero failures/skips. Linux debug information was disabled while retaining
+unoptimized code, debug assertions and overflow checks.
+
+The faithful workspace snapshot is committed `b753dac` plus ten exact candidate
+code/assembly/binary files, unchanged Cargo.lock and preserved source-built
+homebrew fixtures. It excludes concurrent uncommitted runtime changes. It
+reports535 passes, the same three CLI/Horizon failures and132 GPU ignores.
+Whole-workspace formatting and nine committed-runtime Clippy diagnostics remain
+outside the passing GPU package.
+
+The updated Windows alu_gpu executable compiled with debug information. D3D12
+and Vulkan launch attempts both failed in the WSL interoperability broker with
+`accept4` error110, before adapter acquisition. A separately compiled small
+native process runner was also blocked on the other existing interop socket.
+There are zero current-PRMT native execution passes; the preceding ISET
+revision's30 actual Vulkan passes are separate evidence. No execution policy,
+shared WSL process or driver configuration was changed. These are synthetic
+Maxwell programs, not original-game GPU submissions or TOTK frames.

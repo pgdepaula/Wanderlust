@@ -1609,3 +1609,21 @@ provenance, while both sources contribute to conservative FMUL rounding-hazard
 metadata. BF is bit44, not FSET's bit52. Valid hardware F/T modes, extended
 carry, CC, non-PT boolean operands/combiners, execution predicates and
 immediate/constant-memory source forms remain explicitly unsupported.
+
+## Generic byte permutation
+
+Vertex and fragment translation accept unmodified generic-mode PRMT with GPR
+or canonical sixteen-bit immediate selectors. Four selector nibbles independently
+choose bytes from the concatenated A/B words; nibble bit3 requests sign-byte
+replication. Only the low sixteen selector bits participate. All register inputs,
+including a GPR selector, must be initialized and ready even if their values
+would not affect the selected bytes. Destination/source aliases snapshot all
+inputs. RZ sources are supported; RZ destinations remain unsupported.
+
+Fixed stall6/no-write-barrier scheduling and supported incoming waits are
+validated. PRMT preserves P0, propagates rounding-hazard metadata from all
+register inputs, and clears texture-handle and position-W/reciprocal provenance,
+including identity permutations. The integer-only WGSL helper is emitted only
+when needed. Constant-memory forms, specialized permutation modes, modifiers,
+execution predicates and noncanonical immediate encodings remain unsupported.
+The driver, renderer and runtime-facing APIs are unchanged.

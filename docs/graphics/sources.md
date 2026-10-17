@@ -1304,3 +1304,25 @@ corroborated by GM107/UAM/envyas. The pinned NAK SM50 encoder has ISetP only,
 so it is not evidence for this GPR opcode. No compiler implementation is
 imported from these MIT sources. The existing ISETP condition emitter is
 shared through an explicit destination name, preserving its prior WGSL bytes.
+
+## SM50 generic PRMT byte selection
+
+Pinned MIT [GM107 tables](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/gm107.c)
+and [NAK SM50 emission](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs#L1955-L1995)
+establish GPR base `5bc0000000070000`, mask `00007f800ff0ffff`, and canonical
+immediate base `36c0000000070000`, mask `00007f8ffff0ffff`. Destination is7:0,
+A15:8, selector27:20 or35:20, and B46:39. SASS operand order is A,selector,B.
+Bits43..46 belong to source B, not instruction modifiers. Mode48..50 is fixed
+zero; unsupported fields remain fixed by the exact base/mask check. Immediate
+bits36..38 and56 are excluded as noncanonical forms, without claiming that all
+are invalid hardware encodings.
+
+[NAK selector semantics](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/ir.rs#L4997-L5155)
+and [CUDA8 generic prmt](https://docs.nvidia.com/cuda/archive/8.0/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-prmt)
+corroborate low-sixteen-bit control, eight source bytes and sign replication.
+Original pinned envyas independently assembles the committed fixtures. Pinned
+MaxAs `54eda7af086a46c9dae1688b691968235d560164` agrees on the encodings and
+fixed-six scheduling. Literal zero in envyas selects GPR RZ; independently
+assembled MaxAs word `36c0028000070404` establishes canonical immediate zero.
+UAM GM107 has no PRMT emitter and is not opcode evidence. No compiler
+implementation is imported; the bounded integer helper follows these semantics.

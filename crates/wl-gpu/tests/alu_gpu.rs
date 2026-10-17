@@ -4204,3 +4204,417 @@ fn driver_vertex_integer_set_results_control_geometry() {
     eprintln!("VS ISET geometry {:?}", d.graphics_counters());
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+fn byte_permute_reference(a: u32, b: u32, control: u32) -> u32 {
+    let a = a.to_le_bytes();
+    let b = b.to_le_bytes();
+    let c = control.to_le_bytes();
+    let bytes = [a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]];
+    let mut out = [0u8; 4];
+    for (lane, target) in out.iter_mut().enumerate() {
+        let nibble = (c[lane / 2] >> ((lane % 2) * 4)) & 15;
+        let value = bytes[usize::from(nibble % 8)];
+        *target = if nibble < 8 {
+            value
+        } else if i8::from_le_bytes([value]) < 0 {
+            255
+        } else {
+            0
+        };
+    }
+    u32::from_le_bytes(out)
+}
+fn byte_permute_draw(
+    d: &mut GpuDriver,
+    c: ChannelId,
+    b: BackingId,
+    data: &mut [u8],
+    words: &[u32],
+    payload: [u32; 4],
+    matches: bool,
+) {
+    let mut bytes = [0u8; 16];
+    for (dst, raw) in bytes.chunks_exact_mut(4).zip(payload) {
+        dst.copy_from_slice(&raw.to_le_bytes());
+    }
+    d.write_backing(b, 0x50, &bytes, &mut mem(data)).unwrap();
+    let r = submit(d, c, b, data, words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    d.publish(c, &mut mem(data)).unwrap();
+    check(
+        data,
+        if matches {
+            [64, 128, 191, 255]
+        } else {
+            [0, 128, 191, 255]
+        },
+        false,
+    );
+    d.retire(r.token).unwrap();
+}
+#[test]
+#[ignore = "requires actual GPU; dynamic and immediate PRMT selectors, sign replication, aliases and deferred fault visibility"]
+fn driver_byte_permutation_selectors_resources_and_aliases() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/byte-permute.bin");
+    let imm = include_bytes!("fixtures/maxwell/byte-permute-immediate.bin");
+    data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
+    data[0x4a00..0x4a00 + imm.len()].copy_from_slice(imm);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x2144, 0x600),
+        (0x214c, 8),
+        (0x2380, 32),
+        (0x2384, 0),
+        (0x2388, 0x40040),
+        (0x2490, 1),
+    ] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let draw_words = draw();
+    let original = u64::from_le_bytes(bin[0x80..0x88].try_into().unwrap());
+    let comparison = u64::from_le_bytes(bin[0x88..0x90].try_into().unwrap());
+    assert_eq!(original, 0x5bc0028000670404);
+    assert_eq!(comparison, 0x5b64038000770407);
+    for (selector, expected) in [
+        (0x3210, 0x807fff00),
+        (0x7654, 0x01807ffe),
+        (0x0123, 0x00ff7f80),
+        (0x4567, 0xfe7f8001),
+        (0xba98, 0xff00ff00),
+        (0xfedc, 0x00ff00ff),
+        (0x5410, 0x7ffeff00),
+        (0x7632, 0x0180807f),
+    ] {
+        assert_eq!(
+            byte_permute_reference(0x807fff00, 0x01807ffe, selector),
+            expected
+        );
+    }
+    let inputs = [(0x807fff00u32, 0x01807ffeu32), (0x81fe7f01, 0x7e0080ff)];
+    let mut selectors = Vec::new();
+    for lane in 0..4 {
+        for nibble in 0..16u32 {
+            selectors.push((0x3210 & !(15 << (lane * 4))) | (nibble << (lane * 4)));
+        }
+    }
+    selectors.extend([
+        0, 0xffff, 0x3210, 0x7654, 0x0123, 0x4567, 0xba98, 0xfedc, 0x5410, 0x7632,
+    ]);
+    let mut cases = Vec::new();
+    for selector in selectors {
+        for (left, right) in inputs {
+            for high in [0, 0xdead0000, 0xffff0000] {
+                cases.push((left, right, selector | high));
+            }
+        }
+    }
+    let mut seed = 0x50524d54u32;
+    for _ in 0..32 {
+        let mut values = [0u32; 3];
+        for value in &mut values {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            *value = seed;
+        }
+        cases.push((values[0], values[1], values[2]));
+    }
+    assert_eq!(cases.len(), 476);
+    let mut identity = None;
+    for (index, &(left, right, selector)) in cases.iter().enumerate() {
+        byte_permute_draw(
+            &mut d,
+            c,
+            b,
+            &mut data,
+            if index == 0 { &words } else { &draw_words },
+            [
+                left,
+                right,
+                selector,
+                byte_permute_reference(left, right, selector),
+            ],
+            true,
+        );
+        let n = d.graphics_counters();
+        let current = [
+            n.shader_decodes,
+            n.shader_module_allocations,
+            n.pipeline_allocations,
+        ];
+        if let Some(old) = identity {
+            assert_eq!(current, old);
+        }
+        identity = Some(current);
+    }
+    // The main GPR selector is R6. Exercise destination=B and destination=control
+    // with independently patched ISETP input; auxiliary PRMT must preserve P0.
+    for dst in [5u8, 6] {
+        let op = (original & !255u64) | u64::from(dst);
+        let compare = (comparison & !(255u64 << 8)) | (u64::from(dst) << 8);
+        d.write_backing(b, 0x4680, &op.to_le_bytes(), &mut mem(&mut data))
+            .unwrap();
+        d.write_backing(b, 0x4688, &compare.to_le_bytes(), &mut mem(&mut data))
+            .unwrap();
+        for selector in [0x0123, 0x5410, 0xfedc] {
+            for (left, right) in inputs {
+                byte_permute_draw(
+                    &mut d,
+                    c,
+                    b,
+                    &mut data,
+                    &draw_words,
+                    [
+                        left,
+                        right,
+                        selector,
+                        byte_permute_reference(left, right, selector),
+                    ],
+                    true,
+                );
+            }
+        }
+    }
+    d.write_backing(b, 0x4688, &comparison.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    for (left_reg, right_reg, control_reg) in [
+        (255u8, 5u8, 6u8),
+        (4, 255, 6),
+        (4, 5, 255),
+        (255, 255, 6),
+        (255, 255, 255),
+    ] {
+        let op = (original & !((255u64 << 8) | (255u64 << 39) | (255u64 << 20)))
+            | (u64::from(left_reg) << 8)
+            | (u64::from(right_reg) << 39)
+            | (u64::from(control_reg) << 20);
+        d.write_backing(b, 0x4680, &op.to_le_bytes(), &mut mem(&mut data))
+            .unwrap();
+        let (left, right, selector) = (0x81fe7f01, 0x7e0080ff, 0xdead7654);
+        let expected = byte_permute_reference(
+            if left_reg == 255 { 0 } else { left },
+            if right_reg == 255 { 0 } else { right },
+            if control_reg == 255 { 0 } else { selector },
+        );
+        byte_permute_draw(
+            &mut d,
+            c,
+            b,
+            &mut data,
+            &draw_words,
+            [left, right, selector, expected],
+            true,
+        );
+    }
+    // Separate guest-selected program uses an immediate selector at PC78.
+    // Its expected word is c0[18], whereas the dynamic program uses c0[1c].
+    let immediate = u64::from_le_bytes(imm[0x78..0x80].try_into().unwrap());
+    assert_eq!(immediate, 0x36c0028541070404);
+    let mut select_immediate = Vec::new();
+    method(&mut select_immediate, 0x2144, 0xa00);
+    select_immediate.extend(&draw_words);
+    for (index, selector) in [
+        0u16, 0xffff, 0x3210, 0x7654, 0x0123, 0x4567, 0xba98, 0xfedc, 0x5410, 0x7632,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let op = (immediate & !(0xffffu64 << 20)) | (u64::from(selector) << 20);
+        // Selector0 is the independently MaxAs-verified canonical36c form,
+        // not envyas's alternative5bc GPR-control-RZ encoding.
+        d.write_backing(b, 0x4a78, &op.to_le_bytes(), &mut mem(&mut data))
+            .unwrap();
+        for (pair, &(left, right)) in inputs.iter().enumerate() {
+            let expected = byte_permute_reference(left, right, u32::from(selector));
+            byte_permute_draw(
+                &mut d,
+                c,
+                b,
+                &mut data,
+                if index == 0 && pair == 0 {
+                    &select_immediate
+                } else {
+                    &draw_words
+                },
+                [left, right, expected, 0],
+                true,
+            );
+        }
+    }
+    d.write_backing(b, 0x4680, &original.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let mut select_dynamic = Vec::new();
+    method(&mut select_dynamic, 0x2144, 0x600);
+    select_dynamic.extend(&draw_words);
+    let (left, right, selector) = (0x807fff00, 0x01807ffe, 0xdead3210);
+    let expected = byte_permute_reference(left, right, selector);
+    assert_eq!(expected, left);
+    byte_permute_draw(
+        &mut d,
+        c,
+        b,
+        &mut data,
+        &select_dynamic,
+        [left, right, selector, expected ^ 1],
+        false,
+    );
+    let mut payload = [0u8; 16];
+    for (dst, raw) in payload
+        .chunks_exact_mut(4)
+        .zip([left, right, selector, expected])
+    {
+        dst.copy_from_slice(&raw.to_le_bytes());
+    }
+    d.write_backing(b, 0x50, &payload, &mut mem(&mut data))
+        .unwrap();
+    let priming = submit(&mut d, c, b, &mut data, &draw_words);
+    assert!(priming.fault.is_none(), "{:?}", priming.fault);
+    assert_eq!(priming.progress.draws_submitted, 1);
+    assert!(!d.query(priming.token).unwrap().guest_visible);
+    check(&data, [0, 128, 191, 255], false);
+    let unchanged = |n: wl_gpu::Counters| {
+        [
+            n.shader_binary_bytes,
+            n.vertex_shader_bytes,
+            n.shader_decodes,
+            n.vertex_shader_decodes,
+            n.descriptor_reads,
+            n.vertex_guest_bytes,
+            n.index_guest_bytes,
+            n.constant_guest_bytes,
+            n.guest_texture_bytes,
+            n.render_target_guest_bytes,
+            n.upload_bytes,
+            n.upload_calls,
+            n.shader_module_allocations,
+            n.pipeline_allocations,
+            n.render_target_allocations,
+            n.readback_operations,
+            n.synchronization_points,
+        ]
+    };
+    let before = d.graphics_counters();
+    let start = std::time::Instant::now();
+    let mut last = None;
+    for _ in 0..32 {
+        let r = submit_existing(&mut d, c, &mut data, 8);
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert_eq!(r.progress.draws_submitted, 1);
+        last = Some(r.token);
+    }
+    let elapsed = start.elapsed();
+    let after = d.graphics_counters();
+    assert_eq!(after.draw_commands - before.draw_commands, 32);
+    assert_eq!(after.submissions - before.submissions, 32);
+    assert_eq!(unchanged(after), unchanged(before));
+    check(&data, [0, 128, 191, 255], false);
+    let last = last.unwrap();
+    assert!(!d.query(last).unwrap().guest_visible);
+    d.write_backing(
+        b,
+        0x4680,
+        &(original | (1 << 48)).to_le_bytes(),
+        &mut mem(&mut data),
+    )
+    .unwrap();
+    let failed = submit(&mut d, c, b, &mut data, &draw_words);
+    assert!(failed.fault.is_some());
+    assert_eq!(failed.progress.draws_submitted, 0);
+    assert_eq!(d.graphics_counters().draw_commands, after.draw_commands);
+    assert_eq!(d.graphics_counters().submissions, after.submissions);
+    check(&data, [0, 128, 191, 255], false);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [64, 128, 191, 255], false);
+    assert!(d.query(priming.token).unwrap().guest_visible);
+    assert!(d.query(last).unwrap().guest_visible);
+    assert_eq!(d.graphics_counters().draw_commands, after.draw_commands);
+    eprintln!(
+        "PRMT {} dynamic cases, warm32 CPU={elapsed:?} before={before:?} after={after:?}",
+        cases.len()
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+#[test]
+#[ignore = "requires actual GPU; PRMT selector/destination alias controls finite guest vertex geometry"]
+fn driver_vertex_byte_permutation_controls_geometry_and_code() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/vertex-byte-permute.bin");
+    data[0x4800..0x4800 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [(0x2044, 0x800), (0x204c, 9), (0x2144, 0x400)] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    assert_eq!(
+        u64::from_le_bytes(bin[0x80..0x88].try_into().unwrap()),
+        0x5bc07f8000670006
+    );
+    for (vertex, expected) in [(0, 0xcdcc4cbf), (1, 0x9a99193f), (2, 0xcdcc4cbe)] {
+        assert_eq!(
+            byte_permute_reference(POS[vertex][0].to_bits(), 0, 0xdead0123),
+            expected
+        );
+    }
+    let r = submit(&mut d, c, b, &mut data, &words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_conditional_geometry(&data, 0.5);
+    d.retire(r.token).unwrap();
+    assert_eq!(
+        byte_permute_reference((-0.6f32).to_bits(), 0, 0xdead0123),
+        0x9a9919bf
+    );
+    d.write_backing(b, 0x3000, &(-0.6f32).to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let background: Vec<_> = (0..W * H).flat_map(|_| BG).collect();
+    d.write_backing(b, RT as u64, &background, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    let after = d.graphics_counters();
+    assert_eq!(after.vertex_shader_decodes, before.vertex_shader_decodes);
+    assert_eq!(after.pipeline_allocations, before.pipeline_allocations);
+    assert_eq!(after.vertex_upload_bytes - before.vertex_upload_bytes, 72);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_conditional_geometry(&data, f64::from(-0.6f32));
+    d.retire(r.token).unwrap();
+    // Actual PCs: selector MOV is68, expected MOV is78, PRMT is80.
+    // Identity3210 plus expected rawBF19999A restore only the first vertex.
+    assert_eq!(
+        byte_permute_reference((-0.6f32).to_bits(), 0, 0xdead3210),
+        0xbf19999a
+    );
+    let control = 0x010000000007f006u64 | (0xdead3210u64 << 20);
+    let expected = 0x010000000007f007u64 | (u64::from((-0.6f32).to_bits()) << 20);
+    d.write_backing(b, 0x4868, &control.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    d.write_backing(b, 0x4878, &expected.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    d.write_backing(b, RT as u64, &background, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    let after = d.graphics_counters();
+    assert_eq!(
+        after.vertex_shader_decodes,
+        before.vertex_shader_decodes + 1
+    );
+    assert_eq!(after.shader_decodes, before.shader_decodes);
+    assert_eq!(after.vertex_upload_bytes, before.vertex_upload_bytes);
+    assert!(after.pipeline_allocations > before.pipeline_allocations);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_conditional_geometry(&data, 0.5);
+    d.retire(r.token).unwrap();
+    eprintln!("VS PRMT geometry {:?}", d.graphics_counters());
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

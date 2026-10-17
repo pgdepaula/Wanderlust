@@ -477,3 +477,20 @@ Raw integer masks are not exported as float clip positions. SHA-256 including SP
 
 These are synthetic independently assembled programs. F/T, extended carry,
 CC, alternate boolean inputs and other source forms remain unsupported.
+
+`byte-permute`, `byte-permute-immediate` and `vertex-byte-permute` retain the
+validated80-byte stage headers and original pinned envyas code. The dynamic
+fragment uses GPR control at PC0x80 (`5bc0028000670404`), aliases A and compares
+raw bits before an auxiliary PRMT verifies P0 preservation. The immediate
+fragment uses selector5410 at PC0x78 (`36c0028541070404`). Its expected constant
+is at offset18; the dynamic fixture uses1c. The vertex fixture aliases the
+control destination at PC0x80 (`5bc07f8000670006`) and tests the first initial
+vertex's byte reversal without exporting arbitrary integer bits as position.
+
+SHA-256 including SPH:
+
+- byte-permute.bin:227adee8a9f1a609c2495351bbd0a898fce60e70931335557f25ebd976a5021a
+- byte-permute-immediate.bin:8640edc06b35b83cc5bface1b74dca4baba492ba8f6fee28b9bd56bb7deccc43
+- vertex-byte-permute.bin:38cbb1da76c2370e564eeb72900b0848820743b318c378087702eec3e3dd9bc5
+
+Only generic mode0 and canonical GPR/immediate selector forms are implied.
