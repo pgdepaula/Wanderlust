@@ -106,34 +106,45 @@ const LM_POINTER_BUFFER_SIZE: u16 = 0x400;
 const AM_POINTER_BUFFER_SIZE: u16 = 0x1000;
 
 /// Minimal valid specification-conformant empty RomFS image (header, dir hash table, root dir).
-const EMPTY_ROMFS: [u8; 304] = [
-    0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // header_size: 0x50
-    0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // dir_hash_table_offset: 0x50
-    0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // dir_hash_table_size: 4
-    0x58, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // dir_table_offset: 0x58
-    0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // dir_table_size: 0x18
-    0x70, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // file_hash_table_offset: 0x70
-    0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // file_hash_table_size: 4
-    0x78, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // file_table_offset: 0x78
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // file_table_size: 0
-    0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // file_data_offset: 0x80
-    // 0x50: dir hash table (4 bytes bucket + 4 bytes padding)
+const EMPTY_ROMFS: [u8; 128] = [
+    // 0x00: header_size = 0x50
+    0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // 0x08: dir_hash_table_offset = 0x50
+    0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // 0x10: dir_hash_table_size = 0x0C (3 buckets)
+    0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // 0x18: dir_table_offset = 0x5C
+    0x5c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // 0x20: dir_table_size = 0x18 (24 bytes)
+    0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // 0x28: file_hash_table_offset = 0x74
+    0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // 0x30: file_hash_table_size = 0x0C (3 buckets)
+    0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // 0x38: file_table_offset = 0x80
+    0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // 0x40: file_table_size = 0x00
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // 0x58: root dir entry (parent=0, sibling=none, child=none, file=none, hash=none, name_len=0)
-    0x00, 0x00, 0x00, 0x00, // parent: 0
+    // 0x48: file_data_offset = 0x80
+    0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+
+    // 0x50: dir hash table (3 buckets: bucket 0 points to root dir entry at offset 0, buckets 1 & 2 empty)
+    0x00, 0x00, 0x00, 0x00,
+    0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff,
+
+    // 0x5C: root dir entry (24 bytes: parent=0, sibling=-1, child=-1, file=-1, hash=-1, name_len=0)
+    0x00, 0x00, 0x00, 0x00, // parent: 0 (points to self)
     0xff, 0xff, 0xff, 0xff, // sibling: none
     0xff, 0xff, 0xff, 0xff, // child: none
     0xff, 0xff, 0xff, 0xff, // file: none
     0xff, 0xff, 0xff, 0xff, // next_hash: none
     0x00, 0x00, 0x00, 0x00, // name_len: 0
-    // 0x70: file hash table (4 bytes bucket + 4 bytes padding)
-    0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00, // 0x78..0x100: empty padding
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+
+    // 0x74: file hash table (3 buckets: all empty 0xFFFFFFFF)
+    0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff,
 ];
 
 /// `lm::LogDestination_TargetManager`, the destination before any SetDestination.
@@ -169,6 +180,10 @@ pub struct HostState {
     pub time_shared_memory: Option<usize>,
     /// Cached hid shared memory index.
     pub hid_shared_memory: Option<usize>,
+    /// Host display server for VI / GraphicBuffer frame queueing.
+    pub display: crate::display::DisplayServer,
+    /// Controller state and HID Npad shared memory updater.
+    pub input: crate::input::NpadManager,
     /// Npad style set update event handle.
     pub npad_style_set_update_event: Option<usize>,
     /// The application's AppletMessage queue and the event signalled while it is not
@@ -1025,8 +1040,8 @@ pub(crate) fn request(
             };
             eprintln!(
                 "[am] SetTerminateResult: {rc:#x} (desc={}, mod={})",
-                rc & 0x1fff,
-                (rc >> 9) & 0x1ff
+                (rc >> 9) & 0x1fff,
+                rc & 0x1ff,
             );
             Done::ok()
         }
@@ -1368,8 +1383,13 @@ pub(crate) fn request(
                 .first()
                 .or(req.statics.first())
                 .or(req.sends.first());
+            eprintln!("[ipc Storage Read] offset={offset:#x} size={size:#x} dst_info={dst_info:?}");
             if let Some(&(dst, buf_size)) = dst_info {
-                let to_copy = size.min(buf_size as usize);
+                let to_copy = if buf_size > 0 {
+                    size.min(buf_size as usize)
+                } else {
+                    size
+                };
                 if offset < EMPTY_ROMFS.len() {
                     let avail = (EMPTY_ROMFS.len() - offset).min(to_copy);
                     let _ = memory.write_bytes(dst, &EMPTY_ROMFS[offset..offset + avail]);

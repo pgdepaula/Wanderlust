@@ -220,7 +220,7 @@ pub fn write_npad_state(
 }
 
 /// Tracks HID input state across frames.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct NpadManager {
     pub sampling_number: u64,
     pub state: GamepadState,

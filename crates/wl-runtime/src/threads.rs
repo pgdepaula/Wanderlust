@@ -1153,11 +1153,34 @@ pub struct RunResult {
 /// instruction budget is exhausted, a fault occurs, or every thread waits forever.
 pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u64) -> RunResult {
     let mut last: Option<usize> = None;
+    let mut sdl_host = if std::env::var("WL_NO_SDL").is_ok() {
+        None
+    } else {
+        crate::sdl::SdlHost::open("Wanderlust — The Legend of Zelda: Tears of the Kingdom", 1280, 720)
+    };
     loop {
         let Process { memory: _, kernel } = p;
         let k = kernel.as_mut().expect("Horizon process");
         expire(k, ticks(k.time_ns));
         rotate(k);
+        if k.stats.slices % 64 == 0 {
+            if let Some(host) = &mut sdl_host {
+                let gamepad = host.poll_input();
+                k.host.input.state = *gamepad;
+                if let Some(hid_idx) = k.host.hid_shared_memory {
+                    if let Some(shm) = k.shared_memories.get_mut(hid_idx) {
+                        k.host.input.update(&mut shm.bytes);
+                    }
+                }
+                host.present_frame(&k.host.display);
+                if host.should_close {
+                    return RunResult {
+                        result: Ok(Stop::ExitProcess),
+                        thread: k.current,
+                    };
+                }
+            }
+        }
         let Some(t) = pick(k) else {
             if running_threads(k) == 0 {
                 return RunResult {
@@ -1219,9 +1242,10 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
         let ran = cpu.steps - k.slice_start;
         k.total_steps += ran;
         k.time_ns += ran;
+        static HEAP_INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if k.config.program_id == 0x100f2c0115b6000
             && k.heap_size > 0
-            && p.memory.load(0xbad2b78, 8).unwrap_or(0) == 0
+            && !HEAP_INITIALIZED.swap(true, std::sync::atomic::Ordering::SeqCst)
         {
             let heap_inst = 0x208e000000u64;
             let vtable = 0x208e001000u64;
@@ -1234,7 +1258,10 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
                 };
                 let _ = p.memory.store(vtable + i * 8, 8, entry);
             }
+            let _ = p.memory.store(vtable + 0x20, 8, 0x873da44);
+            let _ = p.memory.store(vtable + 0x28, 8, 0x8418914);
             let _ = p.memory.store(vtable + 0x30, 8, 0x8418600);
+            let _ = p.memory.store(vtable + 0x38, 8, 0xa7cca74);
             let _ = p.memory.store(vtable + 0x88, 8, 0xa7ccb20);
             let _ = p.memory.store(vtable + 0x90, 8, 0x816fb30);
             let _ = p.memory.store(heap_inst, 8, vtable);
@@ -1245,6 +1272,7 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
             let _ = p.memory.store(heap_inst + 0xa8, 4, 0);
             let _ = p.memory.store(heap_inst + 0xb0, 8, 0x208e010000);
             let _ = p.memory.store(heap_inst + 0xb8, 8, 0x2100000000);
+            let _ = p.memory.store(heap_inst + 0xc0, 8, 0);
             let _ = p.memory.store(heap_inst + 0xcc, 4, 8);
 
             for offset in (0x1000..0x2000).step_by(0x100) {
@@ -1273,9 +1301,8 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
                 let _ = p.memory.store(head, 8, buf_start);
                 let _ = p.memory.store(head + 8, 8, buf_start);
 
-                // Block count and offset at arena + 0xc0 and 0xc4
-                let _ = p.memory.store(arena + 0xc0, 4, 1);
-                let _ = p.memory.store(arena + 0xc4, 4, 0);
+                // Allocated chunk list head at arena + 0xc0 (initially empty)
+                let _ = p.memory.store(arena + 0xc0, 8, 0);
 
                 // First free block in buffer
                 let _ = p.memory.store(buf_start, 8, head);
@@ -1286,15 +1313,14 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
 
             let inner_inst = 0x208e000200u64;
             let inner_vtable = 0x208e002000u64;
-            for i in 0..32u64 {
-                let entry = p.memory.load(0xb9073f0 + i * 8, 8).unwrap_or(0);
-                let entry = if entry > 0 && entry < 0x8000000 {
-                    entry + 0x8006000
-                } else {
-                    entry
-                };
-                let _ = p.memory.store(inner_vtable + i * 8, 8, entry);
-            }
+            let _ = p.memory.store(inner_vtable + 0x00, 8, 0x8cf7ac0);
+            let _ = p.memory.store(inner_vtable + 0x08, 8, 0xa7ccf44);
+            let _ = p.memory.store(inner_vtable + 0x10, 8, 0xa7cd644);
+            let _ = p.memory.store(inner_vtable + 0x18, 8, 0xa7cd688);
+            let _ = p.memory.store(inner_vtable + 0x20, 8, 0xa7ccf7c);
+            let _ = p.memory.store(inner_vtable + 0x28, 8, 0xa7cd094);
+            let _ = p.memory.store(inner_vtable + 0x30, 8, 0xa7cd09c);
+            let _ = p.memory.store(inner_vtable + 0x38, 8, 0x8032734);
             let _ = p.memory.store(inner_vtable + 0x88, 8, 0xa7cd268);
             let _ = p.memory.store(inner_inst, 8, inner_vtable);
             let _ = p.memory.store(inner_inst + 0xa8, 4, 1);
@@ -1335,8 +1361,7 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
             let _ = p.memory.store(arena_4k + 0xa8, 4, 0);
             let _ = p.memory.store(head_4k, 8, buf_4k_start);
             let _ = p.memory.store(head_4k + 8, 8, buf_4k_start);
-            let _ = p.memory.store(arena_4k + 0xc0, 4, 1);
-            let _ = p.memory.store(arena_4k + 0xc4, 4, 0);
+            let _ = p.memory.store(arena_4k + 0xc0, 8, 0);
             let _ = p.memory.store(buf_4k_start, 8, head_4k);
             let _ = p.memory.store(buf_4k_start + 8, 8, head_4k);
             let _ = p.memory.store(buf_4k_start + 0x10, 8, 0);

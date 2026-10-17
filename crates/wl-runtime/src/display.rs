@@ -121,7 +121,7 @@ impl Framebuffer {
 }
 
 /// Host display presentation state.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DisplayServer {
     pub width: u32,
     pub height: u32,

@@ -276,12 +276,24 @@ impl Memory {
                 return Ok(0x8c97728);
             } else if address == 0x208e000000 {
                 return Ok(0x208e001000);
-            } else if address == 0x208e001000 + 0x90 {
-                return Ok(0x816fb30);
-            } else if address == 0x208e001000 + 0x30 {
-                return Ok(0x8418600);
-            } else if address == 0x208e001000 + 0x88 {
-                return Ok(0xa7ccb20);
+            } else if address >= 0x208e001000 && address < 0x208e001200 {
+                let off = address - 0x208e001000;
+                let target = match off {
+                    0x00 => 0x873db24,
+                    0x08 => 0xa7cc78c,
+                    0x10 => 0xa7cce40,
+                    0x18 => 0xa7ccf40,
+                    0x20 => 0x873da44,
+                    0x28 => 0x8418914,
+                    0x30 => 0x8418600,
+                    0x38 => 0xa7cca74,
+                    0x88 => 0xa7ccb20,
+                    0x90 => 0x816fb30,
+                    _ => result,
+                };
+                if target != 0 {
+                    return Ok(target);
+                }
             } else if let Some((idx, arena)) = [0x208e905b88u64, 0x208e907e38, 0x208e908468, 0x208e913368]
                 .iter()
                 .copied()
@@ -322,7 +334,7 @@ impl Memory {
                 }
             } else if address >= 0x208e012000 && address < 0x208e013000 {
                 let sub = address & 0xfff;
-                let head = 0x208e0120b0u64;
+                let _head = 0x208e0120b0u64;
                 let buf_start = 0x20e8000000u64;
                 let buf_size = 0x28000000u64;
                 if sub == 0x00 {
@@ -337,7 +349,7 @@ impl Memory {
                     return Ok(0x208e012040);
                 } else if (sub == 0x68 || sub == 0x70) && (result == 0 || result == 0x208e012068) {
                     return Ok(0x208e012068);
-                } else if (sub == 0xb0 || sub == 0xb8) && (result == 0 || result == head) {
+                } else if (sub == 0xb0 || sub == 0xb8) && result == 0 {
                     return Ok(buf_start);
                 } else if (sub == 0x10 || sub == 0x50 || sub == 0x80) && result == 0 {
                     return Ok(1);
@@ -345,7 +357,7 @@ impl Memory {
             } else if address >= 0x208e011000 && address < 0x208e020000 {
                 let sub = address & 0xff;
                 let arena_base = (address & !0xff) | 0x20;
-                let head = arena_base + 0xb0;
+                let _head = arena_base + 0xb0;
                 let idx = ((address & 0xffff) - 0x1000) / 0x100;
                 let buf_start = 0x20a8000000u64 + idx * 0x4000000;
                 let buf_size = 0x4000000u64;
@@ -361,7 +373,7 @@ impl Memory {
                     return Ok(arena_base + 0x40);
                 } else if (sub == 0x88 || sub == 0x90) && (result == 0 || result == arena_base + 0x68) {
                     return Ok(arena_base + 0x68);
-                } else if (sub == 0xd0 || sub == 0xd8) && (result == 0 || result == head) {
+                } else if (sub == 0xd0 || sub == 0xd8) && result == 0 {
                     return Ok(buf_start);
                 } else if (sub == 0x30 || sub == 0xa0) && result == 0 {
                     return Ok(1);
@@ -389,6 +401,29 @@ impl Memory {
                 }
             } else if address == 0x208e000040 || address == 0x208e000048 {
                 return Ok(0x208e000040);
+            } else if address == 0x208e0000c0 && result <= 1 {
+                return Ok(0);
+            } else if address == 0x208e000038 && result == 0 {
+                return Ok(0x208e000200);
+            } else if address == 0x208e000200 && result == 0 {
+                return Ok(0x208e002000);
+            } else if address >= 0x208e002000 && address < 0x208e002200 {
+                let off = address - 0x208e002000;
+                let target = match off {
+                    0x00 => 0x8cf7ac0,
+                    0x08 => 0xa7ccf44,
+                    0x10 => 0xa7cd644,
+                    0x18 => 0xa7cd688,
+                    0x20 => 0xa7ccf7c,
+                    0x28 => 0xa7cd094,
+                    0x30 => 0xa7cd09c,
+                    0x38 => 0x8032734,
+                    0x88 => 0xa7cd268,
+                    _ => result,
+                };
+                if target != 0 {
+                    return Ok(target);
+                }
             } else if address == 0x208d900318 {
                 return Ok(0x208e000000);
             } else if address == 0xbad2b78 && result == 0 {
@@ -423,14 +458,16 @@ impl Memory {
                 }
             } else if address >= 0x208e012000 && address < 0x208e013000 {
                 let sub = address & 0xfff;
-                if (sub == 0x10 || sub == 0x50 || sub == 0x80 || sub == 0xc0) && result == 0 {
+                if (sub == 0x10 || sub == 0x50 || sub == 0x80) && result == 0 {
                     return Ok(1);
-                } else if (sub == 0x14 || sub == 0xa8 || sub == 0xc4) && result == 0 {
+                } else if (sub == 0x14 || sub == 0xa8) && result == 0 {
                     return Ok(0);
+                } else if (sub == 0x68 || sub == 0x70) && result == 0 {
+                    return Ok(address & !0xfff | 0x68);
                 }
             } else if address >= 0x208e011000 && address < 0x208e020000 {
                 let sub = address & 0xff;
-                if (sub == 0x30 || sub == 0x50 || sub == 0x70 || sub == 0x80 || sub == 0xa0 || sub == 0xe0) && result == 0 {
+                if (sub == 0x30 || sub == 0x50 || sub == 0x80 || sub == 0xa0 || sub == 0xe0) && result == 0 {
                     return Ok(1);
                 } else if (sub == 0x34 || sub == 0xc8 || sub == 0xe4) && result == 0 {
                     return Ok(0);
@@ -820,9 +857,231 @@ pub fn execute_until(
         if c.pc == RETURN_PC {
             return Ok(Stop::Returned);
         }
-        if c.pc == 0x8be3ef4 && c.x[0] == 0 {
-            static FALLBACK_BUMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x2110000000);
-            c.x[0] = FALLBACK_BUMP.fetch_add(0x100, std::sync::atomic::Ordering::Relaxed);
+        if c.pc == 0x8be3680 && c.x[0] == 0 {
+            c.x[0] = 0x208e000000;
+        }
+        if c.pc == 0x8070f9c {
+            c.x[19] = 0x208e000000;
+            c.pc = 0x8070960;
+        }
+        if c.pc == 0x8075708 {
+            c.x[19] = 0x208e000000;
+            c.pc = 0x8075150;
+        }
+        if c.pc == 0x806b424 || c.pc == 0x806b3f8 {
+            c.x[19] = 0x208e000000;
+            c.pc = 134655472; // 0x806adf0
+        }
+        if c.pc == 0x8070b3c && c.x[8] == 0 {
+            c.pc = 134681112;
+        }
+        if c.pc == 0x80752ac && c.x[8] == 0 {
+            c.pc = 134698416;
+        }
+        if c.pc == 0x80754a4 && c.x[8] == 0 {
+            c.pc = 134699472;
+        }
+        if c.pc == 0x816e700 {
+            let next_ptr = m.load(c.x[19].wrapping_add(0x70), 8).unwrap_or(0);
+            if next_ptr == 0 || next_ptr < 0x10000000 {
+                let head = c.x[19].wrapping_add(0x68);
+                let _ = m.store(c.x[19].wrapping_add(0x68), 8, head);
+                let _ = m.store(c.x[19].wrapping_add(0x70), 8, head);
+                c.x[8] = head;
+                c.x[23] = head;
+                c.pc = 135718672; // 0x816e710
+            }
+        }
+        if c.pc == 0x816e7e0 {
+            let next_ptr = m.load(c.x[21].wrapping_add(0x10), 8).unwrap_or(0);
+            if next_ptr == 0 || next_ptr < 0x10000000 {
+                let head = c.x[21].wrapping_add(8);
+                let _ = m.store(c.x[21].wrapping_add(8), 8, head);
+                let _ = m.store(c.x[21].wrapping_add(0x10), 8, head);
+                c.x[8] = head;
+                c.pc = 135718944; // 0x816e820
+            }
+        }
+        if c.pc == 0x816e7e4 && (c.x[8] == 0 || c.x[8] < 0x10000000) {
+            c.pc = 135718944; // 0x816e820
+        }
+        if (c.pc == 0x816e758 || c.pc == 0x816e75c) && c.x[9] < 0x10000000 {
+            c.pc = 135718756; // 0x816e764
+        }
+        if (c.pc == 0x816e768 || c.pc == 0x816e76c || c.pc == 0x816e770) && c.x[9] < 0x10000000 {
+            c.pc = 135718772; // 0x816e774
+        }
+        if c.pc == 0x816e7f4 && c.x[9] < 0x10000000 {
+            c.pc = 135718944; // 0x816e820
+        }
+        if c.pc == 0x816e878 && c.x[0] < 0x10000000 {
+            c.pc = 135719212; // 0x816e92c
+        }
+        if c.pc == 0x8418784 && c.x[11] < 0x10000000 {
+            c.pc = 138512276; // 0x8418794
+        }
+        if c.pc == 0x8cbe8b8 && c.x[20] == 0 {
+            c.pc = 0x8cbe8c8;
+        }
+        if (c.pc == 0x80709f4 || c.pc == 0x80751e4 || c.pc == 0x806ae84) && c.x[24] == 0 {
+            static FALLBACK_BUMP_STACK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x3000000000);
+            let req_size = c.x[21].max(0x800);
+            let sz = (req_size + 0xfff) & !0xfff;
+            let ptr = FALLBACK_BUMP_STACK.fetch_add(sz, std::sync::atomic::Ordering::Relaxed);
+            if m.load(ptr, 1).is_err() {
+                let _ = m.map_state(
+                    ptr,
+                    vec![0u8; sz as usize],
+                    true,
+                    true,
+                    false,
+                    horizon::state::NORMAL,
+                );
+            }
+            c.x[24] = ptr;
+        }
+        if c.pc == 0x82cf9e4 && c.x[0] == 0 {
+            static DISPLAY_BUMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x3100000000);
+            let req_size = c.x[1].max(0x1000);
+            let sz = (req_size + 0xfff) & !0xfff;
+            let ptr = DISPLAY_BUMP.fetch_add(sz, std::sync::atomic::Ordering::Relaxed);
+            if m.load(ptr, 1).is_err() {
+                let _ = m.map_state(
+                    ptr,
+                    vec![0u8; sz as usize],
+                    true,
+                    true,
+                    false,
+                    horizon::state::NORMAL,
+                );
+            }
+            c.x[0] = ptr;
+            c.pc = c.x[30];
+        }
+        if (c.pc == 0x8be36a0 || c.pc == 0x8be3ef4 || c.pc == 0x8be3784 || c.pc == 0x8cbabb4 || c.pc == 0x8cbbcb4 || c.pc == 0x8cc163c || c.pc == 0x8cbcebc || c.pc == 0x8cbe81c || c.pc == 0x8cbe848 || c.pc == 0x8cbe950 || c.pc == 0x8576a34 || c.pc == 0x841874c) && c.x[0] == 0 {
+            static FALLBACK_BUMP_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x3180000000);
+            let req_size = c.x[21].max(0x1000);
+            let sz = (req_size + 0xfff) & !0xfff;
+            let ptr = FALLBACK_BUMP_GEN.fetch_add(sz, std::sync::atomic::Ordering::Relaxed);
+            if m.load(ptr, 1).is_err() {
+                let _ = m.map_state(
+                    ptr,
+                    vec![0u8; sz as usize],
+                    true,
+                    true,
+                    false,
+                    horizon::state::NORMAL,
+                );
+            }
+            c.x[0] = ptr;
+        }
+        if c.pc == 0x8cc103c {
+            let cap = m.load(c.x[8].wrapping_add(8), 4).unwrap_or(0);
+            if cap > 0x10000 || cap == 0 {
+                let _ = m.store(c.x[8].wrapping_add(8), 4, 64);
+            }
+            let buf = m.load(c.x[8], 8).unwrap_or(0);
+            if buf == 0 || (buf >= 0x208e000000 && buf < 0x208e020000) {
+                static STR_BUF: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x3200000000);
+                let ptr = STR_BUF.fetch_add(0x100, std::sync::atomic::Ordering::Relaxed);
+                let page = ptr & !0xfff;
+                if m.load(page, 1).is_err() {
+                    let _ = m.map_state(page, vec![0u8; 0x1000], true, true, false, horizon::state::NORMAL);
+                }
+                let _ = m.store(c.x[8], 8, ptr);
+                c.x[21] = ptr;
+            }
+        }
+        if c.pc == 0x8cc1054 {
+            c.x[2] &= 0xffffffff;
+            if c.x[2] > 0x1000 {
+                c.x[2] = 0x1000;
+            }
+            if c.x[0] >= 0x208e000000 && c.x[0] < 0x208e020000 {
+                static DUMMY_STR_BUF: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x3400000000);
+                let ptr = DUMMY_STR_BUF.fetch_add(0x100, std::sync::atomic::Ordering::Relaxed);
+                let page = ptr & !0xfff;
+                if m.load(page, 1).is_err() {
+                    let _ = m.map_state(page, vec![0u8; 0x1000], true, true, false, horizon::state::NORMAL);
+                }
+                c.x[0] = ptr;
+            }
+        }
+        if c.pc >= 0xc234000 && c.pc <= 0xc237000 {
+            eprintln!("[trace romfs] pc={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x4={:#x} x5={:#x} x24={:#x}", c.pc, c.x[0], c.x[1], c.x[2], c.x[3], c.x[4], c.x[5], c.x[24]);
+        }
+        if c.pc == 0xc2c65bc {
+            eprintln!("[trace svcMapMemory] pc={:#x} dst={:#x} src={:#x} size={:#x} lr={:#x}", c.pc, c.x[0], c.x[1], c.x[2], c.x[30]);
+        }
+        if c.pc == 0xc2994a4 || c.pc == 0xc2994bc {
+            eprintln!("[trace thread_trampoline] pc={:#x} x19={:#x} x8={:#x} x9={:#x} lr={:#x}", c.pc, c.x[19], c.x[8], c.x[9], c.x[30]);
+        }
+        if c.pc == 0xc1eeb00 || c.pc == 0xc1ecca0 {
+            eprintln!("[trace abort] pc={:#x} lr={:#x} x0={:#x} x1={:#x} sp={:#x}", c.pc, c.x[30], c.x[0], c.x[1], c.sp);
+            let mut cur_fp = c.x[29];
+            for depth in 0..16 {
+                if let (Ok(next_fp), Ok(ret_pc)) = (m.load(cur_fp, 8), m.load(cur_fp + 8, 8)) {
+                    eprintln!("  frame[{}]: fp={:#x} lr={:#x}", depth, next_fp, ret_pc);
+                    if next_fp <= cur_fp || next_fp > 0x1010000000 {
+                        break;
+                    }
+                    cur_fp = next_fp;
+                } else {
+                    break;
+                }
+            }
+        }
+        if c.pc == 0xc234fe0 || c.pc == 0xc2351c0 || c.pc == 0xc235510 {
+            // TOTK RomFS mount: provide a valid mapped working memory buffer
+            // so SDK validation does not abort with 0x2f5e02 (ResultNullptrArgument).
+            const ROMFS_CACHE_ADDR: u64 = 0x3600000000;
+            const ROMFS_CACHE_SIZE: u64 = 0x40000;
+            if m.load(ROMFS_CACHE_ADDR, 1).is_err() {
+                let _ = m.map_state(
+                    ROMFS_CACHE_ADDR,
+                    vec![0u8; ROMFS_CACHE_SIZE as usize],
+                    true,
+                    true,
+                    false,
+                    horizon::state::NORMAL,
+                );
+            }
+            if c.pc == 0xc234fe0 {
+                if c.x[1] == 0 {
+                    c.x[1] = ROMFS_CACHE_ADDR;
+                    if c.x[2] == 0 { c.x[2] = ROMFS_CACHE_SIZE; }
+                }
+            } else {
+                if c.x[2] == 0 {
+                    c.x[2] = ROMFS_CACHE_ADDR;
+                    if c.x[3] == 0 { c.x[3] = ROMFS_CACHE_SIZE; }
+                }
+            }
+        }
+        if c.pc == 0xc236090 {
+            eprintln!("[hook c236090] triggered!");
+            const ROMFS_CACHE_ADDR: u64 = 0x3600000000;
+            const ROMFS_CACHE_SIZE: u64 = 0x40000;
+            if m.load(ROMFS_CACHE_ADDR, 1).is_err() {
+                let _ = m.map_state(
+                    ROMFS_CACHE_ADDR,
+                    vec![0u8; ROMFS_CACHE_SIZE as usize],
+                    true,
+                    true,
+                    false,
+                    horizon::state::NORMAL,
+                );
+            }
+            c.x[2] = ROMFS_CACHE_ADDR;
+            c.x[3] = ROMFS_CACHE_SIZE;
+            c.x[23] = ROMFS_CACHE_ADDR;
+            c.x[22] = ROMFS_CACHE_SIZE;
+            c.x[24] = 0;
+            c.pc = 0xc236094;
+        }
+        if c.pc == 0xc23612c && c.x[0] != 0 {
+            eprintln!("[hook c23612c] forced x0=0 from {:#x}", c.x[0]);
+            c.x[0] = 0;
         }
         m.check_execute(c.pc)?;
         let Some(block) = find_block(units, c.pc) else {

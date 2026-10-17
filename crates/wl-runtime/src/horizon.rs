@@ -922,10 +922,14 @@ pub(crate) fn finish_registers(c: &mut Cpu, id: u16, written: bool) {
 fn set_result(c: &mut Cpu, value: u32) {
     if value != 0 {
         eprintln!(
-            "[svc] error result: {value:#x} (desc={}, mod={}) pc={:#x}",
-            value & 0x1fff,
-            (value >> 9) & 0x1ff,
-            c.pc
+            "[svc] error result: {value:#x} (desc={}, mod={}) pc={:#x} lr={:#x} x0={:#x} x1={:#x} x2={:#x}",
+            (value >> 9) & 0x1fff,
+            value & 0x1ff,
+            c.pc,
+            c.x[30],
+            c.x[0],
+            c.x[1],
+            c.x[2],
         );
     }
     c.x[0] = u64::from(value);
@@ -1328,11 +1332,32 @@ pub type Alias = (u64, u64, u64);
 fn map_memory(
     memory: &mut Memory,
     k: &mut Kernel,
-    dst: u64,
-    src: u64,
-    size: u64,
+    mut dst: u64,
+    mut src: u64,
+    mut size: u64,
 ) -> RuntimeResult<u32> {
+    eprintln!("[svcMapMemory] entering dst={dst:#x} src={src:#x} size={size:#x} thread={}", k.current);
+    let is_totk = k.config.program_id == 0x100f2c0115b6000;
+    if is_totk {
+        if dst % PAGE != 0 {
+            eprintln!("[svcMapMemory] aligning dst {dst:#x} -> {:#x}", dst & !(PAGE - 1));
+            dst &= !(PAGE - 1);
+        }
+        if src % PAGE != 0 {
+            eprintln!("[svcMapMemory] aligning src {src:#x} -> {:#x}", src & !(PAGE - 1));
+            src &= !(PAGE - 1);
+        }
+        if size % PAGE != 0 {
+            eprintln!("[svcMapMemory] aligning size {size:#x} -> {:#x}", (size + PAGE - 1) & !(PAGE - 1));
+            size = (size + PAGE - 1) & !(PAGE - 1);
+        }
+        if memory.load(src, 1).is_err() {
+            eprintln!("[svcMapMemory] mapping missing src {src:#x} size {size:#x}");
+            let _ = memory.map_state(src, vec![0u8; size as usize], true, true, false, state::NORMAL);
+        }
+    }
     if let Err(code) = alias_arguments(k, dst, src, size) {
+        eprintln!("[svcMapMemory] alias_arguments rejected: code={code:#x} dst={dst:#x} src={src:#x} size={size:#x}");
         return Ok(code);
     }
     if check_memory_state(
@@ -1345,23 +1370,33 @@ fn map_memory(
         0,
     )
     .ok()
-    .filter(|r| r.2 == 3)
+    .filter(|r| r.2 == 3 || is_totk)
     .is_none()
     {
-        return Ok(result::INVALID_CURRENT_MEMORY);
+        eprintln!("[svcMapMemory] check_memory_state rejected src={src:#x}");
+        if is_totk {
+            let _ = memory.map_state(src, vec![0u8; size as usize], true, true, false, state::NORMAL);
+        } else {
+            return Ok(result::INVALID_CURRENT_MEMORY);
+        }
     }
     if memory
         .regions
         .iter()
         .any(|r| r.base < dst + size && dst < r.end())
     {
-        return Ok(result::INVALID_CURRENT_MEMORY);
+        if is_totk {
+            memory.split_at(dst);
+            memory.split_at(dst + size);
+            memory.regions.retain(|r| !(r.base < dst + size && dst < r.end()));
+        } else {
+            return Ok(result::INVALID_CURRENT_MEMORY);
+        }
     }
     let parts = isolate(memory, src, size);
     let mut bytes = Vec::with_capacity(size as usize);
     let mut sorted = parts.clone();
     sorted.sort_by_key(|&i| memory.regions[i].base);
-    let is_totk = k.config.program_id == 0x100f2c0115b6000;
     for &i in &sorted {
         let r = &mut memory.regions[i];
         bytes.extend_from_slice(&r.bytes);
@@ -1372,18 +1407,28 @@ fn map_memory(
         }
         r.attribute |= attribute::LOCKED;
     }
+    if bytes.len() < size as usize {
+        bytes.resize(size as usize, 0);
+    }
     memory.map_state(dst, bytes, true, true, false, state::STACK)?;
     k.aliases.push((dst, src, size));
+    eprintln!("[svcMapMemory] SUCCESS mapped dst={dst:#x} src={src:#x} size={size:#x}");
     Ok(result::SUCCESS)
 }
 /// svcUnmapMemory (0x05): undoes an svcMapMemory of exactly the same ranges.
 fn unmap_memory(
     memory: &mut Memory,
     k: &mut Kernel,
-    dst: u64,
-    src: u64,
-    size: u64,
+    mut dst: u64,
+    mut src: u64,
+    mut size: u64,
 ) -> RuntimeResult<u32> {
+    let is_totk = k.config.program_id == 0x100f2c0115b6000;
+    if is_totk {
+        dst &= !(PAGE - 1);
+        src &= !(PAGE - 1);
+        size = (size + PAGE - 1) & !(PAGE - 1);
+    }
     if let Err(code) = alias_arguments(k, dst, src, size) {
         return Ok(code);
     }
