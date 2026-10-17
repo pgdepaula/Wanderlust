@@ -187,6 +187,13 @@ pub enum Operation {
         right: u8,
         shift: u8,
     },
+    /// Full-width ordinary SM50 GPR IADD3, wrapping sum without carry/CC.
+    AddThree {
+        dst: u8,
+        left: u8,
+        middle: u8,
+        right: u8,
+    },
     /// SM50 LOP3.LUT, three GPR/RZ sources, discarded PT predicate output.
     TernaryLogic {
         dst: u8,
@@ -789,6 +796,23 @@ impl Program {
                         right,
                         selector,
                     }
+                } else if word & !0x00007f800ff0ffff == 0x5cc0000000070000 {
+                    let left = ((word >> 8) & 255) as u8;
+                    let middle = ((word >> 20) & 255) as u8;
+                    let right = ((word >> 39) & 255) as u8;
+                    if write_barrier != 7
+                        || [left, middle, right]
+                            .iter()
+                            .any(|r| !initialized[*r as usize] || pending[*r as usize])
+                    {
+                        return Err(fail("unready IADD3 operand or unsupported schedule"));
+                    }
+                    Operation::AddThree {
+                        dst,
+                        left,
+                        middle,
+                        right,
+                    }
                 } else if word & !0x00000f800ff0ffff == 0x5c18000000070000 {
                     let left = ((word >> 8) & 255) as u8;
                     let right = ((word >> 20) & 255) as u8;
@@ -1244,7 +1268,13 @@ impl Program {
                     | Operation::ScaledAdd { left, right, .. } => {
                         multiply_result[left as usize] || multiply_result[right as usize]
                     }
-                    Operation::TernaryLogic {
+                    Operation::AddThree {
+                        left: first,
+                        middle: second,
+                        right: third,
+                        ..
+                    }
+                    | Operation::TernaryLogic {
                         first,
                         second,
                         third,
@@ -1370,7 +1400,13 @@ impl Program {
                         }
                     }
                 }
-                Operation::TernaryLogic {
+                Operation::AddThree {
+                    dst,
+                    left: first,
+                    middle: second,
+                    right: third,
+                }
+                | Operation::TernaryLogic {
                     dst,
                     first,
                     second,
@@ -1530,6 +1566,9 @@ impl Program {
                 }
                 Operation::ScaledAdd { dst, left, right, shift } => {
                     emit_scaled_add(&mut s, dst, left, right, shift);
+                }
+                Operation::AddThree { dst, left, middle, right } => {
+                    emit_add_three(&mut s, dst, left, middle, right);
                 }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
@@ -1798,6 +1837,14 @@ impl VertexProgram {
                 } => {
                     emit_scaled_add(&mut s, dst, left, right, shift);
                 }
+                Operation::AddThree {
+                    dst,
+                    left,
+                    middle,
+                    right,
+                } => {
+                    emit_add_three(&mut s, dst, left, middle, right);
+                }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
                 Operation::ConditionalMove { dst, src, invert } => {
@@ -1891,6 +1938,12 @@ fn emit_scaled_add(s: &mut String, dst: u8, left: u8, right: u8, shift: u8) {
     // Both operands are read before a potentially aliased destination is stored.
     // The decoded count is 0..31 and u32 arithmetic wraps modulo 2^32.
     writeln!(s, "r[{dst}]=(r[{left}] << {shift}u)+r[{right}];").unwrap();
+}
+
+fn emit_add_three(s: &mut String, dst: u8, left: u8, middle: u8, right: u8) {
+    use std::fmt::Write;
+    // All three u32 reads precede the aliased store; each addition wraps.
+    writeln!(s, "r[{dst}]=(r[{left}]+r[{middle}])+r[{right}];").unwrap();
 }
 
 fn emit_int_to_float(s: &mut String, dst: u8, src: u8, signed: bool) {

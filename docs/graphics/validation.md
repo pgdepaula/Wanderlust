@@ -2996,3 +2996,59 @@ There are zero current-PRMT native execution passes; the preceding ISET
 revision's30 actual Vulkan passes are separate evidence. No execution policy,
 shared WSL process or driver configuration was changed. These are synthetic
 Maxwell programs, not original-game GPU submissions or TOTK frames.
+
+## Ordinary three-source IADD3
+
+Seven focused CPU tests cover independent stage fixtures, all destination
+aliases and RZ subsets, high registers, strict modifier rejection, all three
+readiness dependencies, pending destinations, P0 and provenance/rounding
+hazards. Two actual OpenGL scenarios execute through GpuDriver/GPFIFO/B06F/B197.
+The independent oracle widens each operand to u64, adds at most2FFFFFFFD, then
+retains the low word. Sixty-four raw tuples include32 explicit overflow/sign/
+carry boundaries and32 deterministic seeded cases; six additional B/C
+destination aliases and seven poisoned RZ subsets distinguish source handling.
+Expected bits are guest constant-buffer data, not shader specialization.
+
+The vertex fixture uses all three inputs, including the previous B value at
+an aliased destination. Initial first X=-.8 uniquely selects finite+.5. Guest
+first X=-.6 disables it; changing shader source C from1 to2 and expected bits
+to3F19999B restores first-only+.5, without another vertex upload. An analytic
+coverage oracle checks each state. The wrong fragment reference leaves RAM
+red0; correct pending output is red64. After32 warm draws, unsupported CC47
+faults without an extra draw or queue submission. Explicit publication retains
+accepted red64 output and prior visibility tokens without replay.
+
+Before warm repetition the fragment workload records79 draws,157 queue
+submissions,11 fragment decodes/2640 shader bytes,1264 constant bytes read and
+1116 uploaded,14 shader modules,24 pipelines, one target allocation and78
+reuses. Its78 intentional readbacks transfer580,320 bytes and publish470,496
+guest bytes. Thirty-two warm draws add32 queue submissions,1280 borrowed
+command-source bytes including1024 command bytes, and64 entry decodes;
+resource reads/uploads, shaders, pipelines, target allocations, readbacks and
+waits remain unchanged. Focused warm CPU wall time was42.185ms under uncontrolled
+host load. This is not GPU/game timing, full batching, zero-copy or an
+allocation-free claim; this workload does not instrument Rust allocator traffic.
+
+Live IADD3 regression gates passed: GPU formatting, strict all-target package
+Clippy,307 CPU tests without default features and308 with default features.
+The normal default suite ignored134 GPU tests; explicit OpenGL execution ran
+all134, zero failures/skips, on llvmpipe LLVM23.1.1/Mesa26.2.4. Unoptimized
+Linux builds retain debug assertions and overflow checks with debug information
+disabled.
+
+The frozen workspace/native source is committed `2e71cb3` plus seven exact
+candidate code/assembly/binary files, unchanged Cargo.lock and preserved
+source-built homebrew fixtures. It excludes concurrent dirty runtime files.
+Snapshot checks reproduce whole-workspace formatting differences, nine
+committed-runtime Clippy diagnostics and the three existing CLI/Horizon
+heap-ratio/absent-service failures. No passing whole-workspace claim is made.
+
+The updated Windows alu_gpu executable compiled with debug information.
+Both D3D12 and Vulkan launches failed in the WSL interoperability broker with
+`accept4` error110 before adapter acquisition; zero current-IADD3 native GPU
+passes are claimed. These are synthetic assembled programs, not authentic
+original-game GPU submissions, presentation or TOTK frames.
+
+The completed IADD3 workspace snapshot reports542 passing tests, the same
+three CLI/Horizon failures and134 ignored GPU tests. This is separate from
+the passing live graphics package and explicit134-scenario OpenGL execution.

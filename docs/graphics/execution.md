@@ -1627,3 +1627,16 @@ including identity permutations. The integer-only WGSL helper is emitted only
 when needed. Constant-memory forms, specialized permutation modes, modifiers,
 execution predicates and noncanonical immediate encodings remain unsupported.
 The driver, renderer and runtime-facing APIs are unchanged.
+
+## Three-source integer addition
+
+Vertex and fragment translation accept ordinary full-width GPR IADD3. Each
+source is a raw32-bit word and the result is their sum modulo2^32. All three
+inputs must be initialized and ready before an aliased destination is written;
+RZ sources are supported. Fixed stall6/no-write-barrier scheduling and supported
+incoming waits are validated. P0 is preserved, all three sources contribute
+to register requirements and conservative rounding-hazard metadata, and
+texture-handle/position-W/reciprocal provenance is erased even for identity
+sums. Halfword selection, intermediate shifts, source negation, carry/CC,
+execution predicates and immediate/constant-memory forms remain unsupported.
+Driver, channel, resource and runtime-facing APIs are unchanged.

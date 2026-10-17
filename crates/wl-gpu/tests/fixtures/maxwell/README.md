@@ -494,3 +494,20 @@ SHA-256 including SPH:
 - vertex-byte-permute.bin:38cbb1da76c2370e564eeb72900b0848820743b318c378087702eec3e3dd9bc5
 
 Only generic mode0 and canonical GPR/immediate selector forms are implied.
+
+`integer-add-three` and `vertex-integer-add-three` each contain the validated
+80-byte stage header plus160 original-envyas code bytes. The fragment executes
+IADD3 R4,R4,R5,R6 at PC80 (`5cc0030000570404`), compares against LDC expected
+bits at PC88, then executes all-RZ IADD3 at PC98 to verify P0 preservation.
+The vertex program executes IADD3 R6,R0,R6,R7 at PC80 (`5cc0038000670006`);
+R6 initially7fffffff and R7 initially1. Only first X=-.8 yields3f4ccccd and
+selects finite+.5. Guest first X=-.6 disables that selection; changing source
+C to2 and expected to3f19999b restores first-only+.5 without a vertex upload.
+Arbitrary integer results are never directly exported as clip positions.
+
+SHA-256 including SPH:
+
+- integer-add-three.bin:bbce538c4e6b232c872e9b6c2aa5897741da4336c58cfa297f7381d04ccbb0b7
+- vertex-integer-add-three.bin:91b7164d5b42d206f254535f35e6bed278cb92c509e128bd785658562b43077e
+
+Only ordinary full-width unmodified GPR IADD3 is implied.

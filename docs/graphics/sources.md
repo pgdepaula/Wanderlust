@@ -1326,3 +1326,23 @@ fixed-six scheduling. Literal zero in envyas selects GPR RZ; independently
 assembled MaxAs word `36c0028000070404` establishes canonical immediate zero.
 UAM GM107 has no PRMT emitter and is not opcode evidence. No compiler
 implementation is imported; the bounded integer helper follows these semantics.
+
+## SM50 ordinary GPR IADD3
+
+Pinned MIT [GM107 table](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/gm107.c#L1994)
+and [MaxAs grammar](https://github.com/NervanaSystems/maxas/blob/54eda7af086a46c9dae1688b691968235d560164/lib/MaxAs/MaxAsGrammar.pm#L314)
+establish base `5cc0000000070000`, variable mask `00007f800ff0ffff`, destination
+7:0, A15:8, B27:20 and C46:39. C43..46 are register bits. Halfword selectors
+31..36, RS/LS37..38, CC47, X48 and negate49..51 are fixed zero in the accepted
+subset. MaxAs and GM107 differ in halfword spellings; no such form is accepted.
+Original unmodified envyas and independent MaxAs agree on both fixtures'
+IADD3 words and RZ/high-register words. MaxAs classifies the ordinary form as
+fixed-six.
+
+The [independent MIT Maxwell emitter](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Shader/Instructions/InstEmitIntegerArithmetic.cs#L343-L404)
+corroborates full-width unmodified (A+B)+C. Its unresolved CC/X/corner-case
+paths are outside this decoder. NAK's generic IAdd3 fold corroborates ordinary
+wrapping arithmetic, but its SM50 builder uses IAdd2 and provides no native
+IADD3 encoding evidence. UAM GM107 likewise has no IADD3 emitter. No compiler
+implementation is copied; lowering uses direct u32 addition, and the test
+oracle independently sums widened u64 values before retaining the low word.
