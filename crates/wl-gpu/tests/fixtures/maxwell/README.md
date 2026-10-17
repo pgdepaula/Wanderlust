@@ -454,3 +454,26 @@ value is never exported as a clip position. SHA-256 including SPH:
 
 All programs are synthetic and independently assembled. Narrow destinations,
 cross-signed conversion, modifiers and other source lanes are not implied.
+
+`integer-set-u-mask`, `integer-set-u-float`, `integer-set-s-mask`,
+`integer-set-s-float` and `vertex-integer-set` each retain an80-byte validated
+stage header plus128 original-envyas-assembled code bytes. The fragment
+variants execute LT at PC0x78, with source signedness bit48 and BF result bit44.
+LDC supplies both operands and independently expected raw bits. ISETP at0x80
+checks the result, then an auxiliary ISET.NE RZ,RZ at0x88 must preserve P0
+before the comparison color is exported.
+
+The vertex fixture performs signed raw-bit X>0 and compares BF output against
+3F800000. Only the second initial X=+.6 matches and moves to finite+.5. Changing
+BF to mask and its expected MOV32I toFFFFFFFF preserves that geometry without
+changing vertex bytes. Subsequent guest second X=-.6 disables the substitution.
+Raw integer masks are not exported as float clip positions. SHA-256 including SPH:
+
+- integer-set-u-mask.bin:0032c39f47859602affc06063f9e307d564ee727d249d00e8f6c4dae2c2a75f3
+- integer-set-u-float.bin:86622a7bd41f14e3fd68ae6cfc905ae086285a744edf492e456a9e64a0f6bd1e
+- integer-set-s-mask.bin:93afe9f17c9b7670007af58a82dbee31fc10cf783a6ea170452c42b01c7c4f3c
+- integer-set-s-float.bin:9b2a27887965e5733148ecccf6bcbb68743f425a5542efb730b63a626792aa59
+- vertex-integer-set.bin:c5a5aded51dc47666791d94d64ed495caf20c3b2aa58974a427c3dc937512020
+
+These are synthetic independently assembled programs. F/T, extended carry,
+CC, alternate boolean inputs and other source forms remain unsupported.

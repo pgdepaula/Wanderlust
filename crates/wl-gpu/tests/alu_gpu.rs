@@ -3810,3 +3810,397 @@ fn driver_vertex_integer_widening_controls_geometry() {
     eprintln!("VS I2I geometry {:?}", d.graphics_counters());
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+fn integer_set_reference(a: u32, b: u32, relation: u8, signed: bool, bf: bool) -> u32 {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    let left = if signed {
+        i64::from(a as i32)
+    } else {
+        i64::from(a)
+    };
+    let right = if signed {
+        i64::from(b as i32)
+    } else {
+        i64::from(b)
+    };
+    let order = left.cmp(&right);
+    let result = match relation {
+        1 => order == Less,
+        2 => order == Equal,
+        3 => order != Greater,
+        4 => order == Greater,
+        5 => order != Equal,
+        6 => order != Less,
+        _ => panic!("unsupported oracle relation"),
+    };
+    if !result {
+        0
+    } else if bf {
+        0x3f800000
+    } else {
+        u32::MAX
+    }
+}
+fn integer_set_draw(
+    d: &mut GpuDriver,
+    c: ChannelId,
+    b: BackingId,
+    data: &mut [u8],
+    words: &[u32],
+    payload: [u32; 3],
+    matches: bool,
+) {
+    let mut bytes = [0u8; 12];
+    for (dst, raw) in bytes.chunks_exact_mut(4).zip(payload) {
+        dst.copy_from_slice(&raw.to_le_bytes());
+    }
+    d.write_backing(b, 0x50, &bytes, &mut mem(data)).unwrap();
+    let r = submit(d, c, b, data, words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    d.publish(c, &mut mem(data)).unwrap();
+    check(
+        data,
+        if matches {
+            [64, 128, 191, 255]
+        } else {
+            [0, 128, 191, 255]
+        },
+        false,
+    );
+    d.retire(r.token).unwrap();
+}
+#[test]
+#[ignore = "requires actual GPU; ISET24 signed/unsigned mask/BF modes, aliases and fixed6 fault preservation"]
+fn driver_integer_set_modes_aliases_and_fixed_latency() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/integer-set-u-mask.bin");
+    data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x2144, 0x600),
+        (0x214c, 8),
+        (0x2380, 28),
+        (0x2384, 0),
+        (0x2388, 0x40040),
+        (0x2490, 1),
+    ] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let draw_words = draw();
+    let original = u64::from_le_bytes(bin[0x78..0x80].try_into().unwrap());
+    let compare = u64::from_le_bytes(bin[0x80..0x88].try_into().unwrap());
+    assert_eq!(original, 0x5b52038000570404);
+    assert_eq!(compare, 0x5b64038000770407);
+    let mut pairs = vec![
+        (0, 0),
+        (0, 1),
+        (1, 0),
+        (u32::MAX, 0),
+        (0, u32::MAX),
+        (u32::MAX, u32::MAX),
+        (0x80000000, 0x7fffffff),
+        (0x7fffffff, 0x80000000),
+        (0x80000000, 0x80000000),
+        (0x80000001, 0x80000000),
+        (0x7fffffff, 0x7ffffffe),
+        (0x12345678, 0x12345678),
+        (0xffff0000, 0x0000ffff),
+        (0x55555555, 0xaaaaaaaa),
+        (0xaaaaaaaa, 0x55555555),
+        (0xdeadbeef, 0xdeadbef0),
+    ];
+    let mut seed = 0x49534554u32;
+    for _ in 0..32 {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        let left = seed;
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        pairs.push((left, seed));
+    }
+    let mut first = true;
+    for relation in 1..=6u8 {
+        for signed in [false, true] {
+            for bf in [false, true] {
+                let op = (original & !((15u64 << 48) | (1u64 << 44)))
+                    | (u64::from(relation) << 49)
+                    | (u64::from(signed) << 48)
+                    | (u64::from(bf) << 44);
+                d.write_backing(b, 0x4678, &op.to_le_bytes(), &mut mem(&mut data))
+                    .unwrap();
+                let mut identity = None;
+                for &(left, right) in &pairs {
+                    integer_set_draw(
+                        &mut d,
+                        c,
+                        b,
+                        &mut data,
+                        if first { &words } else { &draw_words },
+                        [
+                            left,
+                            right,
+                            integer_set_reference(left, right, relation, signed, bf),
+                        ],
+                        true,
+                    );
+                    first = false;
+                    let n = d.graphics_counters();
+                    let current = [
+                        n.shader_decodes,
+                        n.shader_module_allocations,
+                        n.pipeline_allocations,
+                    ];
+                    if let Some(old) = identity {
+                        assert_eq!(current, old);
+                    }
+                    identity = Some(current);
+                }
+            }
+        }
+    }
+    // Right destination alias: ISETP reads the result from R5, while auxiliary
+    // ISET zeroes R4 after P0 was produced and must leave that P0 untouched.
+    let compare_right = (compare & !(255u64 << 8)) | (5u64 << 8);
+    d.write_backing(b, 0x4680, &compare_right.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    for bf in [false, true] {
+        let op = (original & !255u64) | 5 | (u64::from(bf) << 44);
+        d.write_backing(b, 0x4678, &op.to_le_bytes(), &mut mem(&mut data))
+            .unwrap();
+        for (left, right) in [(0, 1), (u32::MAX, 0), (u32::MAX, u32::MAX)] {
+            integer_set_draw(
+                &mut d,
+                c,
+                b,
+                &mut data,
+                &draw_words,
+                [
+                    left,
+                    right,
+                    integer_set_reference(left, right, 1, false, bf),
+                ],
+                true,
+            );
+        }
+    }
+    d.write_backing(b, 0x4680, &compare.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    for relation in [2u8, 4] {
+        for signed in [false, true] {
+            for bf in [false, true] {
+                for (left_reg, right_reg) in [(255u8, 5u8), (4, 255), (255, 255)] {
+                    let op = (original
+                        & !((255u64 << 8) | (255u64 << 20) | (15u64 << 48) | (1u64 << 44)))
+                        | (u64::from(left_reg) << 8)
+                        | (u64::from(right_reg) << 20)
+                        | (u64::from(relation) << 49)
+                        | (u64::from(signed) << 48)
+                        | (u64::from(bf) << 44);
+                    d.write_backing(b, 0x4678, &op.to_le_bytes(), &mut mem(&mut data))
+                        .unwrap();
+                    let left = 0x89abcdef;
+                    let right = 0x76543210;
+                    let expected = integer_set_reference(
+                        if left_reg == 255 { 0 } else { left },
+                        if right_reg == 255 { 0 } else { right },
+                        relation,
+                        signed,
+                        bf,
+                    );
+                    integer_set_draw(
+                        &mut d,
+                        c,
+                        b,
+                        &mut data,
+                        &draw_words,
+                        [left, right, expected],
+                        true,
+                    );
+                }
+            }
+        }
+    }
+    d.write_backing(b, 0x4678, &original.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let expected = integer_set_reference(0x12345678, 0x89abcdef, 1, false, false);
+    assert_eq!(expected, u32::MAX);
+    integer_set_draw(
+        &mut d,
+        c,
+        b,
+        &mut data,
+        &draw_words,
+        [0x12345678, 0x89abcdef, expected ^ 1],
+        false,
+    );
+    let mut payload = [0u8; 12];
+    for (dst, raw) in payload
+        .chunks_exact_mut(4)
+        .zip([0x12345678u32, 0x89abcdef, expected])
+    {
+        dst.copy_from_slice(&raw.to_le_bytes());
+    }
+    d.write_backing(b, 0x50, &payload, &mut mem(&mut data))
+        .unwrap();
+    let priming = submit(&mut d, c, b, &mut data, &draw_words);
+    assert!(priming.fault.is_none(), "{:?}", priming.fault);
+    assert_eq!(priming.progress.draws_submitted, 1);
+    assert!(!d.query(priming.token).unwrap().guest_visible);
+    check(&data, [0, 128, 191, 255], false);
+    let unchanged = |n: wl_gpu::Counters| {
+        [
+            n.shader_binary_bytes,
+            n.vertex_shader_bytes,
+            n.shader_decodes,
+            n.vertex_shader_decodes,
+            n.descriptor_reads,
+            n.vertex_guest_bytes,
+            n.index_guest_bytes,
+            n.constant_guest_bytes,
+            n.guest_texture_bytes,
+            n.render_target_guest_bytes,
+            n.upload_bytes,
+            n.upload_calls,
+            n.shader_module_allocations,
+            n.pipeline_allocations,
+            n.render_target_allocations,
+            n.readback_operations,
+            n.synchronization_points,
+        ]
+    };
+    let before = d.graphics_counters();
+    let start = std::time::Instant::now();
+    let mut last = None;
+    for _ in 0..32 {
+        let r = submit_existing(&mut d, c, &mut data, 8);
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert_eq!(r.progress.draws_submitted, 1);
+        last = Some(r.token);
+    }
+    let elapsed = start.elapsed();
+    let after = d.graphics_counters();
+    assert_eq!(after.draw_commands - before.draw_commands, 32);
+    assert_eq!(after.submissions - before.submissions, 32);
+    assert_eq!(unchanged(after), unchanged(before));
+    check(&data, [0, 128, 191, 255], false);
+    let last = last.unwrap();
+    assert!(!d.query(last).unwrap().guest_visible);
+    // ISET is fixed6, whereas the adjacent ISETP is fixed13. Change only the
+    // ISET stall to13; the accepted GPU-only image must survive this fault.
+    let control = u64::from_le_bytes(bin[0x70..0x78].try_into().unwrap());
+    d.write_backing(
+        b,
+        0x4670,
+        &((control & !31) | 13).to_le_bytes(),
+        &mut mem(&mut data),
+    )
+    .unwrap();
+    let failed = submit(&mut d, c, b, &mut data, &draw_words);
+    assert!(failed.fault.is_some());
+    assert_eq!(failed.progress.draws_submitted, 0);
+    assert_eq!(d.graphics_counters().draw_commands, after.draw_commands);
+    assert_eq!(d.graphics_counters().submissions, after.submissions);
+    check(&data, [0, 128, 191, 255], false);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [64, 128, 191, 255], false);
+    assert!(d.query(priming.token).unwrap().guest_visible);
+    assert!(d.query(last).unwrap().guest_visible);
+    assert_eq!(d.graphics_counters().draw_commands, after.draw_commands);
+    eprintln!(
+        "ISET {} raw pairs x24 modes, warm32 CPU={elapsed:?} before={before:?} after={after:?}",
+        pairs.len()
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+#[test]
+#[ignore = "requires actual GPU; integer comparison BF/mask code mutation and guest vertex geometry"]
+fn driver_vertex_integer_set_results_control_geometry() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/vertex-integer-set.bin");
+    data[0x4800..0x4800 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [(0x2044, 0x800), (0x204c, 9), (0x2144, 0x400)] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    for (vertex, expected) in [(0, 0), (1, 0x3f800000), (2, 0)] {
+        assert_eq!(
+            integer_set_reference(POS[vertex][0].to_bits(), 0, 4, true, true),
+            expected
+        );
+    }
+    let positions = [
+        POS[0].map(f64::from),
+        [0.5, f64::from(POS[1][1])],
+        POS[2].map(f64::from),
+    ];
+    let r = submit(&mut d, c, b, &mut data, &words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_positions(&data, [255, 0, 0, 255], positions);
+    d.retire(r.token).unwrap();
+    // Both guest code edits are necessary: BF result3F800000 must become mask
+    // FFFFFFFF, and ISETP must compare against the matching literal. With only
+    // either edit the position substitution would fail for the second vertex.
+    let mask = u64::from_le_bytes(bin[0x78..0x80].try_into().unwrap()) & !(1u64 << 44);
+    assert_eq!(mask, 0x5b5903800ff70006);
+    let literal = 0x010000000007f007u64 | (u64::from(u32::MAX) << 20);
+    d.write_backing(b, 0x4878, &mask.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    d.write_backing(b, 0x4868, &literal.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let background: Vec<_> = (0..W * H).flat_map(|_| BG).collect();
+    d.write_backing(b, RT as u64, &background, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    let after = d.graphics_counters();
+    assert_eq!(
+        after.vertex_shader_decodes,
+        before.vertex_shader_decodes + 1
+    );
+    assert_eq!(after.shader_decodes, before.shader_decodes);
+    assert_eq!(after.vertex_upload_bytes, before.vertex_upload_bytes);
+    assert!(after.pipeline_allocations > before.pipeline_allocations);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_positions(&data, [255, 0, 0, 255], positions);
+    d.retire(r.token).unwrap();
+    assert_eq!(
+        integer_set_reference((-0.6f32).to_bits(), 0, 4, true, false),
+        0
+    );
+    d.write_backing(b, 0x3018, &(-0.6f32).to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    d.write_backing(b, RT as u64, &background, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    let after = d.graphics_counters();
+    assert_eq!(after.vertex_shader_decodes, before.vertex_shader_decodes);
+    assert_eq!(after.pipeline_allocations, before.pipeline_allocations);
+    assert_eq!(after.vertex_upload_bytes - before.vertex_upload_bytes, 72);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_positions(
+        &data,
+        [255, 0, 0, 255],
+        [
+            POS[0].map(f64::from),
+            [f64::from(-0.6f32), f64::from(POS[1][1])],
+            POS[2].map(f64::from),
+        ],
+    );
+    d.retire(r.token).unwrap();
+    eprintln!("VS ISET geometry {:?}", d.graphics_counters());
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

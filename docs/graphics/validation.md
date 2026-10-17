@@ -2858,3 +2858,81 @@ validation. Unchanged native targets are not counted as rerun. No execution
 policy or shared WSL process was changed. The tested shader programs remain
 independently assembled synthetic inputs; no original TOTK GPU submission or
 frame has been demonstrated.
+
+The completed I2I workspace snapshot reports521 passing tests, three existing
+CLI/Horizon failures and128 ignored GPU tests. This is the frozen `22d4c81`
+plus thirteen-file snapshot described above, not a live-worktree workspace pass.
+
+## GPR ISET: integer relations and exact mask/BF results
+
+The real `GpuDriver`/GPFIFO/B06F/B197 indexed draw path executes all24 supported
+relation/type/result combinations for48 raw pairs each:1152 main result checks.
+An independent oracle widens u32 or sign-interpreted i32 to i64 and compares
+using three-way Ordering. Its integer arithmetic has no overflow or float
+precision dependency. The shader compares expected raw mask/BF bits through
+ISETP before exporting[64,128,191,255]; wrong expected bits export
+[0,128,191,255]. Six right-destination-alias cases and24 poisoned-RZ cases
+exercise independent result storage and zero operands. The auxiliary ISET
+must preserve an already established P0.
+
+The vertex fixture selects only the second initial vertex using signed raw
+X>0. BF-to-mask plus expected-immediate changes preserve identical analytic
+coverage, cause one new vertex decode/pipeline and no additional vertex upload
+or fragment decode. Guest second X=-.6 then disables the finite+.5 substitution,
+adds72 vertex upload bytes and does not recompile the shader. The independent
+coverage oracle distinguishes235 unambiguous pixels between those geometries;
+it does not rely on near-edge tolerance to pass incorrect positions.
+
+RAM first holds red0 while accepted pending GPU work produces red64. Thirty-two
+unchanged draws preserve that separation. Changing only ISET's stall6 to13,
+leaving adjacent ISETP's13 unchanged, faults without an extra draw/submission.
+Explicit publication still produces red64 and advances prior visibility tokens
+without replay. Existing atomic-write failure, alias, layout and channel tests
+remain distinct regressions rather than newly claimed ISET functionality.
+
+Focused live validation passed seven CPU tests and two actual OpenGL scenarios.
+Before warm repetition the fragment workload records1184 draws,2367 queue
+submissions,51 fragment decodes/10608 shader bytes,14208 constant bytes read and
+10856 uploaded,54 shader modules,104 pipelines and one target allocation with
+1183 reuses. Its1183 intentional oracle publications read8,801,520 bytes and
+publish7,135,856 packed guest bytes. The32 warm draws add32 queue submissions,
+1280 command-source borrowed bytes including1024 command bytes, and64 entry
+decodes; resource reads/uploads, shaders, pipelines, target allocations,
+readbacks and waits remain unchanged. Warm CPU wall time was37.753ms focused versus66.975ms in the full suite
+under uncontrolled host load. These are CPU/debug observations, not GPU time,
+game performance, full draw batching, zero-copy or allocation-free claims.
+Rust allocation traffic is not instrumented in this new draw workload.
+
+Executed live-worktree ISET regression gates:
+
+- GPU formatting and strict all-target package Clippy: passed.
+- Without default features:293 CPU tests passed, zero failures.
+- Default features:294 CPU tests passed, zero failures;130 GPU tests ignored.
+- Explicit WSL OpenGL:130 real GPU scenarios passed, zero failures/skips,
+  llvmpipe LLVM23.1.1/Mesa26.2.4.
+
+Linux builds retain unoptimized code, debug assertions and overflow checks,
+with debug information disabled. The faithful workspace/native source snapshot
+is committed `c530ca13` plus thirteen exact candidate code/assembly/binary files,
+unchanged Cargo.lock and preserved source-built homebrew fixtures. It excludes
+concurrent uncommitted runtime changes. Whole-workspace formatting reports
+peer-owned differences; strict Clippy reports nine runtime diagnostics. These
+are separate from the passing live graphics package gates.
+
+The updated Windows `alu_gpu` executable actually ran30 shader GPU scenarios
+on Intel UHD Vulkan (driver101.7076): zero failures/ignored, with one CPU test
+filtered by the explicit `--ignored` selection. Both new ISET scenarios and the
+preceding FSET/ISCADD/I2I/FLO/POPC/LOP3 scenarios execute in that current binary.
+This validates the current candidate, rather than retroactively describing
+older unexecuted revisions as native passes. The first D3D12 launch failed in
+the WSL interoperability broker before adapter initialization.
+
+All40 native GPU test executables subsequently compiled from the same frozen
+source with debug information. Attempts to run that complete matrix failed in
+the WSL broker with `accept4` error110 before its first adapter on each backend.
+A small native process runner, intended to execute the suite inside one Windows
+session, also compiled but was blocked at launch on the alternate existing
+interop socket. Thus the native result remains30 actual Vulkan passes and
+zero D3D12 passes; full native coverage is unavailable in this run. No host
+execution policy or shared WSL process was changed. Only synthetic independently
+assembled shaders execute; original TOTK GPU submission/presentation is unproven.

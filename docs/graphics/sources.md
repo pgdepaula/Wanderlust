@@ -1282,3 +1282,25 @@ type encodings and RZ operands. The reference oracle reads the low bytes using
 signed/unsigned byte interpretation, separately from WGSL's bounded mask or
 shift-based sign extension. Only encoding/semantic evidence is used; no
 compiler implementation is imported.
+
+## SM50 GPR ISET integer comparison results
+
+Pinned GM107 `f102b82381f3f11cee113d16374c87091db039d9` table2029 and
+[UAM ISET emission](https://github.com/devkitPro/uam/blob/5a5afc2bae8b55409ab36ba45be63fcb73f68993/mesa-imported/codegen/nv50_ir_emit_gm107.cpp#L2038-L2081)
+establish base `5b50038000070000`, variable mask `000f10000ff0ffff`, destination
+bits7:0, left15:8, right27:20, signedness48, relation51:49 and BF44. The
+accepted relation values1..6 are LT/EQ/LE/GT/NE/GE; F0 and T7 are valid hardware
+encodings but outside this implementation. X43 and CC47 are rejected, as are
+changes to the fixed AND PT combiner. UAM OP_SET uses fixed six-cycle scheduling;
+this is a GPR instruction, unlike predicate-producing ISETP.
+
+[CUDA8 set semantics](https://docs.nvidia.com/cuda/archive/8.0/parallel-thread-execution/index.html#comparison-and-selection-instructions-set)
+corroborate signed/unsigned integer comparisons and true=FFFFFFFF or1.0f for
+mask/BF output, false=zero. Original pinned envyas assembles all32 relation,
+signedness and result combinations; the decoder intentionally accepts24.
+Pinned MaxAs `54eda7af086a46c9dae1688b691968235d560164` independently matches
+all twelve ordinary mask forms, but its grammar has no BF spelling. BF44 is
+corroborated by GM107/UAM/envyas. The pinned NAK SM50 encoder has ISetP only,
+so it is not evidence for this GPR opcode. No compiler implementation is
+imported from these MIT sources. The existing ISETP condition emitter is
+shared through an explicit destination name, preserving its prior WGSL bytes.

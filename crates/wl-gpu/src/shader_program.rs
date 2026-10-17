@@ -160,6 +160,14 @@ pub enum Operation {
         comparison: FloatComparison,
         float_result: bool,
     },
+    /// Unmodified GPR ISET, AND PT, signed/unsigned relation with mask/BF result.
+    IntegerSet {
+        dst: u8,
+        left: u8,
+        right: u8,
+        comparison: IntegerComparison,
+        float_result: bool,
+    },
     /// Unmodified SM50 ISCADD GPR, wrapping (left << shift) + right.
     ScaledAdd {
         dst: u8,
@@ -759,6 +767,39 @@ impl Program {
                         right,
                         shift: ((word >> 39) & 31) as u8,
                     }
+                } else if word & !0x000f10000ff0ffff == 0x5b50038000070000 {
+                    let comparison = match ((word >> 49) & 7, (word >> 48) & 1) {
+                        (1, 0) => IntegerComparison::Less,
+                        (2, 0) => IntegerComparison::Equal,
+                        (3, 0) => IntegerComparison::LessEqual,
+                        (4, 0) => IntegerComparison::Greater,
+                        (5, 0) => IntegerComparison::NotEqual,
+                        (6, 0) => IntegerComparison::GreaterEqual,
+                        (1, 1) => IntegerComparison::LessSigned,
+                        (2, 1) => IntegerComparison::EqualSigned,
+                        (3, 1) => IntegerComparison::LessEqualSigned,
+                        (4, 1) => IntegerComparison::GreaterSigned,
+                        (5, 1) => IntegerComparison::NotEqualSigned,
+                        (6, 1) => IntegerComparison::GreaterEqualSigned,
+                        _ => return Err(fail("unsupported ISET comparison")),
+                    };
+                    let left = ((word >> 8) & 255) as u8;
+                    let right = ((word >> 20) & 255) as u8;
+                    if write_barrier != 7
+                        || [left, right]
+                            .iter()
+                            .any(|r| !initialized[*r as usize] || pending[*r as usize])
+                    {
+                        return Err(fail("unready ISET operand or unsupported schedule"));
+                    }
+                    // ISET has a GPR destination and BF at44, not FSET's52.
+                    Operation::IntegerSet {
+                        dst,
+                        left,
+                        right,
+                        comparison,
+                        float_result: word & (1 << 44) != 0,
+                    }
                 } else if word & !0x001f00000ff0ffff == 0x5800038000070000 {
                     let comparison = match (word >> 48) & 15 {
                         0 => FloatComparison::False,
@@ -1147,6 +1188,7 @@ impl Program {
                     }
                     Operation::Integer { left, right, .. }
                     | Operation::FloatSet { left, right, .. }
+                    | Operation::IntegerSet { left, right, .. }
                     | Operation::ScaledAdd { left, right, .. } => {
                         multiply_result[left as usize] || multiply_result[right as usize]
                     }
@@ -1244,6 +1286,9 @@ impl Program {
                     dst, left, right, ..
                 }
                 | Operation::FloatSet {
+                    dst, left, right, ..
+                }
+                | Operation::IntegerSet {
                     dst, left, right, ..
                 }
                 | Operation::ScaledAdd {
@@ -1404,6 +1449,9 @@ impl Program {
                 }
                 Operation::FloatSet { dst, left, right, comparison, float_result } => {
                     emit_float_set(&mut s, dst, left, right, comparison, float_result);
+                }
+                Operation::IntegerSet { dst, left, right, comparison, float_result } => {
+                    emit_integer_set(&mut s, dst, left, right, comparison, float_result);
                 }
                 Operation::TernaryLogic { dst, first, second, third, lut } => {
                     emit_ternary(&mut s, dst, first, second, third, lut);
@@ -1653,6 +1701,15 @@ impl VertexProgram {
                 } => {
                     emit_float_set(&mut s, dst, left, right, comparison, float_result);
                 }
+                Operation::IntegerSet {
+                    dst,
+                    left,
+                    right,
+                    comparison,
+                    float_result,
+                } => {
+                    emit_integer_set(&mut s, dst, left, right, comparison, float_result);
+                }
                 Operation::ScaledAdd {
                     dst,
                     left,
@@ -1877,6 +1934,16 @@ fn emit_integer(s: &mut String, dst: u8, left: u8, right: u8, operator: IntegerO
 }
 
 fn emit_comparison(s: &mut String, left: u8, right: u8, comparison: IntegerComparison) {
+    emit_integer_condition(s, left, right, comparison, "p0");
+}
+
+fn emit_integer_condition(
+    s: &mut String,
+    left: u8,
+    right: u8,
+    comparison: IntegerComparison,
+    target: &str,
+) {
     use std::fmt::Write;
     let (symbol, signed) = match comparison {
         IntegerComparison::Less => ("<", false),
@@ -1895,12 +1962,33 @@ fn emit_comparison(s: &mut String, left: u8, right: u8, comparison: IntegerCompa
     if signed {
         writeln!(
             s,
-            "p0=bitcast<i32>(r[{left}]) {symbol} bitcast<i32>(r[{right}]);"
+            "{target}=bitcast<i32>(r[{left}]) {symbol} bitcast<i32>(r[{right}]);"
         )
         .unwrap();
     } else {
-        writeln!(s, "p0=r[{left}] {symbol} r[{right}];").unwrap();
+        writeln!(s, "{target}=r[{left}] {symbol} r[{right}];").unwrap();
     }
+}
+
+fn emit_integer_set(
+    s: &mut String,
+    dst: u8,
+    left: u8,
+    right: u8,
+    comparison: IntegerComparison,
+    float_result: bool,
+) {
+    use std::fmt::Write;
+    // Snapshot the relation before an aliased destination changes either input.
+    // ISET must neither initialize nor clobber the existing predicate P0.
+    s.push_str("{ var condition:bool;\n");
+    emit_integer_condition(s, left, right, comparison, "condition");
+    let bits = if float_result {
+        0x3f800000u32
+    } else {
+        u32::MAX
+    };
+    writeln!(s, "r[{dst}]=select(0u,{bits}u,condition); }}").unwrap();
 }
 
 fn emit_float_set(

@@ -1592,3 +1592,20 @@ FMUL rounding-hazard metadata propagates from the source. Mutable guest data
 does not specialize generated code. Other destination widths, cross-signed
 conversion, byte selectors, saturation, source modifiers, CC, execution
 predicates and immediate/constant-memory forms are rejected explicitly.
+
+## Integer comparisons producing GPR values
+
+Vertex and fragment translation accept unmodified GPR ISET, AND PT, for
+LT/EQ/LE/GT/NE/GE on unsigned or signed 32-bit operands. Mask results are
+FFFFFFFF or zero; BF results are the raw bits of1.0 or zero. Both sources are
+read before any aliased destination is written. The scoped relation does not
+initialize or modify P0. Unsigned comparisons operate on u32, signed comparisons
+on bitcast i32, with no subtraction overflow or floating-point arithmetic.
+
+ISET uses fixed stall6 and no write barrier, independently of ISETP's stall13.
+Inputs and any earlier destination value must be ready; supported incoming
+waits remain honored. The result loses texture-handle/position-W/reciprocal
+provenance, while both sources contribute to conservative FMUL rounding-hazard
+metadata. BF is bit44, not FSET's bit52. Valid hardware F/T modes, extended
+carry, CC, non-PT boolean operands/combiners, execution predicates and
+immediate/constant-memory source forms remain explicitly unsupported.
