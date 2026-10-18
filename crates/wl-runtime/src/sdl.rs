@@ -4,7 +4,7 @@
 
 use crate::{display::DisplayServer, input::GamepadState};
 use std::{
-    ffi::{c_char, c_int, c_void, CString},
+    ffi::{CString, c_char, c_int, c_void},
     ptr,
 };
 
@@ -20,6 +20,11 @@ pub const SDL_WINDOW_RESIZABLE: u32 = 0x00000020;
 pub const SDL_RENDERER_ACCELERATED: u32 = 0x00000002;
 pub const SDL_RENDERER_PRESENTVSYNC: u32 = 0x00000004;
 
+// SDL2 release-2.30.11 SDL_pixels.h: byte-array RGBA32 aliases ABGR8888
+// on little-endian hosts and RGBA8888 on big-endian hosts.
+#[cfg(target_endian = "little")]
+pub const SDL_PIXELFORMAT_RGBA32: u32 = 0x16762004;
+#[cfg(target_endian = "big")]
 pub const SDL_PIXELFORMAT_RGBA32: u32 = 0x16462004;
 pub const SDL_TEXTUREACCESS_STREAMING: c_int = 1;
 
@@ -85,15 +90,19 @@ pub struct SdlEvent {
 
 type SdlInitFn = unsafe extern "C" fn(u32) -> c_int;
 type SdlQuitFn = unsafe extern "C" fn();
-type SdlCreateWindowFn = unsafe extern "C" fn(*const c_char, c_int, c_int, c_int, c_int, u32) -> *mut c_void;
+type SdlCreateWindowFn =
+    unsafe extern "C" fn(*const c_char, c_int, c_int, c_int, c_int, u32) -> *mut c_void;
 type SdlDestroyWindowFn = unsafe extern "C" fn(*mut c_void);
 type SdlCreateRendererFn = unsafe extern "C" fn(*mut c_void, c_int, u32) -> *mut c_void;
 type SdlDestroyRendererFn = unsafe extern "C" fn(*mut c_void);
-type SdlCreateTextureFn = unsafe extern "C" fn(*mut c_void, u32, c_int, c_int, c_int) -> *mut c_void;
+type SdlCreateTextureFn =
+    unsafe extern "C" fn(*mut c_void, u32, c_int, c_int, c_int) -> *mut c_void;
 type SdlDestroyTextureFn = unsafe extern "C" fn(*mut c_void);
-type SdlUpdateTextureFn = unsafe extern "C" fn(*mut c_void, *const c_void, *const c_void, c_int) -> c_int;
+type SdlUpdateTextureFn =
+    unsafe extern "C" fn(*mut c_void, *const c_void, *const c_void, c_int) -> c_int;
 type SdlRenderClearFn = unsafe extern "C" fn(*mut c_void) -> c_int;
-type SdlRenderCopyFn = unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void, *const c_void) -> c_int;
+type SdlRenderCopyFn =
+    unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_void, *const c_void) -> c_int;
 type SdlRenderPresentFn = unsafe extern "C" fn(*mut c_void);
 type SdlPollEventFn = unsafe extern "C" fn(*mut SdlEvent) -> c_int;
 type SdlNumJoysticksFn = unsafe extern "C" fn() -> c_int;
@@ -138,10 +147,8 @@ impl SdlApi {
     #[cfg(unix)]
     pub fn load() -> Option<Self> {
         unsafe {
-            let sdl3_names: [&[u8]; 2] = [
-                b"/home/pedro/.local/lib/libSDL3.so.0\0",
-                b"libSDL3.so.0\0",
-            ];
+            let sdl3_names: [&[u8]; 2] =
+                [b"/home/pedro/.local/lib/libSDL3.so.0\0", b"libSDL3.so.0\0"];
             for name in sdl3_names {
                 let h = dlopen(name.as_ptr() as *const c_char, 2 | 0x100);
                 if !h.is_null() {
@@ -202,8 +209,14 @@ impl SdlApi {
                 is_game_controller: sym!(SDL_IsGameController, SdlIsGameControllerFn),
                 game_controller_open: sym!(SDL_GameControllerOpen, SdlGameControllerOpenFn),
                 game_controller_close: sym!(SDL_GameControllerClose, SdlGameControllerCloseFn),
-                game_controller_get_button: sym!(SDL_GameControllerGetButton, SdlGameControllerGetButtonFn),
-                game_controller_get_axis: sym!(SDL_GameControllerGetAxis, SdlGameControllerGetAxisFn),
+                game_controller_get_button: sym!(
+                    SDL_GameControllerGetButton,
+                    SdlGameControllerGetButtonFn
+                ),
+                game_controller_get_axis: sym!(
+                    SDL_GameControllerGetAxis,
+                    SdlGameControllerGetAxisFn
+                ),
             })
         }
     }
@@ -230,6 +243,7 @@ pub struct SdlHost {
 impl SdlHost {
     /// Attempts to open an SDL2 presentation window (default 1280x720).
     pub fn open(title: &str, width: u32, height: u32) -> Option<Self> {
+        checked_rgba_layout(width, height)?;
         let api = SdlApi::load()?;
         unsafe {
             if (api.init)(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | SDL_INIT_EVENTS) != 0 {
@@ -250,7 +264,11 @@ impl SdlHost {
                 (api.quit)();
                 return None;
             }
-            let mut renderer = (api.create_renderer)(window, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+            let mut renderer = (api.create_renderer)(
+                window,
+                -1,
+                SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC,
+            );
             if renderer.is_null() {
                 renderer = (api.create_renderer)(window, -1, 0);
             }
@@ -339,12 +357,22 @@ impl SdlHost {
                     SDL_KEYDOWN | SDL_KEYUP => {
                         let pressed = event.type_ == SDL_KEYDOWN;
                         // scancode is at offset 16 in SDL_KeyboardEvent
-                        let scancode = u32::from_le_bytes(event.padding[12..16].try_into().unwrap_or_default());
+                        let scancode = u32::from_le_bytes(
+                            event.padding[12..16].try_into().unwrap_or_default(),
+                        );
                         match scancode {
-                            SDL_SCANCODE_W => self.gamepad.thumb_ly = if pressed { 32767 } else { 0 },
-                            SDL_SCANCODE_S => self.gamepad.thumb_ly = if pressed { -32767 } else { 0 },
-                            SDL_SCANCODE_A => self.gamepad.thumb_lx = if pressed { -32767 } else { 0 },
-                            SDL_SCANCODE_D => self.gamepad.thumb_lx = if pressed { 32767 } else { 0 },
+                            SDL_SCANCODE_W => {
+                                self.gamepad.thumb_ly = if pressed { 32767 } else { 0 }
+                            }
+                            SDL_SCANCODE_S => {
+                                self.gamepad.thumb_ly = if pressed { -32767 } else { 0 }
+                            }
+                            SDL_SCANCODE_A => {
+                                self.gamepad.thumb_lx = if pressed { -32767 } else { 0 }
+                            }
+                            SDL_SCANCODE_D => {
+                                self.gamepad.thumb_lx = if pressed { 32767 } else { 0 }
+                            }
                             SDL_SCANCODE_UP => self.gamepad.dpad_up = pressed,
                             SDL_SCANCODE_DOWN => self.gamepad.dpad_down = pressed,
                             SDL_SCANCODE_LEFT => self.gamepad.dpad_left = pressed,
@@ -355,8 +383,12 @@ impl SdlHost {
                             SDL_SCANCODE_V => self.gamepad.x = pressed, // Nintendo Y
                             SDL_SCANCODE_Q => self.gamepad.left_shoulder = pressed,
                             SDL_SCANCODE_E => self.gamepad.right_shoulder = pressed,
-                            SDL_SCANCODE_1 => self.gamepad.left_trigger = if pressed { 255 } else { 0 },
-                            SDL_SCANCODE_3 => self.gamepad.right_trigger = if pressed { 255 } else { 0 },
+                            SDL_SCANCODE_1 => {
+                                self.gamepad.left_trigger = if pressed { 255 } else { 0 }
+                            }
+                            SDL_SCANCODE_3 => {
+                                self.gamepad.right_trigger = if pressed { 255 } else { 0 }
+                            }
                             SDL_SCANCODE_SPACE => self.gamepad.start = pressed, // Plus
                             SDL_SCANCODE_TAB | SDL_SCANCODE_ESCAPE => self.gamepad.back = pressed, // Minus
                             _ => {}
@@ -401,41 +433,69 @@ impl SdlHost {
         &self.gamepad
     }
 
-    /// Presents the latest frame from the display server onto the SDL window.
-    pub fn present_frame(&mut self, display: &DisplayServer) {
-        unsafe {
-            if let Some(frame) = &display.current_frame {
-                let rgba = frame.to_rgba8888();
-                let pitch = (frame.width * 4) as c_int;
-                (self.api.update_texture)(
-                    self.texture,
-                    ptr::null(),
-                    rgba.as_ptr() as *const c_void,
-                    pitch,
-                );
-                (self.api.render_clear)(self.renderer);
-                (self.api.render_copy)(self.renderer, self.texture, ptr::null(), ptr::null());
-            } else {
-                (self.api.render_clear)(self.renderer);
+    /// Presents a validated display frame; malformed input never reaches SDL.
+    pub fn present_frame(&mut self, display: &DisplayServer) -> bool {
+        if let Some(frame) = &display.current_frame {
+            let Ok(rgba) = frame.to_rgba8888() else {
+                return false;
+            };
+            self.present_raw_rgba(&rgba, frame.width, frame.height)
+        } else {
+            unsafe {
+                if (self.api.render_clear)(self.renderer) != 0 {
+                    return false;
+                }
+                (self.api.render_present)(self.renderer);
             }
-            (self.api.render_present)(self.renderer);
+            true
         }
     }
 
-    /// Presents a raw RGBA/BGRA byte slice (width * height * 4).
-    pub fn present_raw_rgba(&mut self, rgba: &[u8], width: u32, _height: u32) {
-        let pitch = (width * 4) as c_int;
+    /// Presents exactly width*height*4 packed RGBA bytes. Textures are resized
+    /// before upload so SDL's null rectangle cannot read beyond the source.
+    pub fn present_raw_rgba(&mut self, rgba: &[u8], width: u32, height: u32) -> bool {
+        let Some((w, h, pitch, size)) = checked_rgba_layout(width, height) else {
+            return false;
+        };
+        if rgba.len() != size {
+            return false;
+        }
         unsafe {
-            (self.api.update_texture)(
-                self.texture,
-                ptr::null(),
-                rgba.as_ptr() as *const c_void,
-                pitch,
-            );
-            (self.api.render_clear)(self.renderer);
-            (self.api.render_copy)(self.renderer, self.texture, ptr::null(), ptr::null());
+            let resized = self.width != width || self.height != height;
+            let texture = if resized {
+                (self.api.create_texture)(
+                    self.renderer,
+                    SDL_PIXELFORMAT_RGBA32,
+                    SDL_TEXTUREACCESS_STREAMING,
+                    w,
+                    h,
+                )
+            } else {
+                self.texture
+            };
+            if texture.is_null() {
+                return false;
+            }
+            if (self.api.update_texture)(texture, ptr::null(), rgba.as_ptr().cast(), pitch) != 0 {
+                if resized {
+                    (self.api.destroy_texture)(texture);
+                }
+                return false;
+            }
+            if resized {
+                (self.api.destroy_texture)(self.texture);
+                self.texture = texture;
+                self.width = width;
+                self.height = height;
+            }
+            if (self.api.render_clear)(self.renderer) != 0
+                || (self.api.render_copy)(self.renderer, texture, ptr::null(), ptr::null()) != 0
+            {
+                return false;
+            }
             (self.api.render_present)(self.renderer);
         }
+        true
     }
 }
 
@@ -456,5 +516,239 @@ impl Drop for SdlHost {
             }
             (self.api.quit)();
         }
+    }
+}
+
+fn checked_rgba_layout(width: u32, height: u32) -> Option<(c_int, c_int, c_int, usize)> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let w = c_int::try_from(width).ok()?;
+    let h = c_int::try_from(height).ok()?;
+    let pitch = w.checked_mul(4)?;
+    let size = usize::try_from(pitch)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?;
+    (size <= crate::display::MAX_RGBA_BYTES).then_some((w, h, pitch, size))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::display::{Framebuffer, PixelFormat};
+    use std::cell::{Cell, RefCell};
+    #[derive(Debug, PartialEq, Eq)]
+    enum Call {
+        Create(u32, i32, i32),
+        Update(usize, i32),
+        Destroy(usize),
+        Present,
+    }
+    thread_local! {
+        static CALLS: RefCell<Vec<Call>> = const { RefCell::new(Vec::new()) };
+        static FAIL_UPDATE: Cell<bool> = const { Cell::new(false) };
+        static FAIL_CREATE: Cell<bool> = const { Cell::new(false) };
+    }
+    fn log(call: Call) {
+        CALLS.with(|c| c.borrow_mut().push(call));
+    }
+    fn take() -> Vec<Call> {
+        CALLS.with(|c| std::mem::take(&mut *c.borrow_mut()))
+    }
+    unsafe extern "C" fn init(_: u32) -> c_int {
+        0
+    }
+    unsafe extern "C" fn quit() {}
+    unsafe extern "C" fn window(
+        _: *const c_char,
+        _: c_int,
+        _: c_int,
+        _: c_int,
+        _: c_int,
+        _: u32,
+    ) -> *mut c_void {
+        ptr::dangling_mut::<c_void>()
+    }
+    unsafe extern "C" fn no_handle(_: *mut c_void) {}
+    unsafe extern "C" fn renderer(_: *mut c_void, _: c_int, _: u32) -> *mut c_void {
+        ptr::dangling_mut::<c_void>()
+    }
+    unsafe extern "C" fn texture(
+        _: *mut c_void,
+        format: u32,
+        _: c_int,
+        w: c_int,
+        h: c_int,
+    ) -> *mut c_void {
+        log(Call::Create(format, w, h));
+        if FAIL_CREATE.get() {
+            ptr::null_mut()
+        } else {
+            ptr::without_provenance_mut::<c_void>(2)
+        }
+    }
+    unsafe extern "C" fn destroy(texture: *mut c_void) {
+        log(Call::Destroy(texture as usize));
+    }
+    unsafe extern "C" fn update(
+        texture: *mut c_void,
+        _: *const c_void,
+        _: *const c_void,
+        pitch: c_int,
+    ) -> c_int {
+        // Never dereference the source: the test observes whether malformed input
+        // reaches the native boundary, without creating an out-of-bounds C read.
+        log(Call::Update(texture as usize, pitch));
+        if FAIL_UPDATE.get() { -1 } else { 0 }
+    }
+    unsafe extern "C" fn clear(_: *mut c_void) -> c_int {
+        0
+    }
+    unsafe extern "C" fn copy(
+        _: *mut c_void,
+        _: *mut c_void,
+        _: *const c_void,
+        _: *const c_void,
+    ) -> c_int {
+        0
+    }
+    unsafe extern "C" fn present(_: *mut c_void) {
+        log(Call::Present);
+    }
+    unsafe extern "C" fn event(_: *mut SdlEvent) -> c_int {
+        0
+    }
+    unsafe extern "C" fn num() -> c_int {
+        0
+    }
+    unsafe extern "C" fn is_controller(_: c_int) -> c_int {
+        0
+    }
+    unsafe extern "C" fn controller(_: c_int) -> *mut c_void {
+        ptr::null_mut()
+    }
+    unsafe extern "C" fn button(_: *mut c_void, _: c_int) -> u8 {
+        0
+    }
+    unsafe extern "C" fn axis(_: *mut c_void, _: c_int) -> i16 {
+        0
+    }
+    fn host() -> SdlHost {
+        take();
+        FAIL_UPDATE.set(false);
+        FAIL_CREATE.set(false);
+        SdlHost {
+            api: SdlApi {
+                _handle: ptr::null_mut(),
+                init,
+                quit,
+                create_window: window,
+                destroy_window: no_handle,
+                create_renderer: renderer,
+                destroy_renderer: no_handle,
+                create_texture: texture,
+                destroy_texture: destroy,
+                update_texture: update,
+                render_clear: clear,
+                render_copy: copy,
+                render_present: present,
+                poll_event: event,
+                num_joysticks: num,
+                is_game_controller: is_controller,
+                game_controller_open: controller,
+                game_controller_close: no_handle,
+                game_controller_get_button: button,
+                game_controller_get_axis: axis,
+            },
+            window: ptr::dangling_mut::<c_void>(),
+            renderer: ptr::dangling_mut::<c_void>(),
+            texture: ptr::dangling_mut::<c_void>(),
+            controller: ptr::null_mut(),
+            width: 1280,
+            height: 720,
+            gamepad: GamepadState::default(),
+            should_close: false,
+        }
+    }
+    #[test]
+    fn short_and_overflowing_rgba_never_reach_sdl() {
+        let mut host = host();
+        for (w, h, n) in [
+            (2, 2, 15),
+            (2, 2, 17),
+            (0, 2, 0),
+            (2, 0, 0),
+            (u32::MAX, 1, 4),
+            (1, u32::MAX, 4),
+            (4097, 4097, 4),
+        ] {
+            assert!(!host.present_raw_rgba(&vec![0; n], w, h));
+            assert!(take().is_empty());
+            assert_eq!(
+                (host.width, host.height, host.texture as usize),
+                (1280, 720, 1)
+            );
+        }
+    }
+    #[test]
+    fn small_frame_resizes_before_upload_and_warm_dimensions_reuse() {
+        let mut host = host();
+        let mut display = DisplayServer::new(2, 2);
+        display.current_frame = Some(Framebuffer::new(
+            2,
+            2,
+            2,
+            PixelFormat::Rgba8888,
+            vec![0; 16],
+        ));
+        assert!(host.present_frame(&display));
+        #[cfg(target_endian = "little")]
+        let expected_format = 0x16762004;
+        #[cfg(target_endian = "big")]
+        let expected_format = 0x16462004;
+        assert_eq!(
+            take(),
+            [
+                Call::Create(expected_format, 2, 2),
+                Call::Update(2, 8),
+                Call::Destroy(1),
+                Call::Present
+            ]
+        );
+        assert_eq!((host.width, host.height, host.texture as usize), (2, 2, 2));
+        assert!(host.present_frame(&display));
+        assert_eq!(take(), [Call::Update(2, 8), Call::Present]);
+        display.current_frame = Some(Framebuffer::new(
+            2,
+            2,
+            2,
+            PixelFormat::Rgba8888,
+            vec![0; 15],
+        ));
+        assert!(!host.present_frame(&display));
+        assert!(take().is_empty());
+    }
+    #[test]
+    fn failed_resize_or_upload_keeps_old_texture_and_dimensions() {
+        let mut host = host();
+        FAIL_CREATE.set(true);
+        assert!(!host.present_raw_rgba(&[0; 16], 2, 2));
+        assert_eq!(take().len(), 1);
+        assert_eq!(
+            (host.width, host.height, host.texture as usize),
+            (1280, 720, 1)
+        );
+        FAIL_CREATE.set(false);
+        FAIL_UPDATE.set(true);
+        assert!(!host.present_raw_rgba(&[0; 16], 2, 2));
+        let calls = take();
+        assert!(matches!(
+            calls.as_slice(),
+            [Call::Create(_, 2, 2), Call::Update(2, 8), Call::Destroy(2)]
+        ));
+        assert_eq!(
+            (host.width, host.height, host.texture as usize),
+            (1280, 720, 1)
+        );
     }
 }

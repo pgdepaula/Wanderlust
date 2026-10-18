@@ -196,7 +196,7 @@ fn display_server_and_framebuffer_conversions() {
     assert_eq!(display.frame_count, 1);
 
     let frame = display.current_frame.as_ref().unwrap();
-    let rgba = frame.to_rgba8888();
+    let rgba = frame.to_rgba8888().unwrap();
     assert_eq!(rgba.len(), 16);
 
     // Pixel 0: Red=0, Green=0, Blue=255, Alpha=255
@@ -209,7 +209,7 @@ fn display_server_and_framebuffer_conversions() {
     assert_eq!(&rgba[12..16], &[255, 255, 255, 255]);
 
     // Test PPM generation
-    let ppm = frame.to_ppm();
+    let ppm = frame.to_ppm().unwrap();
     assert!(ppm.starts_with(b"P6\n2 2\n255\n"));
     assert_eq!(ppm.len(), b"P6\n2 2\n255\n".len() + 2 * 2 * 3);
 }

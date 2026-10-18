@@ -307,3 +307,37 @@ standalone GPU driver until an actual service-to-driver composition is tested.
 
 Strict all-target runtime Clippy passes. Edited Rust files also pass targeted
 format checks; unrelated legacy workspace formatting is not implied.
+
+## Checked framebuffer conversion and texture upload
+
+`Framebuffer::to_rgba8888` and `to_ppm` are fallible. They reject zero dimensions,
+stride smaller than width, truncated visible rows, unsupported formats and
+checked size overflow before conversion. Packed output has a64 MiB frontend
+allocation budget; this is not a Maxwell surface limit. Last-row padding need
+not be present, and padding between rows is excluded from visible output.
+Supported RGBA8888, RGBX8888, BGRA8888 and little-endian RGB565 conversions
+produce packed RGBA bytes; RGBX forces opaque alpha.
+
+SDL uploads require exactly width×height×4 bytes and checked signed dimensions
+and pitch. A changed frame size creates a matching texture before the full
+null-rectangle upload. Texture creation/upload failure retains the prior texture
+and dimensions. A successful upload can replace that texture before later
+render-clear/copy failures; this is not a general presentation transaction.
+Matching dimensions reuse the existing texture. Malformed input never reaches
+the upload function.
+
+[SDL2 release2.30.11 pixel definitions](https://github.com/libsdl-org/SDL/blob/release-2.30.11/include/SDL_pixels.h)
+define RGBA32 as a byte-array alias: ABGR8888 on little-endian hosts, RGBA8888 on
+big-endian hosts. The frontend uses those actual host encodings. The
+[SDL_UpdateTexture contract](https://wiki.libsdl.org/SDL2/SDL_UpdateTexture)
+requires a source large enough for the specified texture region and byte pitch.
+
+Six additional tests independently check literal color/PPM bytes, padded rows,
+RGBX alpha, malformed geometry, short storage and the native-call boundary.
+Mocked SDL functions prove a2×2 frame resizes a1280×720 texture before upload,
+invalid packed sizes invoke no native calls, warm dimensions reuse resources,
+and failed creation/upload preserves the old target. Mocks do not establish
+actual native SDL pixel output. The runtime package passes98 tests with the
+normal parallel runner; strict all-target Clippy and focused boundary tests
+pass. Existing public host fields, loader support and ordinary Rust allocation
+failure remain outside these bounded upload guarantees.
