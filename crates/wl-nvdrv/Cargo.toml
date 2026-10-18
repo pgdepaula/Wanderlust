@@ -1,0 +1,12 @@
+[package]
+name = "wl-nvdrv"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+wl-gpu = { path = "../wl-gpu" }
+
+[dev-dependencies]
+wl-runtime.workspace = true

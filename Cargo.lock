@@ -1294,6 +1294,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wl-nvdrv"
+version = "0.1.0"
+dependencies = [
+ "wl-gpu",
+ "wl-runtime",
+]
+
+[[package]]
 name = "wl-package"
 version = "0.1.0"
 dependencies = [
