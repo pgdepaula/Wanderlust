@@ -341,3 +341,51 @@ actual native SDL pixel output. The runtime package passes98 tests with the
 normal parallel runner; strict all-target Clippy and focused boundary tests
 pass. Existing public host fields, loader support and ordinary Rust allocation
 failure remain outside these bounded upload guarantees.
+
+## Scoped NVIDIA service dispatch
+
+The hosted NVIDIA service uses a process-local installed `nvidia::Host` backend.
+It no longer fabricates descriptor1, accepts unknown ioctls as successful or
+creates an always-signalled GPU event. Without an installed host it reports an
+unsupported initialization. This boundary alone does not connect the launcher
+to the GPU driver or implement native Switch syncpoints.
+
+The supported wire layouts follow
+[libnx feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973 nv.c](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/services/nv.c)
+and its CMIF/HIPC descriptor construction: Initialize3 copies process and
+transfer-memory handles; SetClientPID8 carries an ARUID and kernel-replaced PID;
+Open0 uses one MapAlias path; Close2 returns an NVIDIA error. Initialize and
+SetClientPID have no scalar NVIDIA-error output. Ioctl1, Ioctl2 command11 and
+Ioctl3 command12 preserve logical AutoSelect buffer order: one X/A alternative
+per input and one B/C alternative per output. Simultaneously active alternatives
+are rejected. The primary buffer length and direction follow the ioctl word.
+
+All command metadata is explicitly copied into bounded call-owned storage, with
+a combined64 KiB budget. Actual process `Memory` is passed exclusively to the
+host for checked command/resource acquisition. No guest borrow escapes a call.
+Outputs and the whole TLS reply are preflighted before host execution. Output
+ranges cannot overlap each other or TLS; ordinary input/output aliasing is
+supported because inputs are acquired first. A host error suppresses metadata
+publication but cannot roll back its explicit side effects. Backends must retain
+partial progress and must not mutate CPU mapping layout during the call.
+
+Initialize validates the selected transfer span as readable/writable within one
+region. Its `TransferBuffer` is scoped metadata, not a kernel pin, allocation
+identity or permission-transfer implementation. A backend requiring persistent
+ownership must establish that separately. GPU adapters also need a real dirty
+notification/visibility policy for service output and TLS writes; this transport
+alone does not provide deferred CPU/GPU coherence. QueryEvent returns unsupported
+without inventing an event or completion guarantee. The embedded AOT runtime
+includes this module in its source/cache identity.
+
+Eighteen literal HIPC/CMIF tests exercise these command shapes through the actual
+`ipc::send_sync_request` entry. They cover mixed AutoSelect alternatives, raw
+metadata byte order, in-place input/output, output/TLS overlap, transfer backing,
+permission failure before callbacks, exact metadata limits, host errors and the
+absence of fabricated descriptors/events. The installed test host records calls
+and writes a marker into the same process memory; it is not a GPU emulator.
+The live runtime suite passes116 tests with no failures or ignored tests, and
+strict all-target Clippy passes. `launch_horizon_with_nvidia` installs a supplied
+backend before executing guest instructions; the original launcher delegates
+without a backend. Actual GPU-host composition and its native dependency linkage
+remain separate requirements.

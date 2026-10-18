@@ -180,9 +180,11 @@ fn register_client_then_lookup_and_registration() {
     assert_eq!(reply_result(&p), sm_result::OUT_OF_SESSIONS);
     // Requests to a guest-hosted service are not modelled: explicit fault.
     c.x[0] = u64::from(client);
-    assert!(dispatch(&mut c, &mut p, 0x21)
-        .unwrap_err()
-        .contains("hosted by the guest"));
+    assert!(
+        dispatch(&mut c, &mut p, 0x21)
+            .unwrap_err()
+            .contains("hosted by the guest")
+    );
     // Unregister: success, then NotRegistered.
     request(&mut p, 3, false, &name("wl:svc"));
     send(&mut p, &mut c, sm);
@@ -260,9 +262,11 @@ fn control_close_and_invalid_requests() {
     // Buffer descriptors to sm are not modelled: explicit fault.
     p.write_bytes(t, &[4, 0, 0x10, 0, 0x0A, 0, 0, 0]).unwrap();
     c.x[0] = u64::from(sm);
-    assert!(dispatch(&mut c, &mut p, 0x21)
-        .unwrap_err()
-        .contains("descriptors"));
+    assert!(
+        dispatch(&mut c, &mut p, 0x21)
+            .unwrap_err()
+            .contains("descriptors")
+    );
     // An unknown command: the server closes the session; every later request fails.
     request(&mut p, 99, false, &[0; 8]);
     assert_eq!(send(&mut p, &mut c, sm).0, result::SESSION_CLOSED);
@@ -567,14 +571,18 @@ fn hosted_service_control_requests_and_limits() {
     assert_eq!(send(&mut p, &mut c, logger), (result::SUCCESS, None));
     p.write_bytes(t, &m).unwrap();
     c.x[0] = u64::from(logger);
-    assert!(dispatch(&mut c, &mut p, 0x21)
-        .unwrap_err()
-        .contains("converting a domain session"));
+    assert!(
+        dispatch(&mut c, &mut p, 0x21)
+            .unwrap_err()
+            .contains("converting a domain session")
+    );
     request(&mut p, 9, false, &[]);
     c.x[0] = u64::from(clone);
-    assert!(dispatch(&mut c, &mut p, 0x21)
-        .unwrap_err()
-        .contains("unknown command"));
+    assert!(
+        dispatch(&mut c, &mut p, 0x21)
+            .unwrap_err()
+            .contains("unknown command")
+    );
     // The name cannot be registered by the guest; CMIF Close ends the session.
     let sm = connect(&mut p, &mut c);
     tipc_register_client(&mut p, &mut c, sm);
@@ -757,9 +765,11 @@ fn apm_performance_mode_and_configuration() {
     }
     control(&mut p, 3, &[]);
     c.x[0] = u64::from(apm);
-    assert!(dispatch(&mut c, &mut p, 0x21)
-        .unwrap_err()
-        .contains("pointer-buffer size"));
+    assert!(
+        dispatch(&mut c, &mut p, 0x21)
+            .unwrap_err()
+            .contains("pointer-buffer size")
+    );
 }
 
 #[test]
@@ -1114,23 +1124,10 @@ fn fsp_srv_service_startup() {
 }
 
 #[test]
-fn nvdrv_and_vi_service_startup() {
+fn vi_service_startup() {
     let (mut p, mut c) = process(&[(false, "*")]);
     let sm = connect(&mut p, &mut c);
     tipc_register_client(&mut p, &mut c, sm);
-
-    // nvdrv
-    let nv = service(&mut p, &mut c, sm, "nvdrv");
-    // Initialize (cmd 3)
-    request(&mut p, 3, false, &[0; 4]);
-    assert_eq!(send(&mut p, &mut c, nv), (result::SUCCESS, None));
-    assert_eq!(reply_result(&p), result::SUCCESS);
-    // Open (cmd 0) -> fd 1, err 0
-    request(&mut p, 0, false, &[]);
-    assert_eq!(send(&mut p, &mut c, nv), (result::SUCCESS, None));
-    assert_eq!(reply_result(&p), result::SUCCESS);
-    assert_eq!(reply_u32(&p, 0x20), 1); // fd
-    assert_eq!(reply_u32(&p, 0x24), 0); // err
 
     // vi:u
     let vi = service(&mut p, &mut c, sm, "vi:u");

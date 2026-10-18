@@ -395,6 +395,8 @@ pub struct Kernel {
     pub ipc: ipc::IpcStats,
     /// State of the services hosted by the runtime.
     pub host: crate::services::HostState,
+    /// Process-owned NVIDIA host; never cloned with service/domain state.
+    pub nvidia: crate::nvidia::State,
     /// Process-local region (TLS slot 0 of the first ThreadLocal page).
     pub process_local_region: u64,
     pub heap_size: u64,
@@ -535,6 +537,7 @@ impl Process {
             pending_replies: Vec::new(),
             ipc: ipc::IpcStats::default(),
             host: crate::services::HostState::default(),
+            nvidia: crate::nvidia::State::default(),
             process_local_region: 0,
             heap_size: 0,
             svc_counts: BTreeMap::new(),

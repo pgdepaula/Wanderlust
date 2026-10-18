@@ -6,6 +6,7 @@ pub mod fp;
 pub mod horizon;
 pub mod input;
 pub mod ipc;
+pub mod nvidia;
 pub mod sdl;
 pub mod services;
 pub mod simd;
@@ -1172,6 +1173,17 @@ fn json_string(text: &str) -> String {
 /// every thread exits, or execution faults. Prints one JSON report on stdout.
 /// Options: `--steps N` (total guest instructions), `--quantum N` (instructions per slice).
 pub fn launch_horizon(program: &Program, memory: Memory, image: &ProcessImage) -> i32 {
+    launch_horizon_with_nvidia(program, memory, image, None)
+}
+
+/// Composes an explicitly installed process-local NVIDIA backend before guest execution.
+/// The backend must implement the scoped memory and completion contract in `nvidia`.
+pub fn launch_horizon_with_nvidia(
+    program: &Program,
+    memory: Memory,
+    image: &ProcessImage,
+    host: Option<Box<dyn nvidia::Host>>,
+) -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut limit = 10_000_000_000u64;
     let mut quantum = threads::DEFAULT_QUANTUM;
@@ -1210,6 +1222,12 @@ pub fn launch_horizon(program: &Program, memory: Memory, image: &ProcessImage) -
             return 2;
         }
     };
+    if let Some(host) = host {
+        if let Err(error) = process.kernel.as_mut().unwrap().nvidia.install(host) {
+            eprintln!("NVIDIA backend installation: {error:?}");
+            return 3;
+        }
+    }
     let mut cpu = cpu;
     if image.homebrew {
         if let Err(e) = process.homebrew_entry(&mut cpu) {

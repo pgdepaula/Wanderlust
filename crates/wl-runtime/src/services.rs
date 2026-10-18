@@ -19,10 +19,10 @@
 //!
 //! Requests the model does not cover (domains, unknown commands, a request layout that
 //! differs from the command's) are explicit faults rather than replies.
-use crate::horizon::{self, result, Kernel};
+use crate::horizon::{self, Kernel, result};
 use crate::ipc::{Endpoint, Request};
 use crate::threads;
-use crate::{ipc, Memory};
+use crate::{Memory, ipc};
 
 /// An object behind a session to a hosted service.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,31 +108,22 @@ const AM_POINTER_BUFFER_SIZE: u16 = 0x1000;
 /// Minimal valid specification-conformant empty RomFS image (header, dir hash table, root dir).
 const EMPTY_ROMFS: [u8; 128] = [
     // 0x00: header_size = 0x50
-    0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // 0x08: dir_hash_table_offset = 0x50
+    0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x08: dir_hash_table_offset = 0x50
     0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     // 0x10: dir_hash_table_size = 0x0C (3 buckets)
-    0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // 0x18: dir_table_offset = 0x5C
+    0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x18: dir_table_offset = 0x5C
     0x5c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     // 0x20: dir_table_size = 0x18 (24 bytes)
     0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     // 0x28: file_hash_table_offset = 0x74
     0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     // 0x30: file_hash_table_size = 0x0C (3 buckets)
-    0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // 0x38: file_table_offset = 0x80
+    0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x38: file_table_offset = 0x80
+    0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x40: file_table_size = 0x00
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x48: file_data_offset = 0x80
     0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // 0x40: file_table_size = 0x00
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // 0x48: file_data_offset = 0x80
-    0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-
     // 0x50: dir hash table (3 buckets: bucket 0 points to root dir entry at offset 0, buckets 1 & 2 empty)
-    0x00, 0x00, 0x00, 0x00,
-    0xff, 0xff, 0xff, 0xff,
-    0xff, 0xff, 0xff, 0xff,
-
+    0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
     // 0x5C: root dir entry (24 bytes: parent=0, sibling=-1, child=-1, file=-1, hash=-1, name_len=0)
     0x00, 0x00, 0x00, 0x00, // parent: 0 (points to self)
     0xff, 0xff, 0xff, 0xff, // sibling: none
@@ -140,11 +131,8 @@ const EMPTY_ROMFS: [u8; 128] = [
     0xff, 0xff, 0xff, 0xff, // file: none
     0xff, 0xff, 0xff, 0xff, // next_hash: none
     0x00, 0x00, 0x00, 0x00, // name_len: 0
-
     // 0x74: file hash table (3 buckets: all empty 0xFFFFFFFF)
-    0xff, 0xff, 0xff, 0xff,
-    0xff, 0xff, 0xff, 0xff,
-    0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
 ];
 
 /// `lm::LogDestination_TargetManager`, the destination before any SetDestination.
@@ -1409,37 +1397,10 @@ pub(crate) fn request(
             Done::data(&(EMPTY_ROMFS.len() as u64).to_le_bytes())
         }
         (HostObject::Storage, _) => Done::ok(),
-        (HostObject::NvDrvServices, 3) => {
-            // Initialize(u32 transfer_mem_size, copy_handle proc, copy_handle tmem): out u32 error_code (0)
-            Done::data(&0u32.to_le_bytes())
+        (HostObject::NvDrvServices, _) => {
+            let reply = crate::nvidia::request(memory, k, req, command, args)?;
+            Done::data(&reply.data)
         }
-        (HostObject::NvDrvServices, 0) => {
-            // Open(DeviceName in buffer): out u32 fd, out u32 error_code (0)
-            let mut out = [0u8; 8];
-            out[..4].copy_from_slice(&1u32.to_le_bytes()); // fd 1
-            out[4..8].copy_from_slice(&0u32.to_le_bytes()); // error_code 0
-            Done::data(&out)
-        }
-        (HostObject::NvDrvServices, 1 | 11 | 12) => {
-            // Ioctl, Ioctl2, Ioctl3: out u32 error_code (0)
-            Done::data(&0u32.to_le_bytes())
-        }
-        (HostObject::NvDrvServices, 2) => {
-            // Close: out u32 error_code (0)
-            Done::data(&0u32.to_le_bytes())
-        }
-        (HostObject::NvDrvServices, 4) => {
-            // QueryEvent: out copy handle, out u32 error_code (0)
-            let e = host_event(k, |h| &mut h.nvdrv_event, true);
-            let mut done = copy_event(k, e);
-            done.data = 0u32.to_le_bytes().to_vec();
-            done
-        }
-        (HostObject::NvDrvServices, 8) => {
-            // SetAruid: out u32 error_code (0)
-            Done::data(&0u32.to_le_bytes())
-        }
-        (HostObject::NvDrvServices, _) => Done::data(&0u32.to_le_bytes()),
 
         (HostObject::ViUser, 0..=2) => {
             // GetDisplayService: out object IApplicationDisplayService

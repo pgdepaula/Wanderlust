@@ -15,7 +15,7 @@
 //! GetServiceHandle for a service that is not registered is deferred: the client stays
 //! blocked until the service is registered, and then receives the reply in the protocol of
 //! its request.
-use crate::horizon::{result, Kernel, Object};
+use crate::horizon::{Kernel, Object, result};
 use crate::services::{self, HostObject, Outcome};
 use crate::threads::{self, Wait};
 use crate::{Cpu, Memory, Stop};
@@ -355,6 +355,12 @@ pub fn send_sync_request(
     memory
         .read_into(tls, &mut message)
         .map_err(|e| format!("IPC message buffer unreadable: {e}"))?;
+    // Validate reply storage before a hosted operation can allocate handles or
+    // submit irreversible GPU work. TLS permissions must not cause a late retry.
+    if memory.validate_write(tls, MESSAGE_BUFFER_SIZE).is_err() {
+        c.x[0] = u64::from(result::INVALID_CURRENT_MEMORY);
+        return Ok(None);
+    }
     // Kernel-side message validation: everything must fit the 0x100-byte buffer.
     let mut req = parse_request(&message);
     if req.size > MESSAGE_BUFFER_SIZE {
