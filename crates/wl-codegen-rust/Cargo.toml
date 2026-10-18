@@ -12,3 +12,4 @@ wl-aarch64.workspace = true
 wl-runtime.workspace = true
 sha2.workspace = true
 serde.workspace = true
+serde_json.workspace = true

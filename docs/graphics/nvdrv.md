@@ -9,8 +9,9 @@ commands or implement Horizon kernel handles.
 `wl_guest_runtime` identity used by a generated executable. Its `NativeHost`
 implements the runtime's installed NVIDIA service interface. The integration
 test compiles that module against the workspace runtime and enters through
-literal HIPC/CMIF requests. The default AOT launcher does not automatically link
-or install it; target-correct native dependency composition remains necessary.
+literal HIPC/CMIF requests. `recompile --horizon --native-gpu` now also emits it
+into the final AOT executable and installs the backend before guest execution.
+The CPU-only launcher remains available without this explicit option.
 
 ## Wire subset
 
@@ -92,6 +93,31 @@ two readbacks and two synchronization points. Conservative notifications covered
 counts on the second draw. Metadata copies and GPU transfers remain real costs;
 this is not an asynchronous or zero-copy service path.
 
-These tests construct messages on the host using the actual runtime dispatcher.
-They do not prove an AArch64 homebrew NVIDIA submission, original-game command
-execution, VI presentation or a rendered Tears of the Kingdom frame.
+Those two tests construct messages on the host using the actual dispatcher.
+The additional `tests/horizon/nvidia.c` fixture instead executes real AArch64
+libnx code. It initializes the service, opens the three supported nodes, pins
+and maps allocation subranges, binds B197 and submits two indexed draws. The
+guest checks inside/outside pixels and thresholds 2/4, unmaps its resources and
+closes its handles. No host creates its ioctl messages or invokes its draw.
+
+## Target-correct AOT composition
+
+The optional GPU build invokes Cargo for the exact host/requested target and
+selects dependencies from `compiler-artifact` messages. Target rlibs, host
+proc-macro libraries and explicit native import/static archives are copied into
+a content-keyed snapshot. The compiler identity, target, lockfile, adapter text
+and every artifact digest determine its key. Native framework search paths
+remain unsupported. No newest-file or directory-glob artifact selection is used.
+
+An owned digest manifest is checked before final linking and before atomic
+executable publication. CPU units still reference only `wl_guest_runtime`, so
+ordinary GPU dependency updates do not invalidate their cache. A dedicated
+Cargo target directory avoids taking the outer test runner's build-directory
+lock recursively. The source workspace and native toolchain are trusted build
+inputs; this does not sandbox compilation or make artifact snapshots immutable
+against arbitrary host filesystem writes.
+
+The homebrew integration executes both cold and warm generated binaries and
+requires unchanged artifact identity and zero runtime/unit cache misses on the
+warm build. It does not establish original-game command execution, VI
+presentation or a rendered Tears of the Kingdom frame.

@@ -38,3 +38,10 @@ fd188bad65649e28adbb68ff74f27a8b623da19f27db8bc88fe2b32b383f2ec2  threads/main
 86ab1480d626cfe75aeb06896f28255b4f48165d55bef4ed2397c70fdbf5a675  threads/main.npdm
 6483eaae9ed654b4f6bb810950bdf1d2af953fc84b6ca15aeba17175aa9a61bf  ipc/main
 86ab1480d626cfe75aeb06896f28255b4f48165d55bef4ed2397c70fdbf5a675  ipc/main.npdm
+
+NVIDIA channel fixture: nvidia/main and nvidia/main.npdm are built from
+nvidia.c with the same toolchain and recipe. nvidia_shaders.h contains original
+independently assembled Maxwell fixtures from crates/wl-gpu/tests/fixtures/maxwell;
+their assembly sources and provenance remain in that directory. No game code.
+062089dad7a2c6b96b0268ce222d5b46c5a94dbcfab854435d7906f0aa86fecc  nvidia/main
+86ab1480d626cfe75aeb06896f28255b4f48165d55bef4ed2397c70fdbf5a675  nvidia/main.npdm

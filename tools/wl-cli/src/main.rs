@@ -23,7 +23,7 @@ USAGE:
                      [--roots-file FILE] [--summary]
   wanderlust recompile INPUT [analyze options] --out EXECUTABLE [--target TRIPLE] [--emit-only]
                        [--jobs N] [--cache-dir DIR] [--unit-shift BITS]
-                       [--horizon [--memory-limit BYTES]]
+                       [--horizon [--memory-limit BYTES] [--native-gpu]]
 
 intake identifies NSP/PFS0 packages, NCA headers, tickets, CNMT XML, extracted ExeFS
 directories and NSO files without modifying them; --verify-content streams SHA-256 over
@@ -54,8 +54,10 @@ handle (NRO: X0 = loader configuration, X1 = -1, X30 = loader return), an NPDM-s
 and TLS; Horizon SVCs, guest threads and the sm: service are served by the runtime. Process
 parameters come from main.npdm when present; --memory-limit sets the process memory size
 (default 512 MiB; NPDM applications default to 3296 MiB). An explicit limit is
-never replaced by the NPDM application default. The executable accepts --steps and --quantum. Output is experimental; no
-TOTK boot, other Horizon services or GPU support is claimed.";
+never replaced by the NPDM application default. The executable accepts --steps and --quantum.
+--native-gpu installs the bounded native NVIDIA backend and builds its dependencies with
+Cargo for the selected target. It requires this source workspace and an available host GPU;
+it does not add unsupported Maxwell instructions, services or game compatibility.";
 
 fn number(v: &str) -> Result<u64> {
     if let Some(v) = v.strip_prefix("0x") {
@@ -88,6 +90,7 @@ struct Options {
     unit_shift: u32,
     horizon: bool,
     memory_limit: Option<u64>,
+    native_gpu: bool,
 }
 fn utf8(value: &OsString) -> Result<&str> {
     value
@@ -131,6 +134,7 @@ fn options(args: &[OsString]) -> Result<Options> {
         unit_shift: wl_codegen_rust::EmitOptions::default().unit_shift,
         horizon: false,
         memory_limit: None,
+        native_gpu: false,
     };
     let mut used = Vec::new();
     let mut i = 2;
@@ -146,6 +150,7 @@ fn options(args: &[OsString]) -> Result<Options> {
             "--summary" => o.summary = true,
             "--verify-content" => o.verify_content = true,
             "--horizon" => o.horizon = true,
+            "--native-gpu" => o.native_gpu = true,
             "--base" | "--entry" | "--seed" | "--out" | "--target" | "--link" | "--roots-file"
             | "--examples" | "--jobs" | "--cache-dir" | "--unit-shift" | "--memory-limit" => {
                 i += 1;
@@ -212,6 +217,7 @@ fn options(args: &[OsString]) -> Result<Options> {
             "--unit-shift",
             "--horizon",
             "--memory-limit",
+            "--native-gpu",
         ],
     };
     if let Some(bad) = used.iter().find(|k| !allowed.contains(&k.as_str())) {
@@ -224,6 +230,9 @@ fn options(args: &[OsString]) -> Result<Options> {
             }
             (command, option) => format!("{command} does not accept {option}"),
         });
+    }
+    if o.native_gpu && !o.horizon {
+        return Err("--native-gpu requires --horizon".into());
     }
     Ok(o)
 }
@@ -627,7 +636,12 @@ fn run(args: &[OsString]) -> Result<()> {
             .collect(),
     };
     let started = Instant::now();
-    let generated = wl_codegen_rust::emit(
+    let emit = if o.native_gpu {
+        wl_codegen_rust::emit_with_native_gpu
+    } else {
+        wl_codegen_rust::emit
+    };
+    let generated = emit(
         &image,
         &program,
         stem,
@@ -685,17 +699,25 @@ fn run(args: &[OsString]) -> Result<()> {
                     std::thread::available_parallelism().map_or(1, |n| n.get().min(4))
                 })
         });
-        Some(wl_codegen_rust::build::build(
-            &generated,
-            &source,
-            &output,
-            &wl_codegen_rust::build::BuildConfig {
-                target: o.target.clone(),
-                cache_dir,
-                jobs,
-                opt_level: 2,
-            },
-        )?)
+        let cfg = wl_codegen_rust::build::BuildConfig {
+            target: o.target.clone(),
+            cache_dir,
+            jobs,
+            opt_level: 2,
+        };
+        Some(if o.native_gpu {
+            wl_codegen_rust::build::build_with_native_gpu(
+                &generated,
+                &source,
+                &output,
+                &cfg,
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .as_path(),
+            )?
+        } else {
+            wl_codegen_rust::build::build(&generated, &source, &output, &cfg)?
+        })
     };
     let compile_seconds = started.elapsed().as_secs_f64();
     let unit_source_bytes: usize = generated.units.iter().map(|u| u.source.len()).sum();
@@ -728,6 +750,7 @@ fn run(args: &[OsString]) -> Result<()> {
             "units_wall_seconds": r.units_wall_seconds,
             "slowest_unit_seconds": r.units.iter().map(|u| u.seconds).fold(0.0, f64::max),
             "main_seconds": r.main_seconds,
+            "native_gpu": r.native_gpu,
         })),
         "memory_image_bytes": blob_bytes,
         "executable_bytes": executable_bytes,

@@ -18,7 +18,7 @@ The eventual compatibility target is the original Switch release of Tears of the
 
 **Experimental implementation and subsystem integration.** The project can compile and execute small AArch64 fixtures and source-built homebrew applications, and it can render independently constructed Maxwell workloads on actual host GPUs.
 
-The NVIDIA service adapter has a tested path from synthetic runtime service messages through GPU mappings, GPFIFO, Maxwell shaders and indexed drawing to verified framebuffer pixels. Connecting that adapter to generated guest executables and proving guest-issued graphics submissions remain integration work. Runtime service coverage and Maxwell instruction/state coverage are still limited.
+The NVIDIA service adapter is connected to generated executables through `--native-gpu`. A source-built AArch64 homebrew program initializes NVIDIA services, allocates and maps guest buffers, submits Maxwell commands and verifies two indexed GPU draws. Synthetic host-message tests also cover partial faults and retry safety. Runtime service coverage and Maxwell instruction/state coverage are still limited; this does not establish original-game graphics or VI presentation.
 
 **A playable TOTK build, an original-game GPU command stream reaching this backend, and a verified original TOTK frame have not been demonstrated.** Passing a synthetic rendering test does not establish those milestones. Current code and tests are intended for research, development and conformance testing.
 
@@ -72,6 +72,16 @@ cargo run --locked -- recompile crates/wl-nro/tests/fixtures/probe.nro \
 ```
 
 Use an `.exe` output name on Windows. `--allow-unsupported` emits precise runtime faults for unsupported reachable instructions; it does not add support for those instructions.
+
+To exercise guest-issued NVIDIA submissions using the original homebrew fixture:
+
+```sh
+cargo run --locked -- recompile tests/horizon/nvidia \
+  --horizon --allow-unsupported --native-gpu --out generated/nvidia-probe
+./generated/nvidia-probe --steps 3000000
+```
+
+The guest verifies two rendered framebuffer results and reports them through debug output. This is a graphics conformance program, not TOTK or a VI presentation implementation. `--native-gpu` requires this source workspace, Cargo and a supported GPU. It compiles target-specific graphics dependencies and retains a checked artifact snapshot in the native build cache; the first build has additional time and storage costs. `WL_GPU_TARGET_DIR` can select a dedicated GPU dependency build directory.
 
 For local executable inputs, see [module loading](docs/platform/module-loading.md), [executable formats](docs/platform/executable-formats.md) and [NRO support](docs/platform/nro.md). Extracted, decrypted inputs must be supplied locally. Wanderlust does not distribute game code, game assets, console keys or firmware.
 

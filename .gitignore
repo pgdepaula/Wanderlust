@@ -60,3 +60,5 @@ title.keys
 !tests/horizon/threads/main.npdm
 !tests/horizon/ipc/main
 !tests/horizon/ipc/main.npdm
+!tests/horizon/nvidia/main
+!tests/horizon/nvidia/main.npdm

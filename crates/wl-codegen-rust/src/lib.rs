@@ -1484,6 +1484,31 @@ pub fn emit(
     modules: &[(u64, u64, String)],
     options: EmitOptions,
 ) -> Result<Emitted> {
+    emit_inner(image, program, blob_stem, modules, options, false)
+}
+
+/// Emits a Horizon executable which installs the concrete GPU driver.
+pub fn emit_with_native_gpu(
+    image: &Image,
+    program: &Program,
+    blob_stem: &str,
+    modules: &[(u64, u64, String)],
+    options: EmitOptions,
+) -> Result<Emitted> {
+    if options.horizon.is_none() {
+        return Err("native GPU requires a Horizon process".into());
+    }
+    emit_inner(image, program, blob_stem, modules, options, true)
+}
+
+fn emit_inner(
+    image: &Image,
+    program: &Program,
+    blob_stem: &str,
+    modules: &[(u64, u64, String)],
+    options: EmitOptions,
+    native_gpu: bool,
+) -> Result<Emitted> {
     if image.relocation == RelocationState::NotApplied {
         return Err("module has MOD0 dynamic relocations that were not applied; load it as a process (directory input) so wl-loader can link it".into());
     }
@@ -1632,11 +1657,21 @@ pub fn emit(
                 h.service_access
             )
             .unwrap();
-            "launch_horizon(&PROGRAM, m, &IMAGE)".to_string()
+            if native_gpu {
+                "launch_horizon_with_nvidia(&PROGRAM, m, &IMAGE, Some(Box::new(match native_gpu::NativeHost::new() { Ok(host) => host, Err(error) => { eprintln!(\"NVIDIA backend creation: {error}\"); std::process::exit(3); } })))".to_string()
+            } else {
+                "launch_horizon(&PROGRAM, m, &IMAGE)".to_string()
+            }
         }
     };
     if options.horizon.is_none() {
         out.push_str("Ok(m) }\n");
+    }
+    if native_gpu {
+        out.push_str("pub mod native_gpu {\n");
+        // Leading inner documentation applies to this module, not the main crate.
+        out.push_str(build::native_adapter_source());
+        out.push_str("\n}\n");
     }
     writeln!(out, "fn main() {{ let m = match setup() {{ Ok(m) => m, Err(e) => {{ eprintln!(\"mapping: {{e}}\"); std::process::exit(2); }} }}; std::process::exit({launcher}); }}").unwrap();
     Ok(Emitted {

@@ -19,6 +19,12 @@ use std::{
 use wl_common::Result;
 
 use crate::Emitted;
+#[path = "native_gpu.rs"]
+mod native_gpu;
+pub use native_gpu::NativeGpuReport;
+pub(crate) fn native_adapter_source() -> &'static str {
+    native_gpu::ADAPTER
+}
 
 /// Runtime sources compiled into the `wl_guest_runtime` rlib.
 pub const RUNTIME_SOURCES: [(&str, &str); 13] = [
@@ -79,6 +85,7 @@ pub struct BuildReport {
     pub unit_compile_seconds: f64,
     pub units_wall_seconds: f64,
     pub main_seconds: f64,
+    pub native_gpu: Option<NativeGpuReport>,
 }
 
 /// A compiled (or cached) rlib: path, whether it came from the cache, compile seconds.
@@ -186,6 +193,28 @@ pub fn build(
     output: &Path,
     cfg: &BuildConfig,
 ) -> Result<BuildReport> {
+    build_inner(emitted, main_source, output, cfg, None)
+}
+
+/// Builds a GPU-enabled final executable against target-correct Cargo artifacts.
+/// CPU translation units still link only the exact embedded guest runtime.
+pub fn build_with_native_gpu(
+    emitted: &Emitted,
+    main_source: &Path,
+    output: &Path,
+    cfg: &BuildConfig,
+    workspace: &Path,
+) -> Result<BuildReport> {
+    build_inner(emitted, main_source, output, cfg, Some(workspace))
+}
+
+fn build_inner(
+    emitted: &Emitted,
+    main_source: &Path,
+    output: &Path,
+    cfg: &BuildConfig,
+    gpu_workspace: Option<&Path>,
+) -> Result<BuildReport> {
     fs::create_dir_all(&cfg.cache_dir).map_err(|e| format!("{}: {e}", cfg.cache_dir.display()))?;
     let version = rustc()
         .arg("-vV")
@@ -195,6 +224,9 @@ pub fn build(
         return Err("rustc -vV failed".into());
     }
     let toolchain = String::from_utf8_lossy(&version.stdout).into_owned();
+    let native = gpu_workspace
+        .map(|workspace| native_gpu::prepare(workspace, cfg, &toolchain))
+        .transpose()?;
     let flags = flags_identity(cfg);
     let mut runtime_parts: Vec<&[u8]> =
         vec![b"wl_guest_runtime", toolchain.as_bytes(), flags.as_bytes()];
@@ -301,6 +333,10 @@ pub fn build(
         .args(["--crate-name", "wanderlust_guest", "-L"])
         .arg(format!("crate={}", deps.display()));
     common(&mut cmd, cfg);
+    if let Some(native) = &native {
+        native.verify()?;
+        native.link(&mut cmd);
+    }
     // Extra linker configuration is deliberately a single executable path, not a shell string.
     if let Some(linker) = std::env::var_os("WL_LINKER") {
         if cfg.target.as_deref() == Some("x86_64-pc-windows-gnu") {
@@ -315,8 +351,15 @@ pub fn build(
                 .arg(format!("native={}", lib.to_string_lossy()));
         }
     }
-    cmd.arg("-o").arg(output);
+    let temporary = native
+        .as_ref()
+        .map(|_| native_gpu::temporary_output(output));
+    cmd.arg("-o").arg(temporary.as_deref().unwrap_or(output));
     run(cmd, "executable crate")?;
+    if let Some(native) = &native {
+        native.verify()?;
+        fs::rename(temporary.as_ref().unwrap(), output).map_err(|e| e.to_string())?;
+    }
     let cache_hits = units.iter().filter(|u| u.cached).count() + runtime.cached as usize;
     Ok(BuildReport {
         toolchain: toolchain.lines().next().unwrap_or_default().to_string(),
@@ -328,5 +371,6 @@ pub fn build(
         main_seconds: started.elapsed().as_secs_f64(),
         runtime,
         units,
+        native_gpu: native.map(|v| v.report),
     })
 }
