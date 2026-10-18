@@ -6,18 +6,14 @@
 //! (`total`), which zeroes the upper half for 64-bit arrangements and scalar forms.
 // Helpers take the operand list of the instruction they implement.
 #![allow(clippy::too_many_arguments)]
-use crate::{fp, Cpu};
+use crate::{Cpu, fp};
 
 /// FPSR.QC, the cumulative saturation flag.
 pub const QC: u64 = 1 << 27;
 
 #[inline]
 pub fn emask(e: u32) -> u64 {
-    if e >= 64 {
-        u64::MAX
-    } else {
-        (1u64 << e) - 1
-    }
+    if e >= 64 { u64::MAX } else { (1u64 << e) - 1 }
 }
 #[inline]
 pub fn total_mask(bits: u32) -> u128 {
@@ -90,11 +86,7 @@ pub const SQRDMULH: u8 = 32;
 fn shift_by_register(x: u64, amount: u64, e: u32, signed: bool) -> u64 {
     let s = amount as u8 as i8 as i32;
     let r = if s >= 0 {
-        if s >= e as i32 {
-            0
-        } else {
-            x << s
-        }
+        if s >= e as i32 { 0 } else { x << s }
     } else {
         let s = -s;
         if signed {

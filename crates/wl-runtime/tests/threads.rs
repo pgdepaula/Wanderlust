@@ -104,11 +104,12 @@ fn create_thread_initial_context_tls_and_handles() {
         (ENTRY, 0xfeed, stack_top & !15, t.tls)
     );
     assert_eq!(ctx.x[18] & 1, 1);
-    assert!(ctx
-        .x
-        .iter()
-        .enumerate()
-        .all(|(i, &x)| matches!(i, 0 | 18) || x == 0));
+    assert!(
+        ctx.x
+            .iter()
+            .enumerate()
+            .all(|(i, &x)| matches!(i, 0 | 18) || x == 0)
+    );
     assert_eq!(ctx.fpcr, 0x0300_0000);
     let tls = t.tls;
     assert_eq!(
@@ -504,9 +505,11 @@ fn map_memory_aliases_heap_into_the_stack_region() {
     );
     // A consistent part of the alias is valid on the kernel but not modelled: explicit fault.
     c.x[..3].copy_from_slice(&[dst, heap + 0x1000, 0x1000]);
-    assert!(dispatch(&mut c, &mut p, 0x05)
-        .unwrap_err()
-        .contains("part of a mapping"));
+    assert!(
+        dispatch(&mut c, &mut p, 0x05)
+            .unwrap_err()
+            .contains("part of a mapping")
+    );
     assert_eq!(
         svc(&mut p, &mut c, 0x05, &[dst, heap + 0x1000, 0x2000]).0,
         result::SUCCESS

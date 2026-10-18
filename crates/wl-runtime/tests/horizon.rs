@@ -111,7 +111,7 @@ fn bootstrap_state_follows_the_nso_entry_contract() {
     assert_eq!(c.x[0], 0);
     assert_eq!(c.x[1], u64::from(t.handle));
     assert_eq!(t.handle, 1022 | 1 << 15); // 1023-entry table
-                                          // Every other register is zero except X18, the kernel's (here deterministic) odd CFI value.
+    // Every other register is zero except X18, the kernel's (here deterministic) odd CFI value.
     assert!(c.x[2..18].iter().chain(&c.x[19..]).all(|&x| x == 0));
     assert_eq!(c.x[18] & 1, 1);
     assert_eq!(c.sp, t.stack.end);
@@ -137,16 +137,18 @@ fn bootstrap_state_follows_the_nso_entry_contract() {
     let mut bad = config();
     bad.main_thread_stack_size = 0x1234;
     let m = Memory::default();
-    assert!(Process::horizon(
-        m,
-        CODE,
-        Range {
-            start: CODE,
-            end: CODE + 0x1000
-        },
-        bad
-    )
-    .is_err());
+    assert!(
+        Process::horizon(
+            m,
+            CODE,
+            Range {
+                start: CODE,
+                end: CODE + 0x1000
+            },
+            bad
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -638,7 +640,10 @@ fn transfer_memory_creation_and_close() {
     ));
 
     // Close handle.
-    assert_eq!(svc(&mut p, &mut c, 0x16, &[u64::from(handle)]), result::SUCCESS);
+    assert_eq!(
+        svc(&mut p, &mut c, 0x16, &[u64::from(handle)]),
+        result::SUCCESS
+    );
     let k = p.kernel.as_ref().unwrap();
     assert_eq!(k.handles.get(handle), None);
 }

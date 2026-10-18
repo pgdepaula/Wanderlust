@@ -110,9 +110,11 @@ fn budget_and_services() {
         memory: Memory::default(),
         kernel: None,
     };
-    assert!(service(&mut c, &mut p, 1)
-        .unwrap_err()
-        .contains("guest_pc=0x8"));
+    assert!(
+        service(&mut c, &mut p, 1)
+            .unwrap_err()
+            .contains("guest_pc=0x8")
+    );
     assert_eq!(c.x, old);
     assert_eq!(service(&mut c, &mut p, 7).unwrap(), Some(Stop::ExitProcess));
 }

@@ -30,3 +30,33 @@ tests/**/main
 # Retain tracked ISA fixtures needed by wl-gpu compiler unit tests
 !crates/wl-gpu/tests/fixtures/maxwell/*.bin
 !crates/wl-nro/tests/fixtures/*.nro
+
+# Local coordination, editor state and execution diagnostics
+/.codex/
+/.claude/
+/run.err
+/run.json
+*.pem
+*.pfx
+*.p12
+.env
+.env.*
+
+# Private console material and commercial inputs
+prod.keys
+title.keys
+*.nsp
+*.xci
+*.nca
+*.tik
+*.cert
+*.nso
+*.romfs
+
+# Redistributable libnx fixtures, rebuilt from tests/horizon/*.c
+!tests/horizon/probe/main
+!tests/horizon/probe/main.npdm
+!tests/horizon/threads/main
+!tests/horizon/threads/main.npdm
+!tests/horizon/ipc/main
+!tests/horizon/ipc/main.npdm

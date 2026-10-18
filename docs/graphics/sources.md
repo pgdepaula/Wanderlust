@@ -86,9 +86,9 @@ expose identical compression support. Decoding to RGBA adds CPU conversion and
 upload bandwidth; BCn transcoding introduces a separate quality/cost decision.
 
 Only permissively licensed dependencies were introduced. No GPL emulator dependency,
-proprietary shader, asset, game dump or decryption material is included. The root
-repository currently contains no license file; this assessment does not assign a
-new license to the project's own code or replace dependency notice obligations.
+proprietary shader, asset, game dump or decryption material is included.
+Project-authored code uses the root MIT license. Dependency and fixture licenses
+and notice obligations remain separate.
 
 ## Compressed texture implementation
 

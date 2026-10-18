@@ -28,3 +28,13 @@ libgcc (https://gcc.gnu.org/)
 
 GCC runtime library code is distributed under the GNU General Public License version 3 with
 the GCC Runtime Library Exception, version 3.1.
+
+Redistributable fixture build: devkitA64 16.1.0, libnx 4.12.0, rebuilt from
+the adjacent C sources using tools/python/homebrew.py. SHA-256 file identities:
+
+12d823e7496d0c82a0eeab665cf14bb6ed9b4554c22ae8a3026ef99e11cc6e73  probe/main
+86ab1480d626cfe75aeb06896f28255b4f48165d55bef4ed2397c70fdbf5a675  probe/main.npdm
+fd188bad65649e28adbb68ff74f27a8b623da19f27db8bc88fe2b32b383f2ec2  threads/main
+86ab1480d626cfe75aeb06896f28255b4f48165d55bef4ed2397c70fdbf5a675  threads/main.npdm
+6483eaae9ed654b4f6bb810950bdf1d2af953fc84b6ca15aeba17175aa9a61bf  ipc/main
+86ab1480d626cfe75aeb06896f28255b4f48165d55bef4ed2397c70fdbf5a675  ipc/main.npdm
