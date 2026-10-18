@@ -11,7 +11,7 @@
 | Atmosphère `libstratosphere` (`source/sf/hipc/sf_hipc_server_session_manager.cpp`, `source/sf/cmif/sf_cmif_service_dispatch.cpp`, `include/stratosphere/sf/impl/sf_impl_command_serialization.hpp`, `include/stratosphere/tipc/*`, `source/lm/*`) and `stratosphere/sm` | same | CMIF and TIPC server message handling, sm and lm behaviour | same |
 | SwitchBrew wiki (PTM services, Applet Manager services, IPC Marshalling) | pages as of 2026-10-14 | apm and am command tables and values, NoMessage | documentation, restated |
 | am sysmodule of firmware 22.1.0 (program 0100000000000023), analysed statically from a local copy | firmware 22.1.0 | am's pointer-buffer size | values only; no code or binaries reproduced |
-| libnx (`nx/source/runtime/*`, `nx/source/kernel/svc.s`, `nx/include/switch/arm/tls.h`) | [feebd026](https://github.com/switchbrew/libnx/tree/feebd0263b2fed8fdc6fdf14b5ef46efd85e5d72) | user-mode expectations: crt0, self-relocation, TLS layout, heap and stack setup | ISC |
+| libnx (`nx/source/runtime/*`, `nx/source/kernel/svc.s`, `nx/include/switch/arm/tls.h`) | [feebd026](https://github.com/switchbrew/libnx/tree/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973) | user-mode expectations: crt0, self-relocation, TLS layout, heap and stack setup | ISC |
 
 Values marked *deterministic choice* below are where Horizon is random or indeterminate and the runtime fixes one value.
 
@@ -259,3 +259,51 @@ It retires 32,151 guest instructions with 17 requests and one deferred lookup, i
 The CLI also runs the NRO fixtures of `wl-nro` (`crates/wl-nro/tests/fixtures`): `probe.nro` prints the probe lines (with handle `0x83ff`, from the default 1024-entry table) and returns to the loader with result 0 after 64,806 guest instructions, on Linux and Windows. `ipc_probe.nro` asks sm for `time:u`, which no one registers; the deferred request leaves its only thread waiting forever, reported as a `deadlock` fault naming `sm:GetServiceHandle("time:u")`.
 
 The fixture binaries contain libnx (ISC, notice in [`tests/horizon/NOTICE`](../../tests/horizon/NOTICE)), newlib (licences reproduced in [`tests/horizon/COPYING.NEWLIB`](../../tests/horizon/COPYING.NEWLIB)) and libgcc (GPL with the GCC Runtime Library Exception) from devkitA64.
+
+## Shared CPU and graphics memory access
+
+`Memory::load`, vector loads and borrowed byte reads observe the same stored
+little-endian bytes. Scalar reads do not replace data based on numerical guest
+addresses. Writes require an existing writable mapping; an unmapped address
+never implicitly allocates guest pages. Explicit allocation belongs to process
+memory operations. Vector widths outside1..16 and invalid scalar widths return
+errors before slicing.
+
+`Memory::validate_write(address, size)` preflights the complete destination
+without writing or allocating guest pages. With exclusive access to the same
+Memory, the following `write_bytes` checks every mapping and permission before
+copying spanning pieces. This guarantees failure atomicity for mapping and
+permission faults, not host allocation failure or an arbitrary transaction.
+Zero-length byte ranges do not dereference guest addresses. A borrowed read
+still requires one contiguous region; callers needing a gather use `read_into`.
+
+The eight memory conformance tests exercise former address-dependent cases
+with zero and nonzero data, every vector width1..16, truncating stores,
+independent read/write permissions, adjacent regions, gaps, overflow and
+unmodified output after failed preflight. The scalar witness fails against
+the preceding committed runtime: a zero RAM word yields a fabricated nonzero
+scalar value. The corrected runtime passes the same witness.
+
+## Presentation ownership
+
+`threads::run` executes the CPU scheduler without opening a host window.
+`run_with_host` accepts an explicitly caller-owned SDL host. The Horizon
+launcher creates that host on its own thread unless `WL_NO_SDL` is set, and
+retains ownership until execution ends. Scheduler tests can run in parallel
+without independently initializing and destroying process-global SDL video.
+Presentation consumes the display server's current frame, rather than reading
+an assumed framebuffer from a fixed guest address.
+
+The runtime package passes92 tests with the normal parallel test runner after
+this separation, including eight memory tests and16 scheduler tests. The prior
+automatic per-scheduler window initialization reproduced an XCB assertion and
+SIGABRT during the scheduler suite; that was a process abort, not a test pass.
+These tests establish the stated memory/frontend boundaries. Remaining
+title-specific execution redirects and initialization patches elsewhere in the
+runtime are not validated original-game semantics. Retired-instruction counts
+and an open display window do not establish original GPU command execution or
+a rendered game frame. NVIDIA service stubs remain separate from the working
+standalone GPU driver until an actual service-to-driver composition is tested.
+
+Strict all-target runtime Clippy passes. Edited Rust files also pass targeted
+format checks; unrelated legacy workspace formatting is not implied.

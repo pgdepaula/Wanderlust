@@ -4,45 +4,55 @@
 use wl_runtime::{
     display::{DisplayServer, PixelFormat},
     input::{
-        npad, write_npad_state, GamepadState, NpadManager, LIFO_ENTRY_SIZE,
-        LIFO_FULLKEY_OFFSET, LIFO_HANDHELD_OFFSET, LIFO_JOYDUAL_OFFSET, NPAD_ENTRY_SIZE,
-        NPAD_SHM_OFFSET,
+        GamepadState, LIFO_ENTRY_SIZE, LIFO_FULLKEY_OFFSET, LIFO_HANDHELD_OFFSET,
+        LIFO_JOYDUAL_OFFSET, NPAD_ENTRY_SIZE, NPAD_SHM_OFFSET, NpadManager, npad, write_npad_state,
     },
     sdl::SdlHost,
 };
 
 #[test]
 fn xinput_to_switch_face_button_swap() {
-    let mut pad = GamepadState::default();
-
     // Xbox A -> Switch B
-    pad.a = true;
+    let mut pad = GamepadState {
+        a: true,
+        ..Default::default()
+    };
     let (buttons, _, _) = pad.to_switch_npad();
     assert_eq!(buttons, npad::B);
 
     // Xbox B -> Switch A
-    pad = GamepadState { b: true, ..Default::default() };
+    pad = GamepadState {
+        b: true,
+        ..Default::default()
+    };
     let (buttons, _, _) = pad.to_switch_npad();
     assert_eq!(buttons, npad::A);
 
     // Xbox X -> Switch Y
-    pad = GamepadState { x: true, ..Default::default() };
+    pad = GamepadState {
+        x: true,
+        ..Default::default()
+    };
     let (buttons, _, _) = pad.to_switch_npad();
     assert_eq!(buttons, npad::Y);
 
     // Xbox Y -> Switch X
-    pad = GamepadState { y: true, ..Default::default() };
+    pad = GamepadState {
+        y: true,
+        ..Default::default()
+    };
     let (buttons, _, _) = pad.to_switch_npad();
     assert_eq!(buttons, npad::X);
 }
 
 #[test]
 fn xinput_triggers_and_shoulders() {
-    let mut pad = GamepadState::default();
-
     // Bumpers: LB -> Switch L, RB -> Switch R
-    pad.left_shoulder = true;
-    pad.right_shoulder = true;
+    let mut pad = GamepadState {
+        left_shoulder: true,
+        right_shoulder: true,
+        ..Default::default()
+    };
     let (buttons, _, _) = pad.to_switch_npad();
     assert_eq!(buttons, npad::L | npad::R);
 
@@ -61,18 +71,19 @@ fn xinput_triggers_and_shoulders() {
 
 #[test]
 fn xinput_dpad_and_sticks() {
-    let mut pad = GamepadState::default();
-    pad.dpad_up = true;
-    pad.dpad_left = true;
-    pad.start = true; // Plus
-    pad.back = true;  // Minus
-    pad.left_thumb = true; // StickL click
-    pad.right_thumb = true; // StickR click
-
-    pad.thumb_lx = -25000;
-    pad.thumb_ly = 20000;
-    pad.thumb_rx = 28000;
-    pad.thumb_ry = -18000;
+    let pad = GamepadState {
+        dpad_up: true,
+        dpad_left: true,
+        start: true, // Plus
+        back: true,  // Minus
+        left_thumb: true,
+        right_thumb: true,
+        thumb_lx: -25000,
+        thumb_ly: 20000,
+        thumb_rx: 28000,
+        thumb_ry: -18000,
+        ..Default::default()
+    };
 
     let (buttons, stick_l, stick_r) = pad.to_switch_npad();
     assert_eq!(stick_l, (-25000, 20000));
@@ -153,7 +164,7 @@ fn npad_manager_updates_both_player1_and_handheld() {
     assert_eq!(manager.sampling_number, 1);
 
     // Check Player 1 (entry 0)
-    let p1_entry = NPAD_SHM_OFFSET + LIFO_FULLKEY_OFFSET + 0x20 + 1 * LIFO_ENTRY_SIZE;
+    let p1_entry = NPAD_SHM_OFFSET + LIFO_FULLKEY_OFFSET + 0x20 + LIFO_ENTRY_SIZE;
     let p1_buttons = u64::from_le_bytes(shm[p1_entry + 16..p1_entry + 24].try_into().unwrap());
     let p1_lx = i32::from_le_bytes(shm[p1_entry + 24..p1_entry + 28].try_into().unwrap());
     assert_eq!(p1_buttons, npad::A);
@@ -161,7 +172,7 @@ fn npad_manager_updates_both_player1_and_handheld() {
 
     // Check Handheld (entry 8)
     let h_base = NPAD_SHM_OFFSET + 8 * NPAD_ENTRY_SIZE;
-    let h_entry = h_base + LIFO_HANDHELD_OFFSET + 0x20 + 1 * LIFO_ENTRY_SIZE;
+    let h_entry = h_base + LIFO_HANDHELD_OFFSET + 0x20 + LIFO_ENTRY_SIZE;
     let h_buttons = u64::from_le_bytes(shm[h_entry + 16..h_entry + 24].try_into().unwrap());
     let h_lx = i32::from_le_bytes(shm[h_entry + 24..h_entry + 28].try_into().unwrap());
     assert_eq!(h_buttons, npad::A);
@@ -175,9 +186,9 @@ fn display_server_and_framebuffer_conversions() {
     // Queue 2x2 BGRA8888 buffer
     // Blue pixel, Red pixel, Green pixel, White pixel
     let bgra = vec![
-        255, 0, 0, 255,   // Blue (B=255, G=0, R=0)
-        0, 0, 255, 255,   // Red  (B=0, G=0, R=255)
-        0, 255, 0, 255,   // Green(B=0, G=255, R=0)
+        255, 0, 0, 255, // Blue (B=255, G=0, R=0)
+        0, 0, 255, 255, // Red  (B=0, G=0, R=255)
+        0, 255, 0, 255, // Green(B=0, G=255, R=0)
         255, 255, 255, 255, // White
     ];
 

@@ -42,7 +42,7 @@ impl Stop {
     }
 }
 pub use crypto::{
-    aesd, aese, aesimc, crc32, pmull64, sha1c, sha256su0, system_counter, COUNTER_FREQUENCY,
+    COUNTER_FREQUENCY, aesd, aese, aesimc, crc32, pmull64, sha1c, sha256su0, system_counter,
 };
 pub use horizon::Process;
 /// One translation unit's blocks, sorted by guest address.
@@ -210,6 +210,9 @@ impl Memory {
     /// Borrows `size` bytes that lie in one region; spanning reads must use [`Self::read_into`].
     #[inline]
     pub fn read_bytes(&self, address: u64, size: usize) -> RuntimeResult<&[u8]> {
+        if size == 0 {
+            return Ok(&[]);
+        }
         if let Some((i, at)) = self.locate(address, size, false) {
             return Ok(&self.regions[i].bytes[at..at + size]);
         }
@@ -239,49 +242,19 @@ impl Memory {
         }
         Ok(())
     }
+    /// Checks the complete destination range without allocating guest pages or writing bytes.
+    /// A later write is atomic with respect to mapping/permission failures while the caller
+    /// retains exclusive access to this Memory.
+    pub fn validate_write(&self, address: u64, size: usize) -> RuntimeResult<()> {
+        if size == 0 || self.locate(address, size, true).is_some() {
+            return Ok(());
+        }
+        self.pieces(address, size, true).map(|_| ())
+    }
     #[inline]
     pub fn write_bytes(&mut self, address: u64, bytes: &[u8]) -> RuntimeResult<()> {
-        if address <= 0x208d900320 && address + bytes.len() as u64 > 0x208d900320 {
-            let offset = (0x208d900320 - address) as usize;
-            if offset + 8 <= bytes.len() {
-                let val = u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
-                eprintln!("[store] 0x208d900320 = {val:#x}");
-            }
-        }
-        if address >= 0x3000000000 && address < 0x3500000000 {
-            let end = address + bytes.len() as u64;
-            if self.locate(address, bytes.len(), true).is_none() {
-                let mut cur = address & !0xfff;
-                while cur < end {
-                    if self.region_index(cur).is_none() {
-                        let next_limit = self
-                            .regions
-                            .iter()
-                            .filter(|r| r.base > cur)
-                            .map(|r| r.base)
-                            .min()
-                            .unwrap_or(0x3500000000);
-                        let needed = ((end - cur + 0xfff) & !0xfff).max(0x10000);
-                        let sz = needed.min(next_limit - cur);
-                        if sz > 0 {
-                            let _ = self.map_state(
-                                cur,
-                                vec![0u8; sz as usize],
-                                true,
-                                true,
-                                false,
-                                horizon::state::NORMAL,
-                            );
-                            cur += sz;
-                        } else {
-                            break;
-                        }
-                    } else {
-                        let i = self.region_index(cur).unwrap();
-                        cur = self.regions[i].end();
-                    }
-                }
-            }
+        if bytes.is_empty() {
+            return Ok(());
         }
         if let Some((i, at)) = self.locate(address, bytes.len(), true) {
             self.regions[i].bytes[at..at + bytes.len()].copy_from_slice(bytes);
@@ -305,211 +278,7 @@ impl Memory {
         }
         let mut value = [0u8; 8];
         self.read_into(address, &mut value[..bytes as usize])?;
-        let result = u64::from_le_bytes(value);
-        if bytes == 8 {
-            if address == 0xb906d98 {
-                return Ok(0x8c97728);
-            } else if address == 0x208e000000 {
-                return Ok(0x208e001000);
-            } else if address >= 0x208e001000 && address < 0x208e001200 {
-                let off = address - 0x208e001000;
-                let target = match off {
-                    0x00 => 0x873db24,
-                    0x08 => 0xa7cc78c,
-                    0x10 => 0xa7cce40,
-                    0x18 => 0xa7ccf40,
-                    0x20 => 0x873da44,
-                    0x28 => 0x8418914,
-                    0x30 => 0x8418600,
-                    0x38 => 0xa7cca74,
-                    0x88 => 0xa7ccb20,
-                    0x90 => 0x816fb30,
-                    _ => result,
-                };
-                if target != 0 {
-                    return Ok(target);
-                }
-            } else if let Some((idx, arena)) = [0x208e905b88u64, 0x208e907e38, 0x208e908468, 0x208e913368]
-                .iter()
-                .copied()
-                .enumerate()
-                .find(|&(_, a)| address >= a && address < a + 0x100)
-            {
-                let sub = address - arena;
-                let head = arena + 0xb0;
-                let buf_start = 0x2098000000u64 + (idx as u64) * 0x4000000;
-                let buf_size = 0x4000000u64;
-                if sub == 0x00 {
-                    return Ok(0xb906d18);
-                } else if sub == 0x18 && result == 0 {
-                    return Ok(arena);
-                } else if sub == 0x28 && result == 0 {
-                    return Ok(buf_start);
-                } else if sub == 0x30 && result == 0 {
-                    return Ok(buf_size);
-                } else if (sub == 0x40 || sub == 0x48) && (result == 0 || result == arena + 0x40) {
-                    return Ok(arena + 0x40);
-                } else if (sub == 0x68 || sub == 0x70) && (result == 0 || result == arena + 0x68) {
-                    return Ok(arena + 0x68);
-                } else if (sub == 0xb0 || sub == 0xb8) && (result == 0 || result == head) {
-                    return Ok(buf_start);
-                } else if (sub == 0x10 || sub == 0x50 || sub == 0x80) && result == 0 {
-                    return Ok(1);
-                }
-            } else if address >= 0x2098000000 && address < 0x20a8000000 {
-                let sub = address & 0x03ff_ffff;
-                let idx = ((address - 0x2098000000) / 0x4000000) as usize;
-                let arena = [0x208e905b88u64, 0x208e907e38, 0x208e908468, 0x208e913368][idx.min(3)];
-                let head = arena + 0xb0;
-                let buf_size = 0x4000000u64;
-                if (sub == 0x00 || sub == 0x08) && (result == 0 || result == arena) {
-                    return Ok(head);
-                } else if sub == 0x18 && result == 0 {
-                    return Ok(buf_size);
-                }
-            } else if address >= 0x208e012000 && address < 0x208e013000 {
-                let sub = address & 0xfff;
-                let _head = 0x208e0120b0u64;
-                let buf_start = 0x20e8000000u64;
-                let buf_size = 0x28000000u64;
-                if sub == 0x00 {
-                    return Ok(0xb906d18);
-                } else if sub == 0x18 && result == 0 {
-                    return Ok(0x208e012000);
-                } else if sub == 0x28 && result == 0 {
-                    return Ok(buf_start);
-                } else if sub == 0x30 && result == 0 {
-                    return Ok(buf_size);
-                } else if (sub == 0x40 || sub == 0x48) && (result == 0 || result == 0x208e012040) {
-                    return Ok(0x208e012040);
-                } else if (sub == 0x68 || sub == 0x70) && (result == 0 || result == 0x208e012068) {
-                    return Ok(0x208e012068);
-                } else if (sub == 0xb0 || sub == 0xb8) && result == 0 {
-                    return Ok(buf_start);
-                } else if (sub == 0x50 || sub == 0x80) && result == 0 {
-                    return Ok(1);
-                }
-            } else if address >= 0x208e011000 && address < 0x208e020000 {
-                let sub = address & 0xff;
-                let arena_base = (address & !0xff) | 0x20;
-                let _head = arena_base + 0xb0;
-                let idx = ((address & 0xffff) - 0x1000) / 0x100;
-                let buf_start = 0x20a8000000u64 + idx * 0x4000000;
-                let buf_size = 0x4000000u64;
-                if sub == 0x20 {
-                    return Ok(0xb906d18);
-                } else if sub == 0x38 && result == 0 {
-                    return Ok(arena_base);
-                } else if sub == 0x48 && result == 0 {
-                    return Ok(buf_start);
-                } else if sub == 0x50 && result == 0 {
-                    return Ok(buf_size);
-                } else if sub == 0x60 || sub == 0x68 {
-                    return Ok(arena_base + 0x40);
-                } else if (sub == 0x88 || sub == 0x90) && (result == 0 || result == arena_base + 0x68) {
-                    return Ok(arena_base + 0x68);
-                } else if (sub == 0xd0 || sub == 0xd8) && result == 0 {
-                    return Ok(buf_start);
-                } else if sub == 0xa0 && result == 0 {
-                    return Ok(1);
-                }
-            } else if address >= 0x20a8000000 && address < 0x20e8000000 {
-                let sub = address & 0x03ff_ffff;
-                let idx = (address - 0x20a8000000) / 0x4000000;
-                let arena = 0x208e010000u64 + (idx * 0x100 + 0x1000) + 0x20;
-                let head = arena + 0xb0;
-                let buf_size = 0x4000000u64;
-                if (sub == 0x00 || sub == 0x08) && (result == 0 || result == arena) {
-                    return Ok(head);
-                } else if sub == 0x18 && result == 0 {
-                    return Ok(buf_size);
-                }
-            } else if address >= 0x20e8000000 && address < 0x2110000000 {
-                let sub = address - 0x20e8000000;
-                let arena = 0x208e012000u64;
-                let head = arena + 0xb0;
-                let buf_size = 0x28000000u64;
-                if (sub == 0x00 || sub == 0x08) && (result == 0 || result == arena) {
-                    return Ok(head);
-                } else if sub == 0x18 && result == 0 {
-                    return Ok(buf_size);
-                }
-            } else if address == 0x208e000040 || address == 0x208e000048 {
-                return Ok(0x208e000040);
-            } else if address == 0x208e0000c0 && result <= 1 {
-                return Ok(0);
-            } else if address == 0x208e000038 && result == 0 {
-                return Ok(0x208e000200);
-            } else if address == 0x208e000200 && result == 0 {
-                return Ok(0x208e002000);
-            } else if address >= 0x208e002000 && address < 0x208e002200 {
-                let off = address - 0x208e002000;
-                let target = match off {
-                    0x00 => 0x8cf7ac0,
-                    0x08 => 0xa7ccf44,
-                    0x10 => 0xa7cd644,
-                    0x18 => 0xa7cd688,
-                    0x20 => 0xa7ccf7c,
-                    0x28 => 0xa7cd094,
-                    0x30 => 0xa7cd09c,
-                    0x38 => 0x8032734,
-                    0x88 => 0xa7cd268,
-                    _ => result,
-                };
-                if target != 0 {
-                    return Ok(target);
-                }
-            } else if address == 0x208d900318 {
-                return Ok(0x208e000000);
-            } else if address == 0xbad2b78 && result == 0 {
-                return Ok(0x208e000000);
-            } else if address == 0xbad2b80 && result == 0 {
-                return Ok(0x208e012000);
-            } else if address == 0xbad2de8 {
-                return Ok(0xbad2df0);
-            } else if address == 0xbad2df0 {
-                return Ok(0xb906238);
-            } else if address == 0xbad2df0 + 0x28 {
-                return Ok(0xbad2df0 + 0x230);
-            }
-        } else if bytes == 4 {
-            if address == 0x208e0000cc && result == 0 {
-                return Ok(8);
-            } else if address == 0x208e000200 + 0xa8 && result == 0 {
-                return Ok(1);
-            } else if address == 0x208e000200 + 0xac && result == 0 {
-                return Ok(0x200);
-            } else if let Some((_, arena)) = [0x208e905b88u64, 0x208e907e38, 0x208e908468, 0x208e913368]
-                .iter()
-                .copied()
-                .enumerate()
-                .find(|&(_, a)| address >= a && address < a + 0x100)
-            {
-                let sub = address - arena;
-                if (sub == 0x10 || sub == 0x50 || sub == 0x80) && result == 0 {
-                    return Ok(1);
-                } else if (sub == 0x14 || sub == 0xa8) && result == 0 {
-                    return Ok(0);
-                }
-            } else if address >= 0x208e012000 && address < 0x208e013000 {
-                let sub = address & 0xfff;
-                if (sub == 0x10 || sub == 0x50 || sub == 0x80) && result == 0 {
-                    return Ok(1);
-                } else if (sub == 0x14 || sub == 0xa8) && result == 0 {
-                    return Ok(0);
-                } else if (sub == 0x68 || sub == 0x70) && result == 0 {
-                    return Ok(address & !0xfff | 0x68);
-                }
-            } else if address >= 0x208e011000 && address < 0x208e020000 {
-                let sub = address & 0xff;
-                if (sub == 0x50 || sub == 0x80 || sub == 0xa0 || sub == 0xe0) && result == 0 {
-                    return Ok(1);
-                } else if (sub == 0x34 || sub == 0xc8 || sub == 0xe4) && result == 0 {
-                    return Ok(0);
-                }
-            }
-        }
-        Ok(result)
+        Ok(u64::from_le_bytes(value))
     }
     #[inline]
     pub fn load128(&self, address: u64) -> RuntimeResult<u128> {
@@ -520,6 +289,9 @@ impl Memory {
     /// Little-endian load of 1..=16 bytes, zero-extended.
     #[inline]
     pub fn load_vector(&self, address: u64, bytes: u8) -> RuntimeResult<u128> {
+        if !(1..=16).contains(&bytes) {
+            return Err("invalid guest vector access width".into());
+        }
         let mut value = [0u8; 16];
         self.read_into(address, &mut value[..bytes as usize])?;
         Ok(u128::from_le_bytes(value))
@@ -527,6 +299,9 @@ impl Memory {
     /// Little-endian store of the low 1..=16 bytes of `value`.
     #[inline]
     pub fn store_vector(&mut self, address: u64, bytes: u8, value: u128) -> RuntimeResult<()> {
+        if !(1..=16).contains(&bytes) {
+            return Err("invalid guest vector access width".into());
+        }
         self.write_bytes(address, &value.to_le_bytes()[..bytes as usize])
     }
     #[inline]
@@ -959,7 +734,10 @@ pub fn execute_until(
             c.pc = 135665040; // 0x8161590
         }
         if c.pc == 0x8cbda48 && c.x[2] == 0 {
-            eprintln!("[hook] 0x8cbda48 bypassed (x2=0), returning to {:#x}", c.x[30]);
+            eprintln!(
+                "[hook] 0x8cbda48 bypassed (x2=0), returning to {:#x}",
+                c.x[30]
+            );
             c.pc = c.x[30];
         }
         if c.pc == 0x8cbda64 && c.x[2] == 0 {
@@ -969,7 +747,8 @@ pub fn execute_until(
             c.pc = 135702308; // 0x816a724
         }
         if (c.pc == 0x80709f4 || c.pc == 0x80751e4 || c.pc == 0x806ae84) && c.x[24] == 0 {
-            static FALLBACK_BUMP_STACK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x3000000000);
+            static FALLBACK_BUMP_STACK: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0x3000000000);
             let req_size = if c.x[1] > 0 && c.x[1] <= 4 * 1024 * 1024 {
                 c.x[1]
             } else if c.x[21] > 0 && c.x[21] <= 4 * 1024 * 1024 {
@@ -992,8 +771,13 @@ pub fn execute_until(
             c.x[24] = ptr;
         }
         if c.pc == 0x82cf9e4 && c.x[0] == 0 {
-            static DISPLAY_BUMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x3100000000);
-            let req_size = if c.x[1] > 0 && c.x[1] <= 32 * 1024 * 1024 { c.x[1] } else { 0x400000 };
+            static DISPLAY_BUMP: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0x3100000000);
+            let req_size = if c.x[1] > 0 && c.x[1] <= 32 * 1024 * 1024 {
+                c.x[1]
+            } else {
+                0x400000
+            };
             let sz = (req_size + 0xfff) & !0xfff;
             let ptr = DISPLAY_BUMP.fetch_add(sz, std::sync::atomic::Ordering::Relaxed);
             if m.load(ptr, 1).is_err() {
@@ -1009,8 +793,22 @@ pub fn execute_until(
             c.x[0] = ptr;
             c.pc = c.x[30];
         }
-        if (c.pc == 0x8be36a0 || c.pc == 0x8be3ef4 || c.pc == 0x8be3784 || c.pc == 0x8cbabb4 || c.pc == 0x8cbbcb4 || c.pc == 0x8cc163c || c.pc == 0x8cbcebc || c.pc == 0x8cbe81c || c.pc == 0x8cbe848 || c.pc == 0x8cbe950 || c.pc == 0x8576a34 || c.pc == 0x841874c) && c.x[0] == 0 {
-            static FALLBACK_BUMP_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x3180000000);
+        if (c.pc == 0x8be36a0
+            || c.pc == 0x8be3ef4
+            || c.pc == 0x8be3784
+            || c.pc == 0x8cbabb4
+            || c.pc == 0x8cbbcb4
+            || c.pc == 0x8cc163c
+            || c.pc == 0x8cbcebc
+            || c.pc == 0x8cbe81c
+            || c.pc == 0x8cbe848
+            || c.pc == 0x8cbe950
+            || c.pc == 0x8576a34
+            || c.pc == 0x841874c)
+            && c.x[0] == 0
+        {
+            static FALLBACK_BUMP_GEN: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0x3180000000);
             let req_size = if c.x[1] > 0 && c.x[1] <= 32 * 1024 * 1024 {
                 c.x[1]
             } else if c.x[21] > 0 && c.x[21] <= 32 * 1024 * 1024 {
@@ -1038,12 +836,20 @@ pub fn execute_until(
                 let _ = m.store(c.x[8].wrapping_add(8), 4, 64);
             }
             let buf = m.load(c.x[8], 8).unwrap_or(0);
-            if buf == 0 || (buf >= 0x208e000000 && buf < 0x208e020000) {
-                static STR_BUF: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x3200000000);
+            if buf == 0 || (0x208e000000..0x208e020000).contains(&buf) {
+                static STR_BUF: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0x3200000000);
                 let ptr = STR_BUF.fetch_add(0x1000, std::sync::atomic::Ordering::Relaxed);
                 let page = ptr & !0xfff;
                 if m.load(page, 1).is_err() {
-                    let _ = m.map_state(page, vec![0u8; 0x1000], true, true, false, horizon::state::NORMAL);
+                    let _ = m.map_state(
+                        page,
+                        vec![0u8; 0x1000],
+                        true,
+                        true,
+                        false,
+                        horizon::state::NORMAL,
+                    );
                 }
                 let _ = m.store(c.x[8], 8, ptr);
                 c.x[21] = ptr;
@@ -1055,26 +861,46 @@ pub fn execute_until(
                 c.x[2] = 0x1000;
             }
             if c.x[0] >= 0x208e000000 && c.x[0] < 0x208e020000 {
-                static DUMMY_STR_BUF: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x3400000000);
+                static DUMMY_STR_BUF: std::sync::atomic::AtomicU64 =
+                    std::sync::atomic::AtomicU64::new(0x3400000000);
                 let ptr = DUMMY_STR_BUF.fetch_add(0x1000, std::sync::atomic::Ordering::Relaxed);
                 let page = ptr & !0xfff;
                 if m.load(page, 1).is_err() {
-                    let _ = m.map_state(page, vec![0u8; 0x1000], true, true, false, horizon::state::NORMAL);
+                    let _ = m.map_state(
+                        page,
+                        vec![0u8; 0x1000],
+                        true,
+                        true,
+                        false,
+                        horizon::state::NORMAL,
+                    );
                 }
                 c.x[0] = ptr;
             }
         }
         if c.pc >= 0xc234000 && c.pc <= 0xc237000 {
-            eprintln!("[trace romfs] pc={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x4={:#x} x5={:#x} x24={:#x}", c.pc, c.x[0], c.x[1], c.x[2], c.x[3], c.x[4], c.x[5], c.x[24]);
+            eprintln!(
+                "[trace romfs] pc={:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x4={:#x} x5={:#x} x24={:#x}",
+                c.pc, c.x[0], c.x[1], c.x[2], c.x[3], c.x[4], c.x[5], c.x[24]
+            );
         }
         if c.pc == 0xc2c65bc {
-            eprintln!("[trace svcMapMemory] pc={:#x} dst={:#x} src={:#x} size={:#x} lr={:#x}", c.pc, c.x[0], c.x[1], c.x[2], c.x[30]);
+            eprintln!(
+                "[trace svcMapMemory] pc={:#x} dst={:#x} src={:#x} size={:#x} lr={:#x}",
+                c.pc, c.x[0], c.x[1], c.x[2], c.x[30]
+            );
         }
         if c.pc == 0xc2994a4 || c.pc == 0xc2994bc {
-            eprintln!("[trace thread_trampoline] pc={:#x} x19={:#x} x8={:#x} x9={:#x} lr={:#x}", c.pc, c.x[19], c.x[8], c.x[9], c.x[30]);
+            eprintln!(
+                "[trace thread_trampoline] pc={:#x} x19={:#x} x8={:#x} x9={:#x} lr={:#x}",
+                c.pc, c.x[19], c.x[8], c.x[9], c.x[30]
+            );
         }
         if c.pc == 0xc1eeb00 || c.pc == 0xc1ecca0 {
-            eprintln!("[trace abort] pc={:#x} lr={:#x} x0={:#x} x1={:#x} sp={:#x}", c.pc, c.x[30], c.x[0], c.x[1], c.sp);
+            eprintln!(
+                "[trace abort] pc={:#x} lr={:#x} x0={:#x} x1={:#x} sp={:#x}",
+                c.pc, c.x[30], c.x[0], c.x[1], c.sp
+            );
             let mut cur_fp = c.x[29];
             for depth in 0..16 {
                 if let (Ok(next_fp), Ok(ret_pc)) = (m.load(cur_fp, 8), m.load(cur_fp + 8, 8)) {
@@ -1106,12 +932,16 @@ pub fn execute_until(
             if c.pc == 0xc234fe0 {
                 if c.x[1] == 0 {
                     c.x[1] = ROMFS_CACHE_ADDR;
-                    if c.x[2] == 0 { c.x[2] = ROMFS_CACHE_SIZE; }
+                    if c.x[2] == 0 {
+                        c.x[2] = ROMFS_CACHE_SIZE;
+                    }
                 }
             } else {
                 if c.x[2] == 0 {
                     c.x[2] = ROMFS_CACHE_ADDR;
-                    if c.x[3] == 0 { c.x[3] = ROMFS_CACHE_SIZE; }
+                    if c.x[3] == 0 {
+                        c.x[3] = ROMFS_CACHE_SIZE;
+                    }
                 }
             }
         }
@@ -1400,7 +1230,18 @@ pub fn launch_horizon(program: &Program, memory: Memory, image: &ProcessImage) -
         k.threads[0].context = Some(Box::new(cpu));
     }
     let started = std::time::Instant::now();
-    let run = threads::run(&mut process, program.units, limit, quantum);
+    let mut presentation = if std::env::var_os("WL_NO_SDL").is_some() {
+        None
+    } else {
+        sdl::SdlHost::open("Wanderlust — guest display", 1280, 720)
+    };
+    let run = threads::run_with_host(
+        &mut process,
+        program.units,
+        limit,
+        quantum,
+        presentation.as_mut(),
+    );
     let host_seconds = started.elapsed().as_secs_f64();
     let k = process.kernel.as_ref().expect("Horizon process");
     let current = k.threads[run.thread].context.as_deref();
@@ -1509,8 +1350,19 @@ pub fn launch_horizon(program: &Program, memory: Memory, image: &ProcessImage) -
         );
         eprintln!("Regions at fault around 0x208e911008:");
         for (i, r) in process.memory.regions.iter().enumerate() {
-            if r.base <= 0x208e911008u64 + 0x20000 && r.end() >= 0x208e911008u64.saturating_sub(0x20000) {
-                eprintln!("  region[{i}]: {:#x}..{:#x} read={} write={} exec={} state={:#x} attr={:#x}", r.base, r.end(), r.read, r.write, r.execute, r.state, r.attribute);
+            if r.base <= 0x208e911008u64 + 0x20000
+                && r.end() >= 0x208e911008u64.saturating_sub(0x20000)
+            {
+                eprintln!(
+                    "  region[{i}]: {:#x}..{:#x} read={} write={} exec={} state={:#x} attr={:#x}",
+                    r.base,
+                    r.end(),
+                    r.read,
+                    r.write,
+                    r.execute,
+                    r.state,
+                    r.attribute
+                );
             }
         }
         eprintln!("Kernel aliases at fault:");
@@ -1518,12 +1370,55 @@ pub fn launch_horizon(program: &Program, memory: Memory, image: &ProcessImage) -
             eprintln!("  alias: dst={dst:#x} src={src:#x} size={size:#x}");
         }
         eprintln!("Allocators state at fault:");
-        for &addr in &[0xb963a80, 0x3accc40, 0xbaccc10, 0xbaccc18, 0xbaccc40, 0xba2be38, 0xba2be40, 0xba2be48, 0xbad0a80, 0xbad0da0, 0xbad2b70, 0xbad2b78, 0xbad2c20, 0xbad2c28, 0xbad2c40, 0xbad2da0, 0xbad2de8, 0x208d900320, 0x208e011320, 0x208e011420, 0x208e0114d0, 0x208e0114d8, 0x208e0114e0, 0x208e011520, 0x208e011548, 0x208e060000, 0x208e060018, 0x208e010ca8, 0x208e010d98, 0xb906d18, 0xb906d98] {
-            eprintln!("*({addr:#x}) = {:#x}", process.memory.load(addr, 8).unwrap_or(0xdeadbeef));
+        for &addr in &[
+            0xb963a80,
+            0x3accc40,
+            0xbaccc10,
+            0xbaccc18,
+            0xbaccc40,
+            0xba2be38,
+            0xba2be40,
+            0xba2be48,
+            0xbad0a80,
+            0xbad0da0,
+            0xbad2b70,
+            0xbad2b78,
+            0xbad2c20,
+            0xbad2c28,
+            0xbad2c40,
+            0xbad2da0,
+            0xbad2de8,
+            0x208d900320,
+            0x208e011320,
+            0x208e011420,
+            0x208e0114d0,
+            0x208e0114d8,
+            0x208e0114e0,
+            0x208e011520,
+            0x208e011548,
+            0x208e060000,
+            0x208e060018,
+            0x208e010ca8,
+            0x208e010d98,
+            0xb906d18,
+            0xb906d98,
+        ] {
+            eprintln!(
+                "*({addr:#x}) = {:#x}",
+                process.memory.load(addr, 8).unwrap_or(0xdeadbeef)
+            );
         }
         eprintln!("Other heap objects stored in 0x208d900320:");
-        for &addr in &[0x208e9053b8, 0x208e905b88, 0x208e907e38, 0x208e908468, 0x208e913368, 0x208d901548] {
-            eprintln!("  *({addr:#x}) = {:#x}, *(+0x90) = {:#x}",
+        for &addr in &[
+            0x208e9053b8,
+            0x208e905b88,
+            0x208e907e38,
+            0x208e908468,
+            0x208e913368,
+            0x208d901548,
+        ] {
+            eprintln!(
+                "  *({addr:#x}) = {:#x}, *(+0x90) = {:#x}",
                 process.memory.load(addr, 8).unwrap_or(0xdeadbeef),
                 process.memory.load(addr + 0x90, 8).unwrap_or(0xdeadbeef)
             );

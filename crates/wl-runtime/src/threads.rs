@@ -12,10 +12,10 @@
 //! `Waiting` with the PC after the SVC; whoever ends the wait writes the SVC's result and
 //! outputs into the saved context, so no SVC side effect is ever repeated.
 use crate::horizon::{
-    self, result, state, Kernel, Object, Process, Range, CURRENT_THREAD, PAGE, TLS_REGION_SIZE,
-    TLS_THREAD_HANDLE,
+    self, CURRENT_THREAD, Kernel, Object, PAGE, Process, Range, TLS_REGION_SIZE, TLS_THREAD_HANDLE,
+    result, state,
 };
-use crate::{execute_until, BlockTable, Cpu, Memory, RuntimeResult, Stop};
+use crate::{BlockTable, Cpu, Memory, RuntimeResult, Stop, execute_until};
 
 /// Bit 30 of a user mutex word: other threads wait for it (`svc::HandleWaitMask`).
 pub const HANDLE_WAIT_MASK: u32 = 0x4000_0000;
@@ -761,7 +761,9 @@ pub fn arbitrate_lock(memory: &Memory, k: &mut Kernel, c: &mut Cpu) -> Result<Op
     let owner = match thread_of(k, handle, false) {
         Some(o) => o,
         None => {
-            eprintln!("[lock] arbitrate_lock called with non-existent thread handle {handle:#x} at address {address:#x}, value={value:#x}");
+            eprintln!(
+                "[lock] arbitrate_lock called with non-existent thread handle {handle:#x} at address {address:#x}, value={value:#x}"
+            );
             return Ok(None);
         }
     };
@@ -1093,11 +1095,7 @@ fn expire(k: &mut Kernel, tick: u64) {
 
 /// The preemption priority of a core (59 on cores 0-2, 63 on core 3).
 fn preemption_priority(core: u8) -> u8 {
-    if core == 3 {
-        63
-    } else {
-        59
-    }
+    if core == 3 { 63 } else { 59 }
 }
 /// Every 10 ms of virtual time, the first runnable thread at each core's preemption
 /// priority moves behind the others of that priority (`RotateScheduledQueue`).
@@ -1158,12 +1156,19 @@ pub struct RunResult {
 /// Runs the process's threads until the process exits, every thread exits, the
 /// instruction budget is exhausted, a fault occurs, or every thread waits forever.
 pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u64) -> RunResult {
+    run_with_host(p, units, limit, quantum, None)
+}
+
+/// Runs with an explicitly caller-owned presentation host. SDL stays on the
+/// launcher's thread; CPU scheduling and headless execution never initialize it.
+pub fn run_with_host(
+    p: &mut Process,
+    units: &[(u64, BlockTable)],
+    limit: u64,
+    quantum: u64,
+    mut sdl_host: Option<&mut crate::sdl::SdlHost>,
+) -> RunResult {
     let mut last: Option<usize> = None;
-    let mut sdl_host = if std::env::var("WL_NO_SDL").is_ok() {
-        None
-    } else {
-        crate::sdl::SdlHost::open("Wanderlust — The Legend of Zelda: Tears of the Kingdom", 1280, 720)
-    };
     loop {
         let Process { memory: _, kernel } = p;
         let k = kernel.as_mut().expect("Horizon process");
@@ -1184,13 +1189,7 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
                         k.host.input.update(&mut shm.bytes);
                     }
                 }
-                if k.host.display.current_frame.is_some() {
-                    host.present_frame(&k.host.display);
-                } else if let Ok(buf) = p.memory.read_bytes(0x3100000000, 1280 * 720 * 4) {
-                    host.present_raw_rgba(&buf, 1280, 720);
-                } else {
-                    host.present_frame(&k.host.display);
-                }
+                host.present_frame(&k.host.display);
                 if host.should_close {
                     return RunResult {
                         result: Ok(Stop::ExitProcess),
@@ -1223,7 +1222,8 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
                     let vsync = k.host.vi_vsync_event;
                     let binder = k.host.binder_event;
                     let nvdrv = k.host.nvdrv_event;
-                    static IDLE_FRAMES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    static IDLE_FRAMES: std::sync::atomic::AtomicU64 =
+                        std::sync::atomic::AtomicU64::new(0);
                     let idle_count = IDLE_FRAMES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     if vsync.is_some() || binder.is_some() || nvdrv.is_some() {
                         k.time_ns += 16_666_666;
@@ -1240,7 +1240,9 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
                         if idle_count > 5 {
                             for w in 0..k.threads.len() {
                                 if k.threads[w].state == ThreadState::Waiting {
-                                    if let Some(Wait::Address { .. }) | Some(Wait::Lock { .. }) = &k.threads[w].wait {
+                                    if let Some(Wait::Address { .. }) | Some(Wait::Lock { .. }) =
+                                        &k.threads[w].wait
+                                    {
                                         end_wait(k, w, result::SUCCESS, None);
                                     }
                                 }
@@ -1254,13 +1256,7 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
                                     k.host.input.update(&mut shm.bytes);
                                 }
                             }
-                            if k.host.display.current_frame.is_some() {
-                                host.present_frame(&k.host.display);
-                            } else if let Ok(buf) = p.memory.read_bytes(0x3100000000, 1280 * 720 * 4) {
-                                host.present_raw_rgba(&buf, 1280, 720);
-                            } else {
-                                host.present_frame(&k.host.display);
-                            }
+                            host.present_frame(&k.host.display);
                             if host.should_close {
                                 return RunResult {
                                     result: Ok(Stop::ExitProcess),
@@ -1311,7 +1307,8 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
         let ran = cpu.steps - k.slice_start;
         k.total_steps += ran;
         k.time_ns += ran;
-        static HEAP_INITIALIZED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        static HEAP_INITIALIZED: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
         if k.config.program_id == 0x100f2c0115b6000
             && k.heap_size > 0
             && !HEAP_INITIALIZED.swap(true, std::sync::atomic::Ordering::SeqCst)
@@ -1358,7 +1355,7 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
                 let arena = 0x208e010000u64 + offset + 0x20;
                 let head = arena + 0xb0;
                 let idx = (offset - 0x1000) / 0x100;
-                let buf_start = 0x20a8000000u64 + (idx as u64) * 0x4000000;
+                let buf_start = 0x20a8000000u64 + idx * 0x4000000;
                 let buf_size = 0x4000000u64;
 
                 let _ = p.memory.store(arena, 8, 0xb906d18);
@@ -1394,7 +1391,7 @@ pub fn run(p: &mut Process, units: &[(u64, BlockTable)], limit: u64, quantum: u6
 
             let inner_inst = 0x208e000200u64;
             let inner_vtable = 0x208e002000u64;
-            let _ = p.memory.store(inner_vtable + 0x00, 8, 0x8cf7ac0);
+            let _ = p.memory.store(inner_vtable, 8, 0x8cf7ac0);
             let _ = p.memory.store(inner_vtable + 0x08, 8, 0xa7ccf44);
             let _ = p.memory.store(inner_vtable + 0x10, 8, 0xa7cd644);
             let _ = p.memory.store(inner_vtable + 0x18, 8, 0xa7cd688);
