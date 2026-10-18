@@ -389,3 +389,34 @@ strict all-target Clippy passes. `launch_horizon_with_nvidia` installs a supplie
 backend before executing guest instructions; the original launcher delegates
 without a backend. Actual GPU-host composition and its native dependency linkage
 remain separate requirements.
+
+## Canonical GPU backing lifetime guards
+
+`Memory::pin_gpu_range` registers up to64 nonoverlapping, page-aligned spans
+without copying their contents. Each must lie in one plain NORMAL readable and
+writable, nonexecutable region. Locked aliases, shared-memory copies, scattered
+regions and other states are unsupported. Globally unique checked opaque tokens
+prevent foreign-process or stale registrations from releasing a live span.
+
+The audited guest SVC paths reject overlapping reprotection, attribute changes,
+MapMemory/UnmapMemory source or destination changes, heap shrinking and transfer
+ownership before mutation. Region splitting inside a registration is rejected;
+splitting at its boundaries remains valid. CPU byte writes remain legal. The
+future GPU host must journal those writes or conservatively notify full backing
+ranges before synchronous acquisition. A pin does not itself provide dirty
+tracking, a GPU fence, nvmap ABI compatibility or GPU page-table programming.
+
+A trusted host must drain GPU output and remove dependent resources/mappings
+before `release_gpu_pin`. Public `Memory::regions` and Region structural fields
+remain a trusted-host escape hatch: changing them behind a registration bypasses
+this contract and is unsupported. The guards cover guest-accessible runtime
+mutation paths, not arbitrary external code with direct field access.
+
+Ten independent tests check allowed byte writes, foreign/stale tokens, capacity,
+strict storage validation, rejected splits, permission/attribute operations,
+alias creation, transfer-handle allocation and heap reuse. Release-positive
+controls establish that the same SVC arguments otherwise succeed. Adjacent-page
+reprotection tests prove the exact half-open span boundaries. The live runtime
+suite passes126 tests with no failures or ignores; strict all-target Clippy
+passes. This is runtime backing-lifetime infrastructure, not a claim that an
+NVIDIA GPU service host has already been installed in the AOT launcher.

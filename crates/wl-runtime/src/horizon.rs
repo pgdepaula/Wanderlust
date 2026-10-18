@@ -814,6 +814,9 @@ fn set_memory_permission(
     perm: u64,
 ) -> Result<(), u32> {
     check_range(k, address, size)?;
+    memory
+        .ensure_gpu_unpinned(address, size)
+        .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
     if !matches!(perm, 0 | 1 | 3) {
         return Err(result::INVALID_NEW_MEMORY_PERMISSION);
     }
@@ -848,6 +851,9 @@ fn set_memory_attribute(
     value: u32,
 ) -> Result<(), u32> {
     check_range(k, address, size)?;
+    memory
+        .ensure_gpu_unpinned(address, size)
+        .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
     if mask | value != mask || (mask | value) & !attribute::SET_MASK != 0 {
         return Err(result::INVALID_COMBINATION);
     }
@@ -1100,7 +1106,7 @@ pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<S
         }
         0x15 => {
             let (address, size, perm) = (c.x[1], c.x[2], c.x[3] as u32);
-            match create_transfer_memory(k, address, size, perm) {
+            match create_transfer_memory(memory, k, address, size, perm) {
                 Ok(handle) => {
                     set_result(c, result::SUCCESS);
                     c.x[1] = u64::from(handle);
@@ -1339,28 +1345,65 @@ fn map_memory(
     mut src: u64,
     mut size: u64,
 ) -> RuntimeResult<u32> {
-    eprintln!("[svcMapMemory] entering dst={dst:#x} src={src:#x} size={size:#x} thread={}", k.current);
+    // Guard the entire potentially aligned span before normalization or storage
+    // replacement. A malformed range cannot bypass a live registration.
+    for address in [src, dst] {
+        let base = address & !(PAGE - 1);
+        let Some(length) = address
+            .checked_add(size)
+            .and_then(|end| end.checked_add(PAGE - 1))
+            .map(|end| (end & !(PAGE - 1)).saturating_sub(base))
+        else {
+            return Ok(result::INVALID_CURRENT_MEMORY);
+        };
+        if memory.ensure_gpu_unpinned(base, length).is_err() {
+            return Ok(result::INVALID_CURRENT_MEMORY);
+        }
+    }
+
+    eprintln!(
+        "[svcMapMemory] entering dst={dst:#x} src={src:#x} size={size:#x} thread={}",
+        k.current
+    );
     let is_totk = k.config.program_id == 0x100f2c0115b6000;
     if is_totk {
         if dst % PAGE != 0 {
-            eprintln!("[svcMapMemory] aligning dst {dst:#x} -> {:#x}", dst & !(PAGE - 1));
+            eprintln!(
+                "[svcMapMemory] aligning dst {dst:#x} -> {:#x}",
+                dst & !(PAGE - 1)
+            );
             dst &= !(PAGE - 1);
         }
         if src % PAGE != 0 {
-            eprintln!("[svcMapMemory] aligning src {src:#x} -> {:#x}", src & !(PAGE - 1));
+            eprintln!(
+                "[svcMapMemory] aligning src {src:#x} -> {:#x}",
+                src & !(PAGE - 1)
+            );
             src &= !(PAGE - 1);
         }
         if size % PAGE != 0 {
-            eprintln!("[svcMapMemory] aligning size {size:#x} -> {:#x}", (size + PAGE - 1) & !(PAGE - 1));
+            eprintln!(
+                "[svcMapMemory] aligning size {size:#x} -> {:#x}",
+                (size + PAGE - 1) & !(PAGE - 1)
+            );
             size = (size + PAGE - 1) & !(PAGE - 1);
         }
         if memory.load(src, 1).is_err() {
             eprintln!("[svcMapMemory] mapping missing src {src:#x} size {size:#x}");
-            let _ = memory.map_state(src, vec![0u8; size as usize], true, true, false, state::NORMAL);
+            let _ = memory.map_state(
+                src,
+                vec![0u8; size as usize],
+                true,
+                true,
+                false,
+                state::NORMAL,
+            );
         }
     }
     if let Err(code) = alias_arguments(k, dst, src, size) {
-        eprintln!("[svcMapMemory] alias_arguments rejected: code={code:#x} dst={dst:#x} src={src:#x} size={size:#x}");
+        eprintln!(
+            "[svcMapMemory] alias_arguments rejected: code={code:#x} dst={dst:#x} src={src:#x} size={size:#x}"
+        );
         return Ok(code);
     }
     if check_memory_state(
@@ -1378,7 +1421,14 @@ fn map_memory(
     {
         eprintln!("[svcMapMemory] check_memory_state rejected src={src:#x}");
         if is_totk {
-            let _ = memory.map_state(src, vec![0u8; size as usize], true, true, false, state::NORMAL);
+            let _ = memory.map_state(
+                src,
+                vec![0u8; size as usize],
+                true,
+                true,
+                false,
+                state::NORMAL,
+            );
         } else {
             return Ok(result::INVALID_CURRENT_MEMORY);
         }
@@ -1391,7 +1441,9 @@ fn map_memory(
         if is_totk {
             memory.split_at(dst);
             memory.split_at(dst + size);
-            memory.regions.retain(|r| !(r.base < dst + size && dst < r.end()));
+            memory
+                .regions
+                .retain(|r| !(r.base < dst + size && dst < r.end()));
         } else {
             return Ok(result::INVALID_CURRENT_MEMORY);
         }
@@ -1426,6 +1478,22 @@ fn unmap_memory(
     mut src: u64,
     mut size: u64,
 ) -> RuntimeResult<u32> {
+    // Guard the entire potentially aligned span before normalization or storage
+    // replacement. A malformed range cannot bypass a live registration.
+    for address in [src, dst] {
+        let base = address & !(PAGE - 1);
+        let Some(length) = address
+            .checked_add(size)
+            .and_then(|end| end.checked_add(PAGE - 1))
+            .map(|end| (end & !(PAGE - 1)).saturating_sub(base))
+        else {
+            return Ok(result::INVALID_CURRENT_MEMORY);
+        };
+        if memory.ensure_gpu_unpinned(base, length).is_err() {
+            return Ok(result::INVALID_CURRENT_MEMORY);
+        }
+    }
+
     let is_totk = k.config.program_id == 0x100f2c0115b6000;
     if is_totk {
         dst &= !(PAGE - 1);
@@ -1540,7 +1608,10 @@ fn map_shared_memory(
     };
     let shmem = &k.shared_memories[idx];
     if size != shmem.size {
-        eprintln!("[svc 0x13] map_shared_memory size mismatch: requested size={size:#x}, shmem.size={:#x}", shmem.size);
+        eprintln!(
+            "[svc 0x13] map_shared_memory size mismatch: requested size={size:#x}, shmem.size={:#x}",
+            shmem.size
+        );
         return Ok(result::INVALID_SIZE);
     }
     if perm != 1 && perm != 3 {
@@ -1600,6 +1671,9 @@ fn unmap_shared_memory(
     if st != state::SHARED_MEMORY {
         return Ok(result::INVALID_CURRENT_MEMORY);
     }
+    if memory.ensure_gpu_unpinned(address, size).is_err() {
+        return Ok(result::INVALID_CURRENT_MEMORY);
+    }
     let mut index = 0;
     memory.regions.retain(|_| {
         index += 1;
@@ -1609,6 +1683,7 @@ fn unmap_shared_memory(
 }
 /// `svcCreateTransferMemory` (0x15): creates a transfer memory object from a process memory region.
 fn create_transfer_memory(
+    memory: &Memory,
     k: &mut Kernel,
     address: u64,
     size: u64,
@@ -1626,6 +1701,9 @@ fn create_transfer_memory(
     if end > k.layout.address_space_end {
         return Err(result::INVALID_CURRENT_MEMORY);
     }
+    memory
+        .ensure_gpu_unpinned(address, size)
+        .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
     k.create_transfer_memory(address, size, permission)
 }
 /// `svcSetHeapSize`: grows or shrinks the Normal-state RW heap at the heap region start.
@@ -1647,6 +1725,10 @@ fn set_heap_size(memory: &mut Memory, k: &mut Kernel, size: u64) -> Result<u64, 
     let base = k.layout.heap.start;
     let current = k.heap_size;
     if size < current {
+        memory
+            .ensure_gpu_unpinned(base + size, current - size)
+            .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
+
         check_memory_state(
             memory,
             base + size,

@@ -3,6 +3,7 @@
 pub mod crypto;
 pub mod display;
 pub mod fp;
+pub mod gpu_memory;
 pub mod horizon;
 pub mod input;
 pub mod ipc;
@@ -74,6 +75,7 @@ impl Region {
 pub struct Memory {
     /// Disjoint regions sorted by base address (maintained by `map_state` and `split_at`).
     pub regions: Vec<Region>,
+    gpu_pins: Vec<gpu_memory::PinRange>,
 }
 impl Memory {
     pub fn map(
@@ -128,6 +130,9 @@ impl Memory {
     /// Splits the region that strictly contains `address` in two at `address`; both halves
     /// keep its permissions, state and attribute. Returns whether a split happened.
     pub fn split_at(&mut self, address: u64) -> bool {
+        if self.gpu_split_blocked(address) {
+            return false;
+        }
         let Some(i) = self
             .regions
             .iter()
