@@ -1253,7 +1253,9 @@ pub fn launch_horizon_with_nvidia(
         k.threads[0].context = Some(Box::new(cpu));
     }
     let started = std::time::Instant::now();
-    let mut presentation = if std::env::var_os("WL_NO_SDL").is_some() {
+    let mut presentation = if std::env::var_os("WL_NO_SDL").is_some()
+        || std::env::var("WL_GPU_DEBUG_WINDOW").as_deref() == Ok("1")
+    {
         None
     } else {
         sdl::SdlHost::open("Wanderlust — guest display", 1280, 720)

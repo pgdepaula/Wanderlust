@@ -114,6 +114,7 @@ pub struct Driver<P: Copy> {
     next_handle: u32,
     next_syncpoint: u32,
     fatal: Option<String>,
+    frame: Option<wl_gpu::backend::Frame>,
 }
 impl<P: Copy> std::fmt::Debug for Driver<P> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -145,6 +146,7 @@ impl<P: Copy> Driver<P> {
             next_handle: 1,
             next_syncpoint: 1,
             fatal: None,
+            frame: None,
         })
     }
     pub fn capabilities(&self) -> &wl_gpu::backend::Capabilities {
@@ -158,6 +160,11 @@ impl<P: Copy> Driver<P> {
     }
     pub fn has_pending_output(&self) -> bool {
         self.gpu.has_pending_output()
+    }
+    /// Latest explicitly published color output. This is a diagnostic image,
+    /// not a guest VI queue or a replacement for display-buffer ownership.
+    pub fn take_frame(&mut self) -> Option<wl_gpu::backend::Frame> {
+        self.frame.take()
     }
     fn file(&self, fd: u32) -> Result<usize> {
         self.files
@@ -546,8 +553,9 @@ impl<P: Copy> Driver<P> {
                     Some(r.extra_input),
                     memory,
                 ))?;
+                let mut completed_frame = None;
                 let finish = (|| -> wl_gpu::Result<()> {
-                    self.gpu.publish(channel, memory)?;
+                    completed_frame = self.gpu.publish(channel, memory)?;
                     let status = self.gpu.wait(report.token)?;
                     if !status.host_completed || !status.guest_visible {
                         return Err(wl_gpu::Error("GPU completion/publication invariant".into()));
@@ -565,6 +573,7 @@ impl<P: Copy> Driver<P> {
                     self.fatal = Some(message.clone());
                     return Err(Error::Fatal(message));
                 }
+                self.frame = completed_frame;
                 state.threshold = threshold;
                 r.output.copy_from_slice(r.input);
                 out32(r.output, 12, 0);

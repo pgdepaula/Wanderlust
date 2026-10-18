@@ -119,6 +119,14 @@ unsafe extern "C" {
     fn dlclose(handle: *mut c_void) -> c_int;
 }
 
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn LoadLibraryExW(path: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
+    fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
+    fn FreeLibrary(module: *mut c_void) -> c_int;
+}
+
 /// Dynamic function table for SDL2.
 pub struct SdlApi {
     _handle: *mut c_void,
@@ -221,9 +229,88 @@ impl SdlApi {
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    pub fn load() -> Option<Self> {
+        use std::{os::windows::ffi::OsStrExt, path::PathBuf};
+        let path = std::env::var_os("WL_SDL2_LIBRARY")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::current_exe()
+                    .ok()?
+                    .parent()
+                    .map(|p| p.join("SDL2.dll"))
+            })?
+            .canonicalize()
+            .ok()?;
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if wide.contains(&0) {
+            return None;
+        }
+        wide.push(0);
+        // Absolute path plus DLL_LOAD_DIR/DEFAULT_DIRS: do not search an
+        // arbitrary guest-input working directory or PATH for SDL2.dll.
+        let handle = unsafe { LoadLibraryExW(wide.as_ptr(), ptr::null_mut(), 0x100 | 0x1000) };
+        if handle.is_null() {
+            return None;
+        }
+        unsafe {
+            macro_rules! sym {
+                ($name:ident, $type:ty) => {{
+                    let name = CString::new(stringify!($name)).ok()?;
+                    let pointer = GetProcAddress(handle, name.as_ptr());
+                    if pointer.is_null() {
+                        FreeLibrary(handle);
+                        return None;
+                    }
+                    std::mem::transmute::<*mut c_void, $type>(pointer)
+                }};
+            }
+            Some(Self {
+                _handle: handle,
+                init: sym!(SDL_Init, SdlInitFn),
+                quit: sym!(SDL_Quit, SdlQuitFn),
+                create_window: sym!(SDL_CreateWindow, SdlCreateWindowFn),
+                destroy_window: sym!(SDL_DestroyWindow, SdlDestroyWindowFn),
+                create_renderer: sym!(SDL_CreateRenderer, SdlCreateRendererFn),
+                destroy_renderer: sym!(SDL_DestroyRenderer, SdlDestroyRendererFn),
+                create_texture: sym!(SDL_CreateTexture, SdlCreateTextureFn),
+                destroy_texture: sym!(SDL_DestroyTexture, SdlDestroyTextureFn),
+                update_texture: sym!(SDL_UpdateTexture, SdlUpdateTextureFn),
+                render_clear: sym!(SDL_RenderClear, SdlRenderClearFn),
+                render_copy: sym!(SDL_RenderCopy, SdlRenderCopyFn),
+                render_present: sym!(SDL_RenderPresent, SdlRenderPresentFn),
+                poll_event: sym!(SDL_PollEvent, SdlPollEventFn),
+                num_joysticks: sym!(SDL_NumJoysticks, SdlNumJoysticksFn),
+                is_game_controller: sym!(SDL_IsGameController, SdlIsGameControllerFn),
+                game_controller_open: sym!(SDL_GameControllerOpen, SdlGameControllerOpenFn),
+                game_controller_close: sym!(SDL_GameControllerClose, SdlGameControllerCloseFn),
+                game_controller_get_button: sym!(
+                    SDL_GameControllerGetButton,
+                    SdlGameControllerGetButtonFn
+                ),
+                game_controller_get_axis: sym!(
+                    SDL_GameControllerGetAxis,
+                    SdlGameControllerGetAxisFn
+                ),
+            })
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
     pub fn load() -> Option<Self> {
         None
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SdlApi {
+    fn drop(&mut self) {
+        if self._handle.is_null() {
+            return;
+        }
+        unsafe {
+            FreeLibrary(self._handle);
+        }
     }
 }
 

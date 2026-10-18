@@ -121,3 +121,33 @@ The homebrew integration executes both cold and warm generated binaries and
 requires unchanged artifact identity and zero runtime/unit cache misses on the
 warm build. It does not establish original-game command execution, VI
 presentation or a rendered Tears of the Kingdom frame.
+
+
+## Diagnostic window
+
+Generated NVIDIA executables can display their explicitly published framebuffer
+with `WL_GPU_DEBUG_WINDOW=1`. `WL_GPU_DEBUG_HOLD=1` keeps the last image visible
+after guest termination until the window is closed. Repainting that image does
+not execute guest instructions or produce additional GPU frames. The window is
+labeled as a guest GPU diagnostic, not Tears of the Kingdom. This path is not VI
+or BufferQueue presentation and uses the existing synchronous CPU readback.
+
+`Driver::take_frame` transfers ownership of the latest successfully published
+color frame. Taking it twice returns no second image. No guest memory borrow is
+retained and presentation adds no GPU readback. Failure to open a requested
+window is an error; presentation failure after accepted work is fatal rather
+than a retryable ioctl failure.
+
+On Windows, place the generated executable and the official x64 SDL2 runtime
+`SDL2.dll` in a native Windows directory. The loader resolves an absolute DLL
+path beside the executable, or the explicit `WL_SDL2_LIBRARY` path, and uses
+restricted Windows library search flags. It does not search the working
+directory or arbitrary PATH entries. Loading from a WSL network path may fail;
+copy both files to NTFS in that case. SDL binaries are external dependencies
+and are not included in this repository.
+
+Native Windows D3D12 and Vulkan runs executed the source-built AArch64 NVIDIA fixture's
+two indexed draws, verified both framebuffer results in the guest and presented
+the framebuffer in the SDL window. A separately held D3D12 window was captured
+and visually inspected. The result is synthetic homebrew
+execution, not original-game graphics.

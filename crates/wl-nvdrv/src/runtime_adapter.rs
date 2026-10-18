@@ -42,21 +42,84 @@ fn error(e: driver::Error) -> service::HostError {
         }),
     }
 }
-#[derive(Debug)]
 pub struct NativeHost {
     driver: driver::Driver<GpuPin>,
+    debug_window: Option<wl_guest_runtime::sdl::SdlHost>,
+    last_frame: Option<wl_gpu::backend::Frame>,
+    hold_window: bool,
+}
+impl std::fmt::Debug for NativeHost {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeHost")
+            .field("driver", &self.driver)
+            .field("debug_window", &self.debug_window.is_some())
+            .finish_non_exhaustive()
+    }
 }
 impl NativeHost {
     pub fn new() -> wl_gpu::Result<Self> {
         let driver = driver::Driver::new()?;
         eprintln!("NVIDIA adapter {:?}", driver.capabilities().adapter);
-        Ok(Self { driver })
+        let debug_window = if std::env::var("WL_GPU_DEBUG_WINDOW").as_deref() == Ok("1") {
+            Some(
+                wl_guest_runtime::sdl::SdlHost::open(
+                    "Wanderlust - guest GPU diagnostic (not TOTK)",
+                    940,
+                    580,
+                )
+                .ok_or_else(|| {
+                    wl_gpu::Error(
+                        "requested GPU diagnostic window could not open; SDL2 is required".into(),
+                    )
+                })?,
+            )
+        } else {
+            None
+        };
+        Ok(Self {
+            driver,
+            debug_window,
+            last_frame: None,
+            hold_window: std::env::var("WL_GPU_DEBUG_HOLD").as_deref() == Ok("1"),
+        })
     }
     pub fn graphics_counters(&self) -> wl_gpu::Counters {
         self.driver.graphics_counters()
     }
     pub fn driver_counters(&self) -> wl_gpu::driver_backend::DriverCounters {
         self.driver.driver_counters()
+    }
+    fn present_debug_output(&mut self) -> service::HostResult<()> {
+        if let Some(frame) = self.driver.take_frame() {
+            if let Some(window) = &mut self.debug_window {
+                window.poll_input();
+                if !window.present_raw_rgba(&frame.rgba, frame.width, frame.height) {
+                    return Err(service::HostError::Fatal(
+                        "GPU diagnostic frame presentation failed".into(),
+                    ));
+                }
+                self.last_frame = Some(frame);
+            }
+        }
+        Ok(())
+    }
+}
+impl Drop for NativeHost {
+    fn drop(&mut self) {
+        // Explicit interactive inspection after the guest exits. This loop
+        // does not count as guest execution, new GPU draws or GPU completion.
+        if !self.hold_window {
+            return;
+        }
+        if let (Some(window), Some(frame)) = (&mut self.debug_window, &self.last_frame) {
+            while !window.should_close {
+                window.poll_input();
+                if !window.present_raw_rgba(&frame.rgba, frame.width, frame.height) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(8));
+            }
+        }
     }
 }
 impl service::Host for NativeHost {
@@ -93,6 +156,7 @@ impl service::Host for NativeHost {
                 },
                 &mut MemoryView(memory),
             )
-            .map_err(error)
+            .map_err(error)?;
+        self.present_debug_output()
     }
 }
