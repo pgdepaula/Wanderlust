@@ -21,7 +21,7 @@ This directory provides authoritative, reproducible Nintendo Switch Homebrew NRO
 All fixtures are compiled reproducibly using:
 - **Compiler:** `aarch64-none-elf-gcc` (devkitA64) 16.1.0
 - **C Library:** newlib 4.6.0.20260123
-- **Switch Runtime:** libnx 4.12.0 (commit `feebd0263b2fed8fdc6fdf14b5ef46efd85e5d72`)
+- **Switch Runtime:** libnx 4.12.0 (commit `feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973`)
 - **Container Tool:** `elf2nro` (devkitPro tools)
 
 ### Build Recipe
@@ -101,3 +101,13 @@ Exercises display service acquisition and initialization sequence leading toward
   - Sends CMIF Command 1 (`GetService`, name `"vi:u"`) to `sm:`.
   - **Current status under Wanderlust:** `sm:` is functional (commit `3347fca`), but `"vi:u"` has not yet been registered. As designed by Mesosphere / Horizon service manager semantics, unregistered lookups defer until registered. When no threads remain runnable to register `"vi:u"`, the deterministic scheduler flags a clean `deadlock` fault naming service `"vi:u"`.
   - **Next requirement:** Implementation of `vi:u` service dispatch (`IApplicationDisplayService`: `OpenDisplay`, `GetDisplayResolution`, `CloseDisplay`) in Horizon runtime.
+
+## Deliberately absent service fixture
+
+`absent_service.nro` is compiled from `absent_service.c` with the recipe above.
+It requests `wlmiss`, a deliberately unregistered six-character service name,
+then blocks in the real libnx service-manager call. Its size is94,208 bytes and
+SHA-256 is `f05dff410b5cacaeb97081bfa7219bdb87dac6c5d8f527ae9a014ff1af21d512`.
+The CLI deadlock regression uses this separate executable. `time:u` is now a
+hosted runtime service, so the existing `ipc_probe.nro` is a positive lookup
+probe and its historical missing-service description above is obsolete.

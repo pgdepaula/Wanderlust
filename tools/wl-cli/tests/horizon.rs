@@ -46,7 +46,13 @@ fn run(input: &Path, t: &Temp) -> serde_json::Value {
     let build = cli()
         .arg("recompile")
         .arg(input)
-        .args(["--horizon", "--allow-unsupported", "--out"])
+        .args([
+            "--horizon",
+            "--allow-unsupported",
+            "--memory-limit",
+            "0x20000000",
+            "--out",
+        ])
         .arg(&out)
         .output()
         .unwrap();
@@ -271,16 +277,16 @@ fn libnx_nro_starts_with_the_homebrew_abi() {
     );
 }
 
-/// ipc_probe.nro asks sm for "time:u", which nothing in the process registers: sm defers the
-/// request, so the only thread waits forever, which the scheduler reports.
+/// A dedicated libnx NRO asks for the deliberately unregistered "wlmiss" service.
+/// Standard time:u is hosted and is therefore not a valid absent-service oracle.
 #[test]
 fn nro_waiting_for_an_absent_service_is_reported() {
     let t = Temp::new();
     let out =
-        t.0.join(format!("ipc_probe{}", std::env::consts::EXE_SUFFIX));
+        t.0.join(format!("absent_service{}", std::env::consts::EXE_SUFFIX));
     let build = cli()
         .arg("recompile")
-        .arg(root().join("crates/wl-nro/tests/fixtures/ipc_probe.nro"))
+        .arg(root().join("crates/wl-nro/tests/fixtures/absent_service.nro"))
         .args(["--horizon", "--allow-unsupported", "--out"])
         .arg(&out)
         .output()
@@ -295,14 +301,14 @@ fn nro_waiting_for_an_absent_service_is_reported() {
     let state: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
     assert_eq!(
         state["debug_output"],
-        serde_json::json!(["ipc_probe sm_init rc=0"])
+        serde_json::json!(["absent_service sm_init rc=0"])
     );
     assert_eq!(state["fault"]["category"], "deadlock");
     assert!(
         state["fault"]["message"]
             .as_str()
             .unwrap()
-            .contains("sm:GetServiceHandle(\"time:u\")")
+            .contains("sm:GetServiceHandle(\"wlmiss\")")
     );
     assert_eq!(state["ipc"]["deferred"], 1);
 }
@@ -327,6 +333,28 @@ fn run_nro(input: &Path, t: &Temp) -> serde_json::Value {
         String::from_utf8_lossy(&run.stderr)
     );
     serde_json::from_slice(&run.stdout).unwrap()
+}
+
+#[test]
+fn libnx_nro_looks_up_and_closes_hosted_time_service() {
+    let t = Temp::new();
+    let state = run_nro(
+        &root().join("crates/wl-nro/tests/fixtures/ipc_probe.nro"),
+        &t,
+    );
+    assert!(state["fault"].is_null(), "{state}");
+    let lines = state["debug_output"].as_array().unwrap();
+    assert_eq!(lines.len(), 4, "{state}");
+    assert_eq!(lines[0], "ipc_probe sm_init rc=0");
+    let handle = lines[1]
+        .as_str()
+        .unwrap()
+        .strip_prefix("ipc_probe lookup srv=time:u rc=0 handle=0x")
+        .unwrap();
+    assert_ne!(u32::from_str_radix(handle, 16).unwrap(), 0);
+    assert_eq!(lines[2], "ipc_probe close srv=time:u rc=0");
+    assert_eq!(lines[3], "ipc_probe sm_exit ok");
+    assert_eq!(state["ipc"]["deferred"], 0);
 }
 
 #[test]

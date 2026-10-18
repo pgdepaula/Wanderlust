@@ -6,10 +6,10 @@ use std::{
     process,
     time::Instant,
 };
-use wl_analysis::{discover_roots, survey, Image, Program, Roots, RAW_BASE};
+use wl_analysis::{Image, Program, RAW_BASE, Roots, discover_roots, survey};
 use wl_common::{GuestAddr, Result};
-use wl_loader::{LinkMode, Process, DEFAULT_CODE_BASE, MODULE_ORDER};
-use wl_nso::{read_input, Module};
+use wl_loader::{DEFAULT_CODE_BASE, LinkMode, MODULE_ORDER, Process};
+use wl_nso::{Module, read_input};
 
 const HELP: &str = "Wanderlust — experimental AArch64 ahead-of-time recompiler
 
@@ -53,7 +53,8 @@ register-level test harness: the main thread starts at the first module with X0 
 handle (NRO: X0 = loader configuration, X1 = -1, X30 = loader return), an NPDM-sized stack
 and TLS; Horizon SVCs, guest threads and the sm: service are served by the runtime. Process
 parameters come from main.npdm when present; --memory-limit sets the process memory size
-(default 512 MiB). The executable accepts --steps and --quantum. Output is experimental; no
+(default 512 MiB; NPDM applications default to 3296 MiB). An explicit limit is
+never replaced by the NPDM application default. The executable accepts --steps and --quantum. Output is experimental; no
 TOTK boot, other Horizon services or GPU support is claimed.";
 
 fn number(v: &str) -> Result<u64> {
@@ -86,7 +87,7 @@ struct Options {
     cache_dir: Option<PathBuf>,
     unit_shift: u32,
     horizon: bool,
-    memory_limit: u64,
+    memory_limit: Option<u64>,
 }
 fn utf8(value: &OsString) -> Result<&str> {
     value
@@ -129,7 +130,7 @@ fn options(args: &[OsString]) -> Result<Options> {
         cache_dir: None,
         unit_shift: wl_codegen_rust::EmitOptions::default().unit_shift,
         horizon: false,
-        memory_limit: 0x2000_0000,
+        memory_limit: None,
     };
     let mut used = Vec::new();
     let mut i = 2;
@@ -161,7 +162,7 @@ fn options(args: &[OsString]) -> Result<Options> {
                     "--jobs" => o.jobs = Some(number(utf8(value)?)? as usize),
                     "--cache-dir" => o.cache_dir = Some(value.into()),
                     "--unit-shift" => o.unit_shift = number(utf8(value)?)? as u32,
-                    "--memory-limit" => o.memory_limit = number(utf8(value)?)?,
+                    "--memory-limit" => o.memory_limit = Some(number(utf8(value)?)?),
                     "--link" => {
                         o.link = Some(match utf8(value)? {
                             "host" => LinkMode::Host,
@@ -351,7 +352,7 @@ fn horizon_options(
         is_application: true,
         svc_permissions: [u64::MAX; 3],
         service_access: vec![(false, "*".into()), (true, "*".into())],
-        memory_limit: o.memory_limit,
+        memory_limit: o.memory_limit.unwrap_or(0x2000_0000),
         source: "defaults (no main.npdm)",
         homebrew,
     };
@@ -391,8 +392,8 @@ fn horizon_options(
     options.priority_mask = md.priority_mask;
     options.handle_table_size = md.handle_table_size;
     options.is_application = md.is_application;
-    if md.is_application && options.memory_limit == 0x2000_0000 {
-        // Standard Nintendo Switch 4GB retail application memory limit (3296 MiB).
+    if md.is_application && o.memory_limit.is_none() {
+        // Default application budget; an explicit user limit always wins.
         options.memory_limit = 0xCE00_0000;
     }
     options.svc_permissions = svc_permissions;
@@ -746,5 +747,33 @@ fn main() {
     if let Err(e) = run(&args) {
         eprintln!("wanderlust: {e}");
         process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn explicit_memory_limits_survive_application_npdm() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/horizon/probe");
+        for (argument, expected) in [
+            (None, 0xce00_0000),
+            (Some("0x20000000"), 0x2000_0000),
+            (Some("0x4000000"), 0x400_0000),
+        ] {
+            let mut args = vec![
+                OsString::from("recompile"),
+                fixture.as_os_str().to_owned(),
+                OsString::from("--horizon"),
+            ];
+            if let Some(value) = argument {
+                args.extend([OsString::from("--memory-limit"), OsString::from(value)]);
+            }
+            let options = options(&args).unwrap();
+            let process = load_process(&options).unwrap();
+            let config = horizon_options(&options, &process, false).unwrap();
+            assert!(config.is_application);
+            assert_eq!(config.memory_limit, expected);
+        }
     }
 }
