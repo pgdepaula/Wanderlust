@@ -244,6 +244,12 @@ pub enum Operation {
         dst: u8,
         bits: u32,
     },
+    /// Full-lane MOV32I guarded by P0 or !P0; false retains the ready old dst.
+    ConditionalImmediate {
+        dst: u8,
+        bits: u32,
+        invert: bool,
+    },
     Move {
         dst: u8,
         src: u8,
@@ -590,6 +596,22 @@ impl Program {
                     Operation::Immediate {
                         dst,
                         bits: (word >> 20) as u32,
+                    }
+                } else if word & !0x000ffffffff800ff == 0x010000000000f000 {
+                    if !predicate_initialized {
+                        return Err(fail("uninitialized conditional MOV32I predicate P0"));
+                    }
+                    // Even a false guard reads the previous destination. An
+                    // immediate source cannot establish readiness on that path.
+                    if write_barrier != 7 || !initialized[dst as usize] || pending[dst as usize] {
+                        return Err(fail(
+                            "unready conditional MOV32I destination or unsupported schedule",
+                        ));
+                    }
+                    Operation::ConditionalImmediate {
+                        dst,
+                        bits: (word >> 20) as u32,
+                        invert: word & (1 << 19) != 0,
                     }
                 } else if word & !move_mask == 0x5c98078000070000 {
                     let src = ((word >> 20) & 255) as u8;
@@ -1340,6 +1362,9 @@ impl Program {
                             || multiply_result[right as usize]
                             || predicate_multiply
                     }
+                    Operation::ConditionalImmediate { dst, .. } => {
+                        multiply_result[dst as usize] || predicate_multiply
+                    }
                     Operation::ConditionalMove { dst, src, .. } => {
                         multiply_result[dst as usize]
                             || multiply_result[src as usize]
@@ -1449,6 +1474,7 @@ impl Program {
                     }
                 }
                 Operation::Immediate { dst, .. }
+                | Operation::ConditionalImmediate { dst, .. }
                 | Operation::Constant { dst, .. }
                 | Operation::PositionW { dst }
                 | Operation::Interpolate { dst, .. } => largest = largest.max(u16::from(dst)),
@@ -1576,6 +1602,7 @@ impl Program {
                     | Operation::FloatPredicateCompare { .. }
                     | Operation::Select { .. }
                     | Operation::ConditionalMove { .. }
+                    | Operation::ConditionalImmediate { .. }
             )
         }) {
             s.push_str("var p0:bool;\n");
@@ -1678,6 +1705,9 @@ impl Program {
                     emit_multiply_add16(&mut s, dst, left, middle, right, signed);
                 }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
+                Operation::ConditionalImmediate { dst, bits, invert } => {
+                    emit_conditional_immediate(&mut s, dst, bits, invert);
+                }
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
                 Operation::ConditionalMove { dst, src, invert } => {
                     emit_conditional_move(&mut s, dst, src, invert);
@@ -1756,6 +1786,7 @@ impl VertexProgram {
                     | Operation::FloatPredicateCompare { .. }
                     | Operation::Select { .. }
                     | Operation::ConditionalMove { .. }
+                    | Operation::ConditionalImmediate { .. }
             )
         }) {
             s.push_str("var p0:bool;\n");
@@ -1962,6 +1993,9 @@ impl VertexProgram {
                     emit_multiply_add16(&mut s, dst, left, middle, right, signed);
                 }
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
+                Operation::ConditionalImmediate { dst, bits, invert } => {
+                    emit_conditional_immediate(&mut s, dst, bits, invert);
+                }
                 Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
                 Operation::ConditionalMove { dst, src, invert } => {
                     emit_conditional_move(&mut s, dst, src, invert);
@@ -2432,6 +2466,12 @@ fn emit_float_immediate(s: &mut String, dst: u8, src: u8, bits: u32, operator: F
         "r[{dst}]=bitcast<u32>(bitcast<f32>(r[{src}]) {symbol} bitcast<f32>({bits}u));"
     )
     .unwrap();
+}
+
+fn emit_conditional_immediate(s: &mut String, dst: u8, bits: u32, invert: bool) {
+    use std::fmt::Write;
+    let negate = if invert { "!" } else { "" };
+    writeln!(s, "if ({negate}p0) {{ r[{dst}]={bits}u; }}").unwrap();
 }
 
 fn emit_conditional_move(s: &mut String, dst: u8, src: u8, invert: bool) {

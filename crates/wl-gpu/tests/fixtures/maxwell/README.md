@@ -559,3 +559,19 @@ words; this does not claim MaxAs assembles the SPH or scheduled complete binary.
 SHA-256 including SPH:
 
 - float-constant.bin:ecab5c4606d2b90378ef3cd687d7cc18f13dd35d30da0d0b0984975b6a681ae6
+
+`conditional-immediate` and `vertex-conditional-immediate` combine validated
+80-byte stage headers with original-envyas assembled scheduled code. The
+208-byte fragment uses six registers: unsigned ISETP at98, @P0 MOV32I R0,1
+atA0 (`0103f8000000f000`), @!P0 MOV32I R2,0 atA8
+(`010000000008f002`) and EXIT atB8. The176-byte vertex fixture uses seven
+registers: compare constant at68, ISETP at78, @P0 MOV32I R0,.5 at80
+(`0103f0000000f000`), position export at88 and UV export at98.
+Original MaxAs independently agrees on the predicated instruction words,
+including high destination/raw DEADBEEF and FFFFFFFF examples; it does not
+assemble the SPH or complete scheduled binaries.
+
+SHA-256 including SPH:
+
+- conditional-immediate.bin:0f07262306da9f50776700f06addbd1833cb2e62e4dcc381739439ed23272e4c
+- vertex-conditional-immediate.bin:ef86a1c1b7c1054c671c79ba5af22a746df514becfe692fc75932df10b4d9051

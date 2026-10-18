@@ -1693,3 +1693,24 @@ clears texture-handle/position-W/reciprocal provenance. Vertex resources, high
 offset ambiguity, modifiers, alternate rounding/denormal modes and fused
 arithmetic remain unsupported. Lowering inherits the existing bounded F32
 accuracy contract; it does not establish new all-input exact-IEEE guarantees.
+
+## Predicated full-immediate moves
+
+Vertex and fragment programs support full-lane MOV32I guarded by P0 or !P0.
+The immediate is raw32-bit register data. A true guard replaces the destination;
+a false guard retains its old value. The typed ConditionalImmediate operation
+keeps this distinction without numeric conversion or specialization on mutable
+predicate/resource values. Immediate instruction bits remain part of shader identity.
+
+P0 and the prior destination must be initialized, and the destination must
+have no pending write. This conservative false-path rule also applies when
+an earlier comparison could be constant-folded. The supported schedule uses
+fixed stall6 and no write barrier, retaining the existing explicit wait rules.
+Old-destination and predicate-derived FMUL hazards are preserved. Conditional
+writes clear texture-handle, position-W and reciprocal proofs conservatively.
+The immediate never contributes a fake source register to allocation metadata.
+
+Only P0/!P0 and the full four-lane mask are supported. Other execution predicates,
+partial lane masks, reserved fields and general control flow remain unsupported.
+Existing unconditional PT MOV32I behavior is unchanged. No driver or runtime
+interface changes are required.

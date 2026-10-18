@@ -1412,3 +1412,23 @@ agrees on every instruction word and boundary/RZ examples. Fixed-six ALU
 scheduling uses no write barrier. Only semantic/encoding evidence is used;
 no compiler implementation is imported. The new source form lowers through
 the existing WGSL f32 arithmetic contract and adds no stronger precision claim.
+
+## SM50 predicated MOV32I
+
+Pinned MIT [GM107 predicate table](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/gm107.c#L408-L412)
+and [MOV32I entry](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/gm107.c#L2170)
+identify predicate16..18/invert19, destination7:0, full immediate51:20 and
+lane mask15:12. Pinned [MaxAs movement grammar](https://github.com/NervanaSystems/maxas/blob/54eda7af086a46c9dae1688b691968235d560164/lib/MaxAs/MaxAsGrammar.pm#L358)
+and [predicate encoding](https://github.com/NervanaSystems/maxas/blob/54eda7af086a46c9dae1688b691968235d560164/lib/MaxAs/MaxAsGrammar.pm#L1193-L1201)
+independently encode the same fields. The bounded decoder fixes predicateP0,
+all four lane bits and reserved fields: base `010000000000f000`, variable
+mask `000ffffffff800ff`. PT remains the separate unconditional form.
+
+Pinned [NAK generic predicate encoding](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/compiler/nak/sm50.rs#L225)
+and [UAM predication](https://github.com/devkitPro/uam/blob/5a5afc2bae8b55409ab36ba45be63fcb73f68993/mesa-imported/codegen/nv50_ir_emit_gm107.cpp#L238)
+corroborate those predicate fields. The existing MOV fixed-six timing subset
+is reused. NVIDIA's [CUDA8 predicated-execution description](https://docs.nvidia.com/cuda/archive/8.0/parallel-thread-execution/index.html#predicated-execution)
+corroborates the false-guard no-write behavior; it is not used as a SASS encoding
+source. Original envyas assembles both complete fixtures, and original MaxAs
+independently matches positive/inverted and high-register raw-bit examples.
+No compiler implementation is imported.

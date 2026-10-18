@@ -5861,3 +5861,213 @@ fn driver_float_constant_data_code_and_visibility() {
     eprintln!("FADD/FMUL.C warm32 CPU={elapsed:?} before={before:?} after={after:?}");
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+#[test]
+#[ignore = "requires actual GPU; MOV32I predication preserves false paths, raw code identity and pending output"]
+fn driver_conditional_immediate_predicates_code_and_visibility() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/conditional-immediate.bin");
+    data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x2144, 0x600),
+        (0x214c, 6),
+        (0x2380, 32),
+        (0x2384, 0),
+        (0x2388, 0x40040),
+        (0x2490, 1),
+    ] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let draw_words = draw();
+    let mut identity = None;
+    for (index, (input, color)) in [
+        ([1u32, 2], [255, 128, 191, 255]),
+        ([2, 1], [64, 128, 0, 255]),
+        ([7, 7], [64, 128, 0, 255]),
+        ([0, u32::MAX], [255, 128, 191, 255]),
+        ([0x80000000, 0x7fffffff], [64, 128, 0, 255]),
+        ([1, 2], [255, 128, 191, 255]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut bytes = [0u8; 8];
+        for (dst, value) in bytes.chunks_exact_mut(4).zip(input) {
+            dst.copy_from_slice(&value.to_le_bytes());
+        }
+        d.write_backing(b, 0x50, &bytes, &mut mem(&mut data))
+            .unwrap();
+        let r = submit(
+            &mut d,
+            c,
+            b,
+            &mut data,
+            if index == 0 { &words } else { &draw_words },
+        );
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert_eq!(r.progress.draws_submitted, 1);
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        check(&data, color, false);
+        d.retire(r.token).unwrap();
+        let n = d.graphics_counters();
+        let now = [
+            n.shader_decodes,
+            n.shader_module_allocations,
+            n.pipeline_allocations,
+        ];
+        if let Some(old) = identity {
+            assert_eq!(now, old);
+        }
+        identity = Some(now);
+    }
+    let original = u64::from_le_bytes(bin[0xa0..0xa8].try_into().unwrap());
+    assert_eq!(original, 0x0103f8000000f000);
+    // Same true P0, new immediate bits: 1.0→.5 must change red255→128.
+    let half = (original & !(0xffffffffu64 << 20)) | (0x3f000000u64 << 20);
+    d.write_backing(b, 0x46a0, &half.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw_words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    assert_eq!(
+        d.graphics_counters().shader_decodes,
+        before.shader_decodes + 1
+    );
+    assert!(!d.query(r.token).unwrap().guest_visible);
+    check(&data, [255, 128, 191, 255], false);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [128, 128, 191, 255], false);
+    d.retire(r.token).unwrap();
+    // Inverting only the first execution predicate preserves original .25 while P0 is true.
+    let inverted = half ^ (1 << 19);
+    d.write_backing(b, 0x46a0, &inverted.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let before_code = d.graphics_counters();
+    let pending = submit(&mut d, c, b, &mut data, &draw_words);
+    assert!(pending.fault.is_none(), "{:?}", pending.fault);
+    assert_eq!(pending.progress.draws_submitted, 1);
+    assert_eq!(
+        d.graphics_counters().shader_decodes,
+        before_code.shader_decodes + 1
+    );
+    assert_eq!(
+        d.graphics_counters().vertex_upload_bytes,
+        before_code.vertex_upload_bytes
+    );
+    check(&data, [128, 128, 191, 255], false);
+    assert!(!d.query(pending.token).unwrap().guest_visible);
+    let before = d.graphics_counters();
+    let start = std::time::Instant::now();
+    let mut last = pending.token;
+    for _ in 0..32 {
+        let r = submit_existing(&mut d, c, &mut data, 8);
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert_eq!(r.progress.draws_submitted, 1);
+        last = r.token;
+    }
+    let elapsed = start.elapsed();
+    let after = d.graphics_counters();
+    assert_eq!(after.draw_commands - before.draw_commands, 32);
+    assert_eq!(after.submissions - before.submissions, 32);
+    assert_eq!(
+        move_constant_resource_work(after),
+        move_constant_resource_work(before)
+    );
+    assert!(!d.query(last).unwrap().guest_visible);
+    check(&data, [128, 128, 191, 255], false);
+    d.write_backing(
+        b,
+        0x46a0,
+        &(inverted | (1 << 16)).to_le_bytes(),
+        &mut mem(&mut data),
+    )
+    .unwrap();
+    let failed = submit(&mut d, c, b, &mut data, &draw_words);
+    assert!(failed.fault.is_some());
+    assert_eq!(failed.progress.draws_submitted, 0);
+    assert_eq!(d.graphics_counters().draw_commands, after.draw_commands);
+    assert_eq!(d.graphics_counters().submissions, after.submissions);
+    check(&data, [128, 128, 191, 255], false);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, [64, 128, 191, 255], false);
+    assert!(d.query(pending.token).unwrap().guest_visible);
+    assert!(d.query(last).unwrap().guest_visible);
+    assert_eq!(d.graphics_counters().draw_commands, after.draw_commands);
+    eprintln!("conditional MOV32I warm32 CPU={elapsed:?} before={before:?} after={after:?}");
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+#[test]
+#[ignore = "requires actual GPU; predicated MOV32I consumes guest vertex predicates and code-immediate positions"]
+fn driver_vertex_conditional_immediate_geometry_and_code() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/vertex-conditional-immediate.bin");
+    data[0x4800..0x4800 + bin.len()].copy_from_slice(bin);
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [(0x2044, 0x800), (0x204c, 7), (0x2144, 0x400)] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    assert_eq!(
+        u64::from_le_bytes(bin[0x80..0x88].try_into().unwrap()),
+        0x0103f0000000f000
+    );
+    assert_eq!(POS[0][0].to_bits(), 0xbf4ccccd);
+    assert_ne!(POS[1][0].to_bits(), 0xbf4ccccd);
+    assert_ne!(POS[2][0].to_bits(), 0xbf4ccccd);
+    let r = submit(&mut d, c, b, &mut data, &words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_conditional_geometry(&data, 0.5);
+    d.retire(r.token).unwrap();
+    d.write_backing(b, 0x3000, &(-0.6f32).to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let background: Vec<_> = (0..W * H).flat_map(|_| BG).collect();
+    d.write_backing(b, RT as u64, &background, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    let after = d.graphics_counters();
+    assert_eq!(after.vertex_shader_decodes, before.vertex_shader_decodes);
+    assert_eq!(after.pipeline_allocations, before.pipeline_allocations);
+    assert_eq!(after.vertex_upload_bytes - before.vertex_upload_bytes, 72);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_conditional_geometry(&data, f64::from(-0.6f32));
+    d.retire(r.token).unwrap();
+    // New compare constant matches only first -.6; new predicated immediate supplies +.25.
+    assert_eq!((-0.6f32).to_bits(), 0xbf19999a);
+    assert_ne!(POS[1][0].to_bits(), 0xbf19999a);
+    assert_ne!(POS[2][0].to_bits(), 0xbf19999a);
+    let expected = 0x010000000007f006u64 | (0xbf19999au64 << 20);
+    let position = 0x010000000000f000u64 | (0x3e800000u64 << 20);
+    d.write_backing(b, 0x4868, &expected.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    d.write_backing(b, 0x4880, &position.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    d.write_backing(b, RT as u64, &background, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    assert_eq!(r.progress.draws_submitted, 1);
+    let after = d.graphics_counters();
+    assert_eq!(
+        after.vertex_shader_decodes,
+        before.vertex_shader_decodes + 1
+    );
+    assert_eq!(after.shader_decodes, before.shader_decodes);
+    assert_eq!(after.vertex_upload_bytes, before.vertex_upload_bytes);
+    assert!(after.pipeline_allocations > before.pipeline_allocations);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_conditional_geometry(&data, 0.25);
+    d.retire(r.token).unwrap();
+    eprintln!("VS conditional MOV32I {:?}", d.graphics_counters());
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

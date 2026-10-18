@@ -3245,3 +3245,54 @@ publication-retry, depth, layout, channel and shader regressions. Whole-workspac
 formatting still reports differences outside the GPU package, and strict
 workspace Clippy reports13 committed-runtime diagnostics. No passing
 whole-workspace result is implied by these package gates.
+
+## Predicated MOV32I in both graphics stages
+
+Seven live CPU tests pass, covering both independently assembled stage fixtures,
+all32 immediate bit positions and raw NaN/sign payloads, high destinations,
+initialized predicate/false-path requirements, unsupported fields, schedules,
+waits, old-value/predicate rounding hazards and resource-proof erasure.
+
+Two focused GPU scenarios pass on each of OpenGL llvmpipe, native Windows
+D3D12 and native Windows Vulkan: six actual GPU passes, no failures/skips.
+Native child environments select WGPU_BACKEND directly; logs identify Intel
+UHD D3D12 driver32.0.101.7076 and Vulkan driver101.7076, with terminal two-pass
+summaries. This is execution and pixel verification, not cross-compilation.
+
+The fragment test uses runtime unsigned comparisons of guest constant words.
+Six cases distinguish P0 and !P0 without recompilation. Changing the immediate
+bits1→.5 and then only predicate inversion produces distinct red255→128→64
+results. A subsequent unsupported P1 faults without an extra draw/submission;
+pending red64 publishes while guest RAM previously held red128, without replay.
+The vertex test changes the first clip X from-.8 to+.5 through decoded MOV32I.
+Changing guest X to-.6 disables that guard with72 vertex-upload bytes and no
+shader recompile. Updating the guest compare constant and code immediate then
+moves only the first vertex to+.25 with one vertex decode and no vertex upload.
+An independent f64 edge/barycentric coverage oracle checks inside/outside pixels.
+
+Before warm repetition the fragment workload records8 draws/15 queue submissions,
+three fragment decodes/624 shader bytes,64 constant bytes read/uploaded, six
+shader modules/eight pipelines, one target allocation/seven reuses and seven
+intentional readbacks transferring52080 bytes with42224 packed guest-write bytes.
+Thirty-two warm draws add32 queues,1280 borrowed command-source bytes including
+1024 command bytes and64 entry decodes; resource reads/uploads, modules/pipelines,
+target allocations, readbacks and waits remain unchanged. Focused OpenGL CPU
+wall time was16.640ms and native D3D12 was26.264ms under uncontrolled load;
+these are not GPU/game timings, full batching or allocation-free/zero-copy claims.
+Rust allocator traffic is not instrumented for these new draw workloads.
+
+Live package gates pass: formatting, strict all-target Clippy,336 CPU tests
+without default features and337 with default features. The normal default
+suite ignores141 GPU tests; explicit OpenGL execution passes all141 with zero
+failures/skips. Linux remains unoptimized with debug assertions and overflow
+checks enabled, debug information disabled. A broader native alu_gpu launch
+subsequently failed in the WSL broker with accept4 error110 before adapter
+acquisition; it adds no full-suite Windows pass to the focused results above.
+
+The completed preceding FloatConstant workspace snapshot is committed72accf7
+plus its five exact candidate code/assembly/binary files and unchanged lock,
+excluding concurrent uncommitted runtime/SDL work. It reports564 passing tests,
+the same three CLI/Horizon failures and139 ignored GPU tests; workspace
+formatting and13 committed-runtime Clippy diagnostics remain separate from
+passing GPU package gates. That snapshot is not the later f955345 live tree
+or a complete validation of its runtime changes.
