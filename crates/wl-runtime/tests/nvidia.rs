@@ -36,11 +36,12 @@ enum Call {
 struct Observed {
     calls: Vec<Call>,
     fail_ioctl: bool,
+    fatal_ioctl: bool,
 }
 #[derive(Debug)]
 struct Host(Arc<Mutex<Observed>>);
 impl nvidia::Host for Host {
-    fn initialize(&mut self, transfer: nvidia::TransferBuffer) -> nvidia::NvResult<()> {
+    fn initialize(&mut self, transfer: nvidia::TransferBuffer) -> nvidia::HostResult<()> {
         self.0
             .lock()
             .unwrap()
@@ -48,21 +49,21 @@ impl nvidia::Host for Host {
             .push(Call::Initialize(transfer));
         Ok(())
     }
-    fn set_client_pid(&mut self, aruid: u64, pid: u64) -> nvidia::NvResult<()> {
+    fn set_client_pid(&mut self, aruid: u64, pid: u64) -> nvidia::HostResult<()> {
         self.0.lock().unwrap().calls.push(Call::Pid(aruid, pid));
         Ok(())
     }
-    fn open(&mut self, path: &str) -> nvidia::NvResult<u32> {
+    fn open(&mut self, path: &str) -> nvidia::HostResult<u32> {
         self.0.lock().unwrap().calls.push(Call::Open(path.into()));
         Ok(FD)
     }
-    fn close(&mut self, fd: u32, memory: &mut Memory) -> nvidia::NvResult<()> {
+    fn close(&mut self, fd: u32, memory: &mut Memory) -> nvidia::HostResult<()> {
         self.0.lock().unwrap().calls.push(Call::Close(fd));
         memory.write_bytes(MARKER, b"CLOS").unwrap();
         Ok(())
     }
-    fn ioctl(&mut self, call: nvidia::Ioctl<'_>, memory: &mut Memory) -> nvidia::NvResult<()> {
-        let fail = {
+    fn ioctl(&mut self, call: nvidia::Ioctl<'_>, memory: &mut Memory) -> nvidia::HostResult<()> {
+        let (fail, fatal) = {
             let mut seen = self.0.lock().unwrap();
             seen.calls.push(Call::Ioctl {
                 fd: call.fd,
@@ -73,7 +74,7 @@ impl nvidia::Host for Host {
                 out_len: call.output.len(),
                 extra_out_len: call.extra_output.len(),
             });
-            seen.fail_ioctl
+            (seen.fail_ioctl, seen.fatal_ioctl)
         };
         // Proves callback receives the actual process image, not a scratch clone.
         memory.write_bytes(MARKER, b"IOCT").unwrap();
@@ -83,8 +84,12 @@ impl nvidia::Host for Host {
         for (i, byte) in call.extra_output.iter_mut().enumerate() {
             *byte = 0xa0 + i as u8;
         }
-        if fail {
-            Err(nvidia::NvError::IoctlFailed)
+        if fatal {
+            Err(nvidia::HostError::Fatal(
+                "accepted output publication failed".into(),
+            ))
+        } else if fail {
+            Err(nvidia::NvError::IoctlFailed.into())
         } else {
             Ok(())
         }
@@ -994,4 +999,78 @@ fn in_place_primary_metadata_is_snapshotted_before_host_and_output_publication()
             extra_out_len: 0,
         }
     );
+}
+
+#[test]
+fn fatal_host_failure_stops_ipc_before_reply_and_latches_against_replay() {
+    let mut h = Harness::new();
+    h.initialize();
+    h.inputs();
+    h.observed.lock().unwrap().fatal_ioctl = true;
+    h.stage(&Wire {
+        command: 1,
+        args: &ioctl_args(RW8),
+        x: &[(INPUT, 8)],
+        a: &[(0, 0)],
+        b: &[(OUTPUT, 8)],
+        c: &[(0, 0)],
+        ..Wire::default()
+    });
+    let message = h.read(h.tls(), 0x100);
+    let before = h.count();
+    assert!(
+        h.invoke()
+            .unwrap_err()
+            .contains("accepted output publication failed")
+    );
+    assert_eq!(h.count(), before + 1);
+    assert_eq!(
+        h.read(h.tls(), 0x100),
+        message,
+        "no success reply after fatal work"
+    );
+    assert_eq!(
+        h.read(MARKER, 4),
+        b"IOCT",
+        "accepted side effect is not rolled back"
+    );
+    assert_eq!(h.read(OUTPUT, 8), [0xcc; 8]);
+    assert!(h.process.kernel.as_ref().unwrap().nvidia.is_faulted());
+    // Clearing backend injection cannot reset the process-level fault or replay.
+    h.observed.lock().unwrap().fatal_ioctl = false;
+    for command in [0, 1, 2, 3, 4, 8] {
+        h.stage(&Wire {
+            command,
+            ..Wire::default()
+        });
+        assert!(h.invoke().unwrap_err().contains("NVIDIA backend halted"));
+        assert_eq!(h.count(), before + 1);
+    }
+}
+
+#[test]
+fn ordinary_host_driver_error_is_wire_error_without_latching_a_fatal_fault() {
+    let mut h = Harness::new();
+    h.initialize();
+    h.inputs();
+    h.observed.lock().unwrap().fail_ioctl = true;
+    let args = ioctl_args(RW8);
+    let wire = Wire {
+        command: 1,
+        args: &args,
+        x: &[(INPUT, 8)],
+        a: &[(0, 0)],
+        b: &[(OUTPUT, 8)],
+        c: &[(0, 0)],
+        ..Wire::default()
+    };
+    h.send(&wire);
+    assert_eq!(h.scalar(0x20), nvidia::NvError::IoctlFailed as u32);
+    assert!(!h.process.kernel.as_ref().unwrap().nvidia.is_faulted());
+    let before = h.count();
+    h.observed.lock().unwrap().fail_ioctl = false;
+    h.send(&wire);
+    assert_eq!(h.scalar(0x20), 0);
+    assert_eq!(h.count(), before + 1);
+    assert_eq!(h.read(OUTPUT, 8), expected_output());
 }

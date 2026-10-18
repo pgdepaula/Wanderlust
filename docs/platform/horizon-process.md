@@ -369,6 +369,15 @@ supported because inputs are acquired first. A host error suppresses metadata
 publication but cannot roll back its explicit side effects. Backends must retain
 partial progress and must not mutate CPU mapping layout during the call.
 
+`HostResult` distinguishes ordinary `HostError::Driver` wire errors from
+`HostError::Fatal`. A fatal backend failure latches the process NVIDIA state,
+returns a runtime execution error before metadata/TLS publication, and prevents
+later NVIDIA requests from invoking the backend. Already accepted side effects
+are retained; the runtime does not retry the operation. This is required when
+an accepted GPU prefix cannot safely return control to an uninstrumented guest.
+Two additional literal transport tests verify fatal side effects, unchanged
+reply/output storage, rejection of replay, and recoverable ordinary errors.
+
 Initialize validates the selected transfer span as readable/writable within one
 region. Its `TransferBuffer` is scoped metadata, not a kernel pin, allocation
 identity or permission-transfer implementation. A backend requiring persistent
