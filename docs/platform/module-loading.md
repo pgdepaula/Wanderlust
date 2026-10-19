@@ -149,6 +149,29 @@ Each condition is a structured `Diagnostic { severity, module, kind, detail, add
 
 Every value written by a relocation that lands on a 4-byte-aligned address in an executable mapping, every defined `STT_FUNC` dynamic symbol, and every `DT_INIT`/`DT_FINI` becomes a `CodePointer`. These seed analysis as *speculative* roots: a pointer into text is not proof of an instruction boundary (it may address constant data), so analysis discards a speculative root, and everything reached only through it, if traversal leaves executable memory (see [execution model](../architecture/execution-model.md)). Relocated function pointers are the principal source of indirect-branch targets: vtables, function-pointer tables, GOT entries and PLT slots all appear here.
 
+### Initialization-array candidates
+
+`DT_INIT_ARRAY` and `DT_FINI_ARRAY` supply additional `CodePointer` candidates
+with `initializer-array` and `finalizer-array` provenance. Their ELF64 elements
+are read as little-endian pointers from the already relocated analysis copy;
+the module base is never added a second time. Guest-mode storage remains
+unrelocated. Candidate collection does not execute constructors, change their
+order, remove duplicate guest calls or alter `init_order`'s DT_INIT-only contract.
+
+The [ELF gABI dynamic-linking specification](https://gabi.xinuos.com/elf/08-dynamic.html)
+defines the array addresses, byte sizes and execution order. Discovery retains
+only aligned executable targets, as for other code-pointer sources. Empty,
+null and non-executable targets add no candidate. An unmapped pointer entry,
+address overflow or partial pointer is an explicit error. The combined arrays
+have a conservative analysis budget of 1,048,576 entries per process, independent
+of hardware limits and the instruction-discovery budget.
+
+The `link` JSON exposes these provenance tags for filtering into an existing
+`--roots-file`. This permits initializer-specific analysis without automatically
+seeding every vtable or dynamic export. Synthetic tests cover explicit and
+implicit relocation data, alternate bases, cross-module targets, duplicate
+pointers, unmodified guest bytes and malformed metadata.
+
 ## Validation
 
 * [Synthetic modules](../../crates/wl-loader/tests/support/mod.rs) with exact control of every dynamic table: RELA vs REL relative semantics independent of the stored word, base changes, the count prefix, load-order symbol precedence independent of input order, hidden-visibility binding, REL jump slots, ABS32 field width and overflow, strong/weak unresolved symbols, unsupported/unmapped/read-only targets, layout and permissions, rtld blocking, guest mode, and init order. Fourteen malformed-table cases are rejected by the parser ([tests](../../crates/wl-loader/tests/dynamic_tables.rs)).
@@ -156,4 +179,4 @@ Every value written by a relocation that lands on a 4-byte-aligned address in an
 
 Observed: both formats link with zero diagnostics; every relocation-derived code pointer equals `module_base + st_value` from LLD's symbol table; the recompiled process returns `X0 = 1681`, `X9 = 1001` after 43 guest instructions on Linux x86-64 and as a Windows x86-64 PE (`x86_64-pc-windows-gnu`). Without host linking (`--link guest`, no rtld) the same program faults at its first PLT call, branching to the unrelocated stub offset.
 
-No open homebrew built with libnx has been executed: its crt0 self-relocation requires guest support for the libnx startup path, which has not been exercised.
+Source-built libnx programs exercise self-relocation, threads and hosted service calls through the [Horizon integration tests](../../tools/wl-cli/tests/horizon.rs). The [NVIDIA fixture](../../tools/wl-cli/tests/native_gpu.rs) also executes guest-issued graphics requests. These are original homebrew fixtures, not original-game graphics evidence.

@@ -619,6 +619,7 @@ impl Process {
         for (value, m) in &linker.pointers {
             push(*value, "relocation", &placed[*m].name, &mut code_pointers);
         }
+        let mut pointer_array_entries = 0u64;
         for p in &placed {
             if let Some(d) = p.dynamic {
                 for s in d
@@ -635,6 +636,42 @@ impl Process {
                 }
                 for init in [d.init, d.fini].into_iter().flatten() {
                     push(p.base + init.0, "initializer", &p.name, &mut code_pointers);
+                }
+                for (source, array) in [
+                    ("initializer-array", d.init_array),
+                    ("finalizer-array", d.fini_array),
+                ] {
+                    let Some(array) = array else { continue };
+                    if array.size % 8 != 0 {
+                        return Err(
+                            "initializer/finalizer array size is not a multiple of 8".into()
+                        );
+                    }
+                    pointer_array_entries = pointer_array_entries
+                        .checked_add(array.size / 8)
+                        .filter(|n| *n <= 1_048_576)
+                        .ok_or("initializer/finalizer arrays exceed the analysis entry budget")?;
+                    let start = p
+                        .base
+                        .checked_add(array.offset.0)
+                        .ok_or("initializer/finalizer array address overflow")?;
+                    for offset in (0..array.size).step_by(8) {
+                        let address = start
+                            .checked_add(offset)
+                            .ok_or("initializer/finalizer entry address overflow")?;
+                        let (mapping, at) = linker
+                            .locate(address, 8)
+                            .ok_or("initializer/finalizer entry is not mapped in one segment")?;
+                        // The analysis copy is already relocated, even in guest
+                        // mode. Never rebase the value again or modify the
+                        // guest image; guest code still executes these calls.
+                        push(
+                            linker.read64(mapping, at),
+                            source,
+                            &p.name,
+                            &mut code_pointers,
+                        );
+                    }
                 }
             }
         }
