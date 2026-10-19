@@ -180,3 +180,13 @@ pointers, unmodified guest bytes and malformed metadata.
 Observed: both formats link with zero diagnostics; every relocation-derived code pointer equals `module_base + st_value` from LLD's symbol table; the recompiled process returns `X0 = 1681`, `X9 = 1001` after 43 guest instructions on Linux x86-64 and as a Windows x86-64 PE (`x86_64-pc-windows-gnu`). Without host linking (`--link guest`, no rtld) the same program faults at its first PLT call, branching to the unrelocated stub offset.
 
 Source-built libnx programs exercise self-relocation, threads and hosted service calls through the [Horizon integration tests](../../tools/wl-cli/tests/horizon.rs). The [NVIDIA fixture](../../tools/wl-cli/tests/native_gpu.rs) also executes guest-issued graphics requests. These are original homebrew fixtures, not original-game graphics evidence.
+
+Analysis budgets are explicit: `analyze` and `recompile` accept
+`--instruction-limit COUNT` (1–16,777,216, default 1,000,000). Required roots
+from `--entry`/`--seed` must traverse successfully; speculative metadata/file
+roots that exceed the budget are rejected without retaining their partial
+traversal. Increasing the budget does not relax instruction or memory validation
+and can substantially increase host memory, generated code and compile time.
+Observed execution destinations should be required roots rather than relying on
+the retention of a speculative candidate. Recompile and summary reports include
+the selected limit.

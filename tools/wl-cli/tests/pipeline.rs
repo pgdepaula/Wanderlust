@@ -288,3 +288,73 @@ fn scalar_and_vector_reciprocal_estimates_execute_as_native_code() {
     assert_eq!(s["fpsr"], 0);
     assert_eq!(s["steps"], 11);
 }
+
+#[test]
+fn explicit_analysis_budget_preserves_required_and_speculative_root_rules() {
+    let t = Temp::new();
+    let input = t.0.join("budget.a64");
+    fs::write(&input, raw(&[0xd65f03c0, 0x91000400, 0xd65f03c0])).unwrap();
+    let candidates = t.0.join("candidates.txt");
+    fs::write(&candidates, "0x10004\n").unwrap();
+    let small = cli()
+        .arg("analyze")
+        .arg(&input)
+        .args([
+            "--raw",
+            "--entry",
+            "0x10000",
+            "--summary",
+            "--instruction-limit",
+            "2",
+            "--roots-file",
+        ])
+        .arg(&candidates)
+        .output()
+        .unwrap();
+    assert!(
+        small.status.success(),
+        "{}",
+        String::from_utf8_lossy(&small.stderr)
+    );
+    let s = state(&small);
+    assert_eq!(s["instructions"], 1);
+    assert_eq!(s["instruction_limit"], 2);
+    assert_eq!(s["speculative_roots_rejected"], 1);
+    let required = cli()
+        .arg("analyze")
+        .arg(&input)
+        .args([
+            "--raw",
+            "--entry",
+            "0x10000",
+            "--seed",
+            "0x10004",
+            "--instruction-limit",
+            "2",
+        ])
+        .output()
+        .unwrap();
+    assert!(!required.status.success());
+    let sufficient = cli()
+        .arg("analyze")
+        .arg(&input)
+        .args([
+            "--raw",
+            "--entry",
+            "0x10000",
+            "--seed",
+            "0x10004",
+            "--instruction-limit",
+            "3",
+            "--summary",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        sufficient.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sufficient.stderr)
+    );
+    assert_eq!(state(&sufficient)["instructions"], 3);
+    assert_eq!(state(&sufficient)["required_roots"], 2);
+}

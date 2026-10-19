@@ -20,7 +20,7 @@ USAGE:
   wanderlust survey INPUT [--raw] [--base ADDRESS] [--examples N]
   wanderlust analyze INPUT [--raw] [--base ADDRESS] [--entry ADDRESS] [--seed ADDRESS]...
                      [--link host|guest] [--no-pointer-seeds] [--allow-unsupported]
-                     [--roots-file FILE] [--summary]
+                     [--roots-file FILE] [--instruction-limit COUNT] [--summary]
   wanderlust recompile INPUT [analyze options] --out EXECUTABLE [--target TRIPLE] [--emit-only]
                        [--jobs N] [--cache-dir DIR] [--unit-shift BITS] [--opt-level 0..3]
                        [--horizon [--memory-limit BYTES] [--native-gpu]]
@@ -43,7 +43,7 @@ adds speculative roots (one address per line), e.g. from symbols, metadata or tr
 For single files the default load base is 0x10000 and --entry is required.
 The executable crate is written beside EXECUTABLE as EXECUTABLE.rs with memory images as
 EXECUTABLE.rs.<address>.bin. Translated blocks form one crate per 2^BITS-byte guest window
-(default 14); the runtime and units are compiled as rlibs by N parallel rustc jobs (default
+(default 12); the runtime and units are compiled as rlibs by N parallel rustc jobs (default
 WL_JOBS or min(CPUs, 4)) and cached in DIR (default WL_CACHE_DIR or .wanderlust-cache beside
 EXECUTABLE), keyed by source, toolchain, target and flags. --target uses rustc's installed
 target and linker.
@@ -57,7 +57,10 @@ parameters come from main.npdm when present; --memory-limit sets the process mem
 never replaced by the NPDM application default. The executable accepts --steps and --quantum.
 --native-gpu installs the bounded native NVIDIA backend and builds its dependencies with
 Cargo for the selected target. It requires this source workspace and an available host GPU;
-it does not add unsupported Maxwell instructions, services or game compatibility.";
+it does not add unsupported Maxwell instructions, services or game compatibility.
+--instruction-limit bounds analysis to 1..16777216 decoded instructions (default 1000000).
+Required roots (--entry/--seed) take priority; speculative roots that exceed the budget
+are rejected. Increasing the budget can significantly increase memory and compilation time.";
 
 fn number(v: &str) -> Result<u64> {
     if let Some(v) = v.strip_prefix("0x") {
@@ -84,6 +87,7 @@ struct Options {
     summary: bool,
     verify_content: bool,
     roots_file: Option<PathBuf>,
+    instruction_limit: usize,
     examples: usize,
     jobs: Option<usize>,
     opt_level: u8,
@@ -129,6 +133,7 @@ fn options(args: &[OsString]) -> Result<Options> {
         summary: false,
         verify_content: false,
         roots_file: None,
+        instruction_limit: wl_analysis::MAX_INSTRUCTIONS,
         examples: 32,
         jobs: None,
         opt_level: 2,
@@ -153,9 +158,20 @@ fn options(args: &[OsString]) -> Result<Options> {
             "--verify-content" => o.verify_content = true,
             "--horizon" => o.horizon = true,
             "--native-gpu" => o.native_gpu = true,
-            "--base" | "--entry" | "--seed" | "--out" | "--target" | "--link" | "--roots-file"
-            | "--examples" | "--jobs" | "--cache-dir" | "--unit-shift" | "--memory-limit"
-            | "--opt-level" => {
+            "--base"
+            | "--entry"
+            | "--seed"
+            | "--out"
+            | "--target"
+            | "--link"
+            | "--roots-file"
+            | "--examples"
+            | "--jobs"
+            | "--cache-dir"
+            | "--unit-shift"
+            | "--memory-limit"
+            | "--opt-level"
+            | "--instruction-limit" => {
                 i += 1;
                 let value = args
                     .get(i)
@@ -166,6 +182,13 @@ fn options(args: &[OsString]) -> Result<Options> {
                     "--seed" => o.seeds.push(GuestAddr(number(utf8(value)?)?)),
                     "--out" => o.out = Some(value.into()),
                     "--roots-file" => o.roots_file = Some(value.into()),
+                    "--instruction-limit" => {
+                        let limit = number(utf8(value)?)?;
+                        if !(1..=16_777_216).contains(&limit) {
+                            return Err("--instruction-limit must be between 1 and 16777216".into());
+                        }
+                        o.instruction_limit = limit as usize;
+                    }
                     "--examples" => o.examples = number(utf8(value)?)? as usize,
                     "--jobs" => o.jobs = Some(number(utf8(value)?)? as usize),
                     "--opt-level" => {
@@ -209,6 +232,7 @@ fn options(args: &[OsString]) -> Result<Options> {
             "--allow-unsupported",
             "--roots-file",
             "--summary",
+            "--instruction-limit",
         ],
         _ => &[
             "--raw",
@@ -229,6 +253,7 @@ fn options(args: &[OsString]) -> Result<Options> {
             "--horizon",
             "--memory-limit",
             "--native-gpu",
+            "--instruction-limit",
         ],
     };
     if let Some(bad) = used.iter().find(|k| !allowed.contains(&k.as_str())) {
@@ -594,7 +619,7 @@ fn run(args: &[OsString]) -> Result<()> {
             .collect(),
         speculative,
         allow_unsupported: o.allow_unsupported,
-        instruction_limit: None,
+        instruction_limit: Some(o.instruction_limit),
     };
     let started = Instant::now();
     let program = discover_roots(&image, &roots)?;
@@ -603,6 +628,7 @@ fn run(args: &[OsString]) -> Result<()> {
         return if o.summary {
             let mut s = analysis_summary(&program);
             s["analysis_seconds"] = analysis_seconds.into();
+            s["instruction_limit"] = o.instruction_limit.into();
             json(&s)
         } else {
             json(&program)
@@ -770,6 +796,7 @@ fn run(args: &[OsString]) -> Result<()> {
         "rustc_seconds": if o.emit_only { None } else { Some(compile_seconds) },
         "target": o.target,
         "opt_level": o.opt_level,
+        "instruction_limit": o.instruction_limit,
         "module_id": image.module_id,
     }))
 }
@@ -788,6 +815,36 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn instruction_limits_are_bounded_and_analysis_only() {
+        let parse = |args: &[&str]| options(&args.iter().map(OsString::from).collect::<Vec<_>>());
+        assert_eq!(
+            parse(&["analyze", "input"]).unwrap().instruction_limit,
+            1_000_000
+        );
+        for value in ["1", "2000000", "16777216"] {
+            for command in ["analyze", "recompile"] {
+                assert_eq!(
+                    parse(&[command, "input", "--instruction-limit", value])
+                        .unwrap()
+                        .instruction_limit,
+                    value.parse::<usize>().unwrap()
+                );
+            }
+        }
+        for value in [
+            "0",
+            "16777217",
+            "4294967297",
+            "18446744073709551615",
+            "-1",
+            "many",
+        ] {
+            assert!(parse(&["analyze", "input", "--instruction-limit", value]).is_err());
+        }
+        assert!(parse(&["analyze", "input", "--instruction-limit"]).is_err());
+        assert!(parse(&["survey", "input", "--instruction-limit", "1"]).is_err());
+    }
     #[test]
     fn optimization_levels_are_bounded_and_recompile_only() {
         let parse = |args: &[&str]| options(&args.iter().map(OsString::from).collect::<Vec<_>>());
