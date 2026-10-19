@@ -476,6 +476,8 @@ mod rt {
     pub const FCMEQ0: u8 = 11;
     pub const FCMLE0: u8 = 12;
     pub const FCMLT0: u8 = 13;
+    pub const FRECPE: u8 = 14;
+    pub const FRSQRTE: u8 = 15;
     pub const SHL: u8 = 0;
     pub const USHR: u8 = 1;
     pub const SSHR: u8 = 2;
@@ -1367,6 +1369,8 @@ fn two_misc(w: u32, pc: GuestAddr, rd: u8, rn: u8, scalar: bool) -> Decoded {
             (false, 1, 0x0f) if !scalar => (rt::FABS, 0),
             (true, 1, 0x0f) if !scalar => (rt::FNEG, 0),
             (true, 1, 0x1f) if !scalar => (rt::FSQRT, 0),
+            (false, 1, 0x1d) => (rt::FRECPE, 0),
+            (true, 1, 0x1d) => (rt::FRSQRTE, 0),
             (false, 0, 0x18) if !scalar => (rt::FRINT, rt::RN),
             (true, 0, 0x18) if !scalar => (rt::FRINT, rt::RA),
             (false, 0, 0x19) if !scalar => (rt::FRINT, rt::RM),

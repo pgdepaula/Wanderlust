@@ -240,3 +240,51 @@ fn optimization_modes_preserve_guest_results_and_separate_cache_identity() {
         previous = Some(result);
     }
 }
+
+#[test]
+fn scalar_and_vector_reciprocal_estimates_execute_as_native_code() {
+    let t = Temp::new();
+    // GNU as, Armv8-A: v1 holds four f32 inputs; v11 holds two f64 inputs.
+    let exe = compile(
+        &t,
+        &[
+            0x4ea1d820, 0x6ea1d822, 0x0ea1d823, 0x2ea1d824, 0x4ee1d965, 0x6ee1d966, 0x5ea1d827,
+            0x7ea1d828, 0x5ee1d969, 0x7ee1d96a, 0xd65f03c0,
+        ],
+    );
+    let output = Command::new(exe)
+        .args([
+            "--vreg",
+            "1=0x4180000040800000400000003f800000",
+            "--vreg",
+            "11=0x40100000000000003ff0000000000000",
+            "--vreg",
+            "3=0xffffffffffffffffffffffffffffffff",
+            "--vreg",
+            "7=0xffffffffffffffffffffffffffffffff",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let s = state(&output);
+    for (r, expected) in [
+        (0, "0x3d7f80003e7f80003eff80003f7f8000"),
+        (2, "0x3e7f80003eff80003f3480003f7f8000"),
+        (3, "0x3eff80003f7f8000"),
+        (4, "0x3f3480003f7f8000"),
+        (5, "0x3fcff000000000003feff00000000000"),
+        (6, "0x3fdff000000000003feff00000000000"),
+        (7, "0x3f7f8000"),
+        (8, "0x3f7f8000"),
+        (9, "0x3feff00000000000"),
+        (10, "0x3feff00000000000"),
+    ] {
+        assert_eq!(s["v"][r], expected, "V{r}");
+    }
+    assert_eq!(s["fpsr"], 0);
+    assert_eq!(s["steps"], 11);
+}

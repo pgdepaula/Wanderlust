@@ -202,8 +202,8 @@ fn inspect_reports_dynamic_metadata() {
 #[test]
 fn unsupported_instruction_becomes_precise_runtime_fault() {
     let t = Temp::new();
-    // CBZ X0 skips the unsupported word (FRECPE S0, S0: estimates are not implemented).
-    let words: Vec<u8> = [0xb4000040u32, 0x5ea1d800, 0xd65f03c0]
+    // CBZ X0 skips the unsupported word (URECPE V0.4S, V1.4S: integer estimates are not implemented).
+    let words: Vec<u8> = [0xb4000040u32, 0x4ea1c820, 0xd65f03c0]
         .iter()
         .flat_map(|w| w.to_le_bytes())
         .collect();
@@ -239,7 +239,7 @@ fn unsupported_instruction_becomes_precise_runtime_fault() {
     assert_eq!(o.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&o.stderr);
     assert!(
-        stderr.contains("0x5ea1d800") && stderr.contains("0x10004"),
+        stderr.contains("0x4ea1c820") && stderr.contains("0x10004"),
         "{stderr}"
     );
 }

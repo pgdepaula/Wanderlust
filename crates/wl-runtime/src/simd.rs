@@ -492,6 +492,8 @@ pub const FCMGE0: u8 = 10;
 pub const FCMEQ0: u8 = 11;
 pub const FCMLE0: u8 = 12;
 pub const FCMLT0: u8 = 13;
+pub const FRECPE: u8 = 14;
+pub const FRSQRTE: u8 = 15;
 /// FP lanewise unary operation. `mode` is the rounding mode for FRINT/FCVT forms and the
 /// number of fraction bits for fixed-point SCVTF/UCVTF/FCVTZ forms (`fbits`).
 pub fn fp1(c: &mut Cpu, op: u8, e: u32, n: u32, a: u128, mode: u8, fbits: u32) -> u128 {
@@ -504,6 +506,8 @@ pub fn fp1(c: &mut Cpu, op: u8, e: u32, n: u32, a: u128, mode: u8, fbits: u32) -
             FNEG => fp::neg(f, x),
             FABS => fp::abs(f, x),
             FSQRT => fp::sqrt(c, f, x),
+            FRECPE => fp::reciprocal_estimate(c, f, x, false),
+            FRSQRTE => fp::reciprocal_estimate(c, f, x, true),
             FRINT => fp::round_int(c, f, x, mode, false),
             FRINTX => fp::round_int(c, f, x, fp::ROUND_FPCR, true),
             FCVT_S => fp::to_fixed(c, f, x, e, true, mode, fbits),

@@ -169,3 +169,30 @@ To integrate these decoded extensions into the compilation and execution pipelin
    - Ensure `get_system_tick()` scales virtual deterministic time appropriately.
 5. **Next CPU Milestone:**
    - Re-running TOTK startup under AOT with System Counter and CRC32 lowered to observe the next stopping condition.
+
+## Implemented Armv8.0 reciprocal estimates
+
+`FRECPE` and `FRSQRTE` now decode and lower through the existing SIMD unary
+path for scalar S/D and vector 2S/4S/2D operands. The 64-bit 1D vector encoding
+remains reserved; unsigned integer estimates and FP16 are not implemented.
+The operations use the architecture's eight-bit midpoint estimates, rather
+than exact host reciprocal/division or host-specific approximation instructions.
+An integer rational calculation and integer square root determine the estimate;
+existing IEEE packing handles overflow, underflow and FPCR rounding. Signed
+zero, infinity, negative square-root inputs, NaN quieting/default-NaN, FZ and
+sticky FPSR exceptions are preserved. These additions do not implement Armv9
+increased-precision estimates or floating-point exception traps.
+
+The quantization mathematics follows Arm DDI 0406C.d, A2.7.8,
+[reciprocal and reciprocal-square-root estimates, pages A2-84–87](https://documentation-service.arm.com/static/5f8daeb7f86e16515cdb8c4e).
+The mathematical tables are shared with Armv8; AArch64 operand forms were
+independently assembled using devkitA64 GNU as 2.46.0.20260210 for Armv8-A.
+No external emulator implementation is incorporated.
+
+`tools/isa/reciprocal_estimates.py` compares the actual Rust arithmetic helper
+against Unicorn 2.1.4's Cortex-A57 execution: 66,496 bit/exception comparisons
+cover both precisions, every normal table bin, edge and deterministic random
+inputs, and all rounding/FZ/DN combinations. The separate CLI pipeline test
+compiles and executes ten literal scalar/vector forms, checking every result,
+upper-register clearing and FPSR. The helper comparison alone does not validate
+AOT lowering or original-game execution.

@@ -531,6 +531,60 @@ fn isqrt(n: u128) -> u128 {
     }
     result
 }
+/// Armv8.0 eight-bit FRECPE/FRSQRTE estimates. The estimate is the nearest
+/// integer reciprocal (or reciprocal square root) of a quantization-bin
+/// midpoint, not an exact host division rounded to the guest format.
+pub fn reciprocal_estimate(c: &mut Cpu, f: Format, a: u64, square_root: bool) -> u64 {
+    let (fpcr, fpsr) = (c.fpcr, &mut c.fpsr);
+    let v = unpack(f, a, fpcr, fpsr);
+    match v {
+        Value::QNaN | Value::SNaN => process_nan(f, a, v == Value::SNaN, fpcr, fpsr),
+        Value::Zero(sign) => {
+            *fpsr |= DZC;
+            f.infinity(sign)
+        }
+        Value::Inf(true) | Value::Finite { sign: true, .. } if square_root => invalid(f, fpsr),
+        Value::Inf(sign) => f.zero(sign),
+        Value::Finite { sign, mant, exp } => {
+            let leading = 127 - mant.leading_zeros();
+            let exponent = exp + leading as i32;
+            let (estimate, result_exp) = if square_root {
+                // Normalize into [1,2); both exponent parities select 128
+                // bins. Scaling by 1/4 or 1/2 gives the two Arm table ranges.
+                let q = if leading >= 7 {
+                    mant >> (leading - 7)
+                } else {
+                    mant << (7 - leading)
+                };
+                let denominator = q * 2 + 1;
+                let numerator = 1u128 << if exponent & 1 == 0 { 26 } else { 25 };
+                let floor = isqrt(numerator / denominator);
+                let midpoint = floor * 2 + 1;
+                let rounded = floor + u128::from(denominator * midpoint * midpoint < numerator * 4);
+                let result_exp = if exponent & 1 == 0 {
+                    -exponent / 2 - 9
+                } else {
+                    -(exponent + 1) / 2 - 8
+                };
+                (rounded, result_exp)
+            } else {
+                let q = if leading >= 8 {
+                    mant >> (leading - 8)
+                } else {
+                    mant << (8 - leading)
+                };
+                let denominator = q * 2 + 1;
+                // Round the exact rational midpoint reciprocal; the odd
+                // denominator cannot tie the power-of-two numerator.
+                (
+                    ((1u128 << 19) + denominator) / (denominator * 2),
+                    -exponent - 9,
+                )
+            };
+            round(f, sign, estimate, result_exp, fpcr, fpsr)
+        }
+    }
+}
 pub fn sqrt(c: &mut Cpu, f: Format, a: u64) -> u64 {
     if f != H && fast(c.fpcr, c.fpsr) && a & f.sign_bit() == 0 && fast_result_ok(f, a) {
         // The square root of a positive normal number is normal.

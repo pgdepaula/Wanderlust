@@ -178,8 +178,8 @@ fn syscall_and_nop() {
 #[test]
 fn reserved_and_unsupported_are_explicit() {
     for w in [
-        // 0x4ea1d820 is FRECPE (a SIMD reciprocal estimate, not implemented).
-        0, 0xffffffff, 0x52c00000, 0x32a00000, 0x0bc00000, 0x0b008000, 0x4ea1d820, 0xf8400c00,
+        // 0x4ea1c820 is URECPE (the unsigned integer estimate is not implemented).
+        0, 0xffffffff, 0x52c00000, 0x32a00000, 0x0bc00000, 0x0b008000, 0x4ea1c820, 0xf8400c00,
     ] {
         let e = decode(w, GuestAddr(0x10000)).unwrap_err();
         assert!(e.contains("0x10000"));
@@ -380,7 +380,7 @@ fn simd_and_fp_families_decode() {
 fn rejects_simd_and_fp_encodings_outside_armv8_0_or_not_implemented() {
     for w in [
         0x1ee22820u32,        // FADD H0, H1, H2: half-precision arithmetic is ARMv8.2
-        0x4ea1d820,           // FRECPE V0.4S, V1.4S: reciprocal estimate not implemented
+        0x4ea1c820,           // URECPE V0.4S, V1.4S: unsigned estimate not implemented
         0x1e22c020 | 0x2000,  // FCVT with identical source and destination precision
         0x2ee0c003,           // UMULL with size 3 (reserved)
         0x0e208400 | 3 << 22, // ADD V.1D (64-bit lanes in a 64-bit vector)
