@@ -191,3 +191,52 @@ fn compressed_nso_reconstructs_and_runs() {
     assert!(o.status.success());
     assert_eq!(state(&o)["x"][0], 7);
 }
+
+#[test]
+fn optimization_modes_preserve_guest_results_and_separate_cache_identity() {
+    let t = Temp::new();
+    let input = t.0.join("optimization.a64");
+    // MOVZ X0,7; ADD X0,X0,3; MOVZ X2,#0x1000,LSL#16;
+    // STR X0,[X2]; LDR X3,[X2]; RET. Independent expected result: 10.
+    fs::write(
+        &input,
+        raw(&[
+            0xd28000e0, 0x91000c00, 0xd2a20002, 0xf9000040, 0xf9400043, 0xd65f03c0,
+        ]),
+    )
+    .unwrap();
+    let output =
+        t.0.join(format!("optimization{}", std::env::consts::EXE_SUFFIX));
+    let mut previous = None;
+    for (level, misses) in [("0", 2), ("0", 0), ("1", 2), ("0", 0)] {
+        let build = cli()
+            .arg("recompile")
+            .arg(&input)
+            .args(["--raw", "--entry", "0x10000", "--opt-level", level, "--out"])
+            .arg(&output)
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let report = state(&build);
+        assert_eq!(report["opt_level"], level.parse::<u64>().unwrap());
+        assert_eq!(report["build"]["cache_misses"], misses);
+        let run = Command::new(&output).output().unwrap();
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let result = state(&run);
+        assert_eq!(result["x"][0], 10);
+        assert_eq!(result["x"][3], 10);
+        assert_eq!(result["steps"], 6);
+        if let Some(prior) = previous {
+            assert_eq!(result, prior);
+        }
+        previous = Some(result);
+    }
+}

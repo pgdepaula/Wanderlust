@@ -59,6 +59,8 @@ cargo run --locked -- recompile generated/fixtures/mixed-compressed.nso \
 ./generated/mixed
 ```
 
+The compiler defaults to optimization level 2. `recompile --opt-level 0` or `--opt-level 1` selects a different compilation/runtime tradeoff for bring-up; levels 0 through 3 have separate artifact cache identities.
+
 The resulting native executable reports its guest register state as JSON. The fixture's expected result is `x0=26`, `nzcv=6` and `steps=21`.
 
 On Windows, use `python` if appropriate, pass `--out generated/mixed.exe`, and run `./generated/mixed.exe`.

@@ -22,7 +22,7 @@ USAGE:
                      [--link host|guest] [--no-pointer-seeds] [--allow-unsupported]
                      [--roots-file FILE] [--summary]
   wanderlust recompile INPUT [analyze options] --out EXECUTABLE [--target TRIPLE] [--emit-only]
-                       [--jobs N] [--cache-dir DIR] [--unit-shift BITS]
+                       [--jobs N] [--cache-dir DIR] [--unit-shift BITS] [--opt-level 0..3]
                        [--horizon [--memory-limit BYTES] [--native-gpu]]
 
 intake identifies NSP/PFS0 packages, NCA headers, tickets, CNMT XML, extracted ExeFS
@@ -86,6 +86,7 @@ struct Options {
     roots_file: Option<PathBuf>,
     examples: usize,
     jobs: Option<usize>,
+    opt_level: u8,
     cache_dir: Option<PathBuf>,
     unit_shift: u32,
     horizon: bool,
@@ -130,6 +131,7 @@ fn options(args: &[OsString]) -> Result<Options> {
         roots_file: None,
         examples: 32,
         jobs: None,
+        opt_level: 2,
         cache_dir: None,
         unit_shift: wl_codegen_rust::EmitOptions::default().unit_shift,
         horizon: false,
@@ -152,7 +154,8 @@ fn options(args: &[OsString]) -> Result<Options> {
             "--horizon" => o.horizon = true,
             "--native-gpu" => o.native_gpu = true,
             "--base" | "--entry" | "--seed" | "--out" | "--target" | "--link" | "--roots-file"
-            | "--examples" | "--jobs" | "--cache-dir" | "--unit-shift" | "--memory-limit" => {
+            | "--examples" | "--jobs" | "--cache-dir" | "--unit-shift" | "--memory-limit"
+            | "--opt-level" => {
                 i += 1;
                 let value = args
                     .get(i)
@@ -165,6 +168,13 @@ fn options(args: &[OsString]) -> Result<Options> {
                     "--roots-file" => o.roots_file = Some(value.into()),
                     "--examples" => o.examples = number(utf8(value)?)? as usize,
                     "--jobs" => o.jobs = Some(number(utf8(value)?)? as usize),
+                    "--opt-level" => {
+                        let level = number(utf8(value)?)?;
+                        if level > 3 {
+                            return Err("--opt-level must be between 0 and 3".into());
+                        }
+                        o.opt_level = level as u8;
+                    }
                     "--cache-dir" => o.cache_dir = Some(value.into()),
                     "--unit-shift" => o.unit_shift = number(utf8(value)?)? as u32,
                     "--memory-limit" => o.memory_limit = Some(number(utf8(value)?)?),
@@ -213,6 +223,7 @@ fn options(args: &[OsString]) -> Result<Options> {
             "--target",
             "--emit-only",
             "--jobs",
+            "--opt-level",
             "--cache-dir",
             "--unit-shift",
             "--horizon",
@@ -703,7 +714,7 @@ fn run(args: &[OsString]) -> Result<()> {
             target: o.target.clone(),
             cache_dir,
             jobs,
-            opt_level: 2,
+            opt_level: o.opt_level,
         };
         Some(if o.native_gpu {
             wl_codegen_rust::build::build_with_native_gpu(
@@ -758,6 +769,7 @@ fn run(args: &[OsString]) -> Result<()> {
         "emit_seconds": emit_seconds,
         "rustc_seconds": if o.emit_only { None } else { Some(compile_seconds) },
         "target": o.target,
+        "opt_level": o.opt_level,
         "module_id": image.module_id,
     }))
 }
@@ -776,6 +788,24 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn optimization_levels_are_bounded_and_recompile_only() {
+        let parse = |args: &[&str]| options(&args.iter().map(OsString::from).collect::<Vec<_>>());
+        assert_eq!(parse(&["recompile", "input"]).unwrap().opt_level, 2);
+        for level in 0..=3 {
+            assert_eq!(
+                parse(&["recompile", "input", "--opt-level", &level.to_string()])
+                    .unwrap()
+                    .opt_level,
+                level
+            );
+        }
+        for value in ["4", "256", "18446744073709551615", "-1", "fast"] {
+            assert!(parse(&["recompile", "input", "--opt-level", value]).is_err());
+        }
+        assert!(parse(&["analyze", "input", "--opt-level", "0"]).is_err());
+        assert!(parse(&["recompile", "input", "--opt-level"]).is_err());
+    }
     #[test]
     fn explicit_memory_limits_survive_application_npdm() {
         let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/horizon/probe");
