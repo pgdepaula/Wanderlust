@@ -374,6 +374,26 @@ fn transfer(state: &mut State, op: &Op) {
         Op::Logical {
             width,
             dst,
+            lhs,
+            rhs: Operand::Imm(imm),
+            kind: 0 | 3,
+            invert: false,
+        } => {
+            // AND/ANDS cannot produce an unsigned value larger than their
+            // immediate mask, including when the source register is unknown.
+            // This also bounds alignment-dispatch tables without a CMP branch.
+            let value = match state.get(lhs) {
+                Some(Val::Const(c)) => Val::Const(mask(c & imm, width)),
+                _ => Val::Bounded {
+                    max: mask(imm, width),
+                    full: true,
+                },
+            };
+            result = Some((dst, Some(value), width));
+        }
+        Op::Logical {
+            width,
+            dst,
             lhs: Reg::Zero,
             rhs:
                 Operand::Shifted {

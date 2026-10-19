@@ -127,6 +127,45 @@ fn unknown_indirect_target_is_not_interpreted() {
     assert_eq!(o.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&o.stderr).contains("unresolved native branch"));
 }
+
+#[test]
+fn masked_table_dispatch_executes_all_original_native_cases() {
+    // GNU as 2.46: AND X9,X0,#3; ADR X10,table; ADR X11,case0;
+    // LDRB W12,[X10,X9]; ADD X11,X11,X12,LSL #2; BR X11.
+    // Four MOV X0,#value / RET cases and .byte 0,2,4,6 follow.
+    // Only the entry is supplied; analysis must discover every table target.
+    for mask in [0x92400409, 0x12000409, 0xf2400409] {
+        let t = Temp::new();
+        let exe = compile(
+            &t,
+            &[
+                mask, 0x100001aa, 0x1000008b, 0x3869694c, 0x8b0c096b, 0xd61f0160, 0xd2800160,
+                0xd65f03c0, 0xd28002c0, 0xd65f03c0, 0xd2800420, 0xd65f03c0, 0xd2800580, 0xd65f03c0,
+                0x06040200,
+            ],
+        );
+        for (input, expected) in [
+            (0, 11),
+            (1, 22),
+            (2, 33),
+            (3, 44),
+            (4, 11),
+            (0xffff_ffff_0000_0002u64, 33),
+            (u64::MAX, 44),
+        ] {
+            let output = Command::new(&exe)
+                .args(["--reg", &format!("0={input}")])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(state(&output)["x"][0], expected, "{mask:#x}, {input:#x}");
+        }
+    }
+}
 #[test]
 fn negative_translation_and_input_protection() {
     let t = Temp::new();

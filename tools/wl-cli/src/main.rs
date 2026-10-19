@@ -678,7 +678,7 @@ fn run(args: &[OsString]) -> Result<()> {
     } else {
         wl_codegen_rust::emit
     };
-    let generated = emit(
+    let mut generated = emit(
         &image,
         &program,
         stem,
@@ -695,6 +695,25 @@ fn run(args: &[OsString]) -> Result<()> {
         },
     )?;
     let emit_seconds = started.elapsed().as_secs_f64();
+    // Linking only needs emitted sources. Retaining the decoded instruction graph
+    // and loader images here competes with rustc/the linker for several hundred
+    // MiB on large programs. Keep just the report before releasing those inputs.
+    let program_report = serde_json::json!({
+        "instructions": program.instruction_count,
+        "unsupported_sites": program.unsupported_count,
+        "blocks": program.blocks.len(),
+        "speculative_roots_accepted": program.speculative_roots_accepted,
+        "speculative_roots_rejected": program.rejected_roots.len(),
+        "flow_roots": program.flow_roots,
+        "jump_tables": program.jump_tables.len(),
+    });
+    let relocation = image.relocation;
+    let module_id = image.module_id.clone();
+    drop(program);
+    drop(image);
+    drop(process);
+    drop(nro);
+    drop(roots);
     let parent = output
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -709,6 +728,9 @@ fn run(args: &[OsString]) -> Result<()> {
         fs::write(&path, bytes).map_err(|e| format!("{}: {e}", path.display()))?;
         blob_bytes += bytes.len();
     }
+    // The on-disk blobs are the executable's inputs; the build does not use
+    // their in-memory copies after publication beside the generated source.
+    generated.blobs.clear();
     fs::write(&source, &generated.main).map_err(|e| format!("{}: {e}", source.display()))?;
     let started = Instant::now();
     let report = if o.emit_only {
@@ -766,14 +788,14 @@ fn run(args: &[OsString]) -> Result<()> {
         "source": source,
         "executable": if o.emit_only { None } else { Some(&output) },
         "entry": entry,
-        "instructions": program.instruction_count,
-        "unsupported_sites": program.unsupported_count,
-        "blocks": program.blocks.len(),
-        "speculative_roots_accepted": program.speculative_roots_accepted,
-        "speculative_roots_rejected": program.rejected_roots.len(),
-        "flow_roots": program.flow_roots,
-        "jump_tables": program.jump_tables.len(),
-        "relocation": image.relocation,
+        "instructions": program_report["instructions"],
+        "unsupported_sites": program_report["unsupported_sites"],
+        "blocks": program_report["blocks"],
+        "speculative_roots_accepted": program_report["speculative_roots_accepted"],
+        "speculative_roots_rejected": program_report["speculative_roots_rejected"],
+        "flow_roots": program_report["flow_roots"],
+        "jump_tables": program_report["jump_tables"],
+        "relocation": relocation,
         "generated_source_bytes": generated.main.len() + unit_source_bytes,
         "units": generated.units.len(),
         "build": report.as_ref().map(|r| serde_json::json!({
@@ -797,7 +819,7 @@ fn run(args: &[OsString]) -> Result<()> {
         "target": o.target,
         "opt_level": o.opt_level,
         "instruction_limit": o.instruction_limit,
-        "module_id": image.module_id,
+        "module_id": module_id,
     }))
 }
 fn main() {

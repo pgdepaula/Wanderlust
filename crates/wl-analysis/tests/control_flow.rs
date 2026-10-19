@@ -147,6 +147,45 @@ fn unbounded_index_and_unknown_base_stay_unresolved() {
     assert_eq!(p.flow_roots, 0);
     assert_eq!(p.indirect_sites, [GuestAddr(0x100a8)]);
 }
+
+// Independent devkitA64 GNU as 2.46 fixture:
+// and x9,x0,#3; adr x10,table; adr x11,case0; ldrb w12,[x10,x9];
+// add x11,x11,x12,lsl #2; br x11; four MOV/RET cases; .byte 0,2,4,6.
+// The input X0 is deliberately unknown: no CMP or caller-specific seed is used.
+const MASK_SWITCH: [u32; 15] = [
+    0x92400409, 0x100001aa, 0x1000008b, 0x3869694c, 0x8b0c096b, 0xd61f0160, 0xd2800160, 0xd65f03c0,
+    0xd28002c0, 0xd65f03c0, 0xd2800420, 0xd65f03c0, 0xd2800580, 0xd65f03c0, 0x06040200,
+];
+
+#[test]
+fn immediate_and_bounds_unknown_indices_without_a_compare() {
+    for word in [0x92400409, 0x12000409, 0xf2400409] {
+        // AND X, AND W, ANDS X.
+        let mut words = MASK_SWITCH;
+        words[0] = word;
+        let p = discover(&image(&words), GuestAddr(0x10000), &[]).unwrap();
+        assert_eq!(p.jump_tables.get(&GuestAddr(0x10014)), Some(&4));
+        for target in [0x10018, 0x10020, 0x10028, 0x10030] {
+            assert!(starts(&p).contains(&target), "{word:#x}: {target:#x}");
+        }
+        assert_eq!(p.instruction_count, 14);
+        assert!(!starts(&p).contains(&0x10038)); // Table bytes stay data.
+    }
+}
+
+#[test]
+fn masks_do_not_justify_unbounded_or_oversized_table_reads() {
+    // ORR does not bound an unknown source; a 17-bit AND exceeds the defensive
+    // table-entry limit. Neither may fabricate targets from the four-byte table.
+    for word in [0xb2400409, 0x92404009] {
+        let mut words = MASK_SWITCH;
+        words[0] = word;
+        let p = discover(&image(&words), GuestAddr(0x10000), &[]).unwrap();
+        assert!(p.jump_tables.is_empty(), "{word:#x}");
+        assert_eq!(p.instruction_count, 6);
+        assert_eq!(p.indirect_sites, [GuestAddr(0x10014)]);
+    }
+}
 #[test]
 fn stored_code_address_becomes_a_root() {
     let p = switches(&[0x100ac]);

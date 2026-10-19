@@ -190,3 +190,18 @@ and can substantially increase host memory, generated code and compile time.
 Observed execution destinations should be required roots rather than relying on
 the retention of a speculative candidate. Recompile and summary reports include
 the selected limit.
+
+Indirect-flow analysis also recognizes an immediate `AND`/`ANDS` as an
+unsigned index bound: `value & mask` cannot exceed `mask`. This supports bounded
+alignment-dispatch tables without a preceding comparison. Both W- and X-register
+forms retain their actual width; ORR does not establish this bound. The existing
+65,536-entry table limit and mapped-data/executable-target checks still apply.
+Independent GNU-as fixtures execute all four table cases after native compilation,
+including inputs with nonzero upper 32 bits. No runtime branch interpretation or
+guest instruction replacement is used.
+
+After emission, the CLI releases decoded instructions, loader images and root
+metadata before invoking native compilation. Written memory-image blobs are also
+released. The report retains counts and identities rather than those large input
+structures; generated units remain available to the existing content-keyed build
+cache. Native linking still requires memory proportional to the emitted program.
