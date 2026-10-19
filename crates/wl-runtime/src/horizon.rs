@@ -1341,11 +1341,11 @@ pub type Alias = (u64, u64, u64);
 fn map_memory(
     memory: &mut Memory,
     k: &mut Kernel,
-    mut dst: u64,
-    mut src: u64,
-    mut size: u64,
+    dst: u64,
+    src: u64,
+    size: u64,
 ) -> RuntimeResult<u32> {
-    // Guard the entire potentially aligned span before normalization or storage
+    // Guard the entire potentially aligned span before validation or storage
     // replacement. A malformed range cannot bypass a live registration.
     for address in [src, dst] {
         let base = address & !(PAGE - 1);
@@ -1365,41 +1365,6 @@ fn map_memory(
         "[svcMapMemory] entering dst={dst:#x} src={src:#x} size={size:#x} thread={}",
         k.current
     );
-    let is_totk = k.config.program_id == 0x100f2c0115b6000;
-    if is_totk {
-        if dst % PAGE != 0 {
-            eprintln!(
-                "[svcMapMemory] aligning dst {dst:#x} -> {:#x}",
-                dst & !(PAGE - 1)
-            );
-            dst &= !(PAGE - 1);
-        }
-        if src % PAGE != 0 {
-            eprintln!(
-                "[svcMapMemory] aligning src {src:#x} -> {:#x}",
-                src & !(PAGE - 1)
-            );
-            src &= !(PAGE - 1);
-        }
-        if size % PAGE != 0 {
-            eprintln!(
-                "[svcMapMemory] aligning size {size:#x} -> {:#x}",
-                (size + PAGE - 1) & !(PAGE - 1)
-            );
-            size = (size + PAGE - 1) & !(PAGE - 1);
-        }
-        if memory.load(src, 1).is_err() {
-            eprintln!("[svcMapMemory] mapping missing src {src:#x} size {size:#x}");
-            let _ = memory.map_state(
-                src,
-                vec![0u8; size as usize],
-                true,
-                true,
-                false,
-                state::NORMAL,
-            );
-        }
-    }
     if let Err(code) = alias_arguments(k, dst, src, size) {
         eprintln!(
             "[svcMapMemory] alias_arguments rejected: code={code:#x} dst={dst:#x} src={src:#x} size={size:#x}"
@@ -1416,37 +1381,18 @@ fn map_memory(
         0,
     )
     .ok()
-    .filter(|r| r.2 == 3 || is_totk)
+    .filter(|r| r.2 == 3)
     .is_none()
     {
         eprintln!("[svcMapMemory] check_memory_state rejected src={src:#x}");
-        if is_totk {
-            let _ = memory.map_state(
-                src,
-                vec![0u8; size as usize],
-                true,
-                true,
-                false,
-                state::NORMAL,
-            );
-        } else {
-            return Ok(result::INVALID_CURRENT_MEMORY);
-        }
+        return Ok(result::INVALID_CURRENT_MEMORY);
     }
     if memory
         .regions
         .iter()
         .any(|r| r.base < dst + size && dst < r.end())
     {
-        if is_totk {
-            memory.split_at(dst);
-            memory.split_at(dst + size);
-            memory
-                .regions
-                .retain(|r| !(r.base < dst + size && dst < r.end()));
-        } else {
-            return Ok(result::INVALID_CURRENT_MEMORY);
-        }
+        return Ok(result::INVALID_CURRENT_MEMORY);
     }
     let parts = isolate(memory, src, size);
     let mut bytes = Vec::with_capacity(size as usize);
@@ -1455,11 +1401,9 @@ fn map_memory(
     for &i in &sorted {
         let r = &mut memory.regions[i];
         bytes.extend_from_slice(&r.bytes);
-        if !is_totk {
-            r.bytes = zeroed(r.bytes.len() as u64);
-            r.read = false;
-            r.write = false;
-        }
+        r.bytes = zeroed(r.bytes.len() as u64);
+        r.read = false;
+        r.write = false;
         r.attribute |= attribute::LOCKED;
     }
     if bytes.len() < size as usize {
@@ -1474,11 +1418,11 @@ fn map_memory(
 fn unmap_memory(
     memory: &mut Memory,
     k: &mut Kernel,
-    mut dst: u64,
-    mut src: u64,
-    mut size: u64,
+    dst: u64,
+    src: u64,
+    size: u64,
 ) -> RuntimeResult<u32> {
-    // Guard the entire potentially aligned span before normalization or storage
+    // Guard the entire potentially aligned span before validation or storage
     // replacement. A malformed range cannot bypass a live registration.
     for address in [src, dst] {
         let base = address & !(PAGE - 1);
@@ -1494,16 +1438,9 @@ fn unmap_memory(
         }
     }
 
-    let is_totk = k.config.program_id == 0x100f2c0115b6000;
-    if is_totk {
-        dst &= !(PAGE - 1);
-        src &= !(PAGE - 1);
-        size = (size + PAGE - 1) & !(PAGE - 1);
-    }
     if let Err(code) = alias_arguments(k, dst, src, size) {
         return Ok(code);
     }
-    let is_totk = k.config.program_id == 0x100f2c0115b6000;
     let src_ok = check_memory_state(
         memory,
         src,
@@ -1514,7 +1451,7 @@ fn unmap_memory(
         0,
     )
     .ok()
-    .filter(|r| (r.2 == 0 || (is_totk && r.2 == 3)) && r.3 == attribute::LOCKED)
+    .filter(|r| r.2 == 0 && r.3 == attribute::LOCKED)
     .is_some();
     let dst_ok = check_memory_state(
         memory,

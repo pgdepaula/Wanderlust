@@ -469,3 +469,24 @@ stubs are not treated as current-process RomFS images. The tests use original
 synthetic containers, literal HIPC requests, exact byte assertions, adjacent
 mapped regions, invalid bounds and truncated-file injection. No commercial data
 is included in the test fixtures.
+
+
+`IApplicationFunctions` command 123 returns a signed previous-program index:
+`-1` for an initially launched process. It does not return application identity,
+version or an `IApplication` launch-property buffer. The distinct interfaces
+reuse the same command number. This follows libnx
+[`appletGetPreviousProgramIndex`](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/include/switch/services/applet.h)
+and the corresponding command serializer in `applet.c`. A literal CMIF-domain
+regression checks the four-byte signed response and its zero padding.
+
+
+Memory mapping validation follows the checked source/destination states and reprotection in [Atmosphere KPageTableBase](https://github.com/Atmosphere-NX/Atmosphere/blob/6b0c077b4c608a3a2ee712b8dc35fee87ceb62e8/libraries/libmesosphere/source/kern_k_page_table_base.cpp).
+
+Memory mapping validation is uniform across program identities. `MapMemory` does
+not round malformed addresses, create missing source pages or replace occupied
+destinations. Valid aliasable RW source memory becomes inaccessible and locked
+until `UnmapMemory` restores it, including writes made through the destination.
+Live GPU backing registrations remain protected before either operation can
+change storage. Tests compare the same valid and invalid sequences under two
+program identities and verify source permissions, preserved bytes and rejection
+without destination mutation.

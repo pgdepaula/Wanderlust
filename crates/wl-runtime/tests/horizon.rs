@@ -647,3 +647,85 @@ fn transfer_memory_creation_and_close() {
     let k = p.kernel.as_ref().unwrap();
     assert_eq!(k.handles.get(handle), None);
 }
+
+#[test]
+fn memory_mapping_permissions_and_failures_do_not_depend_on_program_id() {
+    for program_id in [0x0100_0000_0000_2000, 0x0100_f2c0_115b_6000] {
+        let (mut p, mut c) = process();
+        let k = p.kernel.as_mut().unwrap();
+        k.config.program_id = program_id;
+        let src = k.layout.heap.start;
+        let dst = k.layout.stack.start + 0x40_0000;
+        p.memory
+            .map_state(
+                src,
+                vec![0x5a; (PAGE * 2) as usize],
+                true,
+                true,
+                false,
+                state::NORMAL,
+            )
+            .unwrap();
+        for (destination, source, length, expected) in [
+            (dst + 1, src, PAGE, result::INVALID_ADDRESS),
+            (dst, src + 1, PAGE, result::INVALID_ADDRESS),
+            (dst, src, PAGE + 1, result::INVALID_SIZE),
+            (dst, src + PAGE * 16, PAGE, result::INVALID_CURRENT_MEMORY),
+            (dst, CODE, PAGE, result::INVALID_CURRENT_MEMORY),
+        ] {
+            assert_eq!(
+                svc(&mut p, &mut c, 4, &[destination, source, length]),
+                expected,
+                "program {program_id:#x}"
+            );
+            assert!(p.kernel.as_ref().unwrap().aliases.is_empty());
+            assert_eq!(info(&p, src).permission, 3);
+            assert_eq!(info(&p, dst).state, state::FREE);
+            assert_eq!(p.load(src, 1).unwrap(), 0x5a);
+        }
+        // A registered GPU backing cannot be hidden by changing CPU mappings.
+        let pin = p.memory.pin_gpu_range(src, PAGE).unwrap();
+        assert_eq!(
+            svc(&mut p, &mut c, 4, &[dst, src, PAGE]),
+            result::INVALID_CURRENT_MEMORY
+        );
+        p.memory.release_gpu_pin(pin).unwrap();
+        assert_eq!(svc(&mut p, &mut c, 4, &[dst, src, PAGE]), result::SUCCESS);
+        assert!(
+            p.load(src, 1).is_err(),
+            "source must be inaccessible while aliased"
+        );
+        assert_eq!(
+            (info(&p, src).permission, info(&p, src).attribute),
+            (0, attribute::LOCKED)
+        );
+        assert_eq!(p.load(dst + 7, 1).unwrap(), 0x5a);
+        p.store(dst + 7, 1, 0x91).unwrap();
+        assert_eq!(
+            svc(&mut p, &mut c, 5, &[dst + 1, src, PAGE]),
+            result::INVALID_ADDRESS
+        );
+        assert_eq!(svc(&mut p, &mut c, 5, &[dst, src, PAGE]), result::SUCCESS);
+        assert_eq!(p.load(src + 7, 1).unwrap(), 0x91);
+        assert_eq!(info(&p, src).permission, 3);
+        assert_eq!(info(&p, dst).state, state::FREE);
+        // An occupied destination must survive rejection byte-for-byte.
+        p.memory
+            .map_state(
+                dst,
+                vec![0x7b; PAGE as usize],
+                true,
+                true,
+                false,
+                state::STACK,
+            )
+            .unwrap();
+        assert_eq!(
+            svc(&mut p, &mut c, 4, &[dst, src, PAGE]),
+            result::INVALID_CURRENT_MEMORY
+        );
+        assert_eq!(p.load(dst, 1).unwrap(), 0x7b);
+        assert_eq!(p.load(src + 7, 1).unwrap(), 0x91);
+        assert!(p.kernel.as_ref().unwrap().aliases.is_empty());
+    }
+}

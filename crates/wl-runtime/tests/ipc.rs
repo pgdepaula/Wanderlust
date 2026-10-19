@@ -944,6 +944,10 @@ fn applet_oe_application_startup() {
     assert_eq!(call(&mut p, &mut c, am, 9, 2, &[]).0, 0);
     assert_eq!(call(&mut p, &mut c, am, 9, 50, &[]).0, 0);
     assert_eq!(call(&mut p, &mut c, am, 9, 123, &[]).0, 0);
+    // Initial launch has no previous program. The response is a signed index,
+    // never a fabricated application ID/version or a launch-property structure.
+    assert_eq!(&reply(&p)[0x30..0x34], &(-1i32).to_le_bytes());
+    assert_eq!(&reply(&p)[0x34..0x40], &[0; 12]);
     assert_eq!(call(&mut p, &mut c, am, 9, 20, &[]).0, 0);
     assert_eq!(call(&mut p, &mut c, am, 9, 21, &[]).0, 0);
     assert_eq!(&reply(&p)[0x30..0x38], b"en-US\0\0\0");
