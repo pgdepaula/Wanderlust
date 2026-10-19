@@ -217,12 +217,19 @@ def main_object():
 def find_lld():
     explicit = os.environ.get('WL_LLD')
     if explicit:
-        return [explicit]
-    if shutil.which('ld.lld'):
-        return ['ld.lld']
+        return [shutil.which(explicit) or explicit]
+    located = shutil.which('ld.lld')
+    if located:
+        # Windows CreateProcess does not append .exe to a name already ending
+        # in .lld. Preserve the exact executable that which actually found.
+        return [located]
     sysroot = subprocess.run(['rustc', '--print', 'sysroot'], check=True, capture_output=True, text=True).stdout.strip()
-    for path in Path(sysroot, 'lib', 'rustlib').glob('*/bin/rust-lld*'):
-        return [str(path), '-flavor', 'gnu']
+    version = subprocess.run(['rustc', '-vV'], check=True, capture_output=True, text=True).stdout
+    host = next((line.removeprefix('host: ').strip() for line in version.splitlines() if line.startswith('host: ')), None)
+    if host:
+        path = Path(sysroot, 'lib', 'rustlib', host, 'bin', 'rust-lld.exe' if sys.platform == 'win32' else 'rust-lld')
+        if path.is_file():
+            return [str(path), '-flavor', 'gnu']
     raise SystemExit('no LLD found: install lld or a rustup toolchain with rust-lld, or set WL_LLD')
 
 

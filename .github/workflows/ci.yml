@@ -37,6 +37,8 @@ jobs:
         run: cargo fmt --all --check
       - name: Strict workspace Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: LLVM executable resolution regressions
+        run: python -m unittest discover -s tools/python -p test_modules.py -v
       - name: Workspace tests
         run: cargo test --workspace --locked
       - name: Build native CLI
