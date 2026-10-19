@@ -285,7 +285,10 @@ fn parse_request(m: &[u8; MESSAGE_BUFFER_SIZE]) -> Request {
     let buffer = |d: &mut usize| {
         let (size, low, c) = (read_u32(m, *d), read_u32(m, *d + 4), read_u32(m, *d + 8));
         *d += 12;
-        let address = u64::from(low) | u64::from(c >> 28) << 32 | u64::from((c >> 2) & 7) << 36;
+        // Preserve the descriptor's complete address. Discarding the upper
+        // address bits could turn an invalid pointer into a mapped low alias.
+        let address =
+            u64::from(low) | u64::from(c >> 28) << 32 | u64::from((c >> 2) & 0x3f_ffff) << 36;
         (address, u64::from(size) | u64::from((c >> 24) & 0xf) << 32)
     };
     for _ in 0..sends {

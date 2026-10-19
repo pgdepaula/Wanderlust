@@ -1164,6 +1164,85 @@ fn fsp_srv_service_startup() {
 }
 
 #[test]
+fn large_storage_ipc_preserves_descriptor_address_and_exact_output() {
+    let (mut p, mut c) = process(&[(false, "*")]);
+    let sm = connect(&mut p, &mut c);
+    tipc_register_client(&mut p, &mut c, sm);
+    let fs = service(&mut p, &mut c, sm, "fsp-srv");
+    let length = 17 * 1024 * 1024 + 173;
+    let mut image = vec![0; length + 0x200];
+    for (n, value) in [0x50u64, 0x100, 4, 0x104, 24, 0x11c, 4, 0x120, 0, 0x50]
+        .into_iter()
+        .enumerate()
+    {
+        image[n * 8..n * 8 + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    for (i, byte) in image[0x200..].iter_mut().enumerate() {
+        *byte = i.wrapping_mul(53).wrapping_add(7) as u8;
+    }
+    let path = std::env::temp_dir().join(format!(
+        "wanderlust-ipc-large-romfs-{}.bin",
+        std::process::id()
+    ));
+    std::fs::write(&path, &image).unwrap();
+    p.kernel.as_mut().unwrap().host.romfs = Some(wl_runtime::storage::RomFs::open(&path).unwrap());
+    request(&mut p, 200, false, &[]);
+    assert_eq!(send(&mut p, &mut c, fs), (result::SUCCESS, None));
+    let storage = reply_handle(&p);
+    let base = 0x40_0000_0000u64;
+    p.memory
+        .map(base, vec![0xa5; length + 32], true, true, false)
+        .unwrap();
+    // Literal libnx feebd026 HipcBufferDescriptor: 22 high address bits in
+    // bits 2..23, four middle address bits in bits 28..31, NonSecure mode=1.
+    // Request a deliberately unmapped address whose bit 39 must not be
+    // truncated into the mapped address 0x4000000007.
+    let mut wire = [0u8; 0x100];
+    wire[0..4].copy_from_slice(&(4u32 | (1 << 24)).to_le_bytes());
+    wire[4..8].copy_from_slice(&12u32.to_le_bytes());
+    wire[8..12].copy_from_slice(&(length as u32).to_le_bytes());
+    wire[12..16].copy_from_slice(&7u32.to_le_bytes());
+    wire[16..20].copy_from_slice(&0x31u32.to_le_bytes());
+    wire[0x20..0x24].copy_from_slice(b"SFCI");
+    wire[0x30..0x38].copy_from_slice(&0x200i64.to_le_bytes());
+    wire[0x38..0x40].copy_from_slice(&(length as u64).to_le_bytes());
+    let t = tls(&p);
+    p.write_bytes(t, &wire).unwrap();
+    c.x[0] = u64::from(storage);
+    assert!(
+        dispatch(&mut c, &mut p, 0x21)
+            .unwrap_err()
+            .contains("unmapped guest memory")
+    );
+    assert!(
+        p.memory
+            .read_bytes(base, length + 32)
+            .unwrap()
+            .iter()
+            .all(|b| *b == 0xa5)
+    );
+    // The valid high-address request copies all bytes, not a truncated length.
+    wire[16..20].copy_from_slice(&0x11u32.to_le_bytes());
+    p.write_bytes(t, &wire).unwrap();
+    assert_eq!(send(&mut p, &mut c, storage), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+    assert_eq!(
+        p.memory.read_bytes(base + 7, length).unwrap(),
+        &image[0x200..]
+    );
+    assert_eq!(p.memory.read_bytes(base, 7).unwrap(), &[0xa5; 7]);
+    assert!(
+        p.memory
+            .read_bytes(base + 7 + length as u64, 25)
+            .unwrap()
+            .iter()
+            .all(|b| *b == 0xa5)
+    );
+    drop(p);
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn vi_service_startup() {
     let (mut p, mut c) = process(&[(false, "*")]);
     let sm = connect(&mut p, &mut c);

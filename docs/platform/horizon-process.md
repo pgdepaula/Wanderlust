@@ -454,13 +454,23 @@ The numeric FS result identity is corroborated by the
 [Atmosphere result declarations](https://github.com/Atmosphere-NX/Atmosphere/blob/6b0c077b4c608a3a2ee712b8dc35fee87ceb62e8/libraries/libvapours/include/vapours/results/fs_results.hpp).
 Only interface facts are used; no implementation is copied.
 
-Reads are limited to 16 MiB per request. Negative offsets, out-of-range reads,
+Reads are limited to 64 MiB per request, a conservative host staging budget
+rather than an IStorage wire-ABI limit. A synthetic read larger than 22 MiB
+verifies complete data and surrounding canaries, including rejection of a short
+output descriptor without partial writes. Negative offsets, out-of-range reads,
 short output descriptors, inaccessible destinations, changed file lengths and
 host IO errors fail explicitly. The whole guest destination is checked before
-IO, then one staging allocation is filled completely before a guest write.
+IO, then one fallible staging allocation is filled completely before a guest write.
 Mapping/permission failures or short host reads cannot publish a partial buffer.
 The exclusive Memory borrow preserves this transaction boundary; this does not
 protect against an external writer modifying the mounted file in place.
+
+MapAlias addresses retain all 22 high-address bits encoded by the pinned
+[libnx HIPC descriptor](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/include/switch/sf/hipc.h).
+Destination validation rejects an unmapped full address rather than truncating
+it into a valid lower alias. A literal 17 MiB IPC read tests this rejection,
+valid high-address publication and exact bytes. The staging tests also cover a
+read exactly at the 64 MiB limit and rejection above it.
 
 Other program/data-ID selection, mutating storage operations, arbitrary files,
 saves and general filesystem operations are not implemented by this adapter.

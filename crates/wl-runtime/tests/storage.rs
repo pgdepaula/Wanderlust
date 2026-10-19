@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::{Seek, SeekFrom, Write},
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -65,6 +66,80 @@ fn file_backed_storage_reads_exact_bytes_and_signed_size() {
         .read_into_guest(0x50, 8, 0x1000, 8, &mut memory)
         .unwrap();
     assert_eq!(memory.read_bytes(0x1000, 8).unwrap(), &data[0x50..0x58]);
+}
+
+#[test]
+fn large_storage_metadata_is_read_whole_with_canaries_preserved() {
+    // An opaque synthetic metadata-sized span larger than 16 MiB. The expected
+    // bytes come from the file fixture, not a storage adapter invocation.
+    let length = 22 * 1024 * 1024 + 173;
+    assert!(length as u64 <= MAX_READ);
+    let mut data = image();
+    data.resize(length + 0x240, 0);
+    for (i, byte) in data[0x200..].iter_mut().enumerate() {
+        *byte = (i.wrapping_mul(37).wrapping_add(11)) as u8;
+    }
+    let file = Image::new(&data);
+    let storage = RomFs::open(&file.0).unwrap();
+    let mut memory = Memory::default();
+    memory
+        .map(0x1000, vec![0xa5; length + 32], true, true, false)
+        .unwrap();
+    // A short output descriptor rejects the entire read before any write.
+    assert!(
+        storage
+            .read_into_guest(0x200, length as u64, 0x1007, length as u64 - 1, &mut memory)
+            .unwrap_err()
+            .contains("output buffer")
+    );
+    assert!(
+        memory
+            .read_bytes(0x1000, length + 32)
+            .unwrap()
+            .iter()
+            .all(|b| *b == 0xa5)
+    );
+    storage
+        .read_into_guest(0x200, length as u64, 0x1007, length as u64, &mut memory)
+        .unwrap();
+    assert_eq!(
+        memory.read_bytes(0x1007, length).unwrap(),
+        &data[0x200..0x200 + length]
+    );
+    assert_eq!(memory.read_bytes(0x1000, 7).unwrap(), &[0xa5; 7]);
+    assert!(
+        memory
+            .read_bytes(0x1007 + length as u64, 25)
+            .unwrap()
+            .iter()
+            .all(|b| *b == 0xa5)
+    );
+}
+
+#[test]
+fn exact_staging_limit_is_accepted_without_touching_canaries() {
+    let file = Image::new(&image());
+    let mut output = fs::OpenOptions::new().write(true).open(&file.0).unwrap();
+    output.set_len(MAX_READ + 0x200).unwrap();
+    output.seek(SeekFrom::Start(MAX_READ + 0x1ff)).unwrap();
+    output.write_all(&[0x7d]).unwrap();
+    drop(output);
+    let storage = RomFs::open(&file.0).unwrap();
+    let length = MAX_READ as usize;
+    let mut memory = Memory::default();
+    memory
+        .map(0x1000, vec![0xa5; length + 2], true, true, false)
+        .unwrap();
+    storage
+        .read_into_guest(0x200, MAX_READ, 0x1001, MAX_READ, &mut memory)
+        .unwrap();
+    // The extended file's range is zero except for the independently written
+    // last byte. No successful short read or shortened transfer can pass.
+    let data = memory.read_bytes(0x1001, length).unwrap();
+    assert!(data[..length - 1].iter().all(|b| *b == 0));
+    assert_eq!(data[length - 1], 0x7d);
+    assert_eq!(memory.load(0x1000, 1).unwrap(), 0xa5);
+    assert_eq!(memory.load(0x1001 + MAX_READ, 1).unwrap(), 0xa5);
 }
 
 #[test]

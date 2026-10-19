@@ -8,7 +8,7 @@ use std::{
 };
 
 /// Conservative staging bound, independent of the file's potentially large size.
-pub const MAX_READ: u64 = 16 * 1024 * 1024;
+pub const MAX_READ: u64 = 64 * 1024 * 1024;
 
 /// One already-open immutable image. Clones share the same file and serialize seeks.
 #[derive(Clone, Debug)]
@@ -76,8 +76,15 @@ impl RomFs {
         memory: &mut Memory,
     ) -> RuntimeResult<()> {
         let offset = u64::try_from(offset).map_err(|_| "negative IStorage read offset")?;
-        if size > MAX_READ || size > buffer_size {
-            return Err("IStorage read exceeds staging/output buffer bound".into());
+        if size > MAX_READ {
+            return Err(format!(
+                "IStorage read {size} exceeds staging limit {MAX_READ}"
+            ));
+        }
+        if size > buffer_size {
+            return Err(format!(
+                "IStorage read {size} exceeds output buffer {buffer_size}"
+            ));
         }
         let end = offset.checked_add(size).ok_or("IStorage range overflow")?;
         if end > self.size {
@@ -94,7 +101,11 @@ impl RomFs {
         {
             return Err("mounted RomFS size changed".into());
         }
-        let mut bytes = vec![0; length];
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(length)
+            .map_err(|e| format!("IStorage staging allocation: {e}"))?;
+        bytes.resize(length, 0);
         file.seek(SeekFrom::Start(offset))
             .and_then(|_| file.read_exact(&mut bytes))
             .map_err(|e| format!("RomFS read: {e}"))?;
