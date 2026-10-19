@@ -200,6 +200,12 @@ Independent GNU-as fixtures execute all four table cases after native compilatio
 including inputs with nonzero upper 32 bits. No runtime branch interpretation or
 guest instruction replacement is used.
 
+A W-register move preserves an unsigned index bound and promotes a bound on
+the low half to the whole zero-extended register. An X-register move preserves
+unknown upper bits; a preceding W comparison alone cannot justify an X-indexed
+table. Independently assembled native tests exercise both cases, including
+inputs with nonzero upper halves and the default branch.
+
 After emission, the CLI releases decoded instructions, loader images and root
 metadata before invoking native compilation. Written memory-image blobs are also
 released. The report retains counts and identities rather than those large input

@@ -166,6 +166,43 @@ fn masked_table_dispatch_executes_all_original_native_cases() {
         }
     }
 }
+
+#[test]
+fn narrow_register_copy_preserves_native_table_dispatch_bounds() {
+    let t = Temp::new();
+    // Independent GNU-as fixture: CMP W0,#3; B.HI default; MOV W8,W0,
+    // followed by an ADR/LDRB/ADD/BR table dispatch. W0's upper half is unknown
+    // to analysis and deliberately nonzero in two executed inputs.
+    let exe = compile(
+        &t,
+        &[
+            0x71000c1f, 0x540001e8, 0x2a0003e8, 0x100001e9, 0x1000008a, 0x3868692b, 0x8b0b094a,
+            0xd61f0140, 0xd2800160, 0xd65f03c0, 0xd28002c0, 0xd65f03c0, 0xd2800420, 0xd65f03c0,
+            0xd2800580, 0xd65f03c0, 0xd2800c60, 0xd65f03c0, 0x06040200,
+        ],
+    );
+    for (input, expected) in [
+        (0u64, 11),
+        (1, 22),
+        (2, 33),
+        (3, 44),
+        (4, 99),
+        (0xffff_ffff_0000_0002, 33),
+        (0x1234_0000_0000_0003, 44),
+        (u64::MAX, 99),
+    ] {
+        let output = Command::new(&exe)
+            .args(["--reg", &format!("0={input}")])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(state(&output)["x"][0], expected, "{input:#x}");
+    }
+}
 #[test]
 fn negative_translation_and_input_protection() {
     let t = Temp::new();

@@ -157,6 +157,35 @@ const MASK_SWITCH: [u32; 15] = [
     0xd28002c0, 0xd65f03c0, 0xd2800420, 0xd65f03c0, 0xd2800580, 0xd65f03c0, 0x06040200,
 ];
 
+// GNU as 2.46: CMP W0,#3; B.HI default; MOV W8,W0; ADR X9,table;
+// ADR X10,case0; LDRB W11,[X9,X8]; ADD X10,X10,X11,LSL #2; BR X10.
+// Four MOV/RET cases, a default MOV/RET, and .byte 0,2,4,6 follow.
+const MOVED_BOUND_SWITCH: [u32; 19] = [
+    0x71000c1f, 0x540001e8, 0x2a0003e8, 0x100001e9, 0x1000008a, 0x3868692b, 0x8b0b094a, 0xd61f0140,
+    0xd2800160, 0xd65f03c0, 0xd28002c0, 0xd65f03c0, 0xd2800420, 0xd65f03c0, 0xd2800580, 0xd65f03c0,
+    0xd2800c60, 0xd65f03c0, 0x06040200,
+];
+
+#[test]
+fn narrow_move_promotes_a_low_half_bound_to_a_full_index_bound() {
+    let p = discover(&image(&MOVED_BOUND_SWITCH), GuestAddr(0x10000), &[]).unwrap();
+    assert_eq!(p.jump_tables.get(&GuestAddr(0x1001c)), Some(&4));
+    assert_eq!(p.instruction_count, 18);
+    for target in [0x10020, 0x10028, 0x10030, 0x10038, 0x10040] {
+        assert!(starts(&p).contains(&target));
+    }
+}
+
+#[test]
+fn wide_move_does_not_zero_unknown_upper_bits_after_a_narrow_compare() {
+    let mut words = MOVED_BOUND_SWITCH;
+    words[2] = 0xaa0003e8; // MOV X8,X0: the CMP W0 bounds only the low half.
+    let p = discover(&image(&words), GuestAddr(0x10000), &[]).unwrap();
+    assert!(p.jump_tables.is_empty());
+    assert_eq!(p.instruction_count, 10);
+    assert!(!starts(&p).contains(&0x10020));
+}
+
 #[test]
 fn immediate_and_bounds_unknown_indices_without_a_compare() {
     for word in [0x92400409, 0x12000409, 0xf2400409] {

@@ -406,6 +406,12 @@ fn transfer(state: &mut State, op: &Op) {
         } => {
             let value = match state.get(reg) {
                 Some(Val::Const(c)) => Some(Val::Const(mask(c, width))),
+                // A W-register copy zeroes the upper half, making even a bound
+                // established only by a W comparison valid for the whole X view.
+                Some(Val::Bounded { max, .. }) if width == Width::W32 => Some(Val::Bounded {
+                    max: max.min(u64::from(u32::MAX)),
+                    full: true,
+                }),
                 v if width == Width::X64 => v,
                 _ => None,
             };
