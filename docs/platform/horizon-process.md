@@ -429,3 +429,43 @@ reprotection tests prove the exact half-open span boundaries. The live runtime
 suite passes126 tests with no failures or ignores; strict all-target Clippy
 passes. This is runtime backing-lifetime infrastructure, not a claim that an
 NVIDIA GPU service host has already been installed in the AOT launcher.
+
+## Explicit read-only RomFS storage
+
+Generated Horizon executables accept `--romfs IMAGE` and `--patch-romfs IMAGE`.
+These are host-selected, already decrypted images opened before guest execution;
+no keys, archive decryption or guest-supplied host paths are involved. Current
+and patch storage are separate mounts. A base image is not automatically treated
+as the contents of an updated game. The operator must supply matching code and
+assets. Images must remain immutable while mounted.
+
+The storage adapter retains an open regular file, validates the 0x50-byte header
+and all four metadata-table ranges, and reads on demand rather than loading the
+whole image. Metadata may follow file data. This container validation does not
+validate every filesystem record or implement host-side RomFS path traversal.
+
+The source-pinned [libnx filesystem interface](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/services/fs.c)
+defines current-process data storage command 200, patch storage command 203,
+IStorage Read command 0 (signed 64-bit offset, unsigned 64-bit length, one
+MapAlias output), and GetSize command 4 (signed 64-bit size). The runtime
+implements these operations against their respective configured mounts.
+Missing mounts return FS TargetNotFound; no empty success image is fabricated.
+The numeric FS result identity is corroborated by the
+[Atmosphere result declarations](https://github.com/Atmosphere-NX/Atmosphere/blob/6b0c077b4c608a3a2ee712b8dc35fee87ceb62e8/libraries/libvapours/include/vapours/results/fs_results.hpp).
+Only interface facts are used; no implementation is copied.
+
+Reads are limited to 16 MiB per request. Negative offsets, out-of-range reads,
+short output descriptors, inaccessible destinations, changed file lengths and
+host IO errors fail explicitly. The whole guest destination is checked before
+IO, then one staging allocation is filled completely before a guest write.
+Mapping/permission failures or short host reads cannot publish a partial buffer.
+The exclusive Memory borrow preserves this transaction boundary; this does not
+protect against an external writer modifying the mounted file in place.
+
+Other program/data-ID selection, mutating storage operations, arbitrary files,
+saves and general filesystem operations are not implemented by this adapter.
+Unsupported storage operations fault explicitly. Earlier generic applet storage
+stubs are not treated as current-process RomFS images. The tests use original
+synthetic containers, literal HIPC requests, exact byte assertions, adjacent
+mapped regions, invalid bounds and truncated-file injection. No commercial data
+is included in the test fixtures.

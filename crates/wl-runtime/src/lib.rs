@@ -11,6 +11,7 @@ pub mod nvidia;
 pub mod sdl;
 pub mod services;
 pub mod simd;
+pub mod storage;
 pub mod threads;
 use std::io::Write;
 
@@ -1192,9 +1193,15 @@ pub fn launch_horizon_with_nvidia(
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut limit = 10_000_000_000u64;
     let mut quantum = threads::DEFAULT_QUANTUM;
+    let mut romfs = None;
+    let mut patch_romfs = None;
     let mut i = 0;
     while i < args.len() {
         let parsed = match (args[i].as_str(), args.get(i + 1)) {
+            ("--romfs", Some(v)) => storage::RomFs::open(v).map(|image| romfs = Some(image)),
+            ("--patch-romfs", Some(v)) => {
+                storage::RomFs::open(v).map(|image| patch_romfs = Some(image))
+            }
             ("--steps", Some(v)) => number(v).map(|n| limit = n),
             ("--quantum", Some(v)) => number(v).and_then(|n| {
                 if n == 0 {
@@ -1205,7 +1212,9 @@ pub fn launch_horizon_with_nvidia(
                 }
             }),
             ("--help", _) => {
-                println!("Horizon process: [--steps COUNT] [--quantum INSTRUCTIONS]");
+                println!(
+                    "Horizon process: [--steps COUNT] [--quantum INSTRUCTIONS] [--romfs IMAGE] [--patch-romfs IMAGE]"
+                );
                 return 0;
             }
             (option, _) => Err(format!("unknown option {option}")),
@@ -1227,6 +1236,8 @@ pub fn launch_horizon_with_nvidia(
             return 2;
         }
     };
+    process.kernel.as_mut().unwrap().host.romfs = romfs;
+    process.kernel.as_mut().unwrap().host.patch_romfs = patch_romfs;
     if let Some(host) = host {
         if let Err(error) = process.kernel.as_mut().unwrap().nvidia.install(host) {
             eprintln!("NVIDIA backend installation: {error:?}");

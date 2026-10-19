@@ -1108,19 +1108,55 @@ fn fsp_srv_service_startup() {
     assert_eq!(reply_result(&p), result::SUCCESS);
     assert_eq!(reply_u32(&p, 0x20), 0);
 
-    // OpenRomFileSystemByCurrentProcess (cmd 203): returns IFileSystem.
-    request(&mut p, 203, false, &[]);
-    assert_eq!(send(&mut p, &mut c, fs), (result::SUCCESS, None));
-    assert_eq!(reply_result(&p), result::SUCCESS);
-    let romfs = reply_handle(&p);
-    assert_ne!(romfs, 0);
-
-    // OpenDataStorageByCurrentProcess (cmd 200): returns IStorage.
+    // No configured mount must not fabricate a valid empty filesystem.
     request(&mut p, 200, false, &[]);
     assert_eq!(send(&mut p, &mut c, fs), (result::SUCCESS, None));
-    assert_eq!(reply_result(&p), result::SUCCESS);
-    let storage = reply_handle(&p);
-    assert_ne!(storage, 0);
+    assert_eq!(reply_result(&p), (1002 << 9) | 2);
+
+    let path =
+        std::env::temp_dir().join(format!("wanderlust-ipc-romfs-{}.bin", std::process::id()));
+    let mut image = vec![0; 0x120];
+    for (n, value) in [0x50u64, 0x100, 4, 0x104, 24, 0x11c, 4, 0x120, 0, 0x50]
+        .into_iter()
+        .enumerate()
+    {
+        image[n * 8..n * 8 + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    image[0x50..0x58].copy_from_slice(b"rom-data");
+    std::fs::write(&path, &image).unwrap();
+    let mounted = wl_runtime::storage::RomFs::open(&path).unwrap();
+    p.kernel.as_mut().unwrap().host.romfs = Some(mounted.clone());
+    p.kernel.as_mut().unwrap().host.patch_romfs = Some(mounted);
+    for command in [200, 203] {
+        // 203 is OpenPatchDataStorageByCurrentProcess and returns IStorage.
+        request(&mut p, command, false, &[]);
+        assert_eq!(send(&mut p, &mut c, fs), (result::SUCCESS, None));
+        assert_eq!(reply_result(&p), result::SUCCESS);
+        let storage = reply_handle(&p);
+        assert_ne!(storage, 0);
+        request(&mut p, 4, false, &[]);
+        assert_eq!(send(&mut p, &mut c, storage), (result::SUCCESS, None));
+        assert_eq!(reply_result(&p), result::SUCCESS);
+        assert_eq!(reply_u32(&p, 0x20), image.len() as u32);
+
+        // Literal HIPC MapAlias receive descriptor and CMIF IStorage::Read.
+        let destination = CODE + 0x2000;
+        let mut wire = [0u8; 0x100];
+        wire[0..4].copy_from_slice(&(4u32 | (1 << 24)).to_le_bytes());
+        wire[4..8].copy_from_slice(&12u32.to_le_bytes());
+        wire[8..12].copy_from_slice(&8u32.to_le_bytes());
+        wire[12..16].copy_from_slice(&(destination as u32).to_le_bytes());
+        wire[0x20..0x24].copy_from_slice(b"SFCI");
+        wire[0x30..0x38].copy_from_slice(&0x50i64.to_le_bytes());
+        wire[0x38..0x40].copy_from_slice(&8u64.to_le_bytes());
+        let t = tls(&p);
+        p.write_bytes(t, &wire).unwrap();
+        assert_eq!(send(&mut p, &mut c, storage), (result::SUCCESS, None));
+        assert_eq!(reply_result(&p), result::SUCCESS);
+        assert_eq!(p.read_bytes(destination, 8).unwrap(), b"rom-data");
+    }
+    drop(p);
+    std::fs::remove_file(path).unwrap();
 }
 
 #[test]

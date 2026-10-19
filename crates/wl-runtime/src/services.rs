@@ -70,6 +70,10 @@ pub enum HostObject {
     FileSystemProxy,
     FileSystem,
     Storage,
+    /// Explicitly mounted current-process RomFS; patch storage is a distinct mount.
+    RomFsStorage {
+        patch: bool,
+    },
     /// `nvdrv` INvDrvServices (nvservices process).
     NvDrvServices,
     /// `vi` IApplicationRootService, IApplicationDisplayService (vi process).
@@ -105,36 +109,6 @@ const LM_POINTER_BUFFER_SIZE: u16 = 0x400;
 /// Size of `am`'s pointer buffer (0x1000 bytes for HIPC pointer transfer buffers).
 const AM_POINTER_BUFFER_SIZE: u16 = 0x1000;
 
-/// Minimal valid specification-conformant empty RomFS image (header, dir hash table, root dir).
-const EMPTY_ROMFS: [u8; 128] = [
-    // 0x00: header_size = 0x50
-    0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x08: dir_hash_table_offset = 0x50
-    0x50, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // 0x10: dir_hash_table_size = 0x0C (3 buckets)
-    0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x18: dir_table_offset = 0x5C
-    0x5c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // 0x20: dir_table_size = 0x18 (24 bytes)
-    0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // 0x28: file_hash_table_offset = 0x74
-    0x74, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // 0x30: file_hash_table_size = 0x0C (3 buckets)
-    0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x38: file_table_offset = 0x80
-    0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x40: file_table_size = 0x00
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x48: file_data_offset = 0x80
-    0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // 0x50: dir hash table (3 buckets: bucket 0 points to root dir entry at offset 0, buckets 1 & 2 empty)
-    0x00, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-    // 0x5C: root dir entry (24 bytes: parent=0, sibling=-1, child=-1, file=-1, hash=-1, name_len=0)
-    0x00, 0x00, 0x00, 0x00, // parent: 0 (points to self)
-    0xff, 0xff, 0xff, 0xff, // sibling: none
-    0xff, 0xff, 0xff, 0xff, // child: none
-    0xff, 0xff, 0xff, 0xff, // file: none
-    0xff, 0xff, 0xff, 0xff, // next_hash: none
-    0x00, 0x00, 0x00, 0x00, // name_len: 0
-    // 0x74: file hash table (3 buckets: all empty 0xFFFFFFFF)
-    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-];
-
 /// `lm::LogDestination_TargetManager`, the destination before any SetDestination.
 pub const LOG_DESTINATION_TARGET_MANAGER: u32 = 1;
 
@@ -143,6 +117,9 @@ pub const LOG_DESTINATION_TARGET_MANAGER: u32 = 1;
 pub struct HostState {
     /// Destination set by ILogger::SetDestination; `None` before the first call.
     pub log_destination: Option<u32>,
+    /// Immutable images installed before guest execution, never selected by a guest host path.
+    pub romfs: Option<crate::storage::RomFs>,
+    pub patch_romfs: Option<crate::storage::RomFs>,
     /// Log text of messages whose tail packet has not arrived, by thread ID.
     pub partial_logs: Vec<(u64, String)>,
     /// Log packets received.
@@ -297,7 +274,7 @@ impl HostObject {
             HostObject::AccSession => ("acc:u0 ISessionObject", 0),
             HostObject::FileSystemProxy => ("fsp-srv IFileSystemProxy", 0),
             HostObject::FileSystem => ("fsp-srv IFileSystem", 0),
-            HostObject::Storage => ("fsp-srv IStorage", 0),
+            HostObject::Storage | HostObject::RomFsStorage { .. } => ("fsp-srv IStorage", 0),
             HostObject::NvDrvServices => ("nvdrv INvDrvServices", 0),
             HostObject::ViUser => ("vi:u IApplicationRootService", 0),
             HostObject::ViDisplayService => ("vi IApplicationDisplayService", 0),
@@ -319,9 +296,10 @@ impl HostObject {
             | HostObject::TimeSteadyClock
             | HostObject::TimeZoneService => Server::Time,
             HostObject::AccUser | HostObject::AccProfile | HostObject::AccSession => Server::Acc,
-            HostObject::FileSystemProxy | HostObject::FileSystem | HostObject::Storage => {
-                Server::Fs
-            }
+            HostObject::FileSystemProxy
+            | HostObject::FileSystem
+            | HostObject::Storage
+            | HostObject::RomFsStorage { .. } => Server::Fs,
             HostObject::NvDrvServices => Server::NvDrv,
             HostObject::ViUser | HostObject::ViDisplayService | HostObject::HosBinderDriver => {
                 Server::Vi
@@ -1342,13 +1320,27 @@ pub(crate) fn request(
             // Initialize(u64 reserved, ClientProcessId, copied process handle).
             Done::ok()
         }
-        (HostObject::FileSystemProxy, 18 | 51 | 52 | 203) => {
-            // MountSaveData / OpenSaveDataFileSystem / OpenDirectoryFileSystem / OpenRomFileSystemByCurrentProcess
+        (HostObject::FileSystemProxy, 18 | 51 | 52) => {
+            // Existing filesystem stubs; no RomFS storage command is interpreted as IFileSystem.
             Done::object(HostObject::FileSystem)
         }
-        (HostObject::FileSystemProxy, 200 | 202) => {
-            // OpenDataStorageByCurrentProcess / OpenDataStorageByDataId
-            Done::object(HostObject::Storage)
+        (HostObject::FileSystemProxy, 200 | 203) => {
+            check(no_arguments)?;
+            let patch = command == 203;
+            let image = if patch {
+                &k.host.patch_romfs
+            } else {
+                &k.host.romfs
+            };
+            if image.is_none() {
+                // FS module 2, TargetNotFound description 1002. No synthetic empty image.
+                Done::failure((1002 << 9) | 2)
+            } else {
+                Done::object(HostObject::RomFsStorage { patch })
+            }
+        }
+        (HostObject::FileSystemProxy, 201 | 202) => {
+            return unsupported("opening storage by another program/data ID");
         }
         (HostObject::FileSystemProxy, 1005) => {
             // SetGlobalAccessLogMode(u32 mode)
@@ -1360,43 +1352,51 @@ pub(crate) fn request(
         }
         (HostObject::FileSystemProxy, _) => Done::ok(),
         (HostObject::FileSystem, _) => Done::ok(),
-        (HostObject::Storage, 0) => {
-            // Read(u64 offset, u64 size, OutBuffer)
-            let offset =
-                (ipc::read_u32(args, 0) as usize) | ((ipc::read_u32(args, 4) as usize) << 32);
-            let size =
-                (ipc::read_u32(args, 8) as usize) | ((ipc::read_u32(args, 12) as usize) << 32);
-            let dst_info = req
-                .recvs
-                .first()
-                .or(req.statics.first())
-                .or(req.sends.first());
-            eprintln!("[ipc Storage Read] offset={offset:#x} size={size:#x} dst_info={dst_info:?}");
-            if let Some(&(dst, buf_size)) = dst_info {
-                let to_copy = if buf_size > 0 {
-                    size.min(buf_size as usize)
-                } else {
-                    size
-                };
-                if offset < EMPTY_ROMFS.len() {
-                    let avail = (EMPTY_ROMFS.len() - offset).min(to_copy);
-                    let _ = memory.write_bytes(dst, &EMPTY_ROMFS[offset..offset + avail]);
-                    if to_copy > avail {
-                        let zeroes = vec![0u8; to_copy - avail];
-                        let _ = memory.write_bytes(dst + avail as u64, &zeroes);
-                    }
-                } else {
-                    let zeroes = vec![0u8; to_copy];
-                    let _ = memory.write_bytes(dst, &zeroes);
-                }
+        (HostObject::RomFsStorage { patch }, 0) => {
+            // libnx fsStorageRead: signed offset, u64 size, one MapAlias output.
+            if args.len() < 16
+                || req.recvs.len() != 1
+                || !req.statics.is_empty()
+                || !req.sends.is_empty()
+                || req.exchanges != 0
+                || req.pid.is_some()
+                || req.copy_handles != 0
+                || req.move_handles != 0
+            {
+                return unsupported("IStorage Read request layout");
             }
+            let offset = i64::from_le_bytes(args[..8].try_into().unwrap());
+            let size = u64::from_le_bytes(args[8..16].try_into().unwrap());
+            let (destination, buffer_size) = req.recvs[0];
+            let image = if patch {
+                &k.host.patch_romfs
+            } else {
+                &k.host.romfs
+            };
+            image
+                .as_ref()
+                .ok_or("mounted storage unavailable")?
+                .read_into_guest(offset, size, destination, buffer_size, memory)?;
             Done::ok()
         }
-        (HostObject::Storage, 4) => {
-            // GetSize: out u64 size
-            Done::data(&(EMPTY_ROMFS.len() as u64).to_le_bytes())
+        (HostObject::RomFsStorage { patch }, 4) => {
+            check(no_arguments)?;
+            let image = if patch {
+                &k.host.patch_romfs
+            } else {
+                &k.host.romfs
+            };
+            Done::data(
+                &image
+                    .as_ref()
+                    .ok_or("mounted storage unavailable")?
+                    .size()
+                    .to_le_bytes(),
+            )
         }
-        (HostObject::Storage, _) => Done::ok(),
+        (HostObject::Storage | HostObject::RomFsStorage { .. }, _) => {
+            return unsupported("unimplemented or mutating storage command");
+        }
         (HostObject::NvDrvServices, _) => {
             let reply = crate::nvidia::request(memory, k, req, command, args)?;
             Done::data(&reply.data)
