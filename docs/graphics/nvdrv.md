@@ -151,3 +151,23 @@ two indexed draws, verified both framebuffer results in the guest and presented
 the framebuffer in the SDL window. A separately held D3D12 window was captured
 and visually inspected. The result is synthetic homebrew
 execution, not original-game graphics.
+
+## Bounded diagnostic capture
+
+`WL_GPU_CAPTURE_DIR` enables raw RGBA capture of successfully published color
+outputs. Each invocation creates a unique directory. `WL_GPU_CAPTURE_LIMIT`
+selects 1–64 images (default 8); the total raw pixel budget is 1 GiB. A capture
+has a `.rgba` file and JSON metadata containing its dimensions and cumulative
+draw count. Metadata is renamed last as the completion marker; incomplete files
+are not captures. Host filesystem failures are fatal after accepted work and
+must not cause command replay. Captures may contain private guest content and
+should remain outside tracked source directories.
+
+Capture borrows the existing owned readback image, writes it to disk and adds
+no GPU submission, readback or wait. These outputs are explicit color-target
+publications, **not VI presentation events**. Capturing or repainting one image
+multiple times does not establish multiple game frames.
+
+`WL_NVDRV_TRACE=1` logs at most 1024 device-open/ioctl events, including request
+identities and results. Unknown device paths are redacted. Buffer contents,
+shader bytes and allocation contents are not logged.

@@ -2,6 +2,78 @@
 use wl_gpu::memory::{GuestAddress, GuestMemory, GuestMemoryWrite};
 use wl_guest_runtime::{Memory, gpu_memory::GpuPin, nvidia as service};
 use wl_nvdrv as driver;
+struct Capture {
+    directory: std::path::PathBuf,
+    remaining: u32,
+    index: u32,
+    bytes: u64,
+}
+impl Capture {
+    fn create(root: &std::path::Path, limit: u32) -> std::io::Result<Self> {
+        if !(1..=64).contains(&limit) {
+            return Err(std::io::Error::other("capture limit must be 1..64"));
+        }
+        std::fs::create_dir_all(root)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(std::io::Error::other)?
+            .as_nanos();
+        let directory = root.join(format!("run-{}-{now}", std::process::id()));
+        std::fs::create_dir(&directory)?;
+        Ok(Self {
+            directory,
+            remaining: limit,
+            index: 0,
+            bytes: 0,
+        })
+    }
+    fn write(&mut self, frame: &wl_gpu::backend::Frame, draws: u64) -> std::io::Result<bool> {
+        use std::io::Write;
+        if self.remaining == 0 {
+            return Ok(false);
+        }
+        let size = u64::from(frame.width)
+            .checked_mul(u64::from(frame.height))
+            .and_then(|n| n.checked_mul(4))
+            .filter(|n| *n != 0 && *n == frame.rgba.len() as u64)
+            .ok_or_else(|| std::io::Error::other("invalid published color image extent"))?;
+        if size > (1 << 30) - self.bytes {
+            self.remaining = 0;
+            return Ok(false);
+        }
+        let index = self.index + 1;
+        let base = format!("color-{index:04}");
+        let temporary = self.directory.join(format!("{base}.rgba.part"));
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        output.write_all(&frame.rgba)?;
+        drop(output);
+        std::fs::rename(temporary, self.directory.join(format!("{base}.rgba")))?;
+        // The metadata is the commit marker. A partial raw image is not a capture.
+        let temporary = self.directory.join(format!("{base}.json.part"));
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        write!(
+            output,
+            "{{\"kind\":\"published-color-target\",\"index\":{index},\"width\":{},\"height\":{},\"rgba_bytes\":{size},\"draw_commands\":{draws}}}",
+            frame.width, frame.height
+        )?;
+        drop(output);
+        std::fs::rename(temporary, self.directory.join(format!("{base}.json")))?;
+        self.index = index;
+        self.bytes += size;
+        self.remaining -= 1;
+        eprintln!(
+            "NVIDIA captured published color target {index} ({}x{}), not a VI presentation event",
+            frame.width, frame.height
+        );
+        Ok(true)
+    }
+}
 struct MemoryView<'a>(&'a mut Memory);
 impl GuestMemory for MemoryView<'_> {
     fn read(&self, address: GuestAddress, length: usize) -> wl_gpu::Result<&[u8]> {
@@ -47,6 +119,8 @@ pub struct NativeHost {
     debug_window: Option<wl_guest_runtime::sdl::SdlHost>,
     last_frame: Option<wl_gpu::backend::Frame>,
     hold_window: bool,
+    capture: Option<Capture>,
+    trace_remaining: u32,
 }
 impl std::fmt::Debug for NativeHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -76,11 +150,30 @@ impl NativeHost {
         } else {
             None
         };
+        let capture = std::env::var_os("WL_GPU_CAPTURE_DIR")
+            .map(|root| {
+                let limit = match std::env::var("WL_GPU_CAPTURE_LIMIT") {
+                    Ok(value) => value
+                        .parse::<u32>()
+                        .map_err(|_| wl_gpu::Error("capture limit must be 1..64".into()))?,
+                    Err(std::env::VarError::NotPresent) => 8,
+                    Err(_) => return Err(wl_gpu::Error("invalid capture limit encoding".into())),
+                };
+                Capture::create(std::path::Path::new(&root), limit)
+                    .map_err(|e| wl_gpu::Error(format!("GPU capture setup: {e}")))
+            })
+            .transpose()?;
         Ok(Self {
             driver,
             debug_window,
             last_frame: None,
             hold_window: std::env::var("WL_GPU_DEBUG_HOLD").as_deref() == Ok("1"),
+            capture,
+            trace_remaining: if std::env::var("WL_NVDRV_TRACE").as_deref() == Ok("1") {
+                1024
+            } else {
+                0
+            },
         })
     }
     pub fn graphics_counters(&self) -> wl_gpu::Counters {
@@ -91,6 +184,15 @@ impl NativeHost {
     }
     fn present_debug_output(&mut self) -> service::HostResult<()> {
         if let Some(frame) = self.driver.take_frame() {
+            if let Some(capture) = &mut self.capture {
+                capture
+                    .write(&frame, self.driver.graphics_counters().draw_commands)
+                    .map_err(|e| {
+                        service::HostError::Fatal(format!(
+                            "GPU capture after publication failed: {e}"
+                        ))
+                    })?;
+            }
             if let Some(window) = &mut self.debug_window {
                 window.poll_input();
                 if !window.present_raw_rgba(&frame.rgba, frame.width, frame.height) {
@@ -130,7 +232,20 @@ impl service::Host for NativeHost {
         Ok(())
     }
     fn open(&mut self, path: &str) -> service::HostResult<u32> {
-        self.driver.open(path).map_err(error)
+        let result = self.driver.open(path).map_err(error);
+        if self.trace_remaining != 0 {
+            self.trace_remaining -= 1;
+            let node = match path {
+                "/dev/nvmap"
+                | "/dev/nvhost-gpu"
+                | "/dev/nvhost-as-gpu"
+                | "/dev/nvhost-ctrl-gpu"
+                | "/dev/nvhost-ctrl" => path,
+                _ => "<unrecognized-device>",
+            };
+            eprintln!("NVIDIA open node={node} result={result:?}");
+        }
+        result
     }
     fn close(&mut self, fd: u32, memory: &mut Memory) -> service::HostResult<()> {
         self.driver
@@ -138,12 +253,15 @@ impl service::Host for NativeHost {
             .map_err(error)
     }
     fn ioctl(&mut self, r: service::Ioctl<'_>, memory: &mut Memory) -> service::HostResult<()> {
+        let request = r.request;
+        let fd = r.fd;
         let kind = match r.kind {
             service::IoctlKind::Ioctl => driver::IoctlKind::Ioctl,
             service::IoctlKind::Ioctl2 => driver::IoctlKind::Ioctl2,
             service::IoctlKind::Ioctl3 => driver::IoctlKind::Ioctl3,
         };
-        self.driver
+        let result = self
+            .driver
             .ioctl(
                 driver::Ioctl {
                     fd: r.fd,
@@ -156,7 +274,75 @@ impl service::Host for NativeHost {
                 },
                 &mut MemoryView(memory),
             )
-            .map_err(error)?;
+            .map_err(error);
+        if self.trace_remaining != 0 {
+            self.trace_remaining -= 1;
+            eprintln!(
+                "NVIDIA ioctl fd={fd} request={request:#010x} kind={kind:?} result={result:?}"
+            );
+        }
+        result?;
         self.present_debug_output()
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    fn frame() -> wl_gpu::backend::Frame {
+        wl_gpu::backend::Frame {
+            width: 2,
+            height: 1,
+            rgba: vec![1, 2, 3, 255, 7, 8, 9, 128],
+            encode_time: std::time::Duration::ZERO,
+            total_time: std::time::Duration::ZERO,
+            gpu_nanoseconds: None,
+        }
+    }
+    #[test]
+    fn capture_exact_bytes_metadata_and_limit() {
+        let mut capture = Capture::create(&std::env::temp_dir(), 1).unwrap();
+        let directory = capture.directory.clone();
+        assert!(capture.write(&frame(), 42).unwrap());
+        assert_eq!(
+            std::fs::read(directory.join("color-0001.rgba")).unwrap(),
+            frame().rgba
+        );
+        let metadata = std::fs::read_to_string(directory.join("color-0001.json")).unwrap();
+        assert!(metadata.contains("\"kind\":\"published-color-target\""));
+        assert!(metadata.contains("\"draw_commands\":42"));
+        assert!(metadata.contains("\"rgba_bytes\":8"));
+        assert!(!capture.write(&frame(), 43).unwrap());
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 2);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn capture_rejects_malformed_frames_before_writing() {
+        let mut capture = Capture::create(&std::env::temp_dir(), 2).unwrap();
+        let directory = capture.directory.clone();
+        let mut image = frame();
+        image.rgba.pop();
+        assert!(capture.write(&image, 0).is_err());
+        image.width = 0;
+        assert!(capture.write(&image, 0).is_err());
+        image.width = u32::MAX;
+        image.height = u32::MAX;
+        assert!(capture.write(&image, 0).is_err());
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
+        assert_eq!(capture.remaining, 2);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn capture_setup_and_failed_write_do_not_commit_metadata() {
+        assert!(Capture::create(&std::env::temp_dir(), 0).is_err());
+        assert!(Capture::create(&std::env::temp_dir(), 65).is_err());
+        let mut capture = Capture::create(&std::env::temp_dir(), 1).unwrap();
+        let directory = capture.directory.clone();
+        assert!(Capture::create(&directory.join("missing").join("file"), 0).is_err());
+        std::fs::remove_dir(&directory).unwrap();
+        assert!(capture.write(&frame(), 0).is_err());
+        assert_eq!(capture.remaining, 1);
+        assert_eq!(capture.index, 0);
+        assert!(!directory.exists());
     }
 }
