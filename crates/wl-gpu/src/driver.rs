@@ -5,9 +5,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 pub(crate) fn identity() -> Result<u64> {
-    NEXT_ID
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
-        .map_err(|_| invalid("GPU identity exhausted"))
+    let mut current = NEXT_ID.load(Ordering::Relaxed);
+    loop {
+        let next = current
+            .checked_add(1)
+            .ok_or_else(|| invalid("GPU identity exhausted"))?;
+        match NEXT_ID.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(id) => return Ok(id),
+            Err(observed) => current = observed,
+        }
+    }
 }
 macro_rules! id {
     ($name:ident) => {

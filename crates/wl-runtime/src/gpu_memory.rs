@@ -69,9 +69,21 @@ impl Memory {
         }
         // Globally distinct tokens prevent cross-process confusion, including
         // two Memory values with identical numeric guest addresses.
-        let id = NEXT_PIN
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
-            .map_err(|_| "GPU backing token exhaustion")?;
+        let mut current = NEXT_PIN.load(Ordering::Relaxed);
+        let id = loop {
+            let next = current
+                .checked_add(1)
+                .ok_or("GPU backing token exhaustion")?;
+            match NEXT_PIN.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(id) => break id,
+                Err(observed) => current = observed,
+            }
+        };
         let token = GpuPin(id);
         self.gpu_pins.push(PinRange {
             token,
