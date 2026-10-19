@@ -118,3 +118,46 @@ fn budget_and_services() {
     assert_eq!(c.x, old);
     assert_eq!(service(&mut c, &mut p, 7).unwrap(), Some(Stop::ExitProcess));
 }
+
+#[test]
+fn dispatch_preserves_guest_registers_at_all_program_addresses() {
+    fn observe(c: &mut Cpu, _: &mut Process) -> RuntimeResult<Option<Stop>> {
+        assert_eq!(c.x[19], 0x12345678);
+        assert_eq!(c.x[0], c.x[1]);
+        c.steps += 1;
+        Ok(Some(Stop::Returned))
+    }
+    // These addresses previously selected unverified title-specific register
+    // rewrites/branches, even for unrelated bare programs with no Horizon kernel.
+    static BLOCKS: &[(u64, BlockFn)] = &[
+        (0x8070f9c, observe),
+        (0x8be3680, observe),
+        (0xc23612c, observe),
+    ];
+    let units: &[(u64, BlockTable)] = &[(0, BLOCKS)];
+    for (pc, value) in [(0x8070f9c, 5), (0x8be3680, 0), (0xc23612c, 99)] {
+        let mut memory = Memory::default();
+        memory
+            .map(pc & !0xfff, vec![0; 4096], true, false, true)
+            .unwrap();
+        let mut process = Process {
+            memory,
+            kernel: None,
+        };
+        let mut cpu = Cpu::new(pc);
+        cpu.x[0] = value;
+        cpu.x[1] = value;
+        cpu.x[19] = 0x12345678;
+        assert_eq!(
+            execute_until(&mut cpu, &mut process, units, 1).unwrap(),
+            Stop::Returned
+        );
+        assert_eq!(cpu.pc, pc);
+        assert_eq!(cpu.steps, 1);
+        assert_eq!(
+            process.memory.regions.len(),
+            1,
+            "dispatcher must not fabricate heaps"
+        );
+    }
+}
