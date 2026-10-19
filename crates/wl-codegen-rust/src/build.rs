@@ -197,7 +197,13 @@ pub fn build(
     output: &Path,
     cfg: &BuildConfig,
 ) -> Result<BuildReport> {
-    build_inner(emitted, main_source, output, cfg, None)
+    build_inner(
+        BuildInput::Borrowed(emitted),
+        main_source,
+        output,
+        cfg,
+        None,
+    )
 }
 
 /// Builds a GPU-enabled final executable against target-correct Cargo artifacts.
@@ -209,16 +215,54 @@ pub fn build_with_native_gpu(
     cfg: &BuildConfig,
     workspace: &Path,
 ) -> Result<BuildReport> {
-    build_inner(emitted, main_source, output, cfg, Some(workspace))
+    build_inner(
+        BuildInput::Borrowed(emitted),
+        main_source,
+        output,
+        cfg,
+        Some(workspace),
+    )
 }
 
-fn build_inner(
-    emitted: &Emitted,
+/// Consumes emitted sources so their storage can be released after unit
+/// compilation, before the final linker competes for host memory.
+pub fn build_owned(
+    emitted: Emitted,
     main_source: &Path,
     output: &Path,
     cfg: &BuildConfig,
     gpu_workspace: Option<&Path>,
 ) -> Result<BuildReport> {
+    build_inner(
+        BuildInput::Owned(emitted),
+        main_source,
+        output,
+        cfg,
+        gpu_workspace,
+    )
+}
+
+enum BuildInput<'a> {
+    Borrowed(&'a Emitted),
+    Owned(Emitted),
+}
+impl BuildInput<'_> {
+    fn emitted(&self) -> &Emitted {
+        match self {
+            Self::Borrowed(e) => e,
+            Self::Owned(e) => e,
+        }
+    }
+}
+
+fn build_inner(
+    input: BuildInput<'_>,
+    main_source: &Path,
+    output: &Path,
+    cfg: &BuildConfig,
+    gpu_workspace: Option<&Path>,
+) -> Result<BuildReport> {
+    let emitted = input.emitted();
     fs::create_dir_all(&cfg.cache_dir).map_err(|e| format!("{}: {e}", cfg.cache_dir.display()))?;
     let version = rustc()
         .arg("-vV")
@@ -316,6 +360,8 @@ fn build_inner(
             source_bytes: emitted.units[i].source.len(),
         });
     }
+    let unit_count = units.len();
+    drop(input);
     // One dependency directory per executable keeps the rustc command line short.
     let mut deps = output.as_os_str().to_owned();
     deps.push(".deps");
@@ -368,7 +414,7 @@ fn build_inner(
     Ok(BuildReport {
         toolchain: toolchain.lines().next().unwrap_or_default().to_string(),
         jobs,
-        cache_misses: units.len() + 1 - cache_hits,
+        cache_misses: unit_count + 1 - cache_hits,
         cache_hits,
         unit_compile_seconds: units.iter().map(|u| u.seconds).sum(),
         units_wall_seconds,

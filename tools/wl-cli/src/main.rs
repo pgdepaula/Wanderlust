@@ -732,6 +732,13 @@ fn run(args: &[OsString]) -> Result<()> {
     // their in-memory copies after publication beside the generated source.
     generated.blobs.clear();
     fs::write(&source, &generated.main).map_err(|e| format!("{}: {e}", source.display()))?;
+    let generated_source_bytes = generated.main.len()
+        + generated
+            .units
+            .iter()
+            .map(|u| u.source.len())
+            .sum::<usize>();
+    let unit_count = generated.units.len();
     let started = Instant::now();
     let report = if o.emit_only {
         // Emit-only writes the unit sources beside the executable crate for inspection.
@@ -764,22 +771,16 @@ fn run(args: &[OsString]) -> Result<()> {
             jobs,
             opt_level: o.opt_level,
         };
-        Some(if o.native_gpu {
-            wl_codegen_rust::build::build_with_native_gpu(
-                &generated,
-                &source,
-                &output,
-                &cfg,
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .join("../..")
-                    .as_path(),
-            )?
-        } else {
-            wl_codegen_rust::build::build(&generated, &source, &output, &cfg)?
-        })
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        Some(wl_codegen_rust::build::build_owned(
+            generated,
+            &source,
+            &output,
+            &cfg,
+            o.native_gpu.then_some(workspace.as_path()),
+        )?)
     };
     let compile_seconds = started.elapsed().as_secs_f64();
-    let unit_source_bytes: usize = generated.units.iter().map(|u| u.source.len()).sum();
     let executable_bytes = fs::metadata(&output)
         .ok()
         .map(|m| m.len())
@@ -796,8 +797,8 @@ fn run(args: &[OsString]) -> Result<()> {
         "flow_roots": program_report["flow_roots"],
         "jump_tables": program_report["jump_tables"],
         "relocation": relocation,
-        "generated_source_bytes": generated.main.len() + unit_source_bytes,
-        "units": generated.units.len(),
+        "generated_source_bytes": generated_source_bytes,
+        "units": unit_count,
         "build": report.as_ref().map(|r| serde_json::json!({
             "toolchain": r.toolchain,
             "jobs": r.jobs,

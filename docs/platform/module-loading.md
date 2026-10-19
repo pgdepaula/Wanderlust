@@ -203,5 +203,7 @@ guest instruction replacement is used.
 After emission, the CLI releases decoded instructions, loader images and root
 metadata before invoking native compilation. Written memory-image blobs are also
 released. The report retains counts and identities rather than those large input
-structures; generated units remain available to the existing content-keyed build
-cache. Native linking still requires memory proportional to the emitted program.
+structures. Its consuming build entry point also releases generated unit sources
+once their content-keyed rlibs and reports are complete, before final linking.
+The borrowed library entry points remain compatible. Native linking still
+requires memory proportional to the emitted program.
