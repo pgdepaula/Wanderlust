@@ -5,6 +5,8 @@ use std::{
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
 };
+#[path = "../../../crates/wl-loader/tests/support/mod.rs"]
+mod synthetic;
 static ID: AtomicU64 = AtomicU64::new(0);
 struct Temp(PathBuf);
 impl Temp {
@@ -60,6 +62,88 @@ fn json(o: &std::process::Output) -> serde_json::Value {
 }
 fn manifest(dir: &Path) -> serde_json::Value {
     serde_json::from_slice(&fs::read(dir.join("manifest.json")).unwrap()).unwrap()
+}
+
+#[test]
+fn referenced_relocation_table_executes_native_virtual_call_without_global_seeds() {
+    use synthetic::*;
+    use wl_nso::dynamic::R_AARCH64_RELATIVE;
+    // GNU as 2.46, module entry at +8: ADR X0,object(+0x2210);
+    // ADR X8,table(+0x2200); STR X8,[X0]; LDR X9,[X0]; LDR X9,[X9,#8];
+    // BR X9. Callbacks at +0x20 and +0x28 return 11 and 22. A third,
+    // unreferenced table points to +0x30 and must not seed its callback.
+    assert_native_callback_table(
+        Spec {
+            text: vec![
+                0x10011040, 0x10010fa8, 0xf9000008, 0xf9400009, 0xf9400529, 0xd61f0120, 0xd2800160,
+                RET, 0xd28002c0, RET, 0xd2800c60, RET,
+            ],
+            data: vec![0, 0, 0, 0],
+            relocations: vec![
+                rela(DATA_WORDS, R_AARCH64_RELATIVE, 0, 0x20),
+                rela(DATA_WORDS + 8, R_AARCH64_RELATIVE, 0, 0x28),
+                rela(DATA_WORDS + 24, R_AARCH64_RELATIVE, 0, 0x30),
+            ],
+            rela_count: 3,
+            ..Spec::default()
+        },
+        10,
+    );
+}
+
+#[test]
+fn got_table_with_header_and_paired_store_executes_native_virtual_call() {
+    use synthetic::*;
+    use wl_nso::dynamic::R_AARCH64_RELATIVE;
+    // GNU as/ld 2.46: ADR object; ADRP GOT; LDR GOT; ADD X23,#16;
+    // STP X23,XZR,[X0]; LDR X9,[X0]; LDR X9,[X9,#8]; BR X9.
+    // The GOT points to a two-word header before the function address point.
+    assert_native_callback_table(
+        Spec {
+            text: vec![
+                0x100110c0, 0xd0000008, 0xf9411908, 0x91004117, 0xa9007c17, 0xf9400009, 0xf9400529,
+                0xd61f0120, 0xd2800160, RET, 0xd28002c0, RET, 0xd2800c60, RET,
+            ],
+            data: vec![0; 8],
+            relocations: vec![
+                rela(DATA_WORDS + 16, R_AARCH64_RELATIVE, 0, 0x28),
+                rela(DATA_WORDS + 24, R_AARCH64_RELATIVE, 0, 0x30),
+                rela(DATA_WORDS + 48, R_AARCH64_RELATIVE, 0, DATA_WORDS as i64),
+                rela(DATA_WORDS + 56, R_AARCH64_RELATIVE, 0, 0x38),
+            ],
+            rela_count: 4,
+            ..Spec::default()
+        },
+        12,
+    );
+}
+
+fn assert_native_callback_table(spec: synthetic::Spec, instructions: u64) {
+    let t = Temp::new();
+    let exefs = t.0.join("exefs");
+    fs::create_dir(&exefs).unwrap();
+    fs::write(exefs.join("main"), synthetic::bytes(&spec)).unwrap();
+    let out = t.0.join(format!("guest{}", std::env::consts::EXE_SUFFIX));
+    let report = json(
+        &cli()
+            .arg("recompile")
+            .arg(&exefs)
+            .args(["--no-pointer-seeds", "--entry", "0x8000008", "--out"])
+            .arg(&out)
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(report["flow_roots"], 2);
+    assert_eq!(report["instructions"], instructions);
+    let ran = Command::new(out).output().unwrap();
+    assert!(
+        ran.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    let state: serde_json::Value = serde_json::from_slice(&ran.stdout).unwrap();
+    assert_eq!(state["status"], "returned");
+    assert_eq!(state["x"][0], 22);
 }
 
 #[test]

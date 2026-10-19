@@ -191,6 +191,30 @@ Observed execution destinations should be required roots rather than relying on
 the retention of a speculative candidate. Recompile and summary reports include
 the selected limit.
 
+The loader retains an analysis-only index of final values in supported 64-bit
+relocation cells. Later overlapping relocations, including 32-bit writes, are
+reflected by reading the final analysis bytes. The index is shared with analysis
+through an immutable `Arc`; it is neither serialized as process memory nor
+applied to guest-mode bytes. This also preserves pointers to data, such as GOT
+entries referring to a function-pointer table's header.
+
+Dataflow can read an indexed relocation value through a checked, readable
+64-bit load from a constant address. If reached code then stores or passes a
+constant address point of a non-executable function-pointer table, its contiguous
+relocation-backed executable targets become ordinary candidate roots. Discovery
+stops at absent provenance, unreadable/truncated cells or non-code targets. Each
+propagation pass inspects at most 1,024 such tables and 64 entries per table;
+these are implementation budgets, not CPU or ELF limits. All new roots still
+undergo the existing instruction decoder and instruction-budget checks.
+
+`--no-pointer-seeds` disables blanket metadata root seeding; referenced-table
+dataflow discovery remains active, like jump-table discovery. Independent
+GNU-as/ld fixtures execute virtual calls through both direct table construction
+and a GOT load followed by a header offset and paired store. An unreferenced
+table's callback stays uncompiled. Guest loads and indirect branches are emitted
+unchanged: the index supplies candidates, not frozen runtime pointer values or
+a fallback interpreter. Newly written targets can still require explicit roots.
+
 Indirect-flow analysis also recognizes an immediate `AND`/`ANDS` as an
 unsigned index bound: `value & mask` cannot exceed `mask`. This supports bounded
 alignment-dispatch tables without a preceding comparison. Both W- and X-register

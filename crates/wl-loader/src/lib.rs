@@ -144,6 +144,10 @@ pub struct Process {
     /// Executable addresses produced by relocation, dynamic symbols and initializers.
     /// They are candidate analysis roots, not proven instruction starts.
     pub code_pointers: Vec<CodePointer>,
+    /// Final 64-bit relocation cells used only for analysis. Guest-mode
+    /// mappings remain unrelocated; this index never changes execution bytes.
+    #[serde(skip)]
+    pub relocation_cells: std::sync::Arc<BTreeMap<GuestAddr, u64>>,
     #[serde(skip)]
     pub mappings: Vec<Mapping>,
 }
@@ -162,7 +166,7 @@ struct Linker<'a> {
     applied: BTreeMap<&'static str, u64>,
     diagnostics: Vec<Diagnostic>,
     unresolved: usize,
-    pointers: Vec<(u64, usize)>,
+    pointers: Vec<(u64, usize, u64)>,
 }
 impl Linker<'_> {
     fn diag(
@@ -234,8 +238,8 @@ impl Linker<'_> {
     fn write(&mut self, i: usize, at: usize, bytes: &[u8]) {
         self.mappings[i].bytes[at..at + bytes.len()].copy_from_slice(bytes);
     }
-    fn pointer(&mut self, value: u64, m: usize) {
-        self.pointers.push((value, m));
+    fn pointer(&mut self, value: u64, m: usize, address: u64) {
+        self.pointers.push((value, m, address));
     }
     /// rtld `TryResolveSymbol`: non-default visibility binds within the module; otherwise the
     /// first defining, non-local symbol in load order wins.
@@ -305,7 +309,7 @@ impl Linker<'_> {
                     Some((i, at)) if self.mappings[i].write => {
                         let value = base.wrapping_add(self.read64(i, at));
                         self.write(i, at, &value.to_le_bytes());
-                        self.pointer(value, m);
+                        self.pointer(value, m, address);
                         count += 1;
                     }
                     _ => {
@@ -349,7 +353,7 @@ impl Linker<'_> {
                 );
                 continue;
             }
-            let Some((i, at, _)) = self.target(m, r, 8) else {
+            let Some((i, at, address)) = self.target(m, r, 8) else {
                 continue;
             };
             // RELA: B + A. REL: the implicit addend is the stored word, so B + *P.
@@ -358,7 +362,7 @@ impl Linker<'_> {
                 None => base.wrapping_add(self.read64(i, at)),
             };
             self.write(i, at, &value.to_le_bytes());
-            self.pointer(value, m);
+            self.pointer(value, m, address);
             *self.applied.entry("R_AARCH64_RELATIVE").or_default() += 1;
         }
     }
@@ -469,7 +473,7 @@ impl Linker<'_> {
                     None => self.read64(i, at).wrapping_add(s),
                 };
                 self.write(i, at, &value.to_le_bytes());
-                self.pointer(value, m);
+                self.pointer(value, m, address);
             }
             *self.applied.entry(relocation_name(r.kind)).or_default() += 1;
         }
@@ -605,6 +609,19 @@ impl Process {
                     .iter()
                     .any(|m| m.execute && m.contains(a, 4).is_some())
         };
+        // Read the final analysis bytes rather than an earlier relocation's
+        // value: later relocations (including partial writes) may replace it.
+        let relocation_cells = std::sync::Arc::new(
+            linker
+                .pointers
+                .iter()
+                .filter_map(|&(_, _, address)| {
+                    let (mapping, at) = linker.locate(address, 8)?;
+                    let value = linker.read64(mapping, at);
+                    Some((GuestAddr(address), value))
+                })
+                .collect(),
+        );
         let mut seen = std::collections::BTreeSet::new();
         let mut push =
             |address: u64, source: &'static str, module: &str, list: &mut Vec<CodePointer>| {
@@ -616,7 +633,7 @@ impl Process {
                     });
                 }
             };
-        for (value, m) in &linker.pointers {
+        for (value, m, _) in &linker.pointers {
             push(*value, "relocation", &placed[*m].name, &mut code_pointers);
         }
         let mut pointer_array_entries = 0u64;
@@ -711,6 +728,7 @@ impl Process {
             },
             execution_blocker,
             code_pointers,
+            relocation_cells,
             mappings: final_mappings,
         })
     }

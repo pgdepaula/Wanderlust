@@ -186,6 +186,148 @@ fn wide_move_does_not_zero_unknown_upper_bits_after_a_narrow_compare() {
     assert!(!starts(&p).contains(&0x10020));
 }
 
+fn relocated_table_image(got: bool) -> Image {
+    // Independently assembled GNU-as constructor: ADR table; STR table,[X0];
+    // RET, then two MOV/RET callbacks. The GOT variant adds LDR X8,[X8].
+    let words: &[u32] = if got {
+        &[
+            0x10000908, 0xf9400108, 0xf9000008, 0xd65f03c0, 0xd2800160, 0xd65f03c0, 0xd28002c0,
+            0xd65f03c0,
+        ]
+    } else {
+        &[
+            0x10000808, 0xf9000008, 0xd65f03c0, 0xd2800160, 0xd65f03c0, 0xd28002c0, 0xd65f03c0,
+        ]
+    };
+    let mut i = image(words);
+    i.mappings.push(wl_analysis::Mapping {
+        base: GuestAddr(0x10100),
+        bytes: vec![0; 0x28],
+        read: true,
+        write: true,
+        execute: false,
+    });
+    let first = if got { 0x10010 } else { 0x1000c };
+    let mut cells = std::collections::BTreeMap::from([
+        (GuestAddr(0x10100), first),
+        (GuestAddr(0x10108), first + 8),
+    ]);
+    if got {
+        cells.insert(GuestAddr(0x10120), 0x10100);
+    }
+    i.relocation_cells = std::sync::Arc::new(cells);
+    i
+}
+
+#[test]
+fn referenced_relocated_tables_discover_callbacks_without_rewriting_guest_data() {
+    for got in [false, true] {
+        let i = relocated_table_image(got);
+        let p = discover(&i, GuestAddr(0x10000), &[]).unwrap();
+        assert_eq!(p.flow_roots, 2);
+        assert_eq!(p.instruction_count, if got { 8 } else { 7 });
+        assert!(i.mappings[1].bytes.iter().all(|b| *b == 0));
+    }
+}
+
+#[test]
+fn absent_unreadable_and_truncated_relocation_sources_are_not_inferred() {
+    for case in 0..4 {
+        let mut i = relocated_table_image(true);
+        match case {
+            0 => {
+                std::sync::Arc::make_mut(&mut i.relocation_cells).remove(&GuestAddr(0x10120));
+            }
+            1 => i.mappings[1].read = false,
+            2 => i.mappings[1].bytes.truncate(0x24),
+            3 => i.mappings[1].bytes.truncate(0x10),
+            _ => unreachable!(),
+        }
+        // Raw bytes cannot substitute for absent relocation provenance.
+        if case == 0 {
+            i.mappings[1].bytes[0x20..0x28].copy_from_slice(&0x10100u64.to_le_bytes());
+        }
+        let p = discover(&i, GuestAddr(0x10000), &[]).unwrap();
+        assert_eq!(p.flow_roots, 0, "case {case}");
+        assert_eq!(p.instruction_count, 4);
+    }
+}
+
+#[test]
+fn function_table_candidates_stop_at_gaps_invalid_targets_and_the_entry_budget() {
+    for case in 0..3 {
+        let mut i = relocated_table_image(false);
+        let cells = std::sync::Arc::make_mut(&mut i.relocation_cells);
+        match case {
+            0 => {
+                cells.remove(&GuestAddr(0x10108));
+                cells.insert(GuestAddr(0x10110), 0x10014);
+            }
+            1 => {
+                cells.insert(GuestAddr(0x10108), 0xdead_0000);
+            }
+            2 => {
+                cells.clear();
+                for n in 0..65 {
+                    cells.insert(
+                        GuestAddr(0x10100 + n * 8),
+                        if n == 64 { 0x10014 } else { 0x1000c },
+                    );
+                }
+                i.mappings[1].bytes.resize(65 * 8, 0);
+            }
+            _ => unreachable!(),
+        }
+        let p = discover(&i, GuestAddr(0x10000), &[]).unwrap();
+        assert_eq!(p.flow_roots, 1, "case {case}");
+        assert!(!p.roots.contains(&GuestAddr(0x10014)));
+    }
+}
+
+#[test]
+fn unreferenced_relocation_tables_do_not_become_global_roots() {
+    let mut i = relocated_table_image(false);
+    i.mappings[0].bytes[..4].copy_from_slice(&0xd65f03c0u32.to_le_bytes());
+    let p = discover(&i, GuestAddr(0x10000), &[]).unwrap();
+    assert_eq!(p.instruction_count, 1);
+    assert_eq!(p.flow_roots, 0);
+}
+
+#[test]
+fn distinct_pointer_table_discovery_has_a_per_pass_work_budget() {
+    // The ADR encoder for this bounded fixture was checked against GNU as 2.46
+    // for all 1,025 materialized table addresses. No production encoder is used.
+    let count = 1025usize;
+    let base = 0x10000u64;
+    let data = 0x20000u64;
+    let first = base + ((count * 2 + 1) * 4) as u64;
+    let mut words = Vec::new();
+    let mut cells = std::collections::BTreeMap::new();
+    for n in 0..count {
+        let pc = base + words.len() as u64 * 4;
+        let table = data + n as u64 * 16;
+        let delta = table - pc;
+        words
+            .push(0x10000008 | ((delta as u32 & 3) << 29) | (((delta as u32 >> 2) & 0x7ffff) << 5));
+        words.push(0xf9000008); // STR X8,[X0].
+        cells.insert(GuestAddr(table), if n == 1024 { first + 8 } else { first });
+    }
+    words.extend([0xd65f03c0, 0xd2800160, 0xd65f03c0, 0xd28002c0, 0xd65f03c0]);
+    let mut i = image(&words);
+    i.mappings.push(wl_analysis::Mapping {
+        base: GuestAddr(data),
+        bytes: vec![0; count * 16],
+        read: true,
+        write: false,
+        execute: false,
+    });
+    i.relocation_cells = std::sync::Arc::new(cells);
+    let p = discover(&i, GuestAddr(base), &[]).unwrap();
+    assert_eq!(p.flow_roots, 1);
+    assert!(p.roots.contains(&GuestAddr(first)));
+    assert!(!p.roots.contains(&GuestAddr(first + 8)));
+}
+
 #[test]
 fn immediate_and_bounds_unknown_indices_without_a_compare() {
     for word in [0x92400409, 0x12000409, 0xf2400409] {

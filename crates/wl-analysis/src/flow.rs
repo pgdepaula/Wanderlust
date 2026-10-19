@@ -21,6 +21,9 @@ use wl_common::GuestAddr;
 
 /// Largest jump table accepted (entries).
 pub const MAX_TABLE_ENTRIES: u64 = 65_536;
+/// Conservative discovery budgets, not ELF or CPU limits.
+pub const MAX_POINTER_TABLES: usize = 1024;
+pub const MAX_POINTER_TABLE_ENTRIES: u64 = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Val {
@@ -295,7 +298,7 @@ fn bounded_index(s: &State, index: Index) -> Option<u64> {
     (ok && max < MAX_TABLE_ENTRIES).then_some(max)
 }
 
-fn transfer(state: &mut State, op: &Op) {
+fn transfer(image: &Image, state: &mut State, op: &Op) {
     let flags_kept = preserves_flags(op);
     let mut result: Option<(Reg, Option<Val>, Width)> = None;
     let mut compare = None;
@@ -419,6 +422,26 @@ fn transfer(state: &mut State, op: &Op) {
         }
         Op::Memory {
             load: true,
+            bytes: 8,
+            dst,
+            base,
+            offset,
+            mode: 0,
+            signed: false,
+            dst_width: Width::X64,
+            index: None,
+        } => {
+            let value = match state.get(base) {
+                Some(Val::Const(address)) => address
+                    .checked_add_signed(offset)
+                    .and_then(|at| image.relocation_value(at))
+                    .map(Val::Const),
+                _ => None,
+            };
+            result = Some((dst, value, Width::X64));
+        }
+        Op::Memory {
+            load: true,
             bytes,
             dst,
             base,
@@ -491,6 +514,46 @@ pub struct Found {
     pub pointers: BTreeSet<GuestAddr>,
 }
 
+/// A stored/passed constant may be a function or the address point of a
+/// relocated function-pointer table. This is candidate discovery, never a
+/// replacement for a guest load or indirect branch at execution time.
+fn record_pointer(
+    image: &Image,
+    value: Option<Val>,
+    pointers: &mut BTreeSet<GuestAddr>,
+    scanned: &mut BTreeSet<GuestAddr>,
+) {
+    let Some(Val::Const(address)) = value else {
+        return;
+    };
+    if image.is_code(address) {
+        pointers.insert(GuestAddr(address));
+        return;
+    }
+    let start = GuestAddr(address);
+    if address % 8 != 0
+        || !image
+            .relocation_value(address)
+            .is_some_and(|v| image.is_code(v))
+        || scanned.len() >= MAX_POINTER_TABLES
+        || !scanned.insert(start)
+    {
+        return;
+    }
+    for n in 0..MAX_POINTER_TABLE_ENTRIES {
+        let Some(at) = address.checked_add(n * 8) else {
+            break;
+        };
+        let Some(target) = image.relocation_value(at) else {
+            break;
+        };
+        if !image.is_code(target) {
+            break;
+        }
+        pointers.insert(GuestAddr(target));
+    }
+}
+
 fn table_targets(image: &Image, base: u64, t: Table, ext: u8, shift: u8) -> Option<Vec<GuestAddr>> {
     let mut out = Vec::with_capacity(t.count as usize);
     for i in 0..t.count {
@@ -552,7 +615,7 @@ pub fn propagate(
         };
         let b = &blocks[i];
         for instruction in &b.instructions {
-            transfer(&mut state, &instruction.op);
+            transfer(image, &mut state, &instruction.op);
         }
         if b.unsupported.is_some() {
             continue;
@@ -591,38 +654,45 @@ pub fn propagate(
     }
     // Resolution against the fixpoint states.
     let mut found = Found::default();
+    let mut scanned = BTreeSet::new();
     for (i, b) in blocks.iter().enumerate() {
         let Some(mut state) = input[i].clone() else {
             continue;
         };
         for instruction in &b.instructions {
-            let code = |v: Option<Val>| match v {
-                Some(Val::Const(c)) if image.is_code(c) => Some(GuestAddr(c)),
-                _ => None,
-            };
             match instruction.op {
                 Op::Memory {
                     load: false, dst, ..
-                } => found.pointers.extend(code(state.get(dst))),
+                } => record_pointer(image, state.get(dst), &mut found.pointers, &mut scanned),
                 Op::Pair {
                     load: false,
                     first,
                     second,
                     ..
                 } => {
-                    found.pointers.extend(code(state.get(first)));
-                    found.pointers.extend(code(state.get(second)));
+                    record_pointer(image, state.get(first), &mut found.pointers, &mut scanned);
+                    record_pointer(image, state.get(second), &mut found.pointers, &mut scanned);
                 }
                 Op::Branch { link: true, .. } => {
                     for n in 0..8 {
-                        found.pointers.extend(code(state.get(Reg::Gpr(n))));
+                        record_pointer(
+                            image,
+                            state.get(Reg::Gpr(n)),
+                            &mut found.pointers,
+                            &mut scanned,
+                        );
                     }
                 }
                 Op::Indirect { src, link } => {
-                    found.pointers.extend(code(state.get(src)));
+                    record_pointer(image, state.get(src), &mut found.pointers, &mut scanned);
                     if link {
                         for n in 0..8 {
-                            found.pointers.extend(code(state.get(Reg::Gpr(n))));
+                            record_pointer(
+                                image,
+                                state.get(Reg::Gpr(n)),
+                                &mut found.pointers,
+                                &mut scanned,
+                            );
                         }
                     } else if let Some(Val::Target {
                         base,
@@ -638,7 +708,7 @@ pub fn propagate(
                 }
                 _ => {}
             }
-            transfer(&mut state, &instruction.op);
+            transfer(image, &mut state, &instruction.op);
         }
     }
     found

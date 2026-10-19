@@ -34,6 +34,8 @@ pub struct Image {
     pub module_id: String,
     pub sha256: String,
     pub relocation: RelocationState,
+    /// Immutable relocation provenance, separate from executable guest bytes.
+    pub relocation_cells: std::sync::Arc<BTreeMap<GuestAddr, u64>>,
 }
 impl Image {
     pub fn raw(bytes: Vec<u8>, base: GuestAddr) -> Result<Self> {
@@ -54,6 +56,7 @@ impl Image {
             module_id: "raw-aarch64".into(),
             sha256: String::new(),
             relocation: RelocationState::None,
+            relocation_cells: Default::default(),
         })
     }
     /// A single module at an explicit base, without process layout or relocation.
@@ -102,6 +105,7 @@ impl Image {
             } else {
                 RelocationState::None
             },
+            relocation_cells: Default::default(),
         })
     }
     /// The memory image of a loaded process.
@@ -119,6 +123,7 @@ impl Image {
                 LinkMode::Host => RelocationState::AppliedByHost,
                 LinkMode::Guest => RelocationState::GuestLinker,
             },
+            relocation_cells: process.relocation_cells.clone(),
         }
     }
     /// A little-endian value of 1, 2, 4 or 8 bytes from any readable mapping.
@@ -132,6 +137,12 @@ impl Image {
         let mut value = [0u8; 8];
         value[..slice.len()].copy_from_slice(slice);
         Some(u64::from_le_bytes(value))
+    }
+    /// Initial relocated value, with source readability checked against the
+    /// image. Used for candidates only; emitted guest loads remain unchanged.
+    pub fn relocation_value(&self, address: u64) -> Option<u64> {
+        self.read_data(address, 8)?;
+        self.relocation_cells.get(&GuestAddr(address)).copied()
     }
     /// Whether `address` is an instruction-aligned address inside an executable mapping.
     pub fn is_code(&self, address: u64) -> bool {

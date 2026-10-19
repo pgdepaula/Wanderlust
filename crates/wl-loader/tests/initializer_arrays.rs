@@ -52,6 +52,14 @@ fn array_candidates_are_relocated_once_and_guest_storage_is_untouched() {
                 [base + 8, base + 12],
                 "retain existing provenance"
             );
+            assert_eq!(
+                p.relocation_cells.get(&GuestAddr(base + DATA_WORDS)),
+                Some(&(base + 8))
+            );
+            assert_eq!(
+                p.relocation_cells.get(&GuestAddr(base + DATA_WORDS + 8)),
+                Some(&(base + 12))
+            );
             let stored = p.read_u64(GuestAddr(base + DATA_WORDS)).unwrap();
             assert_eq!(
                 stored,
@@ -96,6 +104,11 @@ fn symbolic_array_entry_can_target_another_module() {
         .unwrap();
     assert_eq!(init.address, expected);
     assert_eq!(
+        p.relocation_cells
+            .get(&p.address("main", ModuleOffset(DATA_WORDS)).unwrap()),
+        Some(&expected.0)
+    );
+    assert_eq!(
         init.module, "main",
         "provenance is the module containing the array"
     );
@@ -123,6 +136,61 @@ fn implicit_addends_are_read_from_the_relocated_analysis_copy() {
     .unwrap();
     assert_eq!(pointers(&p, "initializer-array"), [0x800_0008]);
     assert_eq!(p.read_u64(GuestAddr(0x800_0000 + DATA_WORDS)).unwrap(), 8);
+    assert_eq!(
+        p.relocation_cells.get(&GuestAddr(0x800_0000 + DATA_WORDS)),
+        Some(&0x800_0008)
+    );
+}
+
+#[test]
+fn pointer_cell_index_uses_final_relocation_bytes() {
+    for replacement in [DATA_WORDS, 12] {
+        let input = module(&Spec {
+            text: vec![RET; 4],
+            data: vec![0],
+            relocations: vec![
+                rela(DATA_WORDS, R_AARCH64_RELATIVE, 0, 8),
+                rela(DATA_WORDS, R_AARCH64_RELATIVE, 0, replacement as i64),
+            ],
+            rela_count: 2,
+            ..Spec::default()
+        });
+        let base = 0x800_0000;
+        let p =
+            Process::build(&[("main".into(), input)], GuestAddr(base), LinkMode::Guest).unwrap();
+        assert_eq!(
+            p.relocation_cells
+                .get(&GuestAddr(base + DATA_WORDS))
+                .copied(),
+            Some(base + replacement)
+        );
+        assert_eq!(p.read_u64(GuestAddr(base + DATA_WORDS)), Some(0));
+    }
+}
+
+#[test]
+fn partial_symbolic_write_replaces_the_recorded_pointer_value() {
+    for base in [0x800_0000u64, 0x2_0000_0000] {
+        let input = module(&Spec {
+            data: vec![0],
+            relocations: vec![
+                rela(DATA_WORDS, R_AARCH64_RELATIVE, 0, 8),
+                rela(DATA_WORDS, R_AARCH64_ABS32, 0, 0),
+            ],
+            rela_count: 1,
+            ..Spec::default()
+        });
+        let p =
+            Process::build(&[("main".into(), input)], GuestAddr(base), LinkMode::Guest).unwrap();
+        let expected = Some(base & !u64::from(u32::MAX));
+        assert_eq!(
+            p.relocation_cells
+                .get(&GuestAddr(base + DATA_WORDS))
+                .copied(),
+            expected
+        );
+        assert_eq!(p.read_u64(GuestAddr(base + DATA_WORDS)), Some(0));
+    }
 }
 
 #[test]
