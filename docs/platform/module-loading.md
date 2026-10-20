@@ -205,6 +205,14 @@ bound. Both direct branch destinations remain decoded and the emitted guest
 comparison and branch are unchanged. Unknown values and other conditions retain
 conservative propagation.
 
+Constant table indices use the instruction's explicit UXTW/UXTX/SXTW/SXTX
+extension and the same 65,536-entry discovery budget. Integer facts merge as
+unsigned range unions; merging a known constant with a guarded range retains a
+sound bound instead of discarding both facts. Low-word bounds do not establish
+upper bits. This allows an initially constant state-machine dispatch to discover
+later runtime-selected cases without seeding those destinations or changing
+guest loads.
+
 Dataflow can read an indexed relocation value through a checked, readable
 64-bit load from a constant address. If reached code then stores or passes a
 constant address point of a non-executable function-pointer table, its contiguous

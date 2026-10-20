@@ -46,6 +46,24 @@ fn impossible_initial_loop_edge_does_not_erase_a_later_table_bound() {
     assert!(!starts(&p).contains(&0x10040));
 }
 #[test]
+fn initially_constant_switch_index_can_grow_to_a_guarded_runtime_range() {
+    // GNU as/ld 2.46: W24 starts at zero. Case zero copies runtime W0
+    // into W24 and loops through CMP W24,#2; B.HI outside. All three
+    // table destinations must survive the constant-to-bounded-state join.
+    let i = image(&[
+        0x52800018, 0x100001f3, 0x71000b1f, 0x54000168, 0x10000089, 0x38786a6a, 0x8b0a0929,
+        0xd61f0120, 0x2a0003f8, 0x17fffff9, 0xd28003a0, 0xd65f03c0, 0xd28005e0, 0xd65f03c0,
+        0xd2800c60, 0xd65f03c0, 0x00040200,
+    ]);
+    let p = discover(&i, GuestAddr(0x10000), &[]).unwrap();
+    assert_eq!(p.jump_tables.get(&GuestAddr(0x1001c)), Some(&3));
+    for pc in [0x10020, 0x10028, 0x10030] {
+        assert!(starts(&p).contains(&pc));
+    }
+    assert!(!starts(&p).contains(&0x10040));
+}
+
+#[test]
 fn explicit_seeds_recover_indirect_targets() {
     let i = image(&[0xd61f0000, 0xffffffff, 0xd65f03c0]);
     let p = discover(&i, GuestAddr(0x10000), &[GuestAddr(0x10008)]).unwrap();

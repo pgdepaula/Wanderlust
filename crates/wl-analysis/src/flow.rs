@@ -45,6 +45,30 @@ enum Val {
         shift: u8,
     },
 }
+impl Val {
+    /// Union integer facts without turning two different values into a
+    /// constant. A low-word bound never proves anything about the upper word.
+    fn join(self, other: Self) -> Option<Self> {
+        if self == other {
+            return Some(self);
+        }
+        let full = matches!(self, Self::Const(_) | Self::Bounded { full: true, .. })
+            && matches!(other, Self::Const(_) | Self::Bounded { full: true, .. });
+        let bound = |v| match v {
+            Self::Const(c) => Some(if full { c } else { u64::from(c as u32) }),
+            Self::Bounded { max, .. } => Some(if full {
+                max
+            } else {
+                max.min(u64::from(u32::MAX))
+            }),
+            _ => None,
+        };
+        Some(Self::Bounded {
+            max: bound(self)?.max(bound(other)?),
+            full,
+        })
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Table {
     address: u64,
@@ -70,7 +94,13 @@ struct State {
 impl State {
     fn join(&mut self, other: &State) -> bool {
         let before = self.clone();
-        self.regs.retain(|r, v| other.regs.get(r) == Some(v));
+        self.regs.retain(|r, v| {
+            let Some(joined) = other.regs.get(r).and_then(|&other| v.join(other)) else {
+                return false;
+            };
+            *v = joined;
+            true
+        });
         self.narrow &= other.narrow;
         if self.flags != other.flags {
             self.flags = None;
@@ -286,8 +316,13 @@ fn table_offset(s: &State, rhs: Operand) -> Option<(Table, u8, u8)> {
 }
 /// A bounded index register usable as a table index under `index.extend`.
 fn bounded_index(s: &State, index: Index) -> Option<u64> {
-    let Val::Bounded { max, full } = s.get(index.reg)? else {
-        return None;
+    let (max, full) = match s.get(index.reg)? {
+        Val::Const(value) if matches!(index.extend, 2 | 3 | 6 | 7) => {
+            let effective = extend(value, index.extend);
+            return (effective < MAX_TABLE_ENTRIES).then_some(effective);
+        }
+        Val::Bounded { max, full } => (max, full),
+        _ => return None,
     };
     let ok = match index.extend {
         2 => max <= u64::from(u32::MAX),
@@ -775,6 +810,81 @@ fn edges(b: &Block, tables: &BTreeMap<GuestAddr, Vec<GuestAddr>>) -> Vec<(GuestA
 mod tests {
     use super::*;
     use std::cmp::Ordering;
+
+    #[test]
+    fn joined_integer_facts_cover_both_inputs_without_claiming_upper_bits() {
+        let facts = [
+            Val::Const(0),
+            Val::Const(2),
+            Val::Const(0x1_0000_0001),
+            Val::Const(u64::MAX),
+            Val::Bounded {
+                max: 2,
+                full: false,
+            },
+            Val::Bounded { max: 3, full: true },
+            Val::Bounded {
+                max: 0x1_0000_0001,
+                full: true,
+            },
+        ];
+        let contains = |fact, value| match fact {
+            Val::Const(c) => value == c,
+            Val::Bounded { max, full: true } => value <= max,
+            Val::Bounded { max, full: false } => u64::from(value as u32) <= max,
+            _ => false,
+        };
+        for a in facts {
+            for b in facts {
+                let joined = a.join(b).unwrap();
+                assert_eq!(Some(joined), b.join(a));
+                for value in [0, 1, 2, 3, 4, 0xffff_ffff, 0x1_0000_0001, u64::MAX] {
+                    if contains(a, value) || contains(b, value) {
+                        assert!(contains(joined, value), "{a:?} joined with {b:?}");
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            Val::Const(0x1_0000_0001).join(Val::Bounded {
+                max: 2,
+                full: false
+            }),
+            Some(Val::Bounded {
+                max: 2,
+                full: false
+            })
+        );
+    }
+
+    #[test]
+    fn constant_indices_obey_extension_and_discovery_limits() {
+        for (value, option, expected) in [
+            (0, 3, Some(0)),
+            (65535, 3, Some(65535)),
+            (65536, 3, None),
+            (0x1_0000_0001, 2, Some(1)),
+            (0x1_0000_0001, 3, None),
+            (0x1_0000_0001, 6, Some(1)),
+            (0xffff_ffff, 6, None),
+            (u64::MAX, 7, None),
+            (1, 0, None),
+        ] {
+            let mut s = State::default();
+            s.set(Reg::Gpr(8), Some(Val::Const(value)), Width::X64);
+            assert_eq!(
+                bounded_index(
+                    &s,
+                    Index {
+                        reg: Reg::Gpr(8),
+                        extend: option,
+                        shift: 0
+                    }
+                ),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn constant_unsigned_edges_follow_the_compared_register_width() {

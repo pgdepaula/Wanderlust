@@ -182,6 +182,36 @@ fn loop_entry_sentinel_does_not_hide_runtime_switch_cases() {
 }
 
 #[test]
+fn constant_first_dispatch_keeps_later_runtime_table_cases() {
+    let t = Temp::new();
+    // GNU as/ld 2.46: first dispatch index zero, then runtime W0,
+    // guarded by CMP W24,#2; B.HI. No indirect targets are seeded.
+    let exe = compile(
+        &t,
+        &[
+            0x52800018, 0x100001f3, 0x71000b1f, 0x54000168, 0x10000089, 0x38786a6a, 0x8b0a0929,
+            0xd61f0120, 0x2a0003f8, 0x17fffff9, 0xd28003a0, 0xd65f03c0, 0xd28005e0, 0xd65f03c0,
+            0xd2800c60, 0xd65f03c0, 0x00040200,
+        ],
+    );
+    for (input, expected, steps) in [
+        (1, 29, 18),
+        (2, 47, 18),
+        (3, 99, 14),
+        (0xffff_ffff_0000_0002u64, 47, 18),
+    ] {
+        let o = Command::new(&exe)
+            .args(["--reg", &format!("0={input}")])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        assert_eq!(state(&o)["status"], "returned");
+        assert_eq!(state(&o)["x"][0], expected);
+        assert_eq!(state(&o)["steps"], steps);
+    }
+}
+
+#[test]
 fn compiles_and_executes_original_words() {
     let t = Temp::new();
     let exe = compile(
