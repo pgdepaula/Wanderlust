@@ -147,6 +147,121 @@ fn assert_native_callback_table(spec: synthetic::Spec, instructions: u64) {
 }
 
 #[test]
+fn startup_roots_cover_indirect_constructor_calls_without_global_pointer_seeds() {
+    use synthetic::*;
+    use wl_nso::dynamic::*;
+    let t = Temp::new();
+    let exefs = t.0.join("exefs");
+    fs::create_dir(&exefs).unwrap();
+    // GNU as 2.46: save LR, call both array entries via runtime-supplied X8,
+    // restore LR and return. Constructors return 7 and 11; the finalizer 99.
+    // The container adds an eight-byte prefix; entry +8, ctors +0x24/+0x2c.
+    fs::write(
+        exefs.join("main"),
+        bytes(&Spec {
+            text: vec![
+                0xaa1e03f3, 0xf9400109, 0xd63f0120, 0xf9400509, 0xd63f0120, 0xaa1303fe, RET,
+                0xd28000e0, RET, 0xd2800160, RET, 0xd2800c60, RET,
+            ],
+            data: vec![0; 3],
+            relocations: vec![
+                rela(DATA_WORDS, R_AARCH64_RELATIVE, 0, 0x24),
+                rela(DATA_WORDS + 8, R_AARCH64_RELATIVE, 0, 0x2c),
+                rela(DATA_WORDS + 16, R_AARCH64_RELATIVE, 0, 0x34),
+            ],
+            rela_count: 3,
+            extra_dynamic: vec![
+                (DT_INIT, 0x24),
+                (DT_INIT_ARRAY, DATA_WORDS),
+                (DT_INIT_ARRAYSZ, 16),
+                (DT_FINI_ARRAY, DATA_WORDS + 16),
+                (DT_FINI_ARRAYSZ, 8),
+            ],
+            ..Spec::default()
+        }),
+    )
+    .unwrap();
+    let analyze = |mode: &str, extra: &[&str]| {
+        cli()
+            .arg("analyze")
+            .arg(&exefs)
+            .args([
+                "--entry",
+                "0x8000008",
+                "--no-pointer-seeds",
+                "--summary",
+                "--link",
+                mode,
+            ])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    for mode in ["host", "guest"] {
+        let baseline = json(&analyze(mode, &[]));
+        assert_eq!(baseline["instructions"], 7);
+        assert_eq!(baseline["startup_roots_added"], 0);
+        let selected = json(&analyze(mode, &["--startup-roots"]));
+        assert_eq!(selected["instructions"], 11);
+        assert_eq!(selected["required_roots"], 3);
+        assert_eq!(
+            selected["startup_roots_added"], 2,
+            "deduplicate DT_INIT and array"
+        );
+        let explicit = json(&analyze(mode, &["--seed", "0x8000024", "--startup-roots"]));
+        assert_eq!(explicit["required_roots"], 3);
+        assert_eq!(explicit["startup_roots_added"], 1);
+        let finalizer = analyze(mode, &["--startup-roots", "--expect-code", "0x8000034"]);
+        assert!(!finalizer.status.success());
+        assert!(String::from_utf8_lossy(&finalizer.stderr).contains("was not discovered"));
+        let budget = analyze(mode, &["--startup-roots", "--instruction-limit", "7"]);
+        assert!(
+            !budget.status.success(),
+            "required startup code cannot be silently discarded"
+        );
+        assert!(String::from_utf8_lossy(&budget.stderr).contains("limit"));
+    }
+    for startup in [false, true] {
+        let out =
+            t.0.join(format!("startup-{startup}{}", std::env::consts::EXE_SUFFIX));
+        let mut cmd = cli();
+        cmd.arg("recompile")
+            .arg(&exefs)
+            .args(["--entry", "0x8000008", "--no-pointer-seeds", "--out"])
+            .arg(&out);
+        if startup {
+            cmd.arg("--startup-roots");
+        }
+        let compiled = json(&cmd.output().unwrap());
+        assert_eq!(compiled["startup_roots_added"], if startup { 2 } else { 0 });
+        let ran = Command::new(out)
+            .args(["--reg", "8=0x8002200"])
+            .output()
+            .unwrap();
+        let state: serde_json::Value = serde_json::from_slice(&ran.stdout).unwrap();
+        assert_eq!(ran.status.success(), startup);
+        if startup {
+            assert_eq!(state["status"], "returned");
+            assert_eq!(state["x"][0], 11);
+            assert_eq!(state["steps"], 11);
+        } else {
+            assert_eq!(state["pc"], 0x8000024);
+            assert!(String::from_utf8_lossy(&ran.stderr).contains("unresolved native branch"));
+        }
+    }
+    let raw = t.0.join("raw.a64");
+    fs::write(&raw, RET.to_le_bytes()).unwrap();
+    let rejected = cli()
+        .arg("analyze")
+        .arg(raw)
+        .args(["--raw", "--entry", "0x10000", "--startup-roots"])
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("requires an ExeFS directory"));
+}
+
+#[test]
 fn lld_linked_modules_relocate_and_execute_natively() {
     let t = Temp::new();
     let dir = fixtures(&t);

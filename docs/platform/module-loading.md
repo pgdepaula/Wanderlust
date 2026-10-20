@@ -215,6 +215,21 @@ table's callback stays uncompiled. Guest loads and indirect branches are emitted
 unchanged: the index supplies candidates, not frozen runtime pointer values or
 a fallback interpreter. Newly written targets can still require explicit roots.
 
+For ExeFS, `--startup-roots` adds the validated `DT_INIT` and `DT_INIT_ARRAY`
+addresses to the required analysis roots before optional code-pointer discovery.
+It deduplicates them against the entry and explicit seeds. This is independent
+of `--no-pointer-seeds`: a constructor needed by startup cannot be silently
+discarded to fit optional metadata into the instruction budget. An insufficient
+budget fails analysis. Finalizers remain outside this selection.
+
+The option changes code coverage only. It neither executes constructors on the
+host nor changes guest bytes, relocation, initialization order or runtime calls.
+Host- and guest-link analysis use the same validated initializer metadata.
+Reports expose `startup_roots_added`. A synthetic GNU-as fixture loads constructor
+pointers through a runtime-supplied register: without the option it faults at the
+first uncompiled constructor; with it, both real guest calls execute natively
+and return the second constructor's value, while an unused finalizer stays absent.
+
 `analyze` and `recompile` accept repeated `--expect-code ADDRESS` assertions
 (at most 4,096, word aligned). They check that each address is a supported
 instruction in the discovered program, including instructions inside a block.

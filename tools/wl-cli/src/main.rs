@@ -21,7 +21,7 @@ USAGE:
   wanderlust analyze INPUT [--raw] [--base ADDRESS] [--entry ADDRESS] [--seed ADDRESS]...
                      [--link host|guest] [--no-pointer-seeds] [--allow-unsupported]
                      [--roots-file FILE] [--instruction-limit COUNT] [--summary]
-                     [--expect-code ADDRESS]...
+                     [--expect-code ADDRESS]... [--startup-roots]
   wanderlust recompile INPUT [analyze options] --out EXECUTABLE [--target TRIPLE] [--emit-only]
                        [--jobs N] [--cache-dir DIR] [--unit-shift BITS] [--opt-level 0..3]
                        [--horizon [--memory-limit BYTES] [--native-gpu]]
@@ -40,6 +40,9 @@ Relocated code pointers and dynamic function symbols become speculative analysis
 unless --no-pointer-seeds is given. --allow-unsupported compiles unsupported reachable
 instructions as precise runtime faults instead of rejecting the program. --roots-file
 adds speculative roots (one address per line), e.g. from symbols, metadata or traces.
+--startup-roots requires ExeFS and adds validated DT_INIT/DT_INIT_ARRAY targets as
+required roots, independently of --no-pointer-seeds. It does not execute constructors
+or include finalizers. An insufficient instruction budget fails before compilation.
 
 For single files the default load base is 0x10000 and --entry is required.
 The executable crate is written beside EXECUTABLE as EXECUTABLE.rs with memory images as
@@ -88,6 +91,7 @@ struct Options {
     emit_only: bool,
     link: Option<LinkMode>,
     pointer_seeds: bool,
+    startup_roots: bool,
     allow_unsupported: bool,
     summary: bool,
     verify_content: bool,
@@ -135,6 +139,7 @@ fn options(args: &[OsString]) -> Result<Options> {
         emit_only: false,
         link: None,
         pointer_seeds: true,
+        startup_roots: false,
         allow_unsupported: false,
         summary: false,
         verify_content: false,
@@ -159,6 +164,7 @@ fn options(args: &[OsString]) -> Result<Options> {
             "--json" => o.json = true,
             "--emit-only" => o.emit_only = true,
             "--no-pointer-seeds" => o.pointer_seeds = false,
+            "--startup-roots" => o.startup_roots = true,
             "--allow-unsupported" => o.allow_unsupported = true,
             "--summary" => o.summary = true,
             "--verify-content" => o.verify_content = true,
@@ -247,6 +253,7 @@ fn options(args: &[OsString]) -> Result<Options> {
             "--expect-code",
             "--link",
             "--no-pointer-seeds",
+            "--startup-roots",
             "--allow-unsupported",
             "--roots-file",
             "--summary",
@@ -260,6 +267,7 @@ fn options(args: &[OsString]) -> Result<Options> {
             "--expect-code",
             "--link",
             "--no-pointer-seeds",
+            "--startup-roots",
             "--allow-unsupported",
             "--roots-file",
             "--out",
@@ -600,6 +608,9 @@ fn run(args: &[OsString]) -> Result<()> {
     if directory && o.raw {
         return Err("--raw requires a file input".into());
     }
+    if o.startup_roots && !directory {
+        return Err("--startup-roots requires an ExeFS directory input".into());
+    }
     if !directory && (o.link.is_some() || o.command == "link") {
         return Err("process loading (link, --link) requires an ExeFS directory input".into());
     }
@@ -660,10 +671,26 @@ fn run(args: &[OsString]) -> Result<()> {
             speculative.push(GuestAddr(number(line)?));
         }
     }
+    let mut required: Vec<_> = std::iter::once(entry)
+        .chain(o.seeds.iter().copied())
+        .collect();
+    let mut startup_roots_added = 0usize;
+    if o.startup_roots {
+        let p = process
+            .as_ref()
+            .ok_or("startup roots require process metadata")?;
+        let mut seen: std::collections::BTreeSet<_> = required.iter().copied().collect();
+        for pointer in &p.code_pointers {
+            if matches!(pointer.source, "initializer" | "initializer-array")
+                && seen.insert(pointer.address)
+            {
+                required.push(pointer.address);
+                startup_roots_added += 1;
+            }
+        }
+    }
     let roots = Roots {
-        required: std::iter::once(entry)
-            .chain(o.seeds.iter().copied())
-            .collect(),
+        required,
         speculative,
         allow_unsupported: o.allow_unsupported,
         instruction_limit: Some(o.instruction_limit),
@@ -678,6 +705,7 @@ fn run(args: &[OsString]) -> Result<()> {
             s["analysis_seconds"] = analysis_seconds.into();
             s["instruction_limit"] = o.instruction_limit.into();
             s["checked_code_targets"] = o.expected_code.len().into();
+            s["startup_roots_added"] = startup_roots_added.into();
             json(&s)
         } else {
             json(&program)
@@ -750,6 +778,7 @@ fn run(args: &[OsString]) -> Result<()> {
     let program_report = serde_json::json!({
         "instructions": program.instruction_count,
         "checked_code_targets": o.expected_code.len(),
+        "startup_roots_added": startup_roots_added,
         "unsupported_sites": program.unsupported_count,
         "blocks": program.blocks.len(),
         "speculative_roots_accepted": program.speculative_roots_accepted,
@@ -841,6 +870,7 @@ fn run(args: &[OsString]) -> Result<()> {
         "entry": entry,
         "instructions": program_report["instructions"],
         "checked_code_targets": program_report["checked_code_targets"],
+        "startup_roots_added": program_report["startup_roots_added"],
         "unsupported_sites": program_report["unsupported_sites"],
         "blocks": program_report["blocks"],
         "speculative_roots_accepted": program_report["speculative_roots_accepted"],
@@ -936,6 +966,19 @@ mod tests {
         }
         assert!(parse(&["analyze", "input", "--opt-level", "0"]).is_err());
         assert!(parse(&["recompile", "input", "--opt-level"]).is_err());
+    }
+    #[test]
+    fn startup_root_selection_is_opt_in_and_analysis_only() {
+        let parse = |args: &[&str]| options(&args.iter().map(OsString::from).collect::<Vec<_>>());
+        assert!(!parse(&["analyze", "input"]).unwrap().startup_roots);
+        for command in ["analyze", "recompile"] {
+            let o = parse(&[command, "input", "--startup-roots", "--no-pointer-seeds"]).unwrap();
+            assert!(o.startup_roots);
+            assert!(!o.pointer_seeds);
+        }
+        for command in ["intake", "inspect", "survey", "link"] {
+            assert!(parse(&[command, "input", "--startup-roots"]).is_err());
+        }
     }
     #[test]
     fn expected_code_arguments_are_aligned_bounded_and_analysis_only() {
