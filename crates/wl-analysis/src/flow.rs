@@ -7,7 +7,8 @@
 //!   of `switch` (byte, halfword and word entries, absolute- or table-relative bases). Every
 //!   entry `0..=n` becomes a target and an edge of the branch.
 //! * **Code pointers formed in code.** A constant that lies in executable memory and is
-//!   stored to memory, passed in X0-X7 to a call, or used as a `BR`/`BLR` target.
+//!   stored to memory, passed in X0-X7 to a call, returned in X0 through X30, or used
+//!   as a `BR`/`BLR` target.
 //!
 //! Function entries (roots and call targets) start with no known register; calls clobber
 //! the AAPCS64 caller-saved registers X0-X18 and X30 and the flags, and preserve X19-X29
@@ -739,6 +740,17 @@ pub fn propagate(
                 }
                 Op::Indirect { src, link } => {
                     record_pointer(image, state.get(src), &mut found.pointers, &mut scanned);
+                    // AAPCS64 2025Q1, section 6.9: pointer results use X0. This
+                    // adds speculative candidates only; it does not propagate
+                    // a return value into callers or replace the guest branch.
+                    if !link && src == Reg::Gpr(30) {
+                        record_pointer(
+                            image,
+                            state.get(Reg::Gpr(0)),
+                            &mut found.pointers,
+                            &mut scanned,
+                        );
+                    }
                     if link {
                         for n in 0..8 {
                             record_pointer(

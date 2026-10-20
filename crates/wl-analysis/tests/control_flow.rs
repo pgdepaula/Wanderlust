@@ -22,6 +22,56 @@ fn discovers_call_and_return_site() {
     assert_eq!(p.indirect_sites.len(), 2);
 }
 #[test]
+fn returned_code_addresses_become_speculative_roots() {
+    // GNU as/ld 2.46 at 0x10000: ADR X0,target; RET, or
+    // ADRP X0,target; ADD X0,X0,:lo12:target; RET.
+    // Both getters return a separate MOV W0,#17; RET function.
+    for (words, target) in [
+        (
+            &[0x10000040, 0xd65f03c0, 0x52800220, 0xd65f03c0][..],
+            0x10008,
+        ),
+        (
+            &[0x90000000, 0x91003000, 0xd65f03c0, 0x52800220, 0xd65f03c0][..],
+            0x1000c,
+        ),
+    ] {
+        let i = image(words);
+        let original = i.mappings[0].bytes.clone();
+        let p = discover(&i, GuestAddr(0x10000), &[]).unwrap();
+        assert_eq!(p.required_roots, 1);
+        assert_eq!(p.flow_roots, 1);
+        assert!(p.roots.contains(&GuestAddr(target)));
+        assert_eq!(p.instruction_count, words.len());
+        assert_eq!(i.mappings[0].bytes, original);
+    }
+}
+#[test]
+fn non_results_and_non_return_branches_do_not_infer_returned_pointers() {
+    // GNU as/ld 2.46: ADR X1,target; RET (wrong result register),
+    // ADR X0,target; MOV X0,#0; RET, and ADR X0,target; BR X19.
+    for words in [
+        &[0x10000041, 0xd65f03c0, 0x52800220, 0xd65f03c0][..],
+        &[0x10000060, 0xd2800000, 0xd65f03c0, 0x52800220, 0xd65f03c0][..],
+        &[0x10000040, 0xd61f0260, 0x52800220, 0xd65f03c0][..],
+    ] {
+        let p = discover(&image(words), GuestAddr(0x10000), &[]).unwrap();
+        assert_eq!(p.flow_roots, 0);
+        assert_eq!(p.instruction_count, words.len() - 2);
+    }
+}
+#[test]
+fn returned_candidates_still_require_valid_executable_traversal() {
+    for words in [
+        &[0x10000060, 0xd65f03c0][..], // ADR X0,0x1000c; RET: unmapped target.
+        &[0x10000040, 0xd65f03c0, 0xffffffff][..], // Reserved target instruction.
+    ] {
+        let p = discover(&image(words), GuestAddr(0x10000), &[]).unwrap();
+        assert_eq!(p.instruction_count, 2);
+        assert_eq!(p.flow_roots, 0);
+    }
+}
+#[test]
 fn loop_is_finite() {
     let i = image(&[0x14000000]);
     let p = discover(&i, GuestAddr(0x10000), &[]).unwrap();
@@ -264,6 +314,18 @@ fn referenced_relocated_tables_discover_callbacks_without_rewriting_guest_data()
         assert_eq!(p.instruction_count, if got { 8 } else { 7 });
         assert!(i.mappings[1].bytes.iter().all(|b| *b == 0));
     }
+}
+#[test]
+fn returned_relocated_table_discovers_callbacks_without_rewriting_guest_data() {
+    let mut i = relocated_table_image(false);
+    // ADR X0,0x10100; NOP; RET. Only relocation provenance supplies
+    // the callback addresses; the guest's unrelocated data stays zero.
+    i.mappings[0].bytes[..4].copy_from_slice(&0x10000800u32.to_le_bytes());
+    i.mappings[0].bytes[4..8].copy_from_slice(&0xd503201fu32.to_le_bytes());
+    let p = discover(&i, GuestAddr(0x10000), &[]).unwrap();
+    assert_eq!(p.flow_roots, 2);
+    assert_eq!(p.instruction_count, 7);
+    assert!(i.mappings[1].bytes.iter().all(|&b| b == 0));
 }
 
 #[test]

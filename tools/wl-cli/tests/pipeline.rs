@@ -157,6 +157,26 @@ fn expected_code_accepts_interior_instructions_and_executes_natively() {
     assert_eq!(state(&o)["steps"], 2);
 }
 #[test]
+fn returned_function_pointer_executes_without_a_manual_target_seed() {
+    let t = Temp::new();
+    // GNU as/ld 2.46 at 0x10000:
+    // MOV X19,X30; BL getter; MOV X21,X0; BLR X21; MOV X30,X19; RET.
+    // getter: ADRP X0,target; ADD X0,X0,:lo12:target; RET.
+    // target: MOV W0,#17; RET. The caller cannot infer X0 across BL.
+    let exe = compile(
+        &t,
+        &[
+            0xaa1e03f3, 0x94000005, 0xaa0003f5, 0xd63f02a0, 0xaa1303fe, 0xd65f03c0, 0x90000000,
+            0x91009000, 0xd65f03c0, 0x52800220, 0xd65f03c0,
+        ],
+    );
+    let o = Command::new(exe).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(state(&o)["status"], "returned");
+    assert_eq!(state(&o)["x"][0], 17);
+    assert_eq!(state(&o)["steps"], 11);
+}
+#[test]
 fn loop_entry_sentinel_does_not_hide_runtime_switch_cases() {
     let t = Temp::new();
     // Independently assembled GNU as/ld 2.46; the initial index 7 is rejected
