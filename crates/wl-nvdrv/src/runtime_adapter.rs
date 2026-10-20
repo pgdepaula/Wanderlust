@@ -10,15 +10,21 @@ struct Capture {
 }
 impl Capture {
     fn create(root: &std::path::Path, limit: u32) -> std::io::Result<Self> {
-        if !(1..=64).contains(&limit) {
-            return Err(std::io::Error::other("capture limit must be 1..64"));
-        }
-        std::fs::create_dir_all(root)?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(std::io::Error::other)?
             .as_nanos();
-        let directory = root.join(format!("run-{}-{now}", std::process::id()));
+        Self::create_at(root, limit, now)
+    }
+    fn create_at(root: &std::path::Path, limit: u32, now: u128) -> std::io::Result<Self> {
+        if !(1..=64).contains(&limit) {
+            return Err(std::io::Error::other("capture limit must be 1..64"));
+        }
+        std::fs::create_dir_all(root)?;
+        // Clock resolution is not a uniqueness guarantee, including on Windows.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let directory = root.join(format!("run-{}-{now}-{sequence}", std::process::id()));
         std::fs::create_dir(&directory)?;
         Ok(Self {
             directory,
@@ -298,6 +304,38 @@ mod capture_tests {
             total_time: std::time::Duration::ZERO,
             gpu_nanoseconds: None,
         }
+    }
+    #[test]
+    fn concurrent_capture_sessions_with_identical_clock_ticks_are_isolated() {
+        let parent = Capture::create(&std::env::temp_dir(), 1).unwrap();
+        let directory = &parent.directory;
+        let barrier = std::sync::Barrier::new(8);
+        let captures = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    let barrier = &barrier;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        Capture::create_at(directory, 1, 0).unwrap()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|w| w.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let names: std::collections::BTreeSet<_> = captures.iter().map(|c| &c.directory).collect();
+        assert_eq!(names.len(), 8);
+        for mut capture in captures {
+            assert!(capture.write(&frame(), 1).unwrap());
+            assert_eq!(
+                std::fs::read(capture.directory.join("color-0001.rgba")).unwrap(),
+                frame().rgba
+            );
+            assert!(capture.directory.join("color-0001.json").is_file());
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
     #[test]
     fn capture_exact_bytes_metadata_and_limit() {
