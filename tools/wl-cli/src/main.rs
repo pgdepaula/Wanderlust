@@ -21,6 +21,7 @@ USAGE:
   wanderlust analyze INPUT [--raw] [--base ADDRESS] [--entry ADDRESS] [--seed ADDRESS]...
                      [--link host|guest] [--no-pointer-seeds] [--allow-unsupported]
                      [--roots-file FILE] [--instruction-limit COUNT] [--summary]
+                     [--expect-code ADDRESS]...
   wanderlust recompile INPUT [analyze options] --out EXECUTABLE [--target TRIPLE] [--emit-only]
                        [--jobs N] [--cache-dir DIR] [--unit-shift BITS] [--opt-level 0..3]
                        [--horizon [--memory-limit BYTES] [--native-gpu]]
@@ -60,7 +61,10 @@ Cargo for the selected target. It requires this source workspace and an availabl
 it does not add unsupported Maxwell instructions, services or game compatibility.
 --instruction-limit bounds analysis to 1..16777216 decoded instructions (default 1000000).
 Required roots (--entry/--seed) take priority; speculative roots that exceed the budget
-are rejected. Increasing the budget can significantly increase memory and compilation time.";
+are rejected. Increasing the budget can significantly increase memory and compilation time.
+--expect-code asserts that an aligned address was discovered as a supported instruction.
+It never seeds analysis. A failed assertion stops before emission or native compilation.
+Use analyze --summary for analysis-only checks; these checks cannot prove runtime correctness.";
 
 fn number(v: &str) -> Result<u64> {
     if let Some(v) = v.strip_prefix("0x") {
@@ -78,6 +82,7 @@ struct Options {
     base: Option<GuestAddr>,
     entry: Option<GuestAddr>,
     seeds: Vec<GuestAddr>,
+    expected_code: Vec<GuestAddr>,
     out: Option<PathBuf>,
     target: Option<String>,
     emit_only: bool,
@@ -124,6 +129,7 @@ fn options(args: &[OsString]) -> Result<Options> {
         base: None,
         entry: None,
         seeds: Vec::new(),
+        expected_code: Vec::new(),
         out: None,
         target: None,
         emit_only: false,
@@ -161,6 +167,7 @@ fn options(args: &[OsString]) -> Result<Options> {
             "--base"
             | "--entry"
             | "--seed"
+            | "--expect-code"
             | "--out"
             | "--target"
             | "--link"
@@ -180,6 +187,16 @@ fn options(args: &[OsString]) -> Result<Options> {
                     "--base" => o.base = Some(GuestAddr(number(utf8(value)?)?)),
                     "--entry" => o.entry = Some(GuestAddr(number(utf8(value)?)?)),
                     "--seed" => o.seeds.push(GuestAddr(number(utf8(value)?)?)),
+                    "--expect-code" => {
+                        let address = number(utf8(value)?)?;
+                        if address % 4 != 0 {
+                            return Err("--expect-code requires a word-aligned address".into());
+                        }
+                        if o.expected_code.len() >= 4096 {
+                            return Err("--expect-code supports at most 4096 assertions".into());
+                        }
+                        o.expected_code.push(GuestAddr(address));
+                    }
                     "--out" => o.out = Some(value.into()),
                     "--roots-file" => o.roots_file = Some(value.into()),
                     "--instruction-limit" => {
@@ -227,6 +244,7 @@ fn options(args: &[OsString]) -> Result<Options> {
             "--base",
             "--entry",
             "--seed",
+            "--expect-code",
             "--link",
             "--no-pointer-seeds",
             "--allow-unsupported",
@@ -239,6 +257,7 @@ fn options(args: &[OsString]) -> Result<Options> {
             "--base",
             "--entry",
             "--seed",
+            "--expect-code",
             "--link",
             "--no-pointer-seeds",
             "--allow-unsupported",
@@ -544,6 +563,34 @@ fn inspect(module: &Module, as_json: bool) -> Result<()> {
     println!("{}", module.constraints);
     Ok(())
 }
+/// Check known dispatch destinations without changing discovery or accepting an
+/// unsupported site. Blocks and their instructions are ordered by guest PC.
+fn check_expected_code(program: &Program, targets: &[GuestAddr]) -> Result<()> {
+    for &target in targets {
+        let end = program.blocks.partition_point(|b| b.start <= target);
+        if let Some(block) = end.checked_sub(1).map(|i| &program.blocks[i]) {
+            if block
+                .instructions
+                .binary_search_by_key(&target, |i| i.pc)
+                .is_ok()
+            {
+                continue;
+            }
+            if let Some(site) = block.unsupported.as_ref().filter(|u| u.pc == target) {
+                return Err(format!(
+                    "preflight: expected code target {:#x} is unsupported: {}",
+                    target.0, site.reason
+                ));
+            }
+        }
+        return Err(format!(
+            "preflight: expected code target {:#x} was not discovered; --expect-code never adds roots",
+            target.0
+        ));
+    }
+    Ok(())
+}
+
 fn run(args: &[OsString]) -> Result<()> {
     let o = options(args)?;
     if o.command == "intake" {
@@ -624,11 +671,13 @@ fn run(args: &[OsString]) -> Result<()> {
     let started = Instant::now();
     let program = discover_roots(&image, &roots)?;
     let analysis_seconds = started.elapsed().as_secs_f64();
+    check_expected_code(&program, &o.expected_code)?;
     if o.command == "analyze" {
         return if o.summary {
             let mut s = analysis_summary(&program);
             s["analysis_seconds"] = analysis_seconds.into();
             s["instruction_limit"] = o.instruction_limit.into();
+            s["checked_code_targets"] = o.expected_code.len().into();
             json(&s)
         } else {
             json(&program)
@@ -700,6 +749,7 @@ fn run(args: &[OsString]) -> Result<()> {
     // MiB on large programs. Keep just the report before releasing those inputs.
     let program_report = serde_json::json!({
         "instructions": program.instruction_count,
+        "checked_code_targets": o.expected_code.len(),
         "unsupported_sites": program.unsupported_count,
         "blocks": program.blocks.len(),
         "speculative_roots_accepted": program.speculative_roots_accepted,
@@ -790,6 +840,7 @@ fn run(args: &[OsString]) -> Result<()> {
         "executable": if o.emit_only { None } else { Some(&output) },
         "entry": entry,
         "instructions": program_report["instructions"],
+        "checked_code_targets": program_report["checked_code_targets"],
         "unsupported_sites": program_report["unsupported_sites"],
         "blocks": program_report["blocks"],
         "speculative_roots_accepted": program_report["speculative_roots_accepted"],
@@ -885,6 +936,28 @@ mod tests {
         }
         assert!(parse(&["analyze", "input", "--opt-level", "0"]).is_err());
         assert!(parse(&["recompile", "input", "--opt-level"]).is_err());
+    }
+    #[test]
+    fn expected_code_arguments_are_aligned_bounded_and_analysis_only() {
+        let parse = |args: &[&str]| options(&args.iter().map(OsString::from).collect::<Vec<_>>());
+        for command in ["analyze", "recompile"] {
+            let o = parse(&[command, "input", "--expect-code", "0xfffffffffffffffC"]).unwrap();
+            assert_eq!(o.expected_code, vec![GuestAddr(u64::MAX - 3)]);
+        }
+        for command in ["inspect", "intake", "link", "survey"] {
+            assert!(parse(&[command, "input", "--expect-code", "0x10000"]).is_err());
+        }
+        for value in ["0x10001", "-1", "18446744073709551616", "code"] {
+            assert!(parse(&["analyze", "input", "--expect-code", value]).is_err());
+        }
+        assert!(parse(&["analyze", "input", "--expect-code"]).is_err());
+        let mut args = vec![OsString::from("analyze"), OsString::from("input")];
+        for _ in 0..4096 {
+            args.extend([OsString::from("--expect-code"), OsString::from("0x10000")]);
+        }
+        assert_eq!(options(&args).unwrap().expected_code.len(), 4096);
+        args.extend([OsString::from("--expect-code"), OsString::from("0x10000")]);
+        assert!(options(&args).is_err());
     }
     #[test]
     fn explicit_memory_limits_survive_application_npdm() {

@@ -215,6 +215,17 @@ table's callback stays uncompiled. Guest loads and indirect branches are emitted
 unchanged: the index supplies candidates, not frozen runtime pointer values or
 a fallback interpreter. Newly written targets can still require explicit roots.
 
+`analyze` and `recompile` accept repeated `--expect-code ADDRESS` assertions
+(at most 4,096, word aligned). They check that each address is a supported
+instruction in the discovered program, including instructions inside a block.
+They do not add roots or change discovery. An absent target or an unsupported
+site fails before source emission, output replacement, cache creation or native
+compilation. This can catch a previously observed unresolved destination before
+paying native compilation and linking costs. `analyze --summary` performs the
+same checks without generating native code; successful summary/build reports
+include `checked_code_targets`. Assertions do not establish dynamic reachability,
+memory correctness or successful execution, and do not discover future failures.
+
 Indirect-flow analysis also recognizes an immediate `AND`/`ANDS` as an
 unsigned index bound: `value & mask` cannot exceed `mask`. This supports bounded
 alignment-dispatch tables without a preceding comparison. Both W- and X-register

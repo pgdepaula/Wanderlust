@@ -63,6 +63,99 @@ fn help_and_bad_cli() {
         assert!(!cli().args(args).output().unwrap().status.success());
     }
 }
+
+#[test]
+fn expected_code_is_a_precompile_assertion_not_an_analysis_seed() {
+    let t = Temp::new();
+    let input = t.0.join("observed.a64");
+    // RET; MOV X0,#99; RET. The last function exists but is not reachable.
+    fs::write(&input, raw(&[0xd65f03c0, 0xd2800c60, 0xd65f03c0])).unwrap();
+    let analyze = |extra: &[&str]| {
+        cli()
+            .arg("analyze")
+            .arg(&input)
+            .args(["--raw", "--entry", "0x10000", "--summary"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+    let o = analyze(&["--expect-code", "0x10000"]);
+    assert!(o.status.success(), "{:?}", o);
+    assert_eq!(state(&o)["instructions"], 1);
+    assert_eq!(state(&o)["checked_code_targets"], 1);
+    for target in ["0", "0x10004", "0xfffffffffffffffC"] {
+        let o = analyze(&["--expect-code", "0x10000", "--expect-code", target]);
+        assert!(!o.status.success());
+        assert!(String::from_utf8_lossy(&o.stderr).contains("was not discovered"));
+    }
+    let o = analyze(&["--seed", "0x10004", "--expect-code", "0x10008"]);
+    assert!(o.status.success(), "{:?}", o);
+    assert_eq!(state(&o)["instructions"], 3);
+
+    let out = t.0.join("existing-executable");
+    let source = t.0.join("existing-executable.rs");
+    let cache = t.0.join("uncreated-cache");
+    fs::write(&out, b"preserved executable").unwrap();
+    fs::write(&source, b"preserved source").unwrap();
+    let o = cli()
+        .arg("recompile")
+        .arg(&input)
+        .args([
+            "--raw",
+            "--entry",
+            "0x10000",
+            "--expect-code",
+            "0x10004",
+            "--out",
+        ])
+        .arg(&out)
+        .arg("--cache-dir")
+        .arg(&cache)
+        .output()
+        .unwrap();
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("preflight:"));
+    assert_eq!(fs::read(&out).unwrap(), b"preserved executable");
+    assert_eq!(fs::read(&source).unwrap(), b"preserved source");
+    assert!(!cache.exists());
+    assert!(!t.0.join("existing-executable.rs.units").exists());
+
+    fs::write(&input, raw(&[0xffff_ffff])).unwrap();
+    let o = analyze(&["--allow-unsupported", "--expect-code", "0x10000"]);
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("is unsupported"));
+}
+
+#[test]
+fn expected_code_accepts_interior_instructions_and_executes_natively() {
+    let t = Temp::new();
+    let input = t.0.join("observed.a64");
+    fs::write(&input, raw(&[0xd28000e0, 0xd65f03c0])).unwrap();
+    let out =
+        t.0.join(format!("observed{}", std::env::consts::EXE_SUFFIX));
+    let o = cli()
+        .arg("recompile")
+        .arg(&input)
+        .args([
+            "--raw",
+            "--entry",
+            "0x10000",
+            "--expect-code",
+            "0x10000",
+            "--expect-code",
+            "0x10004",
+            "--out",
+        ])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(o.status.success(), "{:?}", o);
+    assert_eq!(state(&o)["checked_code_targets"], 2);
+    let o = Command::new(out).output().unwrap();
+    assert!(o.status.success(), "{:?}", o);
+    assert_eq!(state(&o)["x"][0], 7);
+    assert_eq!(state(&o)["steps"], 2);
+}
 #[test]
 fn compiles_and_executes_original_words() {
     let t = Temp::new();
