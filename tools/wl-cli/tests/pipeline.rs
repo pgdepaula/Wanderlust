@@ -157,6 +157,31 @@ fn expected_code_accepts_interior_instructions_and_executes_natively() {
     assert_eq!(state(&o)["steps"], 2);
 }
 #[test]
+fn loop_entry_sentinel_does_not_hide_runtime_switch_cases() {
+    let t = Temp::new();
+    // Independently assembled GNU as/ld 2.46; the initial index 7 is rejected
+    // before W24 is replaced by runtime W0. Table cases return 13, 29 and 47.
+    let exe = compile(
+        &t,
+        &[
+            0x528000f8, 0x100001f3, 0x71000b1f, 0x540000a8, 0x100000c9, 0x38786a6a, 0x8b0a0929,
+            0xd61f0120, 0x2a0003f8, 0x17fffff9, 0xd28001a0, 0xd65f03c0, 0xd28003a0, 0xd65f03c0,
+            0xd28005e0, 0xd65f03c0, 0x00040200,
+        ],
+    );
+    for (input, expected) in [(0, 13), (1, 29), (2, 47), (0xffff_ffff_0000_0002u64, 47)] {
+        let o = Command::new(&exe)
+            .args(["--reg", &format!("0={input}")])
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        assert_eq!(state(&o)["status"], "returned");
+        assert_eq!(state(&o)["x"][0], expected);
+        assert_eq!(state(&o)["steps"], 14);
+    }
+}
+
+#[test]
 fn compiles_and_executes_original_words() {
     let t = Temp::new();
     let exe = compile(

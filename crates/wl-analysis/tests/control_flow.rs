@@ -27,6 +27,24 @@ fn loop_is_finite() {
     let p = discover(&i, GuestAddr(0x10000), &[]).unwrap();
     assert_eq!(p.instruction_count, 1);
 }
+
+#[test]
+fn impossible_initial_loop_edge_does_not_erase_a_later_table_bound() {
+    // GNU as/ld 2.46: start with W24=7, then CMP W24,#2; B.HI change.
+    // The change block copies the unknown input W0 and loops. The dispatch
+    // must see the later unsigned bound, never the infeasible initial value 7.
+    let i = image(&[
+        0x528000f8, 0x100001f3, 0x71000b1f, 0x540000a8, 0x100000c9, 0x38786a6a, 0x8b0a0929,
+        0xd61f0120, 0x2a0003f8, 0x17fffff9, 0xd28001a0, 0xd65f03c0, 0xd28003a0, 0xd65f03c0,
+        0xd28005e0, 0xd65f03c0, 0x00040200,
+    ]);
+    let p = discover(&i, GuestAddr(0x10000), &[]).unwrap();
+    assert_eq!(p.jump_tables.get(&GuestAddr(0x1001c)), Some(&3));
+    for pc in [0x10028, 0x10030, 0x10038] {
+        assert!(starts(&p).contains(&pc));
+    }
+    assert!(!starts(&p).contains(&0x10040));
+}
 #[test]
 fn explicit_seeds_recover_indirect_targets() {
     let i = image(&[0xd61f0000, 0xffffffff, 0xd65f03c0]);

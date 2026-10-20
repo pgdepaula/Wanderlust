@@ -198,6 +198,13 @@ through an immutable `Arc`; it is neither serialized as process memory nor
 applied to guest-mode bytes. This also preserves pointers to data, such as GOT
 entries referring to a function-pointer table's header.
 
+Constant unsigned comparisons exclude impossible edges from discovery-state
+propagation, with W-register comparisons restricted to their low 32 bits. This
+prevents an infeasible initial loop index from erasing a later proven table
+bound. Both direct branch destinations remain decoded and the emitted guest
+comparison and branch are unchanged. Unknown values and other conditions retain
+conservative propagation.
+
 Dataflow can read an indexed relocation value through a checked, readable
 64-bit load from a constant address. If reached code then stores or passes a
 constant address point of a non-executable function-pointer table, its contiguous

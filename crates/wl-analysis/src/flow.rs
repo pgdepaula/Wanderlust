@@ -484,25 +484,36 @@ fn transfer(image: &Image, state: &mut State, op: &Op) {
     }
 }
 
-/// Refines the compared register on a conditional edge: `taken` selects the branch edge.
-fn refine(state: &mut State, condition: u8, taken: bool) {
+/// Refines discovery state on a conditional edge. False excludes a proven
+/// impossible unsigned comparison; it never removes the decoded guest branch.
+fn refine(state: &mut State, condition: u8, taken: bool) -> bool {
     let Some(Compare { reg, imm, width }) = state.flags else {
-        return;
+        return true;
     };
+    if let Some(Val::Const(value)) = state.regs.get(&reg) {
+        let lhs = mask(*value, width);
+        let rhs = mask(imm, width);
+        let actual = match condition {
+            8 => lhs > rhs,
+            9 => lhs <= rhs,
+            2 => lhs >= rhs,
+            3 => lhs < rhs,
+            _ => return true,
+        };
+        return actual == taken;
+    }
     // HI 8 / LS 9 compare `reg > imm`; HS 2 / LO 3 compare `reg >= imm` (unsigned).
     let max = match (condition, taken) {
         (8, false) | (9, true) => Some(imm),
         (2, false) | (3, true) => imm.checked_sub(1),
         _ => None,
     };
-    let Some(max) = max else { return };
-    if matches!(state.regs.get(&reg), Some(Val::Const(_))) {
-        return;
-    }
+    let Some(max) = max else { return true };
     let full = width == Width::X64 || state.narrow & (1 << reg) != 0;
     let narrow = state.narrow;
     state.regs.insert(reg, Val::Bounded { max, full });
     state.narrow = narrow;
+    true
 }
 
 /// Results of one propagation pass.
@@ -636,8 +647,16 @@ pub fn propagate(
                     }
                     out.flags = None;
                 }
-                Edge::Taken(c) => refine(&mut out, c, true),
-                Edge::Fallthrough(c) => refine(&mut out, c, false),
+                Edge::Taken(c) => {
+                    if !refine(&mut out, c, true) {
+                        continue;
+                    }
+                }
+                Edge::Fallthrough(c) => {
+                    if !refine(&mut out, c, false) {
+                        continue;
+                    }
+                }
                 Edge::Plain => {}
             }
             let changed = match &mut input[j] {
@@ -749,5 +768,59 @@ fn edges(b: &Block, tables: &BTreeMap<GuestAddr, Vec<GuestAddr>>) -> Vec<(GuestA
         Op::Svc { id: 7 } | Op::Trap { .. } => vec![],
         Op::Svc { .. } => vec![(next, Edge::Svc)],
         _ => vec![(next, Edge::Plain)],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cmp::Ordering;
+
+    #[test]
+    fn constant_unsigned_edges_follow_the_compared_register_width() {
+        for width in [Width::W32, Width::X64] {
+            for value in [0, 1, 2, 0xffff_ffff, 0x1_0000_0001, u64::MAX] {
+                for imm in [0, 1, 2, 4095] {
+                    let compared = if width == Width::W32 {
+                        u64::from(value as u32)
+                    } else {
+                        value
+                    };
+                    let order = compared.cmp(&imm);
+                    for (condition, actual) in [
+                        (2, order != Ordering::Less),
+                        (3, order == Ordering::Less),
+                        (8, order == Ordering::Greater),
+                        (9, order != Ordering::Greater),
+                    ] {
+                        for taken in [false, true] {
+                            let mut s = State::default();
+                            s.set(Reg::Gpr(8), Some(Val::Const(value)), Width::X64);
+                            s.flags = Some(Compare { reg: 8, imm, width });
+                            let before = s.clone();
+                            assert_eq!(refine(&mut s, condition, taken), actual == taken);
+                            assert_eq!(s, before, "do not weaken an exact register value");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn absent_comparisons_and_other_conditions_remain_conservative() {
+        let mut s = State::default();
+        assert!(refine(&mut s, 8, false));
+        s.set(Reg::Gpr(8), Some(Val::Const(7)), Width::X64);
+        s.flags = Some(Compare {
+            reg: 8,
+            imm: 2,
+            width: Width::W32,
+        });
+        for condition in [0, 1, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15] {
+            for taken in [false, true] {
+                assert!(refine(&mut s, condition, taken));
+            }
+        }
     }
 }
