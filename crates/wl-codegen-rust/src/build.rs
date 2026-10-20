@@ -8,6 +8,7 @@
 use sha2::{Digest, Sha256};
 use std::{
     fs,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -140,8 +141,51 @@ fn flags_identity(cfg: &BuildConfig) -> String {
         cfg.target.as_deref().unwrap_or("host")
     )
 }
-/// Compiles `source` (written to `<dir>/src/<file>`) into `<dir>/lib<name>.rlib` unless the
-/// keyed directory already exists. Population is atomic: a temporary directory is renamed.
+// Check archive framing without rereading object payloads. This detects missing,
+// empty and truncated artifacts; it is not a checksum of compiled machine code.
+fn complete_archive(path: &Path) -> bool {
+    let check = || -> std::io::Result<bool> {
+        let mut file = fs::File::open(path)?;
+        let length = file.metadata()?.len();
+        let mut magic = [0; 8];
+        file.read_exact(&mut magic)?;
+        if &magic != b"!<arch>\n" {
+            return Ok(false);
+        }
+        let mut cursor = 8u64;
+        let mut metadata = false;
+        while cursor < length {
+            let mut header = [0; 60];
+            file.seek(SeekFrom::Start(cursor))?;
+            file.read_exact(&mut header)?;
+            if &header[58..] != b"`\n" {
+                return Ok(false);
+            }
+            let Some(size) = std::str::from_utf8(&header[48..58])
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+            else {
+                return Ok(false);
+            };
+            let Some(end) = cursor.checked_add(60).and_then(|v| v.checked_add(size)) else {
+                return Ok(false);
+            };
+            let Some(next) = end.checked_add(size & 1).filter(|v| *v <= length) else {
+                return Ok(false);
+            };
+            metadata |= size != 0
+                && std::str::from_utf8(&header[..16])
+                    .is_ok_and(|s| s.trim().trim_end_matches('/') == "lib.rmeta");
+            cursor = next;
+        }
+        Ok(metadata && cursor == length)
+    };
+    check().unwrap_or(false)
+}
+
+/// Compiles `source` (written to `<dir>/src/<file>`) into `<dir>/lib<name>.rlib` unless
+/// a structurally complete archive is cached. Population uses a per-key kernel lock
+/// and publishes a temporary directory by rename; incomplete entries are quarantined.
 fn cached_rlib(
     cfg: &BuildConfig,
     name: &str,
@@ -151,8 +195,41 @@ fn cached_rlib(
 ) -> Built {
     let dir = cfg.cache_dir.join(format!("{name}-{}", &key[..20]));
     let rlib = dir.join(format!("lib{name}.rlib"));
-    if rlib.is_file() {
+    if complete_archive(&rlib) {
         return Ok((rlib, true, 0.0));
+    }
+    // Only cache population/repair takes the kernel lock. Complete immutable
+    // archives keep their read-only hit path. Process exit releases this lock.
+    let population_lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(cfg.cache_dir.join(format!(".lock-{name}-{}", &key[..20])))
+        .map_err(|e| format!("cannot open archive population lock: {e}"))?;
+    fs2::FileExt::lock_exclusive(&population_lock)
+        .map_err(|e| format!("cannot lock archive population: {e}"))?;
+    if complete_archive(&rlib) {
+        return Ok((rlib, true, 0.0));
+    }
+    if dir.exists() {
+        // Preserve interrupted output for diagnosis, including any hard-linked
+        // readers. A fresh directory can then be published under the same key.
+        static REPAIRS: AtomicUsize = AtomicUsize::new(0);
+        let invalid = cfg.cache_dir.join(format!(
+            ".invalid-{name}-{}-{}-{}",
+            &key[..20],
+            std::process::id(),
+            REPAIRS.fetch_add(1, Ordering::Relaxed)
+        ));
+        if let Err(error) = fs::rename(&dir, &invalid) {
+            if complete_archive(&rlib) {
+                return Ok((rlib, true, 0.0));
+            }
+            if dir.exists() {
+                return Err(format!("cannot quarantine {}: {error}", dir.display()));
+            }
+        }
     }
     let tmp = cfg
         .cache_dir
@@ -174,8 +251,24 @@ fn cached_rlib(
     }
     cmd.arg("-o").arg(tmp.join(format!("lib{name}.rlib")));
     run(cmd, name)?;
+    let compiled = tmp.join(format!("lib{name}.rlib"));
+    if !complete_archive(&compiled) {
+        return Err(format!(
+            "compiler produced an incomplete archive for {name}"
+        ));
+    }
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&compiled)
+        .and_then(|file| file.sync_all())
+        .map_err(|e| format!("cannot persist {}: {e}", compiled.display()))?;
     let seconds = started.elapsed().as_secs_f64();
-    if fs::rename(&tmp, &dir).is_err() {
+    if let Err(error) = fs::rename(&tmp, &dir) {
+        if !complete_archive(&rlib) {
+            return Err(format!(
+                "cannot publish compiled archive for {name}: {error}"
+            ));
+        }
         // Another build populated the same key concurrently; its result is equivalent.
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -423,4 +516,78 @@ fn build_inner(
         units,
         native_gpu: native.map(|v| v.report),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interrupted_empty_cached_archive_is_recompiled() {
+        let directory = std::env::temp_dir().join(format!(
+            "wanderlust-cache-repair-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let cfg = BuildConfig {
+            target: None,
+            cache_dir: directory.clone(),
+            jobs: 1,
+            opt_level: 0,
+        };
+        let key = "0123456789abcdef0123456789abcdef";
+        let source = [("lib.rs", "pub fn value() -> u32 { 47 }\n")];
+        let (archive, hit, _) = cached_rlib(&cfg, "cache_probe", key, &source, None).unwrap();
+        assert!(!hit);
+        let complete = fs::read(&archive).unwrap();
+        let damaged = [
+            Vec::new(),
+            b"!<arch>\n".to_vec(),
+            complete[..complete.len() - 1].to_vec(),
+            vec![0; complete.len()],
+        ];
+        for (i, bytes) in damaged.iter().enumerate() {
+            fs::write(&archive, bytes).unwrap();
+            let preserved = directory.join(format!("reader-{i}.rlib"));
+            fs::hard_link(&archive, &preserved).unwrap();
+            let (repaired, hit, _) = cached_rlib(&cfg, "cache_probe", key, &source, None).unwrap();
+            assert!(!hit, "an incomplete artifact must not be a cache hit: {i}");
+            assert!(complete_archive(&repaired));
+            assert_eq!(
+                fs::read(preserved).unwrap(),
+                *bytes,
+                "repair must preserve existing readers"
+            );
+            let (_, hit, _) = cached_rlib(&cfg, "cache_probe", key, &source, None).unwrap();
+            assert!(hit, "a repaired archive should be reusable");
+        }
+        fs::write(&archive, []).unwrap();
+        let barrier = std::sync::Barrier::new(4);
+        let hits = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..4)
+                .map(|_| {
+                    let barrier = &barrier;
+                    let cfg = &cfg;
+                    let source = &source;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        cached_rlib(cfg, "cache_probe", key, source, None)
+                            .unwrap()
+                            .1
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .filter(|hit| *hit)
+                .count()
+        });
+        assert_eq!(hits, 3, "one population, three reusable results");
+        fs::remove_dir_all(directory).unwrap();
+    }
 }
