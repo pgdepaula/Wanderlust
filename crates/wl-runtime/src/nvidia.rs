@@ -306,10 +306,10 @@ pub(crate) fn request(
             if size == 0 || u64::from(size) % PAGE != 0 || u64::from(size) > transfer.size {
                 return Err("invalid NVIDIA transfer memory size".into());
             }
-            // The currently supported seam requires one readable/writable region.
+            // Validate the entire guest range, including adjacent host regions.
             // Validation is scoped to this call: no kernel pin/lifetime is implied.
             memory
-                .read_bytes(transfer.address, size as usize)
+                .pieces(transfer.address, size as usize, false)
                 .map_err(|_| "unsupported NVIDIA transfer memory backing")?;
             memory
                 .validate_write(transfer.address, size as usize)

@@ -828,8 +828,8 @@ fn simple_commands_reject_nonzero_receive_static_mode_before_host() {
 }
 
 #[test]
-fn initialize_requires_current_readable_writable_single_region_transfer_backing() {
-    for case in 0..4 {
+fn initialize_rejects_unmapped_or_inaccessible_transfer_spans() {
+    for case in 0..6 {
         let mut h = Harness::new();
         let address = if case == 0 { 0x3000_0000 } else { TRANSFER };
         if case == 1 || case == 2 {
@@ -846,8 +846,21 @@ fn initialize_requires_current_readable_writable_single_region_transfer_backing(
                 region.write = false;
             }
         }
-        if case == 3 {
+        if case >= 3 {
             assert!(h.process.memory.split_at(TRANSFER + 0x1000));
+            let regions = &mut h.process.memory.regions;
+            let second = regions
+                .iter()
+                .position(|r| r.base == TRANSFER + 0x1000)
+                .unwrap();
+            match case {
+                3 => regions[second].read = false,
+                4 => regions[second].write = false,
+                5 => {
+                    regions.remove(second);
+                }
+                _ => unreachable!(),
+            }
         }
         let tm = h
             .process
@@ -866,6 +879,24 @@ fn initialize_requires_current_readable_writable_single_region_transfer_backing(
         assert_eq!(h.count(), 0);
         assert!(!h.process.kernel.as_ref().unwrap().nvidia.is_initialized());
     }
+}
+
+#[test]
+fn initialize_accepts_adjacent_regions_without_changing_transfer_contents() {
+    let mut h = Harness::new();
+    let contents: Vec<u8> = (0..0x2000).map(|i| (i * 17 + 3) as u8).collect();
+    h.write(TRANSFER, &contents);
+    assert!(h.process.memory.split_at(TRANSFER + 0x1000));
+    h.initialize();
+    assert_eq!(h.count(), 1);
+    assert_eq!(
+        h.observed.lock().unwrap().calls,
+        [Call::Initialize(nvidia::TransferBuffer {
+            address: TRANSFER,
+            size: 0x2000
+        })]
+    );
+    assert_eq!(h.read(TRANSFER, 0x2000), contents);
 }
 
 #[test]

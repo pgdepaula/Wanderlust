@@ -13,6 +13,12 @@ literal HIPC/CMIF requests. `recompile --horizon --native-gpu` now also emits it
 into the final AOT executable and installs the backend before guest execution.
 The CPU-only launcher remains available without this explicit option.
 
+The runtime Initialize boundary validates the entire requested transfer-memory
+range for read and write access. Adjacent accessible guest regions are accepted;
+internal host allocation boundaries do not imply a guest mapping fault. A hole
+or inaccessible region rejects initialization before the host callback. This is
+scoped validation, not a kernel pin or a retained borrow of the transfer buffer.
+
 ## Wire subset
 
 Scalar fields are decoded explicitly in little-endian order. The ioctl's
