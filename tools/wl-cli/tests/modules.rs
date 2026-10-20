@@ -92,6 +92,38 @@ fn referenced_relocation_table_executes_native_virtual_call_without_global_seeds
 }
 
 #[test]
+fn long_referenced_table_executes_its_last_native_method() {
+    use synthetic::*;
+    use wl_nso::dynamic::R_AARCH64_RELATIVE;
+    // GNU as/ld 2.46, text linked at 0: ADR X0,object(+0x25e0);
+    // ADR X8,table(+0x2200); STR X8,[X0]; LDR X9,[X0];
+    // LDR X9,[X9,#984]; BR X9. The 124th method returns 22;
+    // the preceding 123 slots point to a distinct method returning 11.
+    let mut relocations = Vec::new();
+    for n in 0..124 {
+        relocations.push(rela(
+            DATA_WORDS + n * 8,
+            R_AARCH64_RELATIVE,
+            0,
+            if n == 123 { 0x28 } else { 0x20 },
+        ));
+    }
+    assert_native_callback_table(
+        Spec {
+            text: vec![
+                0x10012ec0, 0x10010fa8, 0xf9000008, 0xf9400009, 0xf941ed29, 0xd61f0120, 0xd2800160,
+                RET, 0xd28002c0, RET,
+            ],
+            data: vec![0; 125],
+            relocations,
+            rela_count: 124,
+            ..Spec::default()
+        },
+        10,
+    );
+}
+
+#[test]
 fn got_table_with_header_and_paired_store_executes_native_virtual_call() {
     use synthetic::*;
     use wl_nso::dynamic::R_AARCH64_RELATIVE;

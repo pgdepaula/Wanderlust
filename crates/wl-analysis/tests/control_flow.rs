@@ -268,19 +268,38 @@ fn function_table_candidates_stop_at_gaps_invalid_targets_and_the_entry_budget()
             }
             2 => {
                 cells.clear();
-                for n in 0..65 {
+                for n in 0..257 {
                     cells.insert(
                         GuestAddr(0x10100 + n * 8),
-                        if n == 64 { 0x10014 } else { 0x1000c },
+                        if n == 256 { 0x10014 } else { 0x1000c },
                     );
                 }
-                i.mappings[1].bytes.resize(65 * 8, 0);
+                i.mappings[1].bytes.resize(257 * 8, 0);
             }
             _ => unreachable!(),
         }
         let p = discover(&i, GuestAddr(0x10000), &[]).unwrap();
         assert_eq!(p.flow_roots, 1, "case {case}");
         assert!(!p.roots.contains(&GuestAddr(0x10014)));
+    }
+}
+
+#[test]
+fn long_referenced_tables_retain_methods_beyond_the_first_sixty_four_slots() {
+    for last in [63, 64, 123, 255] {
+        let mut i = relocated_table_image(false);
+        let cells = std::sync::Arc::make_mut(&mut i.relocation_cells);
+        cells.clear();
+        for n in 0..=last {
+            cells.insert(
+                GuestAddr(0x10100 + n * 8),
+                if n == last { 0x10014 } else { 0x1000c },
+            );
+        }
+        i.mappings[1].bytes.resize((last as usize + 1) * 8, 0);
+        let p = discover(&i, GuestAddr(0x10000), &[]).unwrap();
+        assert_eq!(p.flow_roots, 2, "last method index {last}");
+        assert!(p.roots.contains(&GuestAddr(0x10014)));
     }
 }
 

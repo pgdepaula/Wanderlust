@@ -203,14 +203,15 @@ Dataflow can read an indexed relocation value through a checked, readable
 constant address point of a non-executable function-pointer table, its contiguous
 relocation-backed executable targets become ordinary candidate roots. Discovery
 stops at absent provenance, unreadable/truncated cells or non-code targets. Each
-propagation pass inspects at most 1,024 such tables and 64 entries per table;
+propagation pass inspects at most 1,024 such tables and 256 entries per table;
 these are implementation budgets, not CPU or ELF limits. All new roots still
 undergo the existing instruction decoder and instruction-budget checks.
 
 `--no-pointer-seeds` disables blanket metadata root seeding; referenced-table
 dataflow discovery remains active, like jump-table discovery. Independent
 GNU-as/ld fixtures execute virtual calls through both direct table construction
-and a GOT load followed by a header offset and paired store. An unreferenced
+and a GOT load followed by a header offset and paired store. A 124-entry fixture
+executes its final method, while boundary tests exclude the 257th slot. An unreferenced
 table's callback stays uncompiled. Guest loads and indirect branches are emitted
 unchanged: the index supplies candidates, not frozen runtime pointer values or
 a fallback interpreter. Newly written targets can still require explicit roots.

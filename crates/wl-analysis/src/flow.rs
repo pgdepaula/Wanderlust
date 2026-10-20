@@ -23,7 +23,7 @@ use wl_common::GuestAddr;
 pub const MAX_TABLE_ENTRIES: u64 = 65_536;
 /// Conservative discovery budgets, not ELF or CPU limits.
 pub const MAX_POINTER_TABLES: usize = 1024;
-pub const MAX_POINTER_TABLE_ENTRIES: u64 = 64;
+pub const MAX_POINTER_TABLE_ENTRIES: u64 = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Val {
