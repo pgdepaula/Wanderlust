@@ -19,6 +19,17 @@ internal host allocation boundaries do not imply a guest mapping fault. A hole
 or inaccessible region rejects initialization before the host callback. This is
 scoped validation, not a kernel pin or a retained borrow of the transfer buffer.
 
+Command 13 (`SetGraphicsFirmwareMemoryMarginEnabled`, historically called
+`FinishInitialize`) accepts the bounded scalar values 0 and 1 after initialization
+and returns no payload. The service records the request while keeping its effective
+margin disabled, following the documented default of
+`nv!nv_graphics_firmware_memory_margin`. Non-default firmware-margin policy and
+firmware allocation are unsupported. This command neither submits GPU work nor
+signals completion. Its wire contract follows
+[Switchbrew NV services, revision 14790](https://switchbrew.org/w/index.php?title=NV_services&oldid=14790#SetGraphicsFirmwareMemoryMarginEnabled);
+the disabled configuration follows
+[System Settings, revision 14990](https://switchbrew.org/w/index.php?title=System_Settings&oldid=14990#nv).
+
 ## Wire subset
 
 Scalar fields are decoded explicitly in little-endian order. The ioctl's

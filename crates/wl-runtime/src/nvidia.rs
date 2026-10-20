@@ -75,11 +75,20 @@ pub trait Host: std::fmt::Debug {
     fn ioctl(&mut self, ioctl: Ioctl<'_>, memory: &mut Memory) -> HostResult<()>;
 }
 
+/// Service policy request under the supported, disabled firmware-margin setting.
+/// This is not a GPU allocation or a submission-completion event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FirmwareMemoryMargin {
+    pub requested: bool,
+    pub enabled: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct State {
     host: Option<Box<dyn Host>>,
     initialized: bool,
     fatal: Option<String>,
+    firmware_margin: Option<FirmwareMemoryMargin>,
 }
 impl State {
     pub fn install(&mut self, host: Box<dyn Host>) -> NvResult<()> {
@@ -91,6 +100,9 @@ impl State {
     }
     pub fn is_initialized(&self) -> bool {
         self.initialized
+    }
+    pub fn firmware_memory_margin(&self) -> Option<FirmwareMemoryMargin> {
+        self.firmware_margin
     }
     fn invoke<T>(
         &mut self,
@@ -402,6 +414,33 @@ pub(crate) fn request(
             k.nvidia
                 .invoke(true, |host| host.set_client_pid(aruid, k.config.process_id))
                 .map_err(|e| format!("NVIDIA SetClientPID failed: {e:?}"))?;
+            Ok(Reply { data: Vec::new() })
+        }
+        13 => {
+            if !no_buffers
+                || req.pid.is_some()
+                || req.copy_handles != 0
+                || req.move_handles != 0
+                || args.len() < 8
+            {
+                return Err("unsupported NVIDIA firmware-margin request layout".into());
+            }
+            if !k.nvidia.initialized {
+                return Err("NVIDIA firmware-margin request before initialization".into());
+            }
+            let requested = match u64::from_le_bytes(args[..8].try_into().unwrap()) {
+                0 => false,
+                1 => true,
+                _ => return Err("unsupported NVIDIA firmware-margin value".into()),
+            };
+            // NV_services oldid=14790: command 13 applies the request through
+            // nv!nv_graphics_firmware_memory_margin. System_Settings oldid=14990
+            // specifies false by default. Only that disabled system policy is
+            // supported here; this does not allocate firmware or complete work.
+            k.nvidia.firmware_margin = Some(FirmwareMemoryMargin {
+                requested,
+                enabled: false,
+            });
             Ok(Reply { data: Vec::new() })
         }
         _ => Err(format!("unsupported NVIDIA service command {command}")),

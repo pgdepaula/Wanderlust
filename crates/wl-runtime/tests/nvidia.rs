@@ -1105,3 +1105,115 @@ fn ordinary_host_driver_error_is_wire_error_without_latching_a_fatal_fault() {
     assert_eq!(h.count(), before + 1);
     assert_eq!(h.read(OUTPUT, 8), expected_output());
 }
+
+#[test]
+fn firmware_margin_request_honors_disabled_system_policy() {
+    let mut h = Harness::new();
+    h.initialize();
+    let before = h.count();
+    assert_eq!(
+        h.process
+            .kernel
+            .as_ref()
+            .unwrap()
+            .nvidia
+            .firmware_memory_margin(),
+        None
+    );
+    for requested in [1u64, 0, 1] {
+        h.send(&Wire {
+            command: 13,
+            args: &requested.to_le_bytes(),
+            ..Wire::default()
+        });
+        let policy = h
+            .process
+            .kernel
+            .as_ref()
+            .unwrap()
+            .nvidia
+            .firmware_memory_margin()
+            .unwrap();
+        assert_eq!(policy.requested, requested == 1);
+        assert!(
+            !policy.enabled,
+            "the documented system setting defaults to disabled"
+        );
+        assert_eq!(h.count(), before, "this policy does not submit GPU work");
+    }
+}
+
+#[test]
+fn firmware_margin_rejects_invalid_layout_and_preserves_prior_state() {
+    for case in 0..8 {
+        let mut h = Harness::new();
+        h.initialize();
+        h.send(&Wire {
+            command: 13,
+            args: &1u64.to_le_bytes(),
+            ..Wire::default()
+        });
+        let before = h
+            .process
+            .kernel
+            .as_ref()
+            .unwrap()
+            .nvidia
+            .firmware_memory_margin();
+        let value = if case == 0 {
+            2u64
+        } else if case == 1 {
+            0x1_0000_0001
+        } else {
+            0
+        };
+        let copy = [CURRENT_PROCESS];
+        let buffer = [(INPUT, 8)];
+        let mut message = Wire {
+            command: 13,
+            args: &value.to_le_bytes(),
+            pid: case == 2,
+            copies: if case == 3 { &copy } else { &[] },
+            a: if case == 4 { &buffer } else { &[] },
+            b: if case == 5 { &buffer } else { &[] },
+            ..Wire::default()
+        }
+        .encode();
+        if case == 6 {
+            put32(&mut message, 4, 7);
+        } // Only four CMIF argument bytes.
+        if case == 7 {
+            let words = u32::from_le_bytes(message[4..8].try_into().unwrap());
+            put32(&mut message, 4, words | (1 << 10));
+        }
+        h.write(h.tls(), &message);
+        assert!(h.invoke().is_err(), "case {case}");
+        assert_eq!(
+            h.process
+                .kernel
+                .as_ref()
+                .unwrap()
+                .nvidia
+                .firmware_memory_margin(),
+            before
+        );
+        assert_eq!(h.count(), 1);
+    }
+    let mut h = Harness::new();
+    h.stage(&Wire {
+        command: 13,
+        args: &1u64.to_le_bytes(),
+        ..Wire::default()
+    });
+    assert!(h.invoke().is_err());
+    assert_eq!(h.count(), 0);
+    assert_eq!(
+        h.process
+            .kernel
+            .as_ref()
+            .unwrap()
+            .nvidia
+            .firmware_memory_margin(),
+        None
+    );
+}
