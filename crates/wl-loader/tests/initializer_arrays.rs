@@ -14,6 +14,20 @@ fn pointers(p: &Process, kind: &str) -> Vec<u64> {
 }
 
 #[test]
+fn scalar_finalizers_are_not_classified_as_startup_functions() {
+    for mode in [LinkMode::Host, LinkMode::Guest] {
+        let input = module(&Spec {
+            text: vec![RET; 3],
+            extra_dynamic: vec![(DT_INIT, 8), (DT_FINI, 12)],
+            ..Spec::default()
+        });
+        let p = Process::build(&[("main".into(), input)], GuestAddr(0x800_0000), mode).unwrap();
+        assert_eq!(pointers(&p, "initializer"), [0x800_0008]);
+        assert_eq!(pointers(&p, "finalizer"), [0x800_000c]);
+    }
+}
+
+#[test]
 fn array_candidates_are_relocated_once_and_guest_storage_is_untouched() {
     for base in [0x800_0000u64, 0x9000_0000] {
         for mode in [LinkMode::Host, LinkMode::Guest] {

@@ -172,6 +172,7 @@ fn startup_roots_cover_indirect_constructor_calls_without_global_pointer_seeds()
             rela_count: 3,
             extra_dynamic: vec![
                 (DT_INIT, 0x24),
+                (DT_FINI, 0x34),
                 (DT_INIT_ARRAY, DATA_WORDS),
                 (DT_INIT_ARRAYSZ, 16),
                 (DT_FINI_ARRAY, DATA_WORDS + 16),

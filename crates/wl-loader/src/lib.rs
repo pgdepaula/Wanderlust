@@ -651,8 +651,10 @@ impl Process {
                         &mut code_pointers,
                     );
                 }
-                for init in [d.init, d.fini].into_iter().flatten() {
-                    push(p.base + init.0, "initializer", &p.name, &mut code_pointers);
+                for (source, function) in [("initializer", d.init), ("finalizer", d.fini)] {
+                    if let Some(function) = function {
+                        push(p.base + function.0, source, &p.name, &mut code_pointers);
+                    }
                 }
                 for (source, array) in [
                     ("initializer-array", d.init_array),
