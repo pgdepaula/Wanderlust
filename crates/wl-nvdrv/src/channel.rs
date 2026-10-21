@@ -25,6 +25,16 @@ pub(super) fn capacity(request: u32, input: &[u8]) -> Result<u32> {
     Ok(count)
 }
 
+/// Switch uses the legacy `mem` word as a nonzero enable switch. Offset,
+/// size and reserved are ignored, not pointers to map or buffer extents.
+/// https://switchbrew.org/wiki/NV_services#NVGPU_IOCTL_CHANNEL_SET_ERROR_NOTIFIER
+pub(super) fn notifier_enabled(input: &[u8]) -> Result<bool> {
+    if input.len() != 24 {
+        return Err(NvError::InvalidSize.into());
+    }
+    Ok(word(input, 16) != 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -53,5 +63,22 @@ mod tests {
         }
         assert!(capacity(0x40084805, &input()).is_err());
         assert_eq!(capacity(0x40084805, &[1, 0, 0, 0, 0, 0, 0, 0]).unwrap(), 1);
+    }
+}
+
+#[cfg(test)]
+mod notifier_tests {
+    use super::*;
+    #[test]
+    fn legacy_fields_are_ignored_and_every_nonzero_mem_enables_notification() {
+        let mut input = [0xff; 24];
+        for value in [0u32, 1, 2, 4, u32::MAX] {
+            input[16..20].copy_from_slice(&value.to_le_bytes());
+            assert_eq!(notifier_enabled(&input).unwrap(), value != 0);
+        }
+        for length in 0..24 {
+            assert!(notifier_enabled(&input[..length]).is_err());
+        }
+        assert!(notifier_enabled(&[0; 25]).is_err());
     }
 }

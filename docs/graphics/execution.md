@@ -1937,3 +1937,17 @@ file in a separate native SDL2 window title, including Windows, while compilatio
 execution proceeds elsewhere. Its repaints never increment guest graphics or
 frame counters. Host clock frequency and a gameplay FPS value are not inferred
 from CPU instruction throughput. The image area remains reserved for guest output; diagnostics do not draw a text panel.
+
+`SetErrorNotifier` uses the Switch semantics of the legacy `mem` word: zero
+turns notifications off and every nonzero value turns them on. The offset, size
+and reserved words are ignored, including nonzero values; no pointer is
+resolved from these fields. In particular, a legacy-shaped request with size
+4096 and mem four enables the same actual error event as libnx's zero-size,
+mem-one form. The Linux driver's shared notifier-buffer semantics do not apply.
+
+GPU-enabled AOT builds also compare an embedded `native_gpu` host module with
+this code generator's adapter source before creating caches or compiling guest
+units. A saved entry wrapper can otherwise compile using default trait callbacks
+while omitting newer event and diagnostic implementations. Stale wrappers fail
+explicitly. Refreshing the host-only module does not require changing guest
+instruction sources, image blobs or runtime-compatible translation libraries.

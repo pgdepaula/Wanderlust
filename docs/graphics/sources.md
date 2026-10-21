@@ -1569,3 +1569,11 @@ the different desktop/Linux allocation flags. Unknown Switch modes stay rejected
 uses command four, two input u32s, an NVIDIA error result and one HIPC copy handle;
 [event identifiers](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/include/switch/services/nv.h#L27)
 distinguish channel error event three from debug and control-device events.
+
+[Switchbrew SetErrorNotifier](https://switchbrew.org/wiki/NV_services#NVGPU_IOCTL_CHANNEL_SET_ERROR_NOTIFIER)
+(also preserved in the [pinned source mirror, revision 12787d8d212a164c7d6f2dacb4e35ff6bff087e1](https://github.com/backupbrew/switchbrew/blob/12787d8d212a164c7d6f2dacb4e35ff6bff087e1/NV%20services.md#nvgpu_ioctl_channel_set_error_notifier))
+explicitly distinguishes Switch's nonzero `mem` enable switch and ignored
+legacy offset/size/reserved fields from Linux's shared notifier buffer. The
+pinned libnx wrapper calls the same field `enable` with u32 type. A read-only
+original-executable boundary observation confirmed size 4096 and mem four;
+only those scalar ABI values inform the independent regression fixture.

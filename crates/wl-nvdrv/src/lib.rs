@@ -625,15 +625,10 @@ impl<P: Copy> Driver<P> {
                 Ok(())
             }
             0xc018480c => {
-                if !state.object
-                    || long(r.input, 0) != 0
-                    || long(r.input, 8) != 0
-                    || word(r.input, 16) > 1
-                    || word(r.input, 20) != 0
-                {
-                    return Err(NvError::NotSupported.into());
+                if !state.object {
+                    return Err(NvError::InvalidState.into());
                 }
-                state.notifier_enabled = word(r.input, 16) != 0;
+                state.notifier_enabled = channel::notifier_enabled(r.input)?;
                 r.output.copy_from_slice(r.input);
                 Ok(())
             }

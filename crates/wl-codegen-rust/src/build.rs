@@ -364,6 +364,16 @@ fn build_inner(
     if let Some(unit) = emitted.units.iter().find(|u| u.source.trim().is_empty()) {
         return Err(format!("empty emitted source for unit {}", unit.name));
     }
+    if gpu_workspace.is_some() {
+        let module = "pub mod native_gpu {\n";
+        if emitted.main.contains(module)
+            && !emitted
+                .main
+                .contains(&format!("{module}{}\n}}\n", native_gpu::ADAPTER))
+        {
+            return Err("emitted NVIDIA host adapter is stale; refresh the host entry before compiling guest units".into());
+        }
+    }
     fs::create_dir_all(&cfg.cache_dir).map_err(|e| format!("{}: {e}", cfg.cache_dir.display()))?;
     let version = rustc()
         .arg("-vV")
@@ -572,6 +582,36 @@ mod tests {
             assert_eq!(error, "empty emitted source for unit wlu_10000");
             assert!(!cache.exists());
         }
+    }
+
+    #[test]
+    fn stale_embedded_host_adapter_fails_before_guest_compilation_or_cache_creation() {
+        let cache =
+            std::env::temp_dir().join(format!("wanderlust-stale-host-{}", std::process::id()));
+        assert!(!cache.exists());
+        let cfg = BuildConfig {
+            target: None,
+            cache_dir: cache.clone(),
+            jobs: 1,
+            opt_level: 0,
+        };
+        let emitted = Emitted {
+            // A formerly generated wrapper can compile against Host defaults,
+            // yet omit required callbacks. Type checking alone cannot catch it.
+            main: "pub mod native_gpu {\n// obsolete host callbacks\n}\nfn main() {}\n".into(),
+            units: Vec::new(),
+            blobs: Vec::new(),
+        };
+        let error = build_owned(
+            emitted,
+            &cache.join("main.rs"),
+            &cache.join("output"),
+            &cfg,
+            Some(&cache.join("missing-workspace")),
+        )
+        .unwrap_err();
+        assert!(error.contains("host adapter is stale"), "{error}");
+        assert!(!cache.exists());
     }
 
     #[test]

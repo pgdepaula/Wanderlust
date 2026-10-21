@@ -553,11 +553,6 @@ fn runtime_service_executes_indexed_textured_draw_and_cpu_mutation() {
         ),
         (0x4004480d, words(&[0x65]), nvidia::NvError::NotSupported),
         (0x40044803, words(&[1000]), nvidia::NvError::NotSupported),
-        (
-            0xc018480c,
-            words(&[0, 0, 0, 0, 2, 0]),
-            nvidia::NvError::NotSupported,
-        ),
     ] {
         let size = if request >> 30 & 2 != 0 {
             ((request >> 16) & 0x3fff) as u64
@@ -681,7 +676,9 @@ fn runtime_service_partial_gpu_fault_publishes_prefix_and_never_replays() {
         assert!(event.is_none_or(|previous| previous == e));
         event = Some(e);
     }
-    h.ioctl(channel, 0xc018480c, &words(&[0, 0, 0, 0, 1, 0]), None);
+    // Independently observed legacy-shaped Switch request: size 4096, mem 4.
+    // These are not a notifier memory mapping: only mem != 0 has meaning.
+    h.ioctl(channel, 0xc018480c, &words(&[0, 0, 4096, 0, 4, 0]), None);
     // Literal unsupported method at 0x3ffc AFTER the valid indexed draw.
     command.extend([0x20010fff, 0]);
     h.p.memory
