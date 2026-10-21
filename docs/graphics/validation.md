@@ -3299,14 +3299,14 @@ or a complete validation of its runtime changes.
 
 ### GPU controller identity and descriptor isolation
 
-`wl-nvdrv` has four CPU tests for the inline characteristics/TPC wire formats,
+`wl-nvdrv` has five CPU tests for the inline characteristics/TPC wire formats,
 opaque address tags, short/null requests, output failure atomicity, reserved
 fields, and padding. The existing four capture tests also pass. Normal package
-execution reports eight passing tests and four ignored device-dependent tests.
+execution reports nine passing tests and five ignored device-dependent tests.
 
 Explicit device execution ran `control_gpu` (one scenario) and `runtime_gpu`
-(three scenarios) on WSL OpenGL, native Windows D3D12, and native Windows Vulkan:
-twelve passes, no device-test skips. The controller scenario checks 32 repeated
+(four scenarios) on WSL OpenGL, native Windows D3D12, and native Windows Vulkan:
+fifteen passes, no device-test skips. The controller scenario checks 32 repeated
 queries, actual FD close/reopen, cross-device and stale-FD rejection, ioctl
 kind/direction errors, and zero additional GPU submissions, draws, uploads or
 readbacks. A memory adapter that panics on every read/write/pin operation proves
@@ -3338,3 +3338,14 @@ destinations still undergo the same preflight. An original run with the earlier
 shared legacy-tag restriction reached the controller query but rejected it as
 BadParameter. This distinction is now tested separately from the legacy nonzero
 tag requirement, including malformed-size failure without partial output.
+
+The Ioctl3 TPC-mask scenario verifies four- and eight-byte second outputs through
+literal HIPC descriptors, with zero legacy address words. CPU cases exercise
+nonzero size tags up to UINT32_MAX without allocation, ignored reserved data,
+unsupported output extents, and no partial writes on rejection. Direct adapter
+tests additionally prove that enabling this transport does not enable it on an
+nvmap descriptor or cause guest-memory dereferences. An original run reached
+113,167,568 instructions and 103 IPC requests, successfully completed the
+characteristics query with its zero unused tag, and then identified Ioctl3 TPC
+masks as the next unsupported request. No original GPU draw or frame was
+observed in that run.

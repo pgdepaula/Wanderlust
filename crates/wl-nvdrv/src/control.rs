@@ -3,11 +3,22 @@
 //! nx/source/nvidia/ioctl/nvhost-ctrl-gpu.c and nx/include/switch/nvidia/ioctl.h.
 use crate::{Ioctl, IoctlKind, NvError, Result, long, out32, out64, word};
 
-pub(super) fn is_inline_characteristics(r: &Ioctl<'_>) -> bool {
-    r.request == 0xc0b04705 && r.kind == IoctlKind::Ioctl3
+pub(super) fn is_inline_query(r: &Ioctl<'_>) -> bool {
+    matches!(r.request, 0xc0b04705 | 0xc0184706) && r.kind == IoctlKind::Ioctl3
 }
 
 pub(super) fn ioctl(r: Ioctl<'_>) -> Result<()> {
+    if r.request == 0xc0184706
+        && r.input.len() >= 4
+        && std::env::var("WL_NVDRV_TRACE").as_deref() == Ok("1")
+    {
+        eprintln!(
+            "NVIDIA tpc-masks kind={:?} size_tag={} extra_output_bytes={}",
+            r.kind,
+            word(r.input, 0),
+            r.extra_output.len()
+        );
+    }
     if r.request == 0xc0b04705
         && r.input.len() >= 16
         && std::env::var("WL_NVDRV_TRACE").as_deref() == Ok("1")
@@ -20,20 +31,33 @@ pub(super) fn ioctl(r: Ioctl<'_>) -> Result<()> {
             r.extra_output.len()
         );
     }
-    if is_inline_characteristics(&r) {
+    if is_inline_query(&r) {
         if !r.extra_input.is_empty() {
             return Err(NvError::NotSupported.into());
         }
-        if r.extra_output.len() != 160 {
-            return Err(NvError::InvalidSize.into());
+        match r.request {
+            0xc0b04705 => {
+                if r.extra_output.len() != 160 {
+                    return Err(NvError::InvalidSize.into());
+                }
+                characteristics(r.input, r.output, false)?;
+                r.extra_output.copy_from_slice(&r.output[16..]);
+            }
+            0xc0184706 => {
+                if !matches!(r.extra_output.len(), 4 | 8) {
+                    return Err(NvError::InvalidSize.into());
+                }
+                tpc_masks(r.input, r.output, false)?;
+                r.extra_output
+                    .copy_from_slice(&r.output[16..16 + r.extra_output.len()]);
+            }
+            _ => return Err(NvError::NotSupported.into()),
         }
-        characteristics(r.input, r.output, false)?;
-        r.extra_output.copy_from_slice(&r.output[16..]);
         return Ok(());
     }
     match r.request {
         0xc0b04705 => characteristics(r.input, r.output, true),
-        0xc0184706 => tpc_masks(r.input, r.output),
+        0xc0184706 => tpc_masks(r.input, r.output, true),
         _ => Err(NvError::NotSupported.into()),
     }
 }
@@ -90,15 +114,19 @@ fn characteristics(input: &[u8], output: &mut [u8], require_legacy_address: bool
     Ok(())
 }
 
-fn tpc_masks(input: &[u8], output: &mut [u8]) -> Result<()> {
+fn tpc_masks(input: &[u8], output: &mut [u8], legacy_layout: bool) -> Result<()> {
     if input.len() != 24 || output.len() != 24 {
         return Err(NvError::InvalidSize.into());
     }
-    // Bounded one-GPC query. Other buffer shapes remain unsupported.
-    if word(input, 0) != 4 {
+    if word(input, 0) == 0 {
+        return Err(NvError::BadParameter.into());
+    }
+    // Ioctl3 uses its explicit output; its size tag is nonzero but ignored,
+    // and the three reserved words are not a legacy destination pointer.
+    if legacy_layout && word(input, 0) != 4 {
         return Err(NvError::NotSupported.into());
     }
-    if word(input, 4) != 0 || long(input, 8) == 0 {
+    if legacy_layout && (word(input, 4) != 0 || long(input, 8) == 0) {
         return Err(NvError::BadParameter.into());
     }
     output.copy_from_slice(input);
@@ -110,6 +138,66 @@ fn tpc_masks(input: &[u8], output: &mut [u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ioctl3_tpc_masks_use_only_the_bounded_output() {
+        for size_tag in [1u32, 4, 8, u32::MAX] {
+            for extent in [4, 8] {
+                let mut input = [0xa5; 24];
+                input[..4].copy_from_slice(&size_tag.to_le_bytes());
+                let mut output = [0xcc; 24];
+                let mut extra = vec![0xdd; extent];
+                ioctl(Ioctl {
+                    fd: 1,
+                    request: 0xc0184706,
+                    kind: IoctlKind::Ioctl3,
+                    input: &input,
+                    output: &mut output,
+                    extra_input: &[],
+                    extra_output: &mut extra,
+                })
+                .unwrap();
+                assert_eq!(&output[..16], &input[..16]);
+                assert_eq!(&output[16..], &[3, 0, 0, 0, 0, 0, 0, 0]);
+                assert_eq!(&extra, &output[16..16 + extent]);
+            }
+        }
+        for extent in [0, 3, 5, 9] {
+            let mut input = [0; 24];
+            input[0] = 8;
+            let mut output = [0xcc; 24];
+            let mut extra = vec![0xdd; extent];
+            assert!(
+                ioctl(Ioctl {
+                    fd: 1,
+                    request: 0xc0184706,
+                    kind: IoctlKind::Ioctl3,
+                    input: &input,
+                    output: &mut output,
+                    extra_input: &[],
+                    extra_output: &mut extra,
+                })
+                .is_err()
+            );
+            assert_eq!(output, [0xcc; 24]);
+            assert!(extra.iter().all(|v| *v == 0xdd));
+        }
+        let mut output = [0xcc; 24];
+        let mut extra = [0xdd; 8];
+        assert!(
+            ioctl(Ioctl {
+                fd: 1,
+                request: 0xc0184706,
+                kind: IoctlKind::Ioctl3,
+                input: &[0; 24],
+                output: &mut output,
+                extra_input: &[],
+                extra_output: &mut extra,
+            })
+            .is_err()
+        );
+        assert_eq!(output, [0xcc; 24]);
+        assert_eq!(extra, [0xdd; 8]);
+    }
     #[test]
     fn ioctl3_validates_both_outputs_before_writing_either() {
         let mut input = [0u8; 176];
@@ -233,7 +321,7 @@ mod tests {
         input[..8].copy_from_slice(&4u64.to_le_bytes());
         input[8..16].copy_from_slice(&u64::MAX.to_le_bytes());
         let mut output = [0xdd; 24];
-        tpc_masks(&input, &mut output).unwrap();
+        tpc_masks(&input, &mut output, true).unwrap();
         assert_eq!(&output[..16], &input[..16]);
         assert_eq!(&output[16..], &[3, 0, 0, 0, 0, 0, 0, 0]);
         for index in [0, 4, 8] {
@@ -246,7 +334,7 @@ mod tests {
                 invalid[8..16].fill(0);
             }
             let mut output = [0xdd; 24];
-            assert!(tpc_masks(&invalid, &mut output).is_err());
+            assert!(tpc_masks(&invalid, &mut output, true).is_err());
             assert_eq!(output, [0xdd; 24]);
         }
     }

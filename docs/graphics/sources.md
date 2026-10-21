@@ -1464,3 +1464,9 @@ nonzero incoming address tag. This is a semantic cross-check only: no GPL source
 or arbitrary returned pointer constants were copied. Wanderlust preserves the
 unused input tag and never dereferences it; the legacy libnx contract retains its
 nonzero-tag restriction.
+
+The same Switchbrew revision's `NVGPU_GPU_IOCTL_GET_TPC_MASKS` entry specifies
+both transports, a nonzero ignored size tag, three reserved words, and two
+32-bit mask slots. The pinned libnx legacy wrapper's pointer-shaped layout is
+not imposed on the separate Ioctl3 output. The one-GPC GM20B model returns
+`[3, 0]`, with either the first slot or both slots exposed by the bounded output.

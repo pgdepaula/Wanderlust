@@ -680,3 +680,44 @@ fn runtime_service_ioctl3_characteristics_publishes_two_checked_outputs() {
     assert_eq!(counters.0.readback_operations, 0);
     h.close(fd);
 }
+
+#[test]
+#[ignore = "requires the actual NVIDIA runtime backend and wgpu device"]
+fn runtime_service_ioctl3_tpc_masks_publish_the_one_gpc_mask() {
+    let mut h = Harness::new(vec![0; 0x18000]);
+    let fd = h.open("/dev/nvhost-ctrl-gpu");
+    let mut input = [0u8; 24];
+    input[0] = 8;
+    h.p.memory.write_bytes(META + 0x1000, &input).unwrap();
+    let mut args = fd.to_le_bytes().to_vec();
+    args.extend(0xc0184706u32.to_le_bytes());
+    for extent in [4u64, 8] {
+        h.send(&Wire {
+            command: 12,
+            args: &args,
+            x: &[(META + 0x1000, 24)],
+            a: &[(0, 0)],
+            b: &[(META + 0x3000, 24), (META + 0x4000, extent)],
+            c: &[(0, 0), (0, 0)],
+            ..Wire::default()
+        });
+        assert_eq!(h.p.memory.load(h.tls() + 0x20, 4).unwrap(), 0);
+        assert_eq!(
+            h.p.memory.read_bytes(META + 0x3000, 16).unwrap(),
+            &input[..16]
+        );
+        assert_eq!(
+            h.p.memory.read_bytes(META + 0x3010, 8).unwrap(),
+            &[3, 0, 0, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(h.p.memory.load(META + 0x4000, 4).unwrap(), 3);
+        if extent == 8 {
+            assert_eq!(h.p.memory.load(META + 0x4004, 4).unwrap(), 0);
+        }
+    }
+    let counters = *h.metrics.borrow();
+    assert_eq!(counters.0.submissions, 0);
+    assert_eq!(counters.0.draw_commands, 0);
+    assert_eq!(counters.0.readback_operations, 0);
+    h.close(fd);
+}

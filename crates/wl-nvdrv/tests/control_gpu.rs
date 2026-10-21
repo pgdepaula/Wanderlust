@@ -95,6 +95,43 @@ fn control_gpu_identity_and_fd_isolation_do_not_submit_work() {
     let mut masks = [0xcc; 24];
     query(&mut d, fd, IoctlKind::Ioctl, 0xc0184706, &mask, &mut masks).unwrap();
     assert_eq!(&masks[16..], &[3, 0, 0, 0, 0, 0, 0, 0]);
+    // Ioctl3 uses the explicit second output, not the legacy address field.
+    mask.fill(0);
+    mask[0] = 8;
+    let mut inline = [0xcc; 8];
+    d.ioctl(
+        Ioctl {
+            fd,
+            request: 0xc0184706,
+            kind: IoctlKind::Ioctl3,
+            input: &mask,
+            output: &mut masks,
+            extra_input: &[],
+            extra_output: &mut inline,
+        },
+        &mut NoGuestAccess,
+    )
+    .unwrap();
+    assert_eq!(inline, [3, 0, 0, 0, 0, 0, 0, 0]);
+    masks.fill(0xcc);
+    inline.fill(0xdd);
+    assert!(matches!(
+        d.ioctl(
+            Ioctl {
+                fd: nvmap,
+                request: 0xc0184706,
+                kind: IoctlKind::Ioctl3,
+                input: &mask,
+                output: &mut masks,
+                extra_input: &[],
+                extra_output: &mut inline,
+            },
+            &mut NoGuestAccess
+        ),
+        Err(Error::Driver(NvError::NotSupported))
+    ));
+    assert_eq!(masks, [0xcc; 24]);
+    assert_eq!(inline, [0xdd; 8]);
     d.close(fd, &mut NoGuestAccess).unwrap();
     assert!(matches!(
         query(

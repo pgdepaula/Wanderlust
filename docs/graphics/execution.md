@@ -1748,5 +1748,11 @@ are checked before either output changes. The identity is returned in both the
 regular structure and the second output. The runtime validates all guest output
 ranges, including overlap with each other and the TLS reply, before invoking the
 backend. A failed transport/publication preflight does not poison the descriptor;
-a valid query can be retried. This exception does not enable Ioctl3 on other
-device nodes or other controller requests.
+a valid query can be retried. These bounded query forms do not enable Ioctl3 on other
+device nodes or unimplemented controller requests.
+
+TPC masks also support Ioctl3 with a four- or eight-byte second output. Its
+nonzero size tag is not an allocation request, and its reserved words are not a
+legacy pointer. Both the regular mask field and the second output report mask
+three for GPC zero; the absent second GPC has a zero mask. Zero size tags and
+unsupported output extents fail before either metadata output is written.
