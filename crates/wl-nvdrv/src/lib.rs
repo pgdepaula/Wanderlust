@@ -735,13 +735,15 @@ impl<P: Copy> Driver<P> {
                     }
                     Ok(())
                 })();
+                // Publication can succeed before a later accepted-prefix fault.
+                // Retain its actual image even though the request must halt.
+                self.frame = completed_frame;
                 if let Err(error) = finish {
                     let message = error.to_string();
                     state.error_event |= state.notifier_enabled;
                     self.fatal = Some(message.clone());
                     return Err(Error::Fatal(message));
                 }
-                self.frame = completed_frame;
                 state.threshold = threshold;
                 r.output.copy_from_slice(r.input);
                 out32(r.output, 12, 0);

@@ -299,6 +299,9 @@ struct Harness {
 }
 impl Harness {
     fn new(data: Vec<u8>) -> Self {
+        Self::with_capture(data, None)
+    }
+    fn with_capture(data: Vec<u8>, capture: Option<&std::path::Path>) -> Self {
         let mut m = Memory::default();
         for (base, size, st, r, w, x) in [
             (CODE, 4096, state::CODE, true, false, true),
@@ -342,9 +345,13 @@ impl Harness {
         .unwrap();
         let k = p.kernel.as_mut().unwrap();
         let metrics = Metrics::default();
+        let mut native = native::NativeHost::new().unwrap();
+        if let Some(root) = capture {
+            native.capture_for_test(root).unwrap();
+        }
         k.nvidia
             .install(Box::new(ObservedHost {
-                inner: native::NativeHost::new().unwrap(),
+                inner: native,
                 metrics: metrics.clone(),
             }))
             .unwrap();
@@ -481,9 +488,14 @@ const RANGES: [(u64, u64, u64); 9] = [
     (0xb0000, 0x10000, 0x4000),
 ];
 fn configured() -> (Harness, u32, u32, u32, Vec<u32>, Vec<u8>) {
+    configured_with_capture(None)
+}
+fn configured_with_capture(
+    capture: Option<&std::path::Path>,
+) -> (Harness, u32, u32, u32, Vec<u32>, Vec<u8>) {
     let (mut data, command, image) = fixture();
     put(&mut data, 0x10000, &command);
-    let mut h = Harness::new(data);
+    let mut h = Harness::with_capture(data, capture);
     let nvmap = h.open("/dev/nvmap");
     let space = h.open("/dev/nvhost-as-gpu");
     let channel = h.open("/dev/nvhost-gpu");
@@ -686,7 +698,15 @@ fn runtime_service_executes_indexed_textured_draw_and_cpu_mutation() {
 #[test]
 #[ignore = "requires actual GPU partial execution and publication"]
 fn runtime_service_partial_gpu_fault_publishes_prefix_and_never_replays() {
-    let (mut h, _, _, channel, mut command, image) = configured();
+    let root = std::env::temp_dir().join(format!(
+        "wanderlust-fault-prefix-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let (mut h, _, _, channel, mut command, image) = configured_with_capture(Some(&root));
     // QueryEvent returns a genuine readable kernel event. Repeated queries
     // alias the same object, and accepted faults signal it through the kernel.
     let mut event = None;
@@ -753,6 +773,21 @@ fn runtime_service_partial_gpu_fault_publishes_prefix_and_never_replays() {
         None,
         BG,
     );
+    let directory = std::fs::read_dir(&root)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let metadata = std::fs::read_to_string(directory.join("color-0001.json")).unwrap();
+    assert!(metadata.contains("\"kind\":\"published-color-target\""));
+    assert!(metadata.contains("\"draw_commands\":1"));
+    let captured = std::fs::read(directory.join("color-0001.rgba")).unwrap();
+    assert_eq!(
+        captured,
+        h.p.memory.read_bytes(DATA + RT as u64, SIZE).unwrap()
+    );
+    check(&captured, &image, None, BG);
     assert!(h.p.memory.ensure_gpu_unpinned(DATA, 4096).is_err());
     let before = *h.metrics.borrow();
     assert_eq!(before.0.draw_commands, 1);
@@ -769,6 +804,8 @@ fn runtime_service_partial_gpu_fault_publishes_prefix_and_never_replays() {
     assert_eq!(after.0.draw_commands, before.0.draw_commands);
     assert_eq!(after.0.submissions, before.0.submissions);
     assert_eq!(after.1.accepted, before.1.accepted);
+    assert_eq!(std::fs::read_dir(directory).unwrap().count(), 2);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

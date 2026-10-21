@@ -192,6 +192,11 @@ impl NativeHost {
     pub fn driver_counters(&self) -> wl_gpu::driver_backend::DriverCounters {
         self.driver.driver_counters()
     }
+    #[cfg(test)]
+    pub fn capture_for_test(&mut self, root: &std::path::Path) -> std::io::Result<()> {
+        self.capture = Some(Capture::create(root, 1)?);
+        Ok(())
+    }
     fn present_debug_output(&mut self) -> service::HostResult<()> {
         if let Some(frame) = self.driver.take_frame() {
             self.published_targets += 1;
@@ -357,8 +362,10 @@ impl service::Host for NativeHost {
                 "NVIDIA ioctl fd={fd} request={request:#010x} kind={kind:?} result={result:?}"
             );
         }
-        result?;
-        self.present_debug_output()
+        // A valid prefix may already have published an image before a fatal
+        // suffix. Observe that real output while preserving the original error.
+        let presentation = self.present_debug_output();
+        result.and(presentation)
     }
 }
 

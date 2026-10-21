@@ -1947,6 +1947,12 @@ an increment. Nonzero guest-command increment reservations remain unsupported:
 they require command-driven syncpoint execution. The separately supported
 driver-generated fence increment still advances by two after real completion.
 
+If a submission publishes a valid rendered prefix and then reports an accepted
+command fault, the diagnostic capture path retains that published image before
+propagating the original fatal error. It does not turn the failed request into
+success, write a successful ioctl response, replay commands or invent a VI
+presentation. A publication failure produces no new image to capture.
+
 ### SDL diagnostic status
 
 `WL_GPU_DEBUG_WINDOW=1` opens the SDL2 diagnostic window at backend creation.
