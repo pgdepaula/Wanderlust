@@ -1735,7 +1735,8 @@ The Switch ABI returns characteristics inline after two 64-bit header fields.
 A requested structure size of at least 160 bytes is supported and the returned
 size is 160. The nonzero address field is preserved as an opaque value, including
 libnx's literal value of one; it is never dereferenced. Short requests and null
-address tags fail before modifying output. TPC-mask queries support exactly one
+legacy address tags fail before modifying output. Ioctl3 does not require the
+legacy tag: its second output is the destination, and a zero unused tag is valid. TPC-mask queries support exactly one
 32-bit mask, with zero reserved bits and a nonzero opaque address. The returned
 mask is three, identifying the two TPCs in GPC zero; unused inline bytes are zero.
 Other shapes and controller ioctls, including ZCULL/ZBC and GPU-time queries,

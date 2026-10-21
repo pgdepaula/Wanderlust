@@ -637,7 +637,7 @@ fn runtime_service_ioctl3_characteristics_publishes_two_checked_outputs() {
     let fd = h.open("/dev/nvhost-ctrl-gpu");
     let mut input = [0xa5; 176];
     input[..8].copy_from_slice(&160u64.to_le_bytes());
-    input[8..16].copy_from_slice(&1u64.to_le_bytes());
+    input[8..16].fill(0);
     h.p.memory.write_bytes(META + 0x1000, &input).unwrap();
     let mut args = fd.to_le_bytes().to_vec();
     args.extend(0xc0b04705u32.to_le_bytes());
@@ -659,6 +659,7 @@ fn runtime_service_ioctl3_characteristics_publishes_two_checked_outputs() {
     let inline = h.p.memory.read_bytes(META + 0x4000, 160).unwrap();
     assert_eq!(inline, &header[16..]);
     assert_eq!(&header[..8], &160u64.to_le_bytes());
+    assert_eq!(&header[8..16], &[0; 8]);
     assert_eq!(&inline[..4], &[0x20, 1, 0, 0]);
     assert_eq!(&inline[92..96], &[0x97, 0xb1, 0, 0]);
     assert_eq!(&inline[80..88], &[0; 8]);

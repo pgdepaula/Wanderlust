@@ -3326,8 +3326,15 @@ The additional runtime scenario sends literal HIPC command-12 descriptors for
 Ioctl3 GET_CHARACTERISTICS. Both output buffers receive the independently checked
 GM20B identity, while overlapping outputs fail without modifying either and a
 correct retry succeeds. CPU tests cover zero, short and oversized second outputs,
-null address tags, and failure atomicity of both metadata outputs. A subsequent
+null legacy address tags, and failure atomicity of both metadata outputs. A subsequent
 original executable run reached 113,154,258 instructions and 102 IPC requests,
 opened the controller successfully, and identified Ioctl3 GET_CHARACTERISTICS as
 the next unsupported request before this extension. It still ended at the same
 unmapped read and did not produce original GPU output.
+
+The Ioctl3 transport test also supplies a zero unused address tag, matching the
+original SDK call. Its bounded second output remains mandatory and both guest
+destinations still undergo the same preflight. An original run with the earlier
+shared legacy-tag restriction reached the controller query but rejected it as
+BadParameter. This distinction is now tested separately from the legacy nonzero
+tag requirement, including malformed-size failure without partial output.

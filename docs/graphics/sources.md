@@ -1455,3 +1455,12 @@ No compiler implementation is imported.
   [nv.c](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/services/nv.c),
   `nvIoctl3`, supplies one input and two auto-select output buffers. Runtime tests
   independently encode those HIPC descriptors and check both destinations.
+
+The two transports differ in address-tag validation. The original base workload
+uses a zero unused tag with an explicit Ioctl3 output. The historical
+[Yuzu controller implementation, revision ebcee03b0c4e02a58eeee6152950e20ab2769283](https://ni.4a.si/anonymous/yuzu/diff/src/core?id=ebcee03b0c4e02a58eeee6152950e20ab2769283)
+also routes Ioctl3 characteristics into its separate output without requiring a
+nonzero incoming address tag. This is a semantic cross-check only: no GPL source
+or arbitrary returned pointer constants were copied. Wanderlust preserves the
+unused input tag and never dereferences it; the legacy libnx contract retains its
+nonzero-tag restriction.

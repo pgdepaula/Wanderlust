@@ -8,6 +8,18 @@ pub(super) fn is_inline_characteristics(r: &Ioctl<'_>) -> bool {
 }
 
 pub(super) fn ioctl(r: Ioctl<'_>) -> Result<()> {
+    if r.request == 0xc0b04705
+        && r.input.len() >= 16
+        && std::env::var("WL_NVDRV_TRACE").as_deref() == Ok("1")
+    {
+        eprintln!(
+            "NVIDIA characteristics kind={:?} size={} address_tag_zero={} extra_output_bytes={}",
+            r.kind,
+            long(r.input, 0),
+            long(r.input, 8) == 0,
+            r.extra_output.len()
+        );
+    }
     if is_inline_characteristics(&r) {
         if !r.extra_input.is_empty() {
             return Err(NvError::NotSupported.into());
@@ -15,28 +27,29 @@ pub(super) fn ioctl(r: Ioctl<'_>) -> Result<()> {
         if r.extra_output.len() != 160 {
             return Err(NvError::InvalidSize.into());
         }
-        characteristics(r.input, r.output)?;
+        characteristics(r.input, r.output, false)?;
         r.extra_output.copy_from_slice(&r.output[16..]);
         return Ok(());
     }
     match r.request {
-        0xc0b04705 => characteristics(r.input, r.output),
+        0xc0b04705 => characteristics(r.input, r.output, true),
         0xc0184706 => tpc_masks(r.input, r.output),
         _ => Err(NvError::NotSupported.into()),
     }
 }
 
-fn characteristics(input: &[u8], output: &mut [u8]) -> Result<()> {
+fn characteristics(input: &[u8], output: &mut [u8], require_legacy_address: bool) -> Result<()> {
     if input.len() != 176 || output.len() != 176 || long(input, 0) < 160 {
         return Err(NvError::InvalidSize.into());
     }
-    if long(input, 8) == 0 {
+    if require_legacy_address && long(input, 8) == 0 {
         return Err(NvError::BadParameter.into());
     }
     output.fill(0);
     out64(output, 0, 160);
-    // Switch returns the structure inline. The nonzero address is an opaque
-    // ABI field, including 1 in libnx; never resolve or dereference it.
+    // The legacy nonzero tag is opaque (libnx uses 1). Ioctl3 supplies an
+    // explicit second output, so this unused field may be zero. Neither
+    // transport resolves or dereferences this value.
     out64(output, 8, long(input, 8));
     let gc = &mut output[16..];
     for (offset, value) in [
@@ -138,6 +151,21 @@ mod tests {
         input[8..16].fill(0);
         output.fill(0xcc);
         extra.fill(0xdd);
+        ioctl(Ioctl {
+            fd: 1,
+            request: 0xc0b04705,
+            kind: IoctlKind::Ioctl3,
+            input: &input,
+            output: &mut output,
+            extra_input: &[],
+            extra_output: &mut extra,
+        })
+        .unwrap();
+        assert_eq!(&output[8..16], &[0; 8]);
+        assert_eq!(extra, output[16..]);
+        input[..8].copy_from_slice(&159u64.to_le_bytes());
+        output.fill(0xcc);
+        extra.fill(0xdd);
         assert!(
             ioctl(Ioctl {
                 fd: 1,
@@ -159,7 +187,7 @@ mod tests {
         input[..8].copy_from_slice(&u64::MAX.to_le_bytes());
         input[8..16].copy_from_slice(&1u64.to_le_bytes());
         let mut out = [0xcc; 176];
-        characteristics(&input, &mut out).unwrap();
+        characteristics(&input, &mut out, true).unwrap();
         assert_eq!(
             &out[..16],
             &[160, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]
@@ -195,7 +223,7 @@ mod tests {
                 input[8..16].copy_from_slice(&address.to_le_bytes());
             }
             let mut output = vec![0xcc; output_len];
-            assert!(characteristics(&input, &mut output).is_err());
+            assert!(characteristics(&input, &mut output, true).is_err());
             assert!(output.iter().all(|b| *b == 0xcc));
         }
     }
