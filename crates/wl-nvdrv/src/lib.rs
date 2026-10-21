@@ -70,6 +70,7 @@ struct Allocation<P> {
 struct Storage<P> {
     backing: BackingId,
     pin: P,
+    alignment: u32,
 }
 #[derive(Debug)]
 struct Reservation {
@@ -274,6 +275,17 @@ impl<P: Copy> Driver<P> {
     }
     fn nvmap(&mut self, r: Ioctl<'_>, memory: &mut impl Memory<Pin = P>) -> Result<()> {
         match r.request {
+            0xc00c0109 => {
+                let allocation = &self.allocations[self.allocation(word(r.input, 0))?];
+                let value = nvmap::parameter(
+                    word(r.input, 4),
+                    allocation.size,
+                    allocation.storage.as_ref().map(|s| s.alignment),
+                )?;
+                r.output.copy_from_slice(r.input);
+                out32(r.output, 8, value);
+                Ok(())
+            }
             0xc0080101 => {
                 let size = u64::from(word(r.input, 0));
                 if size == 0 || size % PAGE_SIZE != 0 {
@@ -299,7 +311,8 @@ impl<P: Copy> Driver<P> {
                     return Err(NvError::AlreadyAllocated.into());
                 }
                 let size = self.allocations[index].size;
-                let address = nvmap::user_backing(r.input, size)?;
+                let selected = nvmap::user_backing(r.input, size)?;
+                let address = selected.address;
                 let pin = memory
                     .pin(address, size)
                     .map_err(|_| NvError::InvalidAddress)?;
@@ -310,7 +323,11 @@ impl<P: Copy> Driver<P> {
                         return Err(NvError::InvalidState.into());
                     }
                 };
-                self.allocations[index].storage = Some(Storage { backing, pin });
+                self.allocations[index].storage = Some(Storage {
+                    backing,
+                    pin,
+                    alignment: selected.alignment,
+                });
                 r.output.copy_from_slice(r.input);
                 Ok(())
             }

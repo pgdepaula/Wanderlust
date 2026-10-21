@@ -52,6 +52,42 @@ fn control_gpu_identity_and_fd_isolation_do_not_submit_work() {
     let fd = d.open("/dev/nvhost-ctrl-gpu").unwrap();
     let nvmap = d.open("/dev/nvmap").unwrap();
     let before = d.graphics_counters();
+    let mut created = [0; 8];
+    query(
+        &mut d,
+        nvmap,
+        IoctlKind::Ioctl,
+        0xc0080101,
+        &[0, 16, 0, 0, 0, 0, 0, 0],
+        &mut created,
+    )
+    .unwrap();
+    let mut parameter = [0; 12];
+    parameter[..4].copy_from_slice(&created[4..8]);
+    parameter[4] = 1;
+    let mut result = [0xcc; 12];
+    query(
+        &mut d,
+        nvmap,
+        IoctlKind::Ioctl,
+        0xc00c0109,
+        &parameter,
+        &mut result,
+    )
+    .unwrap();
+    assert_eq!(&result[8..], &4096u32.to_le_bytes());
+    for (param, error) in [
+        (2, NvError::InvalidState),
+        (3, NvError::NotSupported),
+        (6, NvError::BadParameter),
+    ] {
+        parameter[4..8].copy_from_slice(&(param as u32).to_le_bytes());
+        result.fill(0xcc);
+        assert!(
+            matches!(query(&mut d,nvmap,IoctlKind::Ioctl,0xc00c0109,&parameter,&mut result),Err(Error::Driver(e)) if e==error)
+        );
+        assert_eq!(result, [0xcc; 12]);
+    }
     let mut input = [0x77; 176];
     input[..8].copy_from_slice(&160u64.to_le_bytes());
     input[8..16].copy_from_slice(&1u64.to_le_bytes());

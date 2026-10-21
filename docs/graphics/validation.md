@@ -3460,3 +3460,17 @@ compiler preflight confirmed that reusing dependent archives from the old
 runtime fails with E0460. Rebuilding against the new runtime is required; a
 completed synthetic validation is not proof that the new original executable
 has already run.
+
+### Process-local nvmap parameter queries
+
+The CPU oracle checks literal SIZE, ALIGNMENT, HEAP and KIND results, missing
+backing, unsupported BASE, unknown selectors and oversized SIZE. Direct device
+tests query SIZE before backing registration and verify rejected metadata
+queries preserve output without accessing guest RAM. A literal runtime service
+scenario attaches real backing and checks all four results.
+
+Seventeen CPU tests and seven device scenarios passed on WSL OpenGL, native
+Windows D3D12 and native Windows Vulkan (21 device executions, zero skips in
+explicit runs). Strict package Clippy and workspace formatting passed. This
+adds a source-verified query subset; it does not claim that an original game
+has already exercised this new request.

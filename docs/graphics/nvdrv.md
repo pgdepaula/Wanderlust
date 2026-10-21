@@ -41,6 +41,7 @@ nvmap node and up to 16 channel identities over its lifetime.
 | Device | Request | Implemented restriction |
 | --- | --- | --- |
 | `/dev/nvmap` | Create `c0080101` | Nonzero size aligned to 4 KiB; unique handle |
+| | Param `c00c0109` | Created size; allocated alignment, system-memory heap and kind; BASE unsupported |
 | | Alloc `c0200104` | User-backed, cache flags 0/1, power-of-two allocation alignment ≥4096, page-aligned CPU storage, kind 0, heap mask 0 |
 | `/dev/nvhost-as-gpu` | InitializeEx `40284109` | Flags 0/1, selected 64/128 KiB large pages, default or checked explicit VA bounds |
 | | GetVARegions `c0404108` | Explicitly configured lower/upper regions; Ioctl and Ioctl3, zero/48-byte sizing tag, exact 48-byte region output |

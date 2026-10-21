@@ -700,6 +700,10 @@ fn runtime_service_reports_the_configured_gpu_va_regions() {
     alloc.extend((DATA + 4096).to_le_bytes());
     h.ioctl(nvmap, 0xc0200104, &alloc, None);
     assert!(h.p.memory.ensure_gpu_unpinned(DATA + 4096, 4096).is_err());
+    for (param, expected) in [(1, 4096u32), (2, 0x20000), (4, 0x40000000), (5, 0)] {
+        let bytes = h.ioctl(nvmap, 0xc00c0109, &words(&[handle, param, 0]), None);
+        assert_eq!(&bytes[8..], &expected.to_le_bytes());
+    }
     h.close(nvmap);
     h.p.memory.ensure_gpu_unpinned(DATA + 4096, 4096).unwrap();
     assert_eq!(h.metrics.borrow().0.submissions, 0);

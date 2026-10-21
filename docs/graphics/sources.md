@@ -1521,3 +1521,10 @@ checks the requested attribute capability while excluding DeviceShared from its
 rejection mask. The source is used as semantic evidence; GPL implementation code
 is not copied. Wanderlust's stricter registration lifetime guard permits only
 Uncached changes that preserve complete contiguous pins.
+
+[NVMAP_PARAM in Switchbrew](https://switchbrew.org/wiki/NV_services#NVMAP_IOC_PARAM)
+specifies SIZE, ALIGNMENT, unsupported BASE, system-memory HEAP and KIND selectors.
+The pinned [libnx ioctl wrapper](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/ioctl/nvmap.c#L79)
+corroborates the three-u32 wire payload and result position. Results come from
+the actual created object and retained user-backing metadata. No pointer-shaped
+value is fabricated for BASE.

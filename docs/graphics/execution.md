@@ -1832,3 +1832,12 @@ retains the larger Vec allocation and allocates only the shorter prefix. It
 still moves the remaining bytes in place. Splitting near the end retains the
 large prefix and allocates the short tail. This avoids a second large allocation
 when a one-page cache request isolates part of a multi-gigabyte guest heap.
+
+`NVMAP_PARAM` (`0xc00c0109`, 12-byte in/out) reads the process-local allocation
+handle and parameter selector and writes a 32-bit result at offset eight. SIZE
+(1) reports the created object's checked size. ALIGNMENT (2), HEAP (4) and KIND
+(5) require attached user backing and report its retained allocation alignment,
+system-memory heap `0x40000000`, and the supported kind zero. BASE (3) remains
+unsupported; unknown selectors and stale handles reject without changing the
+output. These queries acquire no guest-memory borrow, pin, upload, submission
+or completion. They do not implement cross-process nvmap IDs or import/export.

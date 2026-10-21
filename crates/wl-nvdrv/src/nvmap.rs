@@ -3,7 +3,12 @@
 use crate::{NvError, Result, long, word};
 use wl_gpu::memory::GuestAddress;
 
-pub(super) fn user_backing(input: &[u8], size: u64) -> Result<GuestAddress> {
+#[derive(Debug)]
+pub(super) struct UserBacking {
+    pub address: GuestAddress,
+    pub alignment: u32,
+}
+pub(super) fn user_backing(input: &[u8], size: u64) -> Result<UserBacking> {
     if input.len() != 32 {
         return Err(NvError::InvalidSize.into());
     }
@@ -28,7 +33,24 @@ pub(super) fn user_backing(input: &[u8], size: u64) -> Result<GuestAddress> {
     if address == 0 || address % 4096 != 0 || address.checked_add(size).is_none() {
         return Err(NvError::InvalidAddress.into());
     }
-    Ok(GuestAddress(address))
+    Ok(UserBacking {
+        address: GuestAddress(address),
+        alignment,
+    })
+}
+
+pub(super) fn parameter(parameter: u32, size: u64, alignment: Option<u32>) -> Result<u32> {
+    match parameter {
+        1 => u32::try_from(size).map_err(|_| NvError::InvalidSize.into()),
+        2 => alignment.ok_or(NvError::InvalidState.into()),
+        4 | 5 => {
+            alignment.ok_or(NvError::InvalidState)?;
+            // The supported allocations are user-backed system memory, kind 0.
+            Ok(if parameter == 4 { 0x40000000 } else { 0 })
+        }
+        3 => Err(NvError::NotSupported.into()),
+        _ => Err(NvError::BadParameter.into()),
+    }
 }
 
 #[cfg(test)]
@@ -45,7 +67,9 @@ mod tests {
         let mut input = request();
         for flags in [0u32, 1] {
             input[8..12].copy_from_slice(&flags.to_le_bytes());
-            assert_eq!(user_backing(&input, 4096).unwrap(), GuestAddress(0x21000));
+            let backing = user_backing(&input, 4096).unwrap();
+            assert_eq!(backing.address, GuestAddress(0x21000));
+            assert_eq!(backing.alignment, 0x20000);
         }
     }
     #[test]
@@ -71,5 +95,19 @@ mod tests {
         }
         assert!(user_backing(&request(), 0).is_err());
         assert!(user_backing(&request(), 1).is_err());
+    }
+    #[test]
+    fn parameter_queries_report_object_metadata_and_reject_missing_allocation() {
+        assert_eq!(parameter(1, 4096, None).unwrap(), 4096);
+        for (param, expected) in [(1, 4096), (2, 0x20000), (4, 0x40000000), (5, 0)] {
+            assert_eq!(parameter(param, 4096, Some(0x20000)).unwrap(), expected);
+        }
+        for param in [2, 4, 5] {
+            assert!(parameter(param, 4096, None).is_err());
+        }
+        for param in [0, 3, 6, u32::MAX] {
+            assert!(parameter(param, 4096, Some(0x20000)).is_err());
+        }
+        assert!(parameter(1, u64::MAX, None).is_err());
     }
 }
