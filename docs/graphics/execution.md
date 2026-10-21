@@ -1878,3 +1878,22 @@ boundaries, backing overflow and stale IDs fail without changing the epoch or
 existing mappings. There are at most 128 mappings per address space. This does
 not implement splitting or replacing an existing mapping, fragmented gathers,
 sparse PTEs or real hardware page tables.
+
+### Contiguous CPU backing across internal regions
+
+Runtime GPU registration accepts contiguous NORMAL read/write, non-executable
+storage with matching cache attributes (cached or Uncached). If the interval
+crosses adjacent internal regions, registration first validates the entire
+extent and prepares one owned byte buffer, bounded to 256 MiB. It then isolates
+the exact interval and consolidates its bytes into one runtime region. This is
+a one-time CPU copy, not a borrowed gather or zero-copy allocation. Later GPU
+reads borrow that region directly under the existing scoped memory contract.
+
+Bytes and attributes outside the interval and existing nonoverlapping pin
+tokens are retained. Gaps, incompatible attributes/state, executable/readonly
+pages, overlap with a pin and excessive consolidation sizes reject. An ordinary
+single-region pin does not copy payload bytes and retains its existing size
+limits. CPU mutations and GPU publication keep using canonical guest addresses;
+no guest pointer becomes a host pointer, and no asynchronous guest borrow is
+retained. This consolidation changes internal storage boundaries, not ownership
+of the guest allocation or GPU VA mappings.

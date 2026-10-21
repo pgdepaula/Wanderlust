@@ -306,6 +306,12 @@ impl Harness {
         }
         m.map_state(DATA, data, true, true, false, state::NORMAL)
             .unwrap();
+        // The runtime heap can be split into adjacent allocations. Registration
+        // must provide a real contiguous borrow before the GPU reads shaders,
+        // texture data and commands across this internal boundary.
+        if m.regions[m.region_index(DATA).unwrap()].bytes.len() > 0x5000 {
+            assert!(m.split_at(DATA + 0x5000));
+        }
         let (mut p, cpu) = Process::horizon(
             m,
             CODE,

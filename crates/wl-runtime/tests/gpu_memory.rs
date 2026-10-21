@@ -117,12 +117,12 @@ fn foreign_memory_pin_cannot_release_equal_numeric_address_registration() {
 fn invalid_geometry_permissions_state_and_cross_region_pins_do_not_mutate_memory() {
     let mut memory = Memory::default();
     normal(&mut memory, BASE, 4096);
-    normal(&mut memory, BASE + PAGE, 4096);
+    normal(&mut memory, BASE + 2 * PAGE, 4096);
     for (address, size) in [
         (BASE, 0),
         (BASE + 1, PAGE),
         (BASE, PAGE - 1),
-        (BASE + 2 * PAGE, PAGE),
+        (BASE + PAGE, PAGE),
         (BASE, 2 * PAGE),
         (!(PAGE - 1), 2 * PAGE),
     ] {
@@ -142,7 +142,6 @@ fn invalid_geometry_permissions_state_and_cross_region_pins_do_not_mutate_memory
         (true, true, true, state::NORMAL, 0),
         (true, true, false, state::STACK, 0),
         (true, true, false, state::SHARED_MEMORY, 0),
-        (true, true, false, state::NORMAL, attribute::UNCACHED),
         (true, true, false, state::NORMAL, attribute::LOCKED),
     ] {
         let mut candidate = Memory::default();
@@ -153,6 +152,89 @@ fn invalid_geometry_permissions_state_and_cross_region_pins_do_not_mutate_memory
         let before = snapshot(&candidate);
         assert!(candidate.pin_gpu_range(BASE, PAGE).is_err());
         assert_eq!(snapshot(&candidate), before);
+    }
+}
+
+#[test]
+fn adjacent_normal_regions_are_consolidated_once_without_changing_guest_bytes() {
+    for attributes in [0, attribute::UNCACHED] {
+        let mut memory = Memory::default();
+        memory
+            .map_state(BASE, vec![0x31; 8192], true, true, false, state::NORMAL)
+            .unwrap();
+        memory
+            .map_state(
+                BASE + 8192,
+                vec![0xa7; 8192],
+                true,
+                true,
+                false,
+                state::NORMAL,
+            )
+            .unwrap();
+        for r in &mut memory.regions {
+            r.attribute = attributes;
+        }
+        let left_pin = memory.pin_gpu_range(BASE, PAGE).unwrap();
+        let right_pin = memory.pin_gpu_range(BASE + 3 * PAGE, PAGE).unwrap();
+        assert!(memory.read_bytes(BASE + PAGE, 8192).is_err());
+        let pin = memory.pin_gpu_range(BASE + PAGE, 8192).unwrap();
+        assert_eq!(memory.read_bytes(BASE + PAGE, 4096).unwrap(), &[0x31; 4096]);
+        let borrowed = memory.read_bytes(BASE + PAGE, 8192).unwrap();
+        assert_eq!(&borrowed[..4096], &[0x31; 4096]);
+        assert_eq!(&borrowed[4096..], &[0xa7; 4096]);
+        assert_eq!(memory.regions.len(), 3);
+        assert!(memory.regions.iter().all(|r| r.attribute == attributes
+            && r.state == state::NORMAL
+            && r.read
+            && r.write
+            && !r.execute));
+        assert_eq!(memory.read_bytes(BASE, 4096).unwrap(), &[0x31; 4096]);
+        assert_eq!(
+            memory.read_bytes(BASE + 3 * PAGE, 4096).unwrap(),
+            &[0xa7; 4096]
+        );
+        memory.write_bytes(BASE + 2 * PAGE, &[1, 2, 3, 4]).unwrap();
+        assert_eq!(
+            memory.read_bytes(BASE + 2 * PAGE, 4).unwrap(),
+            &[1, 2, 3, 4]
+        );
+        assert!(memory.ensure_gpu_unpinned(BASE + PAGE, 8192).is_err());
+        assert!(!memory.split_at(BASE + 2 * PAGE));
+        memory.release_gpu_pin(pin).unwrap();
+        assert!(memory.split_at(BASE + 2 * PAGE));
+        assert!(memory.ensure_gpu_unpinned(BASE, PAGE).is_err());
+        assert!(memory.ensure_gpu_unpinned(BASE + 3 * PAGE, PAGE).is_err());
+        memory.release_gpu_pin(left_pin).unwrap();
+        memory.release_gpu_pin(right_pin).unwrap();
+    }
+}
+
+#[test]
+fn incompatible_adjacent_gpu_storage_fails_before_restructuring_memory() {
+    for (attributes, writable) in [
+        (attribute::UNCACHED, true),
+        (attribute::LOCKED, true),
+        (0, false),
+    ] {
+        let mut memory = Memory::default();
+        normal(&mut memory, BASE, 4096);
+        memory
+            .map_state(
+                BASE + PAGE,
+                vec![0x75; 4096],
+                true,
+                writable,
+                false,
+                state::NORMAL,
+            )
+            .unwrap();
+        memory.regions[1].attribute = attributes;
+        let before = snapshot(&memory);
+        assert!(memory.pin_gpu_range(BASE, 8192).is_err());
+        assert_eq!(snapshot(&memory), before);
+        let pin = memory.pin_gpu_range(BASE, 4096).unwrap();
+        memory.release_gpu_pin(pin).unwrap();
     }
 }
 
