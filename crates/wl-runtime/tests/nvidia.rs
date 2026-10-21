@@ -37,6 +37,8 @@ struct Observed {
     calls: Vec<Call>,
     fail_ioctl: bool,
     fatal_ioctl: bool,
+    event_supported: bool,
+    event_signaled: bool,
 }
 #[derive(Debug)]
 struct Host(Arc<Mutex<Observed>>);
@@ -61,6 +63,13 @@ impl nvidia::Host for Host {
         self.0.lock().unwrap().calls.push(Call::Close(fd));
         memory.write_bytes(MARKER, b"CLOS").unwrap();
         Ok(())
+    }
+    fn query_event(&mut self, fd: u32, event: u32) -> nvidia::HostResult<bool> {
+        let seen = self.0.lock().unwrap();
+        if !seen.event_supported || fd != FD || event != 3 {
+            return Err(nvidia::NvError::NotSupported.into());
+        }
+        Ok(seen.event_signaled)
     }
     fn ioctl(&mut self, call: nvidia::Ioctl<'_>, memory: &mut Memory) -> nvidia::HostResult<()> {
         let (fail, fatal) = {
@@ -636,7 +645,7 @@ fn uninitialized_and_unsupported_commands_do_not_invent_fds_events_or_completion
         args: &[0; 8],
         ..Wire::default()
     });
-    assert_eq!(h.scalar(0x20), nvidia::NvError::NotSupported as u32);
+    assert_eq!(h.scalar(0x20), nvidia::NvError::NotInitialized as u32);
     assert_eq!(
         h.scalar(4) >> 31,
         0,
@@ -1216,4 +1225,42 @@ fn firmware_margin_rejects_invalid_layout_and_preserves_prior_state() {
             .firmware_memory_margin(),
         None
     );
+}
+
+#[test]
+fn device_error_event_is_a_shared_readable_object_not_a_completion_fence() {
+    let mut h = Harness::new();
+    h.initialize();
+    h.observed.lock().unwrap().event_supported = true;
+    let mut event = None;
+    for _ in 0..2 {
+        h.send(&Wire {
+            command: 4,
+            args: &[0x41, 0, 0, 0, 3, 0, 0, 0],
+            ..Wire::default()
+        });
+        assert_eq!(h.scalar(4) >> 31, 1);
+        let handle = h.scalar(12);
+        let k = h.process.kernel.as_ref().unwrap();
+        let Some(Object::ReadableEvent(e)) = k.handles.get(handle) else {
+            panic!("invalid event")
+        };
+        assert!(event.is_none_or(|previous| previous == e));
+        assert!(!k.events[e].signaled);
+        event = Some(e);
+    }
+    h.observed.lock().unwrap().event_signaled = true;
+    h.observed.lock().unwrap().fatal_ioctl = true;
+    h.inputs();
+    h.stage(&Wire {
+        command: 1,
+        args: &ioctl_args(RW8),
+        x: &[(INPUT, 8)],
+        a: &[(0, 0)],
+        b: &[(OUTPUT, 8)],
+        c: &[(0, 0)],
+        ..Wire::default()
+    });
+    assert!(h.invoke().unwrap_err().contains("publication failed"));
+    assert!(h.process.kernel.as_ref().unwrap().events[event.unwrap()].signaled);
 }

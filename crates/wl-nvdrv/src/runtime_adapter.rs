@@ -127,6 +127,8 @@ pub struct NativeHost {
     hold_window: bool,
     capture: Option<Capture>,
     trace_remaining: u32,
+    published_targets: u64,
+    status_path: Option<std::path::PathBuf>,
 }
 impl std::fmt::Debug for NativeHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -143,7 +145,7 @@ impl NativeHost {
         let debug_window = if std::env::var("WL_GPU_DEBUG_WINDOW").as_deref() == Ok("1") {
             Some(
                 wl_guest_runtime::sdl::SdlHost::open(
-                    "Wanderlust - guest GPU diagnostic (not TOTK)",
+                    "TOTK - Wanderlust | SDL2 | initializing GPU | original frames: 0",
                     940,
                     580,
                 )
@@ -175,6 +177,8 @@ impl NativeHost {
             last_frame: None,
             hold_window: std::env::var("WL_GPU_DEBUG_HOLD").as_deref() == Ok("1"),
             capture,
+            published_targets: 0,
+            status_path: std::env::var_os("WL_GPU_STATUS_FILE").map(std::path::PathBuf::from),
             trace_remaining: if std::env::var("WL_NVDRV_TRACE").as_deref() == Ok("1") {
                 1024
             } else {
@@ -190,6 +194,7 @@ impl NativeHost {
     }
     fn present_debug_output(&mut self) -> service::HostResult<()> {
         if let Some(frame) = self.driver.take_frame() {
+            self.published_targets += 1;
             if let Some(capture) = &mut self.capture {
                 capture
                     .write(&frame, self.driver.graphics_counters().draw_commands)
@@ -252,6 +257,71 @@ impl service::Host for NativeHost {
             eprintln!("NVIDIA open node={node} result={result:?}");
         }
         result
+    }
+    fn update_progress(&mut self, instructions: u64, elapsed: f64) {
+        if self.debug_window.is_none() && self.status_path.is_none() {
+            return;
+        }
+        let c = self.driver.graphics_counters();
+        let adapter = &self.driver.capabilities().adapter;
+        let mips = if elapsed > 0.0 {
+            instructions as f64 / elapsed / 1_000_000.0
+        } else {
+            0.0
+        };
+        let lines = vec![
+            "TOTK - Wanderlust".into(),
+            "Original AArch64 execution - RUNNING".into(),
+            format!(
+                "SDL2 monitor | GPU execution backend: {:?}",
+                adapter.backend
+            ),
+            format!("GPU: {}", adapter.name.replace(['\n', '\r'], " ")),
+            format!("Retired A64 instructions: {instructions}"),
+            format!("CPU throughput: {mips:.2} million instructions/s"),
+            format!("Host elapsed: {elapsed:.1} s"),
+            format!(
+                "Maxwell command words consumed: {}",
+                c.gpfifo_command_bytes / 4
+            ),
+            format!(
+                "Maxwell draws: {} | host queue submissions: {}",
+                c.draw_commands, c.submissions
+            ),
+            format!(
+                "Translated shaders: {}",
+                c.shader_decodes + c.vertex_shader_decodes
+            ),
+            format!("Published GPU color targets: {}", self.published_targets),
+            "Original VI frames: not verified".into(),
+            if self.published_targets == 0 {
+                "Waiting for a published guest GPU image.".into()
+            } else {
+                "Published color targets are not verified VI frames.".into()
+            },
+            "This status canvas is not a game frame.".into(),
+        ];
+        if let Some(path) = &self.status_path {
+            let temporary = path.with_extension(format!("{}.part", std::process::id()));
+            if let Err(e) = std::fs::write(&temporary, lines.join("\n"))
+                .and_then(|()| std::fs::rename(&temporary, path))
+            {
+                eprintln!("GPU diagnostic status disabled after write failure: {e}");
+                self.status_path = None;
+            }
+        }
+        if let Some(window) = &mut self.debug_window {
+            window.set_title(&format!("TOTK - Wanderlust | SDL2 | {:?} | {mips:.2} MIPS | Maxwell draws: {} | targets: {}", adapter.backend, c.draw_commands, self.published_targets));
+            window.poll_input();
+            if let Some(frame) = &self.last_frame {
+                window.present_raw_rgba(&frame.rgba, frame.width, frame.height);
+            } else {
+                window.present_frame(&wl_guest_runtime::display::DisplayServer::default());
+            }
+        }
+    }
+    fn query_event(&mut self, fd: u32, event: u32) -> service::HostResult<bool> {
+        self.driver.query_event(fd, event).map_err(error)
     }
     fn close(&mut self, fd: u32, memory: &mut Memory) -> service::HostResult<()> {
         self.driver

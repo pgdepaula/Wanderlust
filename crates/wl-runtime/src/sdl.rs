@@ -92,6 +92,7 @@ type SdlInitFn = unsafe extern "C" fn(u32) -> c_int;
 type SdlQuitFn = unsafe extern "C" fn();
 type SdlCreateWindowFn =
     unsafe extern "C" fn(*const c_char, c_int, c_int, c_int, c_int, u32) -> *mut c_void;
+type SdlSetWindowTitleFn = unsafe extern "C" fn(*mut c_void, *const c_char);
 type SdlDestroyWindowFn = unsafe extern "C" fn(*mut c_void);
 type SdlCreateRendererFn = unsafe extern "C" fn(*mut c_void, c_int, u32) -> *mut c_void;
 type SdlDestroyRendererFn = unsafe extern "C" fn(*mut c_void);
@@ -134,6 +135,7 @@ pub struct SdlApi {
     pub quit: SdlQuitFn,
     pub create_window: SdlCreateWindowFn,
     pub destroy_window: SdlDestroyWindowFn,
+    pub set_window_title: SdlSetWindowTitleFn,
     pub create_renderer: SdlCreateRendererFn,
     pub destroy_renderer: SdlDestroyRendererFn,
     pub create_texture: SdlCreateTextureFn,
@@ -204,6 +206,7 @@ impl SdlApi {
                 quit: sym!(SDL_Quit, SdlQuitFn),
                 create_window: sym!(SDL_CreateWindow, SdlCreateWindowFn),
                 destroy_window: sym!(SDL_DestroyWindow, SdlDestroyWindowFn),
+                set_window_title: sym!(SDL_SetWindowTitle, SdlSetWindowTitleFn),
                 create_renderer: sym!(SDL_CreateRenderer, SdlCreateRendererFn),
                 destroy_renderer: sym!(SDL_DestroyRenderer, SdlDestroyRendererFn),
                 create_texture: sym!(SDL_CreateTexture, SdlCreateTextureFn),
@@ -271,6 +274,7 @@ impl SdlApi {
                 quit: sym!(SDL_Quit, SdlQuitFn),
                 create_window: sym!(SDL_CreateWindow, SdlCreateWindowFn),
                 destroy_window: sym!(SDL_DestroyWindow, SdlDestroyWindowFn),
+                set_window_title: sym!(SDL_SetWindowTitle, SdlSetWindowTitleFn),
                 create_renderer: sym!(SDL_CreateRenderer, SdlCreateRendererFn),
                 destroy_renderer: sym!(SDL_DestroyRenderer, SdlDestroyRendererFn),
                 create_texture: sym!(SDL_CreateTexture, SdlCreateTextureFn),
@@ -328,6 +332,16 @@ pub struct SdlHost {
 }
 
 impl SdlHost {
+    /// Updates host diagnostics without creating a guest frame or GPU command.
+    pub fn set_title(&mut self, title: &str) -> bool {
+        let Ok(title) = CString::new(title) else {
+            return false;
+        };
+        unsafe {
+            (self.api.set_window_title)(self.window, title.as_ptr());
+        }
+        true
+    }
     /// Attempts to open an SDL2 presentation window (default 1280x720).
     pub fn open(title: &str, width: u32, height: u32) -> Option<Self> {
         checked_rgba_layout(width, height)?;
@@ -657,6 +671,7 @@ mod tests {
         ptr::dangling_mut::<c_void>()
     }
     unsafe extern "C" fn no_handle(_: *mut c_void) {}
+    unsafe extern "C" fn title(_: *mut c_void, _: *const c_char) {}
     unsafe extern "C" fn renderer(_: *mut c_void, _: c_int, _: u32) -> *mut c_void {
         ptr::dangling_mut::<c_void>()
     }
@@ -731,6 +746,7 @@ mod tests {
                 quit,
                 create_window: window,
                 destroy_window: no_handle,
+                set_window_title: title,
                 create_renderer: renderer,
                 destroy_renderer: no_handle,
                 create_texture: texture,
@@ -756,6 +772,13 @@ mod tests {
             gamepad: GamepadState::default(),
             should_close: false,
         }
+    }
+    #[test]
+    fn invalid_window_titles_never_reach_the_native_api() {
+        let mut host = host();
+        assert!(!host.set_title("invalid\0title"));
+        assert!(host.set_title("Wanderlust | Vulkan | draws: 0"));
+        assert!(take().is_empty());
     }
     #[test]
     fn short_and_overflowing_rgba_never_reach_sdl() {

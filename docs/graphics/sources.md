@@ -1556,3 +1556,16 @@ while buffers remain mapped, and unmaps individual buffers by their mapped
 start. The same source distinguishes backing offset, mapping size and GPU VA.
 Only these lifetime/range semantics are adopted: desktop ioctl numbers differ
 from Switch and are not substituted for the pinned libnx wire identities.
+
+### Switch GPU channel initialization and error-event transport
+
+[libnx channel ioctl definitions at feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/ioctl/nvchannel.c#L148)
+establish the 32-byte Ex2 payload, output-only fence fields, priority, timeout,
+user-data and notifier wire identities. The [GPU-channel consumer](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/gpu_channel.c#L11)
+uses flags one and zero unknown fields, followed by object-context allocation,
+error-event query, notifier enablement and priority. No meaning is borrowed from
+the different desktop/Linux allocation flags. Unknown Switch modes stay rejected.
+[Service QueryEvent](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/services/nv.c#L304)
+uses command four, two input u32s, an NVIDIA error result and one HIPC copy handle;
+[event identifiers](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/include/switch/services/nv.h#L27)
+distinguish channel error event three from debug and control-device events.

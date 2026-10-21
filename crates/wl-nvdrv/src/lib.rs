@@ -3,6 +3,7 @@
 //! synchronous subset, not a Horizon handle manager or a second GPU interpreter.
 use wl_gpu::{driver::*, driver_backend::GpuDriver, memory::*};
 mod address_space;
+mod channel;
 mod control;
 mod mapping;
 mod nvmap;
@@ -103,6 +104,10 @@ struct Channel {
     syncpoint: u32,
     threshold: u32,
     entries: u32,
+    priority: u32,
+    user_data: u64,
+    notifier_enabled: bool,
+    error_event: bool,
 }
 #[derive(Debug)]
 enum Node {
@@ -229,6 +234,10 @@ impl<P: Copy> Driver<P> {
                     syncpoint: id,
                     threshold: 0,
                     entries: 0,
+                    priority: 0x64,
+                    user_data: 0,
+                    notifier_enabled: false,
+                    error_event: false,
                 })
             }
             _ => return Err(NvError::NotSupported.into()),
@@ -237,6 +246,19 @@ impl<P: Copy> Driver<P> {
         self.next_fd += 1;
         self.files.push(File { fd, node });
         Ok(fd)
+    }
+    /// Channel error notification only, not a completion fence. The synchronous
+    /// execution adapter latches this event on an accepted execution/publication
+    /// fault while notifications are enabled. Diagnostic queries survive faults.
+    pub fn query_event(&self, fd: u32, event: u32) -> Result<bool> {
+        let f = self.file(fd)?;
+        let Node::Channel(channel) = &self.files[f].node else {
+            return Err(NvError::NotSupported.into());
+        };
+        if event != 3 || channel.id.is_none() || !channel.object {
+            return Err(NvError::NotSupported.into());
+        }
+        Ok(channel.error_event)
     }
     pub fn ioctl(&mut self, r: Ioctl<'_>, memory: &mut impl Memory<Pin = P>) -> Result<()> {
         self.healthy()?;
@@ -588,15 +610,54 @@ impl<P: Copy> Driver<P> {
             return Err(NvError::InvalidState.into());
         }
         match r.request {
-            0x40084805 => {
+            0x40084805 | channel::ALLOC_GPFIFO_EX2 => {
                 if state.gpfifo {
                     return Err(NvError::AlreadyAllocated.into());
                 }
-                if word(r.input, 0) == 0 || word(r.input, 0) > 2048 || word(r.input, 4) != 0 {
+                let entries = channel::capacity(r.request, r.input)?;
+                state.gpfifo = true;
+                state.entries = entries;
+                if r.request == channel::ALLOC_GPFIFO_EX2 {
+                    r.output.copy_from_slice(r.input);
+                    out32(r.output, 12, state.syncpoint);
+                    out32(r.output, 16, state.threshold);
+                }
+                Ok(())
+            }
+            0xc018480c => {
+                if !state.object
+                    || long(r.input, 0) != 0
+                    || long(r.input, 8) != 0
+                    || word(r.input, 16) > 1
+                    || word(r.input, 20) != 0
+                {
                     return Err(NvError::NotSupported.into());
                 }
-                state.gpfifo = true;
-                state.entries = word(r.input, 0);
+                state.notifier_enabled = word(r.input, 16) != 0;
+                r.output.copy_from_slice(r.input);
+                Ok(())
+            }
+            0x4004480d => {
+                let priority = word(r.input, 0);
+                if !matches!(priority, 0x32 | 0x64 | 0x96) {
+                    return Err(NvError::NotSupported.into());
+                }
+                // Requests execute serially in this adapter. No competing GPU
+                // jobs remain to preempt; retain the policy for channel identity.
+                state.priority = priority;
+                Ok(())
+            }
+            0x40044803 => {
+                // Zero disables the watchdog. Finite GPU timeout/preemption
+                // requires a cancellable backend and remains unsupported.
+                if word(r.input, 0) != 0 {
+                    return Err(NvError::NotSupported.into());
+                }
+                Ok(())
+            }
+            0x40084714 => {
+                // Opaque channel metadata, never dereferenced as a host pointer.
+                state.user_data = long(r.input, 0);
                 Ok(())
             }
             0xc0104809 => {
@@ -675,6 +736,7 @@ impl<P: Copy> Driver<P> {
                 })();
                 if let Err(error) = finish {
                     let message = error.to_string();
+                    state.error_event |= state.notifier_enabled;
                     self.fatal = Some(message.clone());
                     return Err(Error::Fatal(message));
                 }

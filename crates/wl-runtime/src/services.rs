@@ -1373,7 +1373,10 @@ pub(crate) fn request(
         }
         (HostObject::NvDrvServices, _) => {
             let reply = crate::nvidia::request(memory, k, req, command, args)?;
-            Done::data(&reply.data)
+            Done {
+                copies: reply.copies,
+                ..Done::data(&reply.data)
+            }
         }
 
         (HostObject::ViUser, 0..=2) => {

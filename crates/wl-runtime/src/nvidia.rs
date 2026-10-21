@@ -53,7 +53,8 @@ pub struct TransferBuffer {
 
 /// Output slices are bounded owned metadata, never borrowed guest storage.
 /// Implementations must preserve accepted progress after a partial GPU fault.
-/// They must not mutate the CPU mapping layout during this scoped request.
+/// CPU virtual mappings and permissions must remain stable during this call.
+/// Internal owned storage may be consolidated without changing guest addresses.
 pub struct Ioctl<'a> {
     pub fd: u32,
     pub request: u32,
@@ -73,6 +74,14 @@ pub trait Host: std::fmt::Debug {
     fn open(&mut self, path: &str) -> HostResult<u32>;
     fn close(&mut self, fd: u32, memory: &mut Memory) -> HostResult<()>;
     fn ioctl(&mut self, ioctl: Ioctl<'_>, memory: &mut Memory) -> HostResult<()>;
+    /// Optional host-only UI update. Retired CPU instructions and elapsed host
+    /// time are observations, not the guest's configured clock frequency.
+    fn update_progress(&mut self, _instructions: u64, _elapsed_seconds: f64) {}
+    /// Validate a device event and report its latched signal state. This is not
+    /// a completion query. Implementations may serve diagnostics after a fault.
+    fn query_event(&mut self, _fd: u32, _event: u32) -> HostResult<bool> {
+        Err(NvError::NotSupported.into())
+    }
 }
 
 /// Service policy request under the supported, disabled firmware-margin setting.
@@ -89,6 +98,7 @@ pub struct State {
     initialized: bool,
     fatal: Option<String>,
     firmware_margin: Option<FirmwareMemoryMargin>,
+    events: Vec<(u32, u32, usize)>,
 }
 impl State {
     pub fn install(&mut self, host: Box<dyn Host>) -> NvResult<()> {
@@ -97,6 +107,11 @@ impl State {
         }
         self.host = Some(host);
         Ok(())
+    }
+    pub(crate) fn update_progress(&mut self, instructions: u64, elapsed: f64) {
+        if let Some(host) = &mut self.host {
+            host.update_progress(instructions, elapsed);
+        }
     }
     pub fn is_initialized(&self) -> bool {
         self.initialized
@@ -129,6 +144,7 @@ impl State {
 
 pub(crate) struct Reply {
     pub data: Vec<u8>,
+    pub copies: Vec<u32>,
 }
 fn scalar(result: HostResult<()>) -> Result<Reply, String> {
     let error = match result {
@@ -138,6 +154,7 @@ fn scalar(result: HostResult<()>) -> Result<Reply, String> {
     };
     Ok(Reply {
         data: error.to_le_bytes().to_vec(),
+        copies: Vec::new(),
     })
 }
 
@@ -340,7 +357,10 @@ pub(crate) fn request(
                 .invoke(false, |host| host.initialize(transfer))
                 .map_err(|e| format!("NVIDIA host initialization failed: {e:?}"))?;
             k.nvidia.initialized = true;
-            Ok(Reply { data: Vec::new() })
+            Ok(Reply {
+                data: Vec::new(),
+                copies: Vec::new(),
+            })
         }
         0 => {
             let result = (|| {
@@ -376,11 +396,27 @@ pub(crate) fn request(
             };
             let mut data = fd.to_le_bytes().to_vec();
             data.extend(error.to_le_bytes());
-            Ok(Reply { data })
+            Ok(Reply {
+                data,
+                copies: Vec::new(),
+            })
         }
         1 | 11 | 12 => {
             let tls = k.threads[k.current].tls;
-            scalar(ioctl(memory, &mut k.nvidia, req, command, args, tls))
+            let result = ioctl(memory, &mut k.nvidia, req, command, args, tls);
+            // Poll only registered diagnostic events, including after a fatal
+            // accepted prefix. Use the normal kernel signal path to wake waiters.
+            for index in 0..k.nvidia.events.len() {
+                let (fd, event, e) = k.nvidia.events[index];
+                if k.nvidia
+                    .host
+                    .as_mut()
+                    .is_some_and(|h| h.query_event(fd, event) == Ok(true))
+                {
+                    crate::threads::signal_event(k, e);
+                }
+            }
+            scalar(result)
         }
         2 => {
             let result = (|| {
@@ -397,9 +433,51 @@ pub(crate) fn request(
             scalar(result)
         }
         4 => {
-            // No invented readable event or permanently signalled completion.
-            // Real syncpoint/event support needs an explicit backend/kernel contract.
-            scalar(Err(NvError::NotSupported.into()))
+            let result = (|| -> HostResult<(usize, bool)> {
+                if !no_buffers
+                    || req.pid.is_some()
+                    || req.copy_handles != 0
+                    || req.move_handles != 0
+                    || args.len() < 8
+                {
+                    return Err(NvError::BadParameter.into());
+                }
+                let fd = u32_at(args, 0)?;
+                let event = u32_at(args, 4)?;
+                let existing = k
+                    .nvidia
+                    .events
+                    .iter()
+                    .position(|&(f, id, _)| f == fd && id == event);
+                if existing.is_none() && k.nvidia.events.len() >= 32 {
+                    return Err(NvError::ResourceError.into());
+                }
+                let signaled = k.nvidia.invoke(true, |host| host.query_event(fd, event))?;
+                let e = if let Some(index) = existing {
+                    k.nvidia.events[index].2
+                } else {
+                    let e = k.events.len();
+                    k.events.push(crate::threads::Event::default());
+                    k.nvidia.events.push((fd, event, e));
+                    e
+                };
+                Ok((e, signaled))
+            })();
+            match result {
+                Ok((e, signaled)) => {
+                    if signaled {
+                        crate::threads::signal_event(k, e);
+                    }
+                    match crate::threads::readable_event_handle(k, e) {
+                        Ok(handle) => Ok(Reply {
+                            data: 0u32.to_le_bytes().to_vec(),
+                            copies: vec![handle],
+                        }),
+                        Err(_) => scalar(Err(NvError::ResourceError.into())),
+                    }
+                }
+                Err(e) => scalar(Err(e)),
+            }
         }
         8 => {
             if !no_buffers
@@ -414,7 +492,10 @@ pub(crate) fn request(
             k.nvidia
                 .invoke(true, |host| host.set_client_pid(aruid, k.config.process_id))
                 .map_err(|e| format!("NVIDIA SetClientPID failed: {e:?}"))?;
-            Ok(Reply { data: Vec::new() })
+            Ok(Reply {
+                data: Vec::new(),
+                copies: Vec::new(),
+            })
         }
         13 => {
             if !no_buffers
@@ -441,7 +522,10 @@ pub(crate) fn request(
                 requested,
                 enabled: false,
             });
-            Ok(Reply { data: Vec::new() })
+            Ok(Reply {
+                data: Vec::new(),
+                copies: Vec::new(),
+            })
         }
         _ => Err(format!("unsupported NVIDIA service command {command}")),
     }

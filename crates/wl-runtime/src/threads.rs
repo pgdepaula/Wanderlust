@@ -1169,9 +1169,19 @@ pub fn run_with_host(
     mut sdl_host: Option<&mut crate::sdl::SdlHost>,
 ) -> RunResult {
     let mut last: Option<usize> = None;
+    let diagnostic_start = std::time::Instant::now();
+    let mut diagnostic_last = None;
     loop {
         let Process { memory: _, kernel } = p;
         let k = kernel.as_mut().expect("Horizon process");
+        let elapsed = diagnostic_start.elapsed();
+        if diagnostic_last.is_none_or(|previous: std::time::Duration| {
+            elapsed.saturating_sub(previous).as_millis() >= 250
+        }) {
+            k.nvidia
+                .update_progress(k.total_steps, elapsed.as_secs_f64());
+            diagnostic_last = Some(elapsed);
+        }
         expire(k, ticks(k.time_ns));
         rotate(k);
         if k.stats.slices % 16 == 0 {

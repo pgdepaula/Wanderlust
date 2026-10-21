@@ -1897,3 +1897,43 @@ limits. CPU mutations and GPU publication keep using canonical guest addresses;
 no guest pointer becomes a host pointer, and no asynchronous guest borrow is
 retained. This consolidation changes internal storage boundaries, not ownership
 of the guest allocation or GPU VA mappings.
+
+### Channel allocation and error events
+
+`AllocGpfifoEx2` (`0xc020481a`) accepts the bounded Switch configuration with
+flags one, zero unknown input fields and 1..32768 queue entries. Its output
+fence fields at bytes 12 and 16 are overwritten, irrespective of their input
+contents. Allocation associates capacity with the existing channel and returns
+its initial process-local synchronization identity and threshold; it submits no
+GPU work and advances no completion counter. The independent per-call execution
+budget remains 2048 GPFIFO entries. Duplicate allocation is rejected unchanged.
+The legacy eight-byte allocation retains its original bounded configuration.
+
+`QueryEvent` service command four supports channel error event three. It returns
+a copied readable kernel-event handle, initially unsignalled. Repeated queries
+refer to one event object. Enabling `SetErrorNotifier` (`0xc018480c`) latches an
+accepted execution/publication fault and signals the event through the existing
+kernel waiter mechanism before the fatal service result propagates. Ordinary
+preflight errors and successful submissions do not signal it. This diagnostic
+is not a GPU-completion fence; hardware error-notification payloads, breakpoint
+events and general Host1x events remain unsupported.
+
+Channel priority accepts the three libnx policy values under the current
+serialized execution model, which has no concurrent jobs to preempt. User data
+is retained as opaque metadata without dereferencing it. Only watchdog timeout
+zero is supported: finite timeout/preemption requires additional backend work.
+
+### SDL diagnostic status
+
+`WL_GPU_DEBUG_WINDOW=1` opens the SDL2 diagnostic window at backend creation.
+The runtime periodically supplies actually retired AArch64 instructions and host
+elapsed time. The window title reports effective MIPS, actual GPU adapter/backend,
+consumed Maxwell command words, draws, host queue submissions, translated shaders
+and explicitly published color targets. Command words are not dynamic shader
+instruction counts, and a published target is not a verified VI frame.
+`WL_GPU_STATUS_FILE` optionally publishes bounded text status via atomic file
+replacement. The `wl-runtime` example `status_window STATUS.txt` displays this
+file in a separate native SDL2 window title, including Windows, while compilation or
+execution proceeds elsewhere. Its repaints never increment guest graphics or
+frame counters. Host clock frequency and a gameplay FPS value are not inferred
+from CPU instruction throughput. The image area remains reserved for guest output; diagnostics do not draw a text panel.

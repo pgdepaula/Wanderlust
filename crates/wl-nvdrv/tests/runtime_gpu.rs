@@ -282,6 +282,9 @@ impl nvidia::Host for ObservedHost {
     fn close(&mut self, fd: u32, m: &mut Memory) -> nvidia::HostResult<()> {
         self.inner.close(fd, m)
     }
+    fn query_event(&mut self, fd: u32, event: u32) -> nvidia::HostResult<bool> {
+        self.inner.query_event(fd, event)
+    }
     fn ioctl(&mut self, r: nvidia::Ioctl<'_>, m: &mut Memory) -> nvidia::HostResult<()> {
         let result = self.inner.ioctl(r, m);
         *self.metrics.borrow_mut() = (self.inner.graphics_counters(), self.inner.driver_counters());
@@ -515,14 +518,70 @@ fn configured() -> (Harness, u32, u32, u32, Vec<u32>, Vec<u8>) {
     for (gpu, offset, size) in ranges {
         mapping(&mut h, space, handle, gpu, offset, size);
     }
-    h.ioctl(channel, 0x40084805, &words(&[2048, 0]), None);
+    let before = *h.metrics.borrow();
+    let allocated = h.ioctl(
+        channel,
+        0xc020481a,
+        &words(&[32768, 1, 0, u32::MAX, u32::MAX, 0, 0, 0]),
+        None,
+    );
+    assert_ne!(u32::from_le_bytes(allocated[12..16].try_into().unwrap()), 0);
+    assert_eq!(&allocated[16..20], &[0; 4]);
+    let after = *h.metrics.borrow();
+    assert_eq!(before.0.submissions, after.0.submissions);
+    assert_eq!(before.0.readback_operations, after.0.readback_operations);
+    assert_eq!(
+        before.0.synchronization_points,
+        after.0.synchronization_points
+    );
     h.ioctl(channel, 0xc0104809, &words(&[0xb197, 0, 0, 0]), None);
+    h.ioctl(channel, 0x4004480d, &0x64u32.to_le_bytes(), None);
+    h.ioctl(channel, 0x40044803, &0u32.to_le_bytes(), None);
+    h.ioctl(channel, 0x40084714, &u64::MAX.to_le_bytes(), None);
     (h, nvmap, space, channel, command, image)
 }
 #[test]
 #[ignore = "requires actual GPU execution, not only runtime transport"]
 fn runtime_service_executes_indexed_textured_draw_and_cpu_mutation() {
     let (mut h, nvmap, space, channel, command, image) = configured();
+    // Validation failures preserve both the output bytes and accepted channel.
+    for (request, input, error) in [
+        (
+            0xc020481a,
+            words(&[32768, 1, 0, 0, 0, 0, 0, 0]),
+            nvidia::NvError::AlreadyAllocated,
+        ),
+        (0x4004480d, words(&[0x65]), nvidia::NvError::NotSupported),
+        (0x40044803, words(&[1000]), nvidia::NvError::NotSupported),
+        (
+            0xc018480c,
+            words(&[0, 0, 0, 0, 2, 0]),
+            nvidia::NvError::NotSupported,
+        ),
+    ] {
+        let size = if request >> 30 & 2 != 0 {
+            ((request >> 16) & 0x3fff) as u64
+        } else {
+            0
+        };
+        h.p.memory.write_bytes(META + 0x1000, &input).unwrap();
+        h.p.memory.write_bytes(META + 0x3000, &[0xcc; 32]).unwrap();
+        h.send(&Wire {
+            command: 1,
+            args: &words(&[channel, request]),
+            x: &[(META + 0x1000, input.len() as u64)],
+            a: &[(0, 0)],
+            b: &[(if size == 0 { 0 } else { META + 0x3000 }, size)],
+            c: &[(0, 0)],
+            ..Wire::default()
+        });
+        assert_eq!(h.p.memory.load(h.tls() + 0x20, 4).unwrap(), error as u64);
+        assert_eq!(
+            h.p.memory.read_bytes(META + 0x3000, 32).unwrap(),
+            &[0xcc; 32]
+        );
+        assert_eq!(h.metrics.borrow().0.draw_commands, 0);
+    }
     let ranges = RANGES;
     let entry_bytes = entry(0xb0000, command.len());
     let header = words(&[0, 0, 1, 6, 0, 0]);
@@ -603,6 +662,26 @@ fn runtime_service_executes_indexed_textured_draw_and_cpu_mutation() {
 #[ignore = "requires actual GPU partial execution and publication"]
 fn runtime_service_partial_gpu_fault_publishes_prefix_and_never_replays() {
     let (mut h, _, _, channel, mut command, image) = configured();
+    // QueryEvent returns a genuine readable kernel event. Repeated queries
+    // alias the same object, and accepted faults signal it through the kernel.
+    let mut event = None;
+    for _ in 0..2 {
+        h.send(&Wire {
+            command: 4,
+            args: &words(&[channel, 3]),
+            ..Wire::default()
+        });
+        assert_eq!(h.p.memory.load(h.tls() + 4, 4).unwrap() >> 31, 1);
+        let handle = h.p.memory.load(h.tls() + 12, 4).unwrap() as u32;
+        let k = h.p.kernel.as_ref().unwrap();
+        let Some(Object::ReadableEvent(e)) = k.handles.get(handle) else {
+            panic!("not a readable event")
+        };
+        assert!(!k.events[e].signaled);
+        assert!(event.is_none_or(|previous| previous == e));
+        event = Some(e);
+    }
+    h.ioctl(channel, 0xc018480c, &words(&[0, 0, 0, 0, 1, 0]), None);
     // Literal unsupported method at 0x3ffc AFTER the valid indexed draw.
     command.extend([0x20010fff, 0]);
     h.p.memory
@@ -636,6 +715,7 @@ fn runtime_service_partial_gpu_fault_publishes_prefix_and_never_replays() {
             .contains("accepted NVIDIA submission fault")
     );
     assert!(h.p.kernel.as_ref().unwrap().nvidia.is_faulted());
+    assert!(h.p.kernel.as_ref().unwrap().events[event.unwrap()].signaled);
     assert_eq!(
         h.p.memory.read_bytes(META + 0x3000, 24).unwrap(),
         [0xcc; 24]
