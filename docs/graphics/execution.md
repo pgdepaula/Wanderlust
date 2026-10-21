@@ -1841,3 +1841,23 @@ system-memory heap `0x40000000`, and the supported kind zero. BASE (3) remains
 unsupported; unknown selectors and stale handles reject without changing the
 output. These queries acquire no guest-memory borrow, pin, upload, submission
 or completion. They do not implement cross-process nvmap IDs or import/export.
+
+### Automatic user-buffer GPU mappings
+
+`MapBufferEx` accepts fixed/cacheable bits zero and two, kind zero or default,
+and whole or checked page-aligned subranges of an attached nvmap allocation.
+Without the fixed bit, a zero final offset requests bounded automatic VA
+placement in the configured small-page region. The page hint (4/64/128 KiB,
+or zero selecting retained allocation alignment) constrains VA alignment.
+Only the actual 4 KiB-granular backing extent is mapped: a 4 KiB allocation
+with a 64 KiB hint does not grant access to another 60 KiB of guest RAM.
+The hint is retained in the returned wire metadata; this software mapper does
+not claim to select or emulate physical GMMU page sizes.
+
+The existing GPU driver owns each reservation, mapping ID and mapping epoch.
+Automatic VA is acquired only after size/handle validation and is released if
+mapping fails. Unmapping an automatic mapping also releases its VA; fixed
+reservations retain their distinct `FreeSpace` lifecycle. Nonzero automatic
+offset/alignment unions, sparse mappings and kind-changing remaps remain
+unsupported. Canonical backing pins survive unmapping until allocation/session
+teardown, and pending-output guards still prohibit mapping mutation.

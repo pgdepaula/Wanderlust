@@ -801,3 +801,76 @@ fn runtime_service_ioctl3_tpc_masks_publish_the_one_gpc_mask() {
     assert_eq!(counters.0.readback_operations, 0);
     h.close(fd);
 }
+
+#[test]
+#[ignore = "executes the actual NVIDIA runtime adapter and GPU mapping controller"]
+fn runtime_automatic_small_buffer_mapping_uses_checked_backing_and_releases_va() {
+    let mut h = Harness::new(vec![0x5a; 4096]);
+    let nvmap = h.open("/dev/nvmap");
+    let space = h.open("/dev/nvhost-as-gpu");
+    let mut init = words(&[1, 0, 65536, 0]);
+    for value in [0x4000000u64, 0x2000000000, 0x400000000] {
+        init.extend(value.to_le_bytes());
+    }
+    h.ioctl(space, 0x40284109, &init, None);
+    let created = h.ioctl(nvmap, 0xc0080101, &words(&[4096, 0]), None);
+    let handle = u32::from_le_bytes(created[4..].try_into().unwrap());
+    let mut alloc = words(&[handle, 0, 0, 131072, 0, 0]);
+    alloc.extend(DATA.to_le_bytes());
+    h.ioctl(nvmap, 0xc0200104, &alloc, None);
+    // Same literal wire shape as libnx nvAddressSpaceMap: no fixed address,
+    // configured 64 KiB hint, zero size means the entire 4 KiB allocation.
+    let mut input = words(&[0, 0, handle, 65536]);
+    input.extend([0; 24]);
+    for (offset, bytes, error) in [
+        (0, 2u64.to_le_bytes().to_vec(), 2),
+        (8, u32::MAX.to_le_bytes().to_vec(), 4),
+        (16, 4096u64.to_le_bytes().to_vec(), 10),
+        (24, 8192u64.to_le_bytes().to_vec(), 10),
+    ] {
+        let mut invalid = input.clone();
+        invalid[offset..offset + bytes.len()].copy_from_slice(&bytes);
+        h.p.memory.write_bytes(META + 0x1000, &invalid).unwrap();
+        h.p.memory.write_bytes(META + 0x3000, &[0xcc; 40]).unwrap();
+        let mut args = space.to_le_bytes().to_vec();
+        args.extend(0xc0284106u32.to_le_bytes());
+        h.send(&Wire {
+            command: 1,
+            args: &args,
+            x: &[(META + 0x1000, 40)],
+            a: &[(0, 0)],
+            b: &[(META + 0x3000, 40)],
+            c: &[(0, 0)],
+            ..Wire::default()
+        });
+        assert_eq!(h.p.memory.load(h.tls() + 0x20, 4).unwrap(), error);
+        assert_eq!(
+            h.p.memory.read_bytes(META + 0x3000, 40).unwrap(),
+            &[0xcc; 40]
+        );
+    }
+    let mut addresses = [0; 2];
+    for (i, address) in addresses.iter_mut().enumerate() {
+        let output = h.ioctl(space, 0xc0284106, &input, None);
+        *address = u64::from_le_bytes(output[32..].try_into().unwrap());
+        assert_eq!(*address, 0x4000000 + i as u64 * 65536);
+        assert_eq!(&output[..32], &input[..32]);
+    }
+    // Unmap owns the automatically allocated VA; no fabricated FreeSpace is
+    // required. A subsequent mapping can reuse that hole safely.
+    h.ioctl(space, 0xc0084105, &addresses[0].to_le_bytes(), None);
+    let output = h.ioctl(space, 0xc0284106, &input, None);
+    assert_eq!(&output[32..], &addresses[0].to_le_bytes());
+    for address in addresses {
+        h.ioctl(space, 0xc0084105, &address.to_le_bytes(), None);
+    }
+    assert_eq!(h.p.memory.read_bytes(DATA, 4096).unwrap(), &[0x5a; 4096]);
+    assert!(h.p.memory.ensure_gpu_unpinned(DATA, 4096).is_err());
+    h.close(space);
+    h.close(nvmap);
+    h.p.memory.ensure_gpu_unpinned(DATA, 4096).unwrap();
+    let counters = *h.metrics.borrow();
+    assert_eq!(counters.0.draw_commands, 0);
+    assert_eq!(counters.0.submissions, 0);
+    assert_eq!(counters.0.readback_operations, 0);
+}

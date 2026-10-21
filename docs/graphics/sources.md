@@ -1528,3 +1528,15 @@ The pinned [libnx ioctl wrapper](https://github.com/switchbrew/libnx/blob/feebd0
 corroborates the three-u32 wire payload and result position. Results come from
 the actual created object and retained user-backing metadata. No pointer-shaped
 value is fabricated for BASE.
+
+### Automatic MapBufferEx ownership
+
+[libnx nvAddressSpaceMap at feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/address_space.c#L59)
+passes the address space's configured page field, zero offset and zero mapping
+size for an entire user buffer. The corresponding
+[ioctl wrapper](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/ioctl/nvhost-as-gpu.c#L58)
+defines fixed bit zero and cacheable bit two. An original-executable scalar
+boundary observation confirmed this shape with a 64 KiB field and a 4 KiB
+allocation. The bounded software mapping uses that field for VA alignment,
+preserves the exact backing extent and does not claim physical page selection.
+No original command or executable bytes are committed as test fixtures.

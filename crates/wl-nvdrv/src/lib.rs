@@ -4,6 +4,7 @@
 use wl_gpu::{driver::*, driver_backend::GpuDriver, memory::*};
 mod address_space;
 mod control;
+mod mapping;
 mod nvmap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,6 +81,7 @@ struct Reservation {
     id: ReservationId,
     mapping: Option<MappingId>,
     allocation: Option<u32>,
+    automatic: bool,
 }
 #[derive(Debug)]
 struct Space {
@@ -422,26 +424,57 @@ impl<P: Copy> Driver<P> {
                     id,
                     mapping: None,
                     allocation: None,
+                    automatic: false,
                 });
                 r.output.copy_from_slice(r.input);
                 out64(r.output, 16, address);
                 Ok(())
             }
             0xc0284106 => {
-                if !matches!(word(r.input, 0), 1 | 5)
-                    || !matches!(word(r.input, 4), 0 | u32::MAX)
-                    || word(r.input, 12) != 0
-                {
-                    return Err(NvError::NotSupported.into());
-                }
-                let handle = word(r.input, 8);
+                let request = mapping::Request::decode(r.input)?;
+                let handle = request.handle;
                 let allocation = self
                     .allocations
                     .iter()
                     .find(|a| a.handle == handle)
                     .ok_or(NvError::BadParameter)?;
                 let storage = allocation.storage.as_ref().ok_or(NvError::InvalidState)?;
-                let address = long(r.input, 32);
+                let size = request.size(allocation.size)?;
+                let offset = request.offset;
+                // request.size checked the entire canonical allocation extent;
+                // the existing driver remains authoritative for mapping identity.
+                if !request.fixed {
+                    let alignment = request.alignment(storage.alignment)?;
+                    let address = configuration.allocate(
+                        size,
+                        4096,
+                        alignment,
+                        space.reservations.iter().map(|v| (v.address, v.size)),
+                    )?;
+                    let id = checked(self.gpu.reserve_fixed(space.id, GpuAddress(address), size))?;
+                    let mapping = match self.gpu.map(space.id, id, storage.backing, offset) {
+                        Ok(mapping) => mapping,
+                        Err(error) => {
+                            // Nothing has executed; release this request's VA
+                            // without disturbing any previous mapping.
+                            checked(self.gpu.free_reservation(space.id, id))?;
+                            return checked(Err(error));
+                        }
+                    };
+                    space.reservations.push(Reservation {
+                        address,
+                        size,
+                        page_size: 4096,
+                        id,
+                        mapping: Some(mapping),
+                        allocation: Some(handle),
+                        automatic: true,
+                    });
+                    r.output.copy_from_slice(r.input);
+                    out64(r.output, 32, address);
+                    return Ok(());
+                }
+                let address = request.address;
                 let reservation = space
                     .reservations
                     .iter_mut()
@@ -450,16 +483,6 @@ impl<P: Copy> Driver<P> {
                 if reservation.mapping.is_some() {
                     return Err(NvError::AlreadyAllocated.into());
                 }
-                let offset = long(r.input, 16);
-                let requested = long(r.input, 24);
-                let size = if requested == 0 {
-                    allocation
-                        .size
-                        .checked_sub(offset)
-                        .ok_or(NvError::InvalidSize)?
-                } else {
-                    requested
-                };
                 if size != reservation.size {
                     return Err(NvError::NotSupported.into());
                 }
@@ -474,15 +497,20 @@ impl<P: Copy> Driver<P> {
                 Ok(())
             }
             0xc0084105 => {
-                let reservation = space
+                let index = space
                     .reservations
-                    .iter_mut()
-                    .find(|v| v.address == long(r.input, 0))
+                    .iter()
+                    .position(|v| v.address == long(r.input, 0))
                     .ok_or(NvError::InvalidAddress)?;
+                let reservation = &mut space.reservations[index];
                 let mapping = reservation.mapping.ok_or(NvError::InvalidState)?;
                 checked(self.gpu.unmap(space.id, mapping))?;
                 reservation.mapping = None;
                 reservation.allocation = None;
+                if reservation.automatic {
+                    checked(self.gpu.free_reservation(space.id, reservation.id))?;
+                    space.reservations.remove(index);
+                }
                 r.output.copy_from_slice(r.input);
                 Ok(())
             }
