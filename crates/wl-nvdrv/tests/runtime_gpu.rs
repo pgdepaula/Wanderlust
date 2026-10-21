@@ -629,3 +629,53 @@ fn runtime_service_partial_gpu_fault_publishes_prefix_and_never_replays() {
     assert_eq!(after.0.submissions, before.0.submissions);
     assert_eq!(after.1.accepted, before.1.accepted);
 }
+
+#[test]
+#[ignore = "requires the actual NVIDIA runtime backend and wgpu device"]
+fn runtime_service_ioctl3_characteristics_publishes_two_checked_outputs() {
+    let mut h = Harness::new(vec![0; 0x18000]);
+    let fd = h.open("/dev/nvhost-ctrl-gpu");
+    let mut input = [0xa5; 176];
+    input[..8].copy_from_slice(&160u64.to_le_bytes());
+    input[8..16].copy_from_slice(&1u64.to_le_bytes());
+    h.p.memory.write_bytes(META + 0x1000, &input).unwrap();
+    let mut args = fd.to_le_bytes().to_vec();
+    args.extend(0xc0b04705u32.to_le_bytes());
+    // Literal libnx auto-select descriptors: one input, two outputs.
+    let send = |h: &mut Harness, second: u64| {
+        h.send(&Wire {
+            command: 12,
+            args: &args,
+            x: &[(META + 0x1000, 176)],
+            a: &[(0, 0)],
+            b: &[(META + 0x3000, 176), (second, 160)],
+            c: &[(0, 0), (0, 0)],
+            ..Wire::default()
+        });
+    };
+    send(&mut h, META + 0x4000);
+    assert_eq!(h.p.memory.load(h.tls() + 0x20, 4).unwrap(), 0);
+    let header = h.p.memory.read_bytes(META + 0x3000, 176).unwrap().to_vec();
+    let inline = h.p.memory.read_bytes(META + 0x4000, 160).unwrap();
+    assert_eq!(inline, &header[16..]);
+    assert_eq!(&header[..8], &160u64.to_le_bytes());
+    assert_eq!(&inline[..4], &[0x20, 1, 0, 0]);
+    assert_eq!(&inline[92..96], &[0x97, 0xb1, 0, 0]);
+    assert_eq!(&inline[80..88], &[0; 8]);
+    assert_eq!(&inline[144..152], b"gm20b\0\0\0");
+    h.p.memory.write_bytes(META + 0x3000, &[0xcc; 176]).unwrap();
+    // Overlapping destinations fail before the host call or either write.
+    send(&mut h, META + 0x3008);
+    assert_eq!(h.p.memory.load(h.tls() + 0x20, 4).unwrap(), 4);
+    assert_eq!(
+        h.p.memory.read_bytes(META + 0x3000, 176).unwrap(),
+        &[0xcc; 176]
+    );
+    send(&mut h, META + 0x4000);
+    assert_eq!(h.p.memory.load(h.tls() + 0x20, 4).unwrap(), 0);
+    let counters = *h.metrics.borrow();
+    assert_eq!(counters.0.draw_commands, 0);
+    assert_eq!(counters.0.submissions, 0);
+    assert_eq!(counters.0.readback_operations, 0);
+    h.close(fd);
+}

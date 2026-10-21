@@ -1447,3 +1447,11 @@ No compiler implementation is imported.
   deliberately clears optional feature flags instead of copying the physical
   device's capability mask. The supported one-GPC mask is four bytes; no guest
   pointer or fragmented buffer acquisition is involved.
+
+- [Switchbrew NV services revision 14790](https://switchbrew.org/w/index.php?title=NV_services&oldid=14790#NVGPU_GPU_IOCTL_GET_CHARACTERISTICS)
+  documents characteristics through both Ioctl and Ioctl3 on Switch, rather than
+  only the later Switch 2 variant. The original base executable independently
+  requested `0xc0b04705` through service command 12. The pinned libnx revision's
+  [nv.c](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/services/nv.c),
+  `nvIoctl3`, supplies one input and two auto-select output buffers. Runtime tests
+  independently encode those HIPC descriptors and check both destinations.

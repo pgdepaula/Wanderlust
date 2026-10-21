@@ -1719,7 +1719,7 @@ interface changes are required.
 
 The process-local NVIDIA adapter opens `/dev/nvhost-ctrl-gpu` as a separate,
 closeable descriptor. It accepts `GET_CHARACTERISTICS` (`0xc0b04705`, 176-byte
-in/out payload) and a one-GPC `GET_TPC_MASKS` query (`0xc0184706`, 24-byte in/out
+in/out payload, using either Ioctl or Ioctl3) and a one-GPC `GET_TPC_MASKS` query (`0xc0184706`, 24-byte in/out
 payload). Neither operation submits GPU work, pins guest memory, or publishes a
 framebuffer. Descriptor ownership, ioctl direction/size checks, and the existing
 32-file bound apply to this node as to the other nodes.
@@ -1740,3 +1740,12 @@ address tags fail before modifying output. TPC-mask queries support exactly one
 mask is three, identifying the two TPCs in GPC zero; unused inline bytes are zero.
 Other shapes and controller ioctls, including ZCULL/ZBC and GPU-time queries,
 remain explicitly unsupported.
+
+The Ioctl3 characteristics variant additionally requires exactly 160 bytes in the
+second output and no additional input. Both output extents and all input fields
+are checked before either output changes. The identity is returned in both the
+regular structure and the second output. The runtime validates all guest output
+ranges, including overlap with each other and the TLS reply, before invoking the
+backend. A failed transport/publication preflight does not poison the descriptor;
+a valid query can be retried. This exception does not enable Ioctl3 on other
+device nodes or other controller requests.

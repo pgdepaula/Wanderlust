@@ -3299,14 +3299,14 @@ or a complete validation of its runtime changes.
 
 ### GPU controller identity and descriptor isolation
 
-`wl-nvdrv` has three CPU tests for the inline characteristics/TPC wire formats,
+`wl-nvdrv` has four CPU tests for the inline characteristics/TPC wire formats,
 opaque address tags, short/null requests, output failure atomicity, reserved
 fields, and padding. The existing four capture tests also pass. Normal package
-execution reports seven passing tests and three ignored device-dependent tests.
+execution reports eight passing tests and four ignored device-dependent tests.
 
 Explicit device execution ran `control_gpu` (one scenario) and `runtime_gpu`
-(two scenarios) on WSL OpenGL, native Windows D3D12, and native Windows Vulkan:
-nine passes, no device-test skips. The controller scenario checks 32 repeated
+(three scenarios) on WSL OpenGL, native Windows D3D12, and native Windows Vulkan:
+twelve passes, no device-test skips. The controller scenario checks 32 repeated
 queries, actual FD close/reopen, cross-device and stale-FD rejection, ioctl
 kind/direction errors, and zero additional GPU submissions, draws, uploads or
 readbacks. A memory adapter that panics on every read/write/pin operation proves
@@ -3321,3 +3321,13 @@ controller open and later an unmapped read. This does not establish that the
 controller open caused the later fault, or demonstrate an original GPU draw,
 framebuffer capture, or VI presentation. The independently assembled rendering
 tests above are synthetic compatibility tests, not game frames.
+
+The additional runtime scenario sends literal HIPC command-12 descriptors for
+Ioctl3 GET_CHARACTERISTICS. Both output buffers receive the independently checked
+GM20B identity, while overlapping outputs fail without modifying either and a
+correct retry succeeds. CPU tests cover zero, short and oversized second outputs,
+null address tags, and failure atomicity of both metadata outputs. A subsequent
+original executable run reached 113,154,258 instructions and 102 IPC requests,
+opened the controller successfully, and identified Ioctl3 GET_CHARACTERISTICS as
+the next unsupported request before this extension. It still ended at the same
+unmapped read and did not produce original GPU output.

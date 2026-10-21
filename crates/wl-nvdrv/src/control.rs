@@ -1,9 +1,24 @@
 //! Inline Switch GPU identity queries, not host-adapter capabilities or pointers.
 //! Wire offsets: libnx feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973,
 //! nx/source/nvidia/ioctl/nvhost-ctrl-gpu.c and nx/include/switch/nvidia/ioctl.h.
-use crate::{Ioctl, NvError, Result, long, out32, out64, word};
+use crate::{Ioctl, IoctlKind, NvError, Result, long, out32, out64, word};
+
+pub(super) fn is_inline_characteristics(r: &Ioctl<'_>) -> bool {
+    r.request == 0xc0b04705 && r.kind == IoctlKind::Ioctl3
+}
 
 pub(super) fn ioctl(r: Ioctl<'_>) -> Result<()> {
+    if is_inline_characteristics(&r) {
+        if !r.extra_input.is_empty() {
+            return Err(NvError::NotSupported.into());
+        }
+        if r.extra_output.len() != 160 {
+            return Err(NvError::InvalidSize.into());
+        }
+        characteristics(r.input, r.output)?;
+        r.extra_output.copy_from_slice(&r.output[16..]);
+        return Ok(());
+    }
     match r.request {
         0xc0b04705 => characteristics(r.input, r.output),
         0xc0184706 => tpc_masks(r.input, r.output),
@@ -82,6 +97,62 @@ fn tpc_masks(input: &[u8], output: &mut [u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ioctl3_validates_both_outputs_before_writing_either() {
+        let mut input = [0u8; 176];
+        input[..8].copy_from_slice(&160u64.to_le_bytes());
+        input[8..16].copy_from_slice(&1u64.to_le_bytes());
+        for size in [0, 159, 161] {
+            let mut output = [0xcc; 176];
+            let mut extra = vec![0xdd; size];
+            assert!(
+                ioctl(Ioctl {
+                    fd: 1,
+                    request: 0xc0b04705,
+                    kind: IoctlKind::Ioctl3,
+                    input: &input,
+                    output: &mut output,
+                    extra_input: &[],
+                    extra_output: &mut extra,
+                })
+                .is_err()
+            );
+            assert_eq!(output, [0xcc; 176]);
+            assert!(extra.iter().all(|b| *b == 0xdd));
+        }
+        let mut output = [0xcc; 176];
+        let mut extra = [0xdd; 160];
+        ioctl(Ioctl {
+            fd: 1,
+            request: 0xc0b04705,
+            kind: IoctlKind::Ioctl3,
+            input: &input,
+            output: &mut output,
+            extra_input: &[],
+            extra_output: &mut extra,
+        })
+        .unwrap();
+        assert_eq!(extra, output[16..]);
+        assert_eq!(&extra[..4], &[0x20, 1, 0, 0]);
+        assert_eq!(&extra[144..152], b"gm20b\0\0\0");
+        input[8..16].fill(0);
+        output.fill(0xcc);
+        extra.fill(0xdd);
+        assert!(
+            ioctl(Ioctl {
+                fd: 1,
+                request: 0xc0b04705,
+                kind: IoctlKind::Ioctl3,
+                input: &input,
+                output: &mut output,
+                extra_input: &[],
+                extra_output: &mut extra,
+            })
+            .is_err()
+        );
+        assert_eq!(output, [0xcc; 176]);
+        assert_eq!(extra, [0xdd; 160]);
+    }
     #[test]
     fn characteristics_wire_offsets_and_opaque_pointer() {
         let mut input = [0xa5; 176];

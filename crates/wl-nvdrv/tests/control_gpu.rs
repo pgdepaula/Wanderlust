@@ -79,7 +79,7 @@ fn control_gpu_identity_and_fd_isolation_do_not_submit_work() {
             0xc0b04705,
             NvError::BadParameter,
         ),
-        (fd, IoctlKind::Ioctl3, 0xc0b04705, NvError::NotSupported),
+        (fd, IoctlKind::Ioctl2, 0xc0b04705, NvError::NotSupported),
         (fd, IoctlKind::Ioctl, 0xc0b04704, NvError::NotSupported),
         (fd, IoctlKind::Ioctl, 0x80b04705, NvError::InvalidSize),
     ] {

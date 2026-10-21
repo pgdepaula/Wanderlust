@@ -249,7 +249,10 @@ impl<P: Copy> Driver<P> {
             return Err(NvError::InvalidSize.into());
         }
         let f = self.file(r.fd)?;
+        let inline_characteristics = matches!(self.files[f].node, Node::ControlGpu)
+            && control::is_inline_characteristics(&r);
         if r.request != KICKOFF_PB
+            && !inline_characteristics
             && (r.kind != IoctlKind::Ioctl
                 || !r.extra_input.is_empty()
                 || !r.extra_output.is_empty())
