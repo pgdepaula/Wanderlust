@@ -1844,7 +1844,8 @@ or completion. They do not implement cross-process nvmap IDs or import/export.
 
 ### Automatic user-buffer GPU mappings
 
-`MapBufferEx` accepts fixed/cacheable bits zero and two, kind zero or default,
+`MapBufferEx` accepts fixed/cacheable bits zero and two, kind zero, generic
+uncompressed `0xfe` (`Generic_16BX2`), or default,
 and whole or checked page-aligned subranges of an attached nvmap allocation.
 Without the fixed bit, a zero final offset requests bounded automatic VA
 placement in the configured small-page region. The page hint (4/64/128 KiB,
@@ -1861,3 +1862,7 @@ reservations retain their distinct `FreeSpace` lifecycle. Nonzero automatic
 offset/alignment unions, sparse mappings and kind-changing remaps remain
 unsupported. Canonical backing pins survive unmapping until allocation/session
 teardown, and pending-output guards still prohibit mapping mutation.
+Pitch and generic-uncompressed aliases retain identical canonical storage.
+Mapping does not swizzle bytes: supported TIC/B197 surface descriptors select
+the existing layout converters when resources are accessed. Compressed PTE
+kinds, compression tags and kind-changing subrange remaps remain unsupported.

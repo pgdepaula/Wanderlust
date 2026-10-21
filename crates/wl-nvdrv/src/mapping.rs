@@ -20,7 +20,7 @@ impl Request {
         let flags = word(input, 0);
         let hint = word(input, 12);
         if flags & !5 != 0
-            || !matches!(word(input, 4), 0 | u32::MAX)
+            || !matches!(word(input, 4), 0 | 0xfe | u32::MAX)
             || !matches!(hint, 0 | 4096 | 65536 | 131072)
         {
             return Err(NvError::NotSupported.into());
@@ -80,6 +80,8 @@ mod tests {
         assert!(!request.fixed);
         assert_eq!(request.size(4096).unwrap(), 4096);
         assert_eq!(request.alignment(131072).unwrap(), 65536);
+        input[4] = 0xfe; // libnx NvKind_Generic_16BX2, uncompressed.
+        assert_eq!(Request::decode(&input).unwrap().size(4096).unwrap(), 4096);
         for (at, value) in [(0, 2u32), (4, 1), (12, 8192)] {
             let mut invalid = input;
             invalid[at..at + 4].copy_from_slice(&value.to_le_bytes());

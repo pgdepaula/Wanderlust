@@ -851,6 +851,9 @@ fn runtime_automatic_small_buffer_mapping_uses_checked_backing_and_releases_va()
     }
     let mut addresses = [0; 2];
     for (i, address) in addresses.iter_mut().enumerate() {
+        // Independent pitch and generic-uncompressed aliases of the same
+        // allocation. Neither mapping may convert or overwrite backing bytes.
+        input[4] = if i == 0 { 0 } else { 0xfe };
         let output = h.ioctl(space, 0xc0284106, &input, None);
         *address = u64::from_le_bytes(output[32..].try_into().unwrap());
         assert_eq!(*address, 0x4000000 + i as u64 * 65536);

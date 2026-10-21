@@ -1540,3 +1540,11 @@ boundary observation confirmed this shape with a 64 KiB field and a 4 KiB
 allocation. The bounded software mapping uses that field for VA alignment,
 preserves the exact backing extent and does not claim physical page selection.
 No original command or executable bytes are committed as test fixtures.
+
+[libnx NvKind at the same revision](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/include/switch/nvidia/types.h#L247)
+identifies `0xfe` as `Generic_16BX2`. NVIDIA's
+[kind classification at a35286a4b10fbcfb689aa77be42c201d2091dca2](https://github.com/LineageOS/android_kernel_nvidia_shield/blob/a35286a4b10fbcfb689aa77be42c201d2091dca2/drivers/gpu/nvgpu/gk20a/kind_gk20a.c#L130)
+excludes this generic kind from compressible kinds. The adapter accepts this
+uncompressed mapping kind with unchanged canonical bytes; the existing surface
+descriptors, rather than the ioctl, select tiling conversions. NVIDIA kernel
+sources are semantic references only; no GPL implementation is imported.
