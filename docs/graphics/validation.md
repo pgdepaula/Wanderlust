@@ -3296,3 +3296,28 @@ the same three CLI/Horizon failures and139 ignored GPU tests; workspace
 formatting and13 committed-runtime Clippy diagnostics remain separate from
 passing GPU package gates. That snapshot is not the later f955345 live tree
 or a complete validation of its runtime changes.
+
+### GPU controller identity and descriptor isolation
+
+`wl-nvdrv` has three CPU tests for the inline characteristics/TPC wire formats,
+opaque address tags, short/null requests, output failure atomicity, reserved
+fields, and padding. The existing four capture tests also pass. Normal package
+execution reports seven passing tests and three ignored device-dependent tests.
+
+Explicit device execution ran `control_gpu` (one scenario) and `runtime_gpu`
+(two scenarios) on WSL OpenGL, native Windows D3D12, and native Windows Vulkan:
+nine passes, no device-test skips. The controller scenario checks 32 repeated
+queries, actual FD close/reopen, cross-device and stale-FD rejection, ioctl
+kind/direction errors, and zero additional GPU submissions, draws, uploads or
+readbacks. A memory adapter that panics on every read/write/pin operation proves
+that the address tag is never accessed. The two runtime scenarios retain real
+HIPC/CMIF-to-indexed-rendering, CPU mutation, pixel and partial-fault publication
+coverage. Strict package Clippy passes.
+
+A separate local execution of the original base executable with returned-callback
+discovery reached 113,150,504 guest instructions and 99 IPC requests. It advanced
+past the previously unresolved callback, then observed an unsupported GPU
+controller open and later an unmapped read. This does not establish that the
+controller open caused the later fault, or demonstrate an original GPU draw,
+framebuffer capture, or VI presentation. The independently assembled rendering
+tests above are synthetic compatibility tests, not game frames.

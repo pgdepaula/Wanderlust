@@ -2,6 +2,7 @@
 //! All requests use explicit little-endian wire decoding. This is a bounded,
 //! synchronous subset, not a Horizon handle manager or a second GPU interpreter.
 use wl_gpu::{driver::*, driver_backend::GpuDriver, memory::*};
+mod control;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -94,6 +95,7 @@ struct Channel {
 }
 #[derive(Debug)]
 enum Node {
+    ControlGpu,
     Nvmap,
     Space(Space),
     Channel(Channel),
@@ -190,6 +192,7 @@ impl<P: Copy> Driver<P> {
             return Err(NvError::ResourceError.into());
         }
         let node = match path {
+            "/dev/nvhost-ctrl-gpu" => Node::ControlGpu,
             "/dev/nvmap" => {
                 if self.files.iter().any(|f| matches!(f.node, Node::Nvmap)) {
                     return Err(NvError::NotSupported.into());
@@ -254,6 +257,7 @@ impl<P: Copy> Driver<P> {
             return Err(NvError::NotSupported.into());
         }
         match &self.files[f].node {
+            Node::ControlGpu => control::ioctl(r),
             Node::Nvmap => self.nvmap(r, memory),
             Node::Space(_) => self.space(f, r),
             Node::Channel(_) => self.channel(f, r, memory),
@@ -587,6 +591,7 @@ impl<P: Copy> Driver<P> {
     pub fn close(&mut self, fd: u32, memory: &mut impl Memory<Pin = P>) -> Result<()> {
         let f = self.file(fd)?;
         match &self.files[f].node {
+            Node::ControlGpu => {}
             Node::Channel(state) => {
                 if let Some(channel) = state.id {
                     checked(self.gpu.close(channel, memory))?;

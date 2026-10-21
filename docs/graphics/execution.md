@@ -1714,3 +1714,29 @@ Only P0/!P0 and the full four-lane mask are supported. Other execution predicate
 partial lane masks, reserved fields and general control flow remain unsupported.
 Existing unconditional PT MOV32I behavior is unchanged. No driver or runtime
 interface changes are required.
+
+### GPU controller identity queries
+
+The process-local NVIDIA adapter opens `/dev/nvhost-ctrl-gpu` as a separate,
+closeable descriptor. It accepts `GET_CHARACTERISTICS` (`0xc0b04705`, 176-byte
+in/out payload) and a one-GPC `GET_TPC_MASKS` query (`0xc0184706`, 24-byte in/out
+payload). Neither operation submits GPU work, pins guest memory, or publishes a
+framebuffer. Descriptor ownership, ioctl direction/size checks, and the existing
+32-file bound apply to this node as to the other nodes.
+
+The characteristics structure describes the emulated GM20B/A1 chip, its 40-bit
+GPU address domain, and its Maxwell interface class identifiers. It does not
+expose properties of the host Intel/software adapter. Optional capability flags
+are zero: sparse mappings, statistics, sync-fence file descriptors, and general
+Host1x syncpoint operations are not advertised. Returning an interface class
+identifier does not imply implementation of every instruction in that class.
+
+The Switch ABI returns characteristics inline after two 64-bit header fields.
+A requested structure size of at least 160 bytes is supported and the returned
+size is 160. The nonzero address field is preserved as an opaque value, including
+libnx's literal value of one; it is never dereferenced. Short requests and null
+address tags fail before modifying output. TPC-mask queries support exactly one
+32-bit mask, with zero reserved bits and a nonzero opaque address. The returned
+mask is three, identifying the two TPCs in GPC zero; unused inline bytes are zero.
+Other shapes and controller ioctls, including ZCULL/ZBC and GPU-time queries,
+remain explicitly unsupported.

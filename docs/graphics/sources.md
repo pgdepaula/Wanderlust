@@ -1432,3 +1432,18 @@ corroborates the false-guard no-write behavior; it is not used as a SASS encodin
 source. Original envyas assembles both complete fixtures, and original MaxAs
 independently matches positive/inverted and high-register raw-bit examples.
 No compiler implementation is imported.
+
+### Switch GPU controller identity ABI
+
+- libnx ISC revision `feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973`,
+  [nvhost-ctrl-gpu.c](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/ioctl/nvhost-ctrl-gpu.c),
+  `nvioctlNvhostCtrlGpu_GetCharacteristics` and `GetTpcMasks`: ioctl direction,
+  payload sizes, inline output, and the literal nonzero address tag. No source
+  implementation was copied.
+- The same revision's
+  [ioctl.h](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/include/switch/nvidia/ioctl.h),
+  `nvioctl_gpu_characteristics`: explicit field order and GM20B identity values.
+  These identify the emulated chip rather than host capabilities. Wanderlust
+  deliberately clears optional feature flags instead of copying the physical
+  device's capability mask. The supported one-GPC mask is four bytes; no guest
+  pointer or fragmented buffer acquisition is involved.
