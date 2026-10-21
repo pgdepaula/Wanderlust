@@ -313,8 +313,9 @@ libnx ISC revision `feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973`:
   and [address_space.c](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/address_space.c)
   establish distinct BindChannel, AllocSpace, MapBufferEx, UnmapBuffer and FreeSpace
   operations, fixed offset/page-size arguments and mapping subregions. Their full
-  ioctl surface is not implemented: the typed adapter adopts only fixed complete
-  reservations/mappings. [map.c](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/map.c)
+  ioctl surface is not implemented: reservations and disjoint fixed mappings
+  retain separate lifetimes, with a bounded automatic-placement adapter above
+  them. [map.c](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/map.c)
   checks 4 KiB CPU backing alignment and size. The adapter's 4 KiB-only policy is
   deliberately narrower than available GPU page sizes; it is not nvmap emulation.
 - [ioctl/nvhost-ctrl.c](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/ioctl/nvhost-ctrl.c)
@@ -1548,3 +1549,10 @@ excludes this generic kind from compressible kinds. The adapter accepts this
 uncompressed mapping kind with unchanged canonical bytes; the existing surface
 descriptors, rather than the ioctl, select tiling conversions. NVIDIA kernel
 sources are semantic references only; no GPL implementation is imported.
+
+[NVIDIA address-space UAPI at a35286a4b10fbcfb689aa77be42c201d2091dca2](https://github.com/LineageOS/android_kernel_nvidia_shield/blob/a35286a4b10fbcfb689aa77be42c201d2091dca2/include/uapi/linux/nvgpu.h#L781)
+defines reservation ranges for later fixed mappings, rejects freeing a range
+while buffers remain mapped, and unmaps individual buffers by their mapped
+start. The same source distinguishes backing offset, mapping size and GPU VA.
+Only these lifetime/range semantics are adopted: desktop ioctl numbers differ
+from Switch and are not substituted for the pinned libnx wire identities.

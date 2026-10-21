@@ -42,7 +42,14 @@ struct Reservation {
     id: ReservationId,
     address: GpuAddress,
     size: u64,
-    mapping: Option<(MappingId, BackingId)>,
+    mappings: Vec<BufferMapping>,
+}
+#[derive(Debug)]
+struct BufferMapping {
+    id: MappingId,
+    backing: BackingId,
+    address: GpuAddress,
+    size: u64,
 }
 #[derive(Debug)]
 struct Space {
@@ -108,7 +115,7 @@ impl MemoryManager {
             .spaces
             .iter()
             .flat_map(|s| &s.reservations)
-            .any(|r| r.mapping.is_some_and(|m| m.1 == id))
+            .any(|r| r.mappings.iter().any(|m| m.backing == id))
         {
             return Err(invalid("backing still mapped"));
         }
@@ -171,18 +178,38 @@ impl MemoryManager {
             id,
             address,
             size,
-            mapping: None,
+            mappings: Vec::new(),
         });
         Ok(id)
     }
-    /// Full-reservation fixed mapping of canonical backing. Partial replacement/gather,
-    /// sparse allocations and automatic VA placement are deliberately absent.
+    /// Full-reservation mapping, retaining the original checked API.
     pub fn map(
         &mut self,
         space: AddressSpaceId,
         reservation: ReservationId,
         backing: BackingId,
         offset: u64,
+    ) -> Result<MappingId> {
+        let size = self
+            .space(space)?
+            .reservations
+            .iter()
+            .find(|r| r.id == reservation)
+            .ok_or_else(|| invalid("wrong reservation owner"))?
+            .size;
+        self.map_subrange(space, reservation, backing, offset, 0, size)
+    }
+    /// Map an unmapped subinterval of an existing VA reservation. The mapping
+    /// owns its exact extent; unmapping it preserves neighboring mappings and
+    /// leaves reservation ownership intact. Replacement and gathers are absent.
+    pub fn map_subrange(
+        &mut self,
+        space: AddressSpaceId,
+        reservation: ReservationId,
+        backing: BackingId,
+        offset: u64,
+        reservation_offset: u64,
+        size: u64,
     ) -> Result<MappingId> {
         if !aligned(offset) {
             return Err(invalid("unaligned backing offset"));
@@ -193,13 +220,33 @@ impl MemoryManager {
             .iter()
             .find(|r| r.id == reservation)
             .ok_or_else(|| invalid("wrong reservation owner"))?;
-        if r.mapping.is_some() {
-            return Err(invalid("reservation already mapped"));
+        if !aligned(reservation_offset)
+            || size == 0
+            || !aligned(size)
+            || reservation_offset
+                .checked_add(size)
+                .is_none_or(|end| end > r.size)
+        {
+            return Err(invalid("mapping subinterval outside reservation"));
         }
+        if s.reservations
+            .iter()
+            .map(|r| r.mappings.len())
+            .sum::<usize>()
+            >= MAX_OBJECTS
+        {
+            return Err(invalid("mapping capacity"));
+        }
+        let address = GpuAddress(
+            r.address
+                .0
+                .checked_add(reservation_offset)
+                .ok_or_else(|| invalid("mapping address overflow"))?,
+        );
         let guest = self.backing_range(
             backing,
             offset,
-            usize::try_from(r.size).map_err(|_| invalid("mapping exceeds host"))?,
+            usize::try_from(size).map_err(|_| invalid("mapping exceeds host"))?,
         )?;
         let s = self.space_mut(space)?;
         let epoch = s
@@ -212,8 +259,13 @@ impl MemoryManager {
             .find(|r| r.id == reservation)
             .unwrap();
         let id = MappingId(identity()?);
-        s.map.map(r.address, guest, r.size)?;
-        r.mapping = Some((id, backing));
+        s.map.map(address, guest, size)?;
+        r.mappings.push(BufferMapping {
+            id,
+            backing,
+            address,
+            size,
+        });
         s.epoch = epoch;
         Ok(id)
     }
@@ -226,10 +278,12 @@ impl MemoryManager {
         let r = s
             .reservations
             .iter_mut()
-            .find(|r| r.mapping.is_some_and(|m| m.0 == mapping))
+            .find(|r| r.mappings.iter().any(|m| m.id == mapping))
             .ok_or_else(|| invalid("unknown or stale mapping"))?;
-        s.map.unmap_exact(r.address, r.size)?;
-        r.mapping = None;
+        let index = r.mappings.iter().position(|m| m.id == mapping).unwrap();
+        let m = &r.mappings[index];
+        s.map.unmap_exact(m.address, m.size)?;
+        r.mappings.remove(index);
         s.epoch = epoch;
         Ok(())
     }
@@ -244,7 +298,7 @@ impl MemoryManager {
             .iter()
             .position(|r| r.id == reservation)
             .ok_or_else(|| invalid("wrong reservation owner"))?;
-        if s.reservations[n].mapping.is_some() {
+        if !s.reservations[n].mappings.is_empty() {
             return Err(invalid("reservation still mapped"));
         }
         s.reservations.remove(n);

@@ -442,7 +442,8 @@ fn words(values: &[u32]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
 fn mapping(h: &mut Harness, space: u32, handle: u32, gpu: u64, offset: u64, size: u64) {
-    let mut reserve = words(&[(size / 4096) as u32, 4096, 1, 0]);
+    let reserved = if gpu == 0x10000 { size * 2 } else { size };
+    let mut reserve = words(&[(reserved / 4096) as u32, 4096, 1, 0]);
     reserve.extend(gpu.to_le_bytes());
     h.ioctl(space, 0xc0184102, &reserve, None);
     let mut map = words(&[1, 0, handle, 0]);
@@ -450,6 +451,14 @@ fn mapping(h: &mut Harness, space: u32, handle: u32, gpu: u64, offset: u64, size
     map.extend(size.to_le_bytes());
     map.extend(gpu.to_le_bytes());
     h.ioctl(space, 0xc0284106, &map, None);
+    if gpu == 0x10000 {
+        // Two independently owned mappings inside one VA reservation. The
+        // actual textured draw reads the first; teardown must retain the second
+        // until its own unmap instead of freeing the entire reservation.
+        map[16..24].copy_from_slice(&(offset + size).to_le_bytes());
+        map[32..40].copy_from_slice(&(gpu + size).to_le_bytes());
+        h.ioctl(space, 0xc0284106, &map, None);
+    }
 }
 const RANGES: [(u64, u64, u64); 9] = [
     (0x10000, 0x1000, 0x2000),
@@ -566,8 +575,14 @@ fn runtime_service_executes_indexed_textured_draw_and_cpu_mutation() {
     );
     for (gpu, _, size) in ranges {
         h.ioctl(space, 0xc0084105, &gpu.to_le_bytes(), None);
+        let reserved = if gpu == 0x10000 {
+            h.ioctl(space, 0xc0084105, &(gpu + size).to_le_bytes(), None);
+            size * 2
+        } else {
+            size
+        };
         let mut free = gpu.to_le_bytes().to_vec();
-        free.extend(words(&[(size / 4096) as u32, 4096]));
+        free.extend(words(&[(reserved / 4096) as u32, 4096]));
         h.ioctl(space, 0xc0104103, &free, None);
     }
     h.close(channel);

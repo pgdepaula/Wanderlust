@@ -153,6 +153,26 @@ impl GpuDriver {
         self.idle_mappings()?;
         self.memory.unmap(space, mapping)
     }
+    /// Mapping mutation retains the same pending-output guard as full maps.
+    pub fn map_subrange(
+        &mut self,
+        space: AddressSpaceId,
+        reservation: ReservationId,
+        backing: BackingId,
+        backing_offset: u64,
+        reservation_offset: u64,
+        size: u64,
+    ) -> Result<MappingId> {
+        self.idle_mappings()?;
+        self.memory.map_subrange(
+            space,
+            reservation,
+            backing,
+            backing_offset,
+            reservation_offset,
+            size,
+        )
+    }
     pub fn free_reservation(
         &mut self,
         space: AddressSpaceId,

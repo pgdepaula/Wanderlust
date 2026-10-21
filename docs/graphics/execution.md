@@ -686,7 +686,8 @@ explicit release. Overlapping registrations are rejected; GPU aliases must map
 one existing BackingId. All guest byte access remains checked and scoped.
 
 The typed mapping API supports fixed, nonzero, 4 KiB-aligned reservations and
-full-reservation mappings of aligned backing subregions. It uses AddressMap,
+full-reservation or independently owned subinterval mappings of aligned backing
+subregions. It uses AddressMap,
 including its single-contiguous-mapping borrow restriction. Explicit full unmap
 invalidates the old MappingId; remapping produces a fresh ID and advances the
 address-space epoch. Partial unmap, sparse memory, automatic VA allocation, other
@@ -1866,3 +1867,14 @@ Pitch and generic-uncompressed aliases retain identical canonical storage.
 Mapping does not swizzle bytes: supported TIC/B197 surface descriptors select
 the existing layout converters when resources are accessed. Compressed PTE
 kinds, compression tags and kind-changing subrange remaps remain unsupported.
+
+Fixed `MapBufferEx` mappings may occupy an unmapped subinterval of an existing
+reservation, including multiple disjoint buffers within one large reservation.
+Each complete mapping has its own identity, exact extent and canonical backing;
+`UnmapBuffer` selects that mapping's start address. Removing it leaves adjacent
+mappings valid, advances the mapping epoch and keeps the reservation allocated.
+`FreeSpace` rejects while any child mapping remains. Overlap, crossing reservation
+boundaries, backing overflow and stale IDs fail without changing the epoch or
+existing mappings. There are at most 128 mappings per address space. This does
+not implement splitting or replacing an existing mapping, fragmented gathers,
+sparse PTEs or real hardware page tables.

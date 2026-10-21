@@ -385,6 +385,10 @@ fn driver_completion_publication_and_mapping_lifetime() {
     assert!(data[RT..RT + SIZE].chunks_exact(4).all(|p| p == BG));
     assert!(d.retire(first.token).is_err());
     assert!(d.unmap(space, maps[7].1).is_err());
+    let epoch = d.mapping_epoch(space).unwrap();
+    let error = d.map_subrange(space, maps[7].0, b, 0, 0, 4096).unwrap_err();
+    assert!(error.0.contains("publish pending output"));
+    assert_eq!(d.mapping_epoch(space).unwrap(), epoch);
     assert!(d.release_backing(b).is_err());
     let other = d.create_channel(space).unwrap();
     assert!(

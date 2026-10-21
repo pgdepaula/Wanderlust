@@ -79,9 +79,14 @@ struct Reservation {
     size: u64,
     page_size: u32,
     id: ReservationId,
-    mapping: Option<MappingId>,
-    allocation: Option<u32>,
+    mappings: Vec<BufferMapping>,
     automatic: bool,
+}
+#[derive(Debug)]
+struct BufferMapping {
+    address: u64,
+    size: u64,
+    id: MappingId,
 }
 #[derive(Debug)]
 struct Space {
@@ -422,8 +427,7 @@ impl<P: Copy> Driver<P> {
                     size,
                     page_size,
                     id,
-                    mapping: None,
-                    allocation: None,
+                    mappings: Vec::new(),
                     automatic: false,
                 });
                 r.output.copy_from_slice(r.input);
@@ -466,8 +470,11 @@ impl<P: Copy> Driver<P> {
                         size,
                         page_size: 4096,
                         id,
-                        mapping: Some(mapping),
-                        allocation: Some(handle),
+                        mappings: vec![BufferMapping {
+                            address,
+                            size,
+                            id: mapping,
+                        }],
                         automatic: true,
                     });
                     r.output.copy_from_slice(r.input);
@@ -475,24 +482,33 @@ impl<P: Copy> Driver<P> {
                     return Ok(());
                 }
                 let address = request.address;
+                let end = address.checked_add(size).ok_or(NvError::InvalidSize)?;
                 let reservation = space
                     .reservations
                     .iter_mut()
-                    .find(|v| v.address == address)
+                    .find(|v| address >= v.address && end <= v.address + v.size)
                     .ok_or(NvError::InvalidAddress)?;
-                if reservation.mapping.is_some() {
+                if reservation
+                    .mappings
+                    .iter()
+                    .any(|m| address < m.address + m.size && m.address < end)
+                {
                     return Err(NvError::AlreadyAllocated.into());
                 }
-                if size != reservation.size {
-                    return Err(NvError::NotSupported.into());
-                }
-                let mapping =
-                    checked(
-                        self.gpu
-                            .map(space.id, reservation.id, storage.backing, offset),
-                    )?;
-                reservation.mapping = Some(mapping);
-                reservation.allocation = Some(handle);
+                configuration.validate_range(address, size, reservation.page_size)?;
+                let mapping = checked(self.gpu.map_subrange(
+                    space.id,
+                    reservation.id,
+                    storage.backing,
+                    offset,
+                    address - reservation.address,
+                    size,
+                ))?;
+                reservation.mappings.push(BufferMapping {
+                    address,
+                    size,
+                    id: mapping,
+                });
                 r.output.copy_from_slice(r.input);
                 Ok(())
             }
@@ -500,13 +516,19 @@ impl<P: Copy> Driver<P> {
                 let index = space
                     .reservations
                     .iter()
-                    .position(|v| v.address == long(r.input, 0))
+                    .position(|v| v.mappings.iter().any(|m| m.address == long(r.input, 0)))
                     .ok_or(NvError::InvalidAddress)?;
                 let reservation = &mut space.reservations[index];
-                let mapping = reservation.mapping.ok_or(NvError::InvalidState)?;
-                checked(self.gpu.unmap(space.id, mapping))?;
-                reservation.mapping = None;
-                reservation.allocation = None;
+                let index_mapping = reservation
+                    .mappings
+                    .iter()
+                    .position(|m| m.address == long(r.input, 0))
+                    .ok_or(NvError::InvalidState)?;
+                checked(
+                    self.gpu
+                        .unmap(space.id, reservation.mappings[index_mapping].id),
+                )?;
+                reservation.mappings.remove(index_mapping);
                 if reservation.automatic {
                     checked(self.gpu.free_reservation(space.id, reservation.id))?;
                     space.reservations.remove(index);
@@ -528,7 +550,7 @@ impl<P: Copy> Driver<P> {
                             && v.page_size == word(r.input, 12)
                     })
                     .ok_or(NvError::InvalidAddress)?;
-                if space.reservations[index].mapping.is_some() {
+                if !space.reservations[index].mappings.is_empty() {
                     return Err(NvError::InvalidState.into());
                 }
                 checked(
@@ -686,7 +708,7 @@ impl<P: Copy> Driver<P> {
                 if self.files.iter().any(|file| matches!(&file.node, Node::Channel(channel) if channel.nvmap == Some(fd))) {
                     return Err(NvError::InvalidState.into());
                 }
-                if self.files.iter().any(|f|matches!(&f.node,Node::Space(s) if s.reservations.iter().any(|r|r.mapping.is_some()))) {
+                if self.files.iter().any(|f|matches!(&f.node,Node::Space(s) if s.reservations.iter().any(|r|!r.mappings.is_empty()))) {
                     return Err(NvError::InvalidState.into());
                 }
                 for allocation in &mut self.allocations {

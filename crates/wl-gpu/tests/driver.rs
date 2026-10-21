@@ -142,6 +142,100 @@ fn adjacent_mappings_remain_distinct_and_ids_cross_manager_fail() {
             .is_err()
     );
 }
+
+#[test]
+fn independent_subrange_mappings_preserve_reservation_and_canonical_identity() {
+    let mut m = MemoryManager::default();
+    let s = m.create_space().unwrap();
+    let other = m.create_space().unwrap();
+    let backing = m.register_backing(GuestAddress(0x20000), 0x4000).unwrap();
+    let replacement = m.register_backing(GuestAddress(0x30000), 0x1000).unwrap();
+    let r = m
+        .reserve_fixed(s, GpuAddress(0x400000000), 0x100000)
+        .unwrap();
+    let a = m.map_subrange(s, r, backing, 0x1000, 0, 0x1000).unwrap();
+    let b = m.map_subrange(s, r, backing, 0, 0x2000, 0x2000).unwrap();
+    for (address, guest) in [
+        (0x400000000, 0x21000),
+        (0x400002000, 0x20000),
+        (0x400003fff, 0x21fff),
+    ] {
+        assert_eq!(
+            m.address_map(s)
+                .unwrap()
+                .resolve(GpuAddress(address), 1)
+                .unwrap(),
+            GuestAddress(guest)
+        );
+    }
+    let epoch = m.mapping_epoch(s).unwrap();
+    for (offset, start, size) in [
+        (0, 0, 4096),
+        (0, 4096, 8192),
+        (0, 0x100000, 4096),
+        (0, u64::MAX - 4095, 4096),
+        (0x4000, 0x5000, 4096),
+        (1, 0x5000, 4096),
+        (0, 0x5001, 4096),
+        (0, 0x5000, 0),
+    ] {
+        assert!(m.map_subrange(s, r, backing, offset, start, size).is_err());
+        assert_eq!(m.mapping_epoch(s).unwrap(), epoch);
+    }
+    assert!(m.map_subrange(other, r, backing, 0, 0, 4096).is_err());
+    assert!(m.map(s, r, backing, 0).is_err());
+    assert!(m.free_reservation(s, r).is_err());
+    assert!(m.release_backing(backing).is_err());
+    m.unmap(s, a).unwrap();
+    assert!(m.unmap(s, a).is_err());
+    assert_eq!(
+        m.address_map(s)
+            .unwrap()
+            .resolve(GpuAddress(0x400002000), 4)
+            .unwrap(),
+        GuestAddress(0x20000)
+    );
+    let c = m.map_subrange(s, r, replacement, 0, 0, 4096).unwrap();
+    assert_ne!(a, c);
+    assert_eq!(
+        m.address_map(s)
+            .unwrap()
+            .resolve(GpuAddress(0x400000000), 4)
+            .unwrap(),
+        GuestAddress(0x30000)
+    );
+    m.unmap(s, b).unwrap();
+    m.release_backing(backing).unwrap();
+    m.unmap(s, c).unwrap();
+    m.free_reservation(s, r).unwrap();
+    m.release_backing(replacement).unwrap();
+    m.destroy_space(s).unwrap();
+}
+
+#[test]
+fn subrange_mapping_count_is_bounded_without_losing_existing_entries() {
+    let mut m = MemoryManager::default();
+    let s = m.create_space().unwrap();
+    let b = m.register_backing(GuestAddress(0), 4096).unwrap();
+    let r = m
+        .reserve_fixed(s, GpuAddress(0x10000), (MAX_OBJECTS as u64 + 1) * 4096)
+        .unwrap();
+    let mut ids = Vec::new();
+    for n in 0..MAX_OBJECTS {
+        ids.push(m.map_subrange(s, r, b, 0, n as u64 * 4096, 4096).unwrap());
+    }
+    let epoch = m.mapping_epoch(s).unwrap();
+    assert!(
+        m.map_subrange(s, r, b, 0, MAX_OBJECTS as u64 * 4096, 4096)
+            .is_err()
+    );
+    assert_eq!(m.mapping_epoch(s).unwrap(), epoch);
+    for id in ids {
+        m.unmap(s, id).unwrap();
+    }
+    m.free_reservation(s, r).unwrap();
+    m.release_backing(b).unwrap();
+}
 #[test]
 fn literal_incrementing_blend_packet_includes_disabled_color_key() {
     // INC from 0x1340, count 7. The sixth word is COLOR_KEY, not a blend factor.
