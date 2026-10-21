@@ -14,6 +14,10 @@ impl Renderer {
     /// earlier submitted draws and latch the channel, making whole-array retry fail.
     /// Packets and engine state continue across entries and calls; use Channel::finish
     /// only when the caller declares the logical command stream ended.
+    /// All payload acquisition is deferred to the current entry (also for
+    /// PROCEED), honoring WAIT without prefetching later entries. Descriptor
+    /// LEVEL does not introduce control flow; unsupported packet control flow
+    /// still faults. No USERD GET/resume-register emulation is claimed.
     pub fn submit_gpfifo_deferred(
         &mut self,
         channel: &mut Channel,

@@ -21,12 +21,30 @@ fn literal_field_boundaries_and_control_rejection() {
         (1, 1024, EntryError::ConditionalFetch),
         (2, 1024, EntryError::ReservedBit),
         (0, 1280, EntryError::Privileged),
-        (0, 1536, EntryError::Subroutine),
-        (0, 0x80000400, EntryError::Wait),
         (0, 0, EntryError::ControlEntry),
         (0, 3, EntryError::ControlEntry),
     ] {
         assert_eq!(Entry::decode(raw(lo, hi)), Err(error));
+    }
+}
+#[test]
+fn level_and_sync_are_distinct_from_address_length_privilege_and_control() {
+    for level in [0, 0x200] {
+        for sync in [0, 0x8000_0000] {
+            let e = Entry::decode(raw(0x1234, 0x401 | level | sync)).unwrap();
+            assert_eq!(e.address(), GpuAddress(0x100001234));
+            assert_eq!(e.byte_len(), 4);
+            assert_eq!(e.subroutine_level(), level != 0);
+            assert_eq!(e.sync_wait(), sync != 0);
+            assert_eq!(
+                Entry::decode(raw(0x1234, 0x501 | level | sync)),
+                Err(EntryError::Privileged)
+            );
+            assert_eq!(
+                Entry::decode(raw(0x1234, 1 | level | sync)),
+                Err(EntryError::ControlEntry)
+            );
+        }
     }
 }
 #[test]

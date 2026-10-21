@@ -289,15 +289,20 @@ from shader translation and quantizes between draws on the UNORM attachment.
   and [NV services](https://switchbrew.org/wiki/NV_services), inspected 2026-10-12:
   mapped command buffers and inline GPFIFO entries in channel submission. The
   NV-services page's informal allow_flush/is_push_buf bit names differ from the
-  NVIDIA class names; those bits are rejected, not assigned speculative semantics.
+  NVIDIA class names; class definitions determine the parsed fields.
 - Ryujinx reference fork `alula/Ryujinx`, MIT, revision
   `4930dced25c0d9ec33096b0f2601d262daa477bf`,
   [GPFifoProcessor.cs](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoProcessor.cs)
   retains method-count state across Process calls, independently corroborating
   packet continuation. [GPFifoDevice.cs](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoDevice.cs)
-  corroborates address/word-length extraction and gives WAIT distinct prefetch
-  handling. It is a source reference, not a dependency or proof that WAIT is
-  implemented here. No processor code was copied or vendored.
+  corroborates address/word-length extraction and maps WAIT to deferred payload
+  acquisition, suppressing early prefetch of following entries. Wanderlust uses
+  deferred acquisition for all payloads and preserves its alias-publication
+  barrier before every borrow. LEVEL is retained for the bounded straight-line
+  path; accepting its descriptor value does not provide CALL/RETURN, USERD GET
+  registers or hardware resume scheduling. No processor code was copied or
+  vendored. Synthetic tests cover a GPU-written next command entry in MAIN/
+  PROCEED, SUBROUTINE/WAIT and WAIT followed by MAIN/PROCEED configurations.
 
 ## Driver-context ABI and host completion
 

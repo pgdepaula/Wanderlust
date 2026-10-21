@@ -612,9 +612,9 @@ interprets ioctl flags/fences.
 | Entry0 GET | 31:2 | aligned address low bits |
 | Entry1 GET_HI | 7:0 | address bits 39:32 |
 | Entry1 PRIV | 8 | USER = 0 |
-| Entry1 LEVEL | 9 | MAIN = 0 |
+| Entry1 LEVEL | 9 | MAIN = 0 or SUBROUTINE = 1, straight-line packets |
 | Entry1 LENGTH | 30:10 | nonzero count of 32-bit words |
-| Entry1 SYNC | 31 | PROCEED = 0 |
+| Entry1 SYNC | 31 | PROCEED = 0 or WAIT = 1, deferred payload acquisition |
 
 Address plus length must fit the 40-bit address space, allowing an exclusive end
 exactly at 2^40. The wire field permits 2,097,151 words. The execution policy caps
@@ -622,9 +622,12 @@ one call at 2,048 entries and 1,048,576 aggregate words (4 MiB), independently o
 hardware limits. Empty arrays are successful no-ops on healthy channels.
 Zero-length entries have control/opcode semantics: even the documented NOP opcode
 is currently rejected, rather than treating an arbitrary control operand as an
-address or borrowing zero bytes. Conditional fetch, kernel privilege, subroutine
-level, WAIT and reserved bit 1 are explicitly rejected. WAIT is not implemented
-by calling a CPU sleep or interpreting it as a complete host fence.
+address or borrowing zero bytes. Conditional fetch, kernel privilege and reserved
+bit one remain rejected. LEVEL is retained as descriptor metadata, distinct from
+a pushbuffer CALL/RETURN; unsupported packet control flow still faults. USERD
+GET/TOP_LEVEL_GET, resume registers and preemptive scheduling are not emulated.
+WAIT disables early payload acquisition, including prefetch of following entries.
+It is not a CPU sleep or a complete host fence.
 
 Metadata length, flags, address ranges and aggregate work are preflighted before
 any FIFO word or engine method is consumed. Entries are decoded a second time during execution to avoid
@@ -658,7 +661,10 @@ target overlapping command bytes triggers the existing explicit completion and
 writeback before acquisition, preventing execution of stale RAM instructions.
 This is a conservative host coherency contract, not a model of PBDMA command
 prefetch timing or a hardware guarantee for self-modifying PROCEED buffers.
-WAIT/no-prefetch behavior and hardware synchronization remain unsupported.
+The executor acquires every payload only when its entry executes, satisfying
+WAIT's no-prefetch policy without an additional per-entry GPU wait. PROCEED also
+uses this conservative acquisition policy. Full PBDMA scheduling remains outside
+the supported subset.
 
 FIFO packet and B197 object/register state survive entry boundaries and calls.
 No implicit `Channel::finish` occurs: the caller invokes it only at logical stream

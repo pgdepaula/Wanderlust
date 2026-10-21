@@ -425,30 +425,38 @@ fn gpfifo_partial_fault_never_replays_draw_and_writeback_is_retryable() {
 #[test]
 #[ignore = "requires actual GPU; run explicitly"]
 fn gpfifo_command_alias_of_gpu_output_requires_visibility_before_fetch() {
-    let (mut d, m, mut w, image) = fixture();
-    for b in &mut d[RT..RT + SIZE] {
-        *b = 0;
+    for high_flags in [[0, 0], [0x80000200, 0x80000200], [0x80000200, 0]] {
+        let (mut d, m, mut w, image) = fixture();
+        for b in &mut d[RT..RT + SIZE] {
+            *b = 0;
+        }
+        method(&mut w, 0x2144, 0x100);
+        w.extend([0x20010485, 0x40030000]);
+        put(&mut d, 0x10000, &w);
+        let mut entries = entry(0xb0000, w.len()).to_vec();
+        entries.extend(entry(0x90000 + ((14 * 52 + 20) * 4), 1));
+        // USER/SUBROUTINE/WAIT: neither this payload nor the next one may be
+        // snapshotted before earlier GPU output has become coherent.
+        for (descriptor, flags) in entries.chunks_exact_mut(8).zip(high_flags) {
+            let high = u32::from_le_bytes(descriptor[4..].try_into().unwrap()) | flags;
+            descriptor[4..].copy_from_slice(&high.to_le_bytes());
+        }
+        let mut r = Renderer::new().unwrap();
+        let mut c = Channel::default();
+        let mut t = TextureChanges::new(1);
+        let e = submit(&mut r, &mut c, &entries, &m, &mut d, &mut t).unwrap_err();
+        assert_eq!(e.phase, FaultPhase::Execute);
+        assert_eq!(e.progress.draws_submitted, 2);
+        assert!(e.cause.0.contains("FIFO opcode 7")); // GPU color FF BF 80 40, not stale RAM NOP.
+        assert_eq!(
+            (
+                r.counters.coherence_barriers,
+                r.counters.readback_operations
+            ),
+            (1, 1)
+        );
+        check(&d[RT..RT + SIZE], &image, Some([64, 128, 191, 255]), [0; 4]);
     }
-    method(&mut w, 0x2144, 0x100);
-    w.extend([0x20010485, 0x40030000]);
-    put(&mut d, 0x10000, &w);
-    let mut entries = entry(0xb0000, w.len()).to_vec();
-    entries.extend(entry(0x90000 + ((14 * 52 + 20) * 4), 1));
-    let mut r = Renderer::new().unwrap();
-    let mut c = Channel::default();
-    let mut t = TextureChanges::new(1);
-    let e = submit(&mut r, &mut c, &entries, &m, &mut d, &mut t).unwrap_err();
-    assert_eq!(e.phase, FaultPhase::Execute);
-    assert_eq!(e.progress.draws_submitted, 2);
-    assert!(e.cause.0.contains("FIFO opcode 7")); // GPU color FF BF 80 40, not stale RAM NOP.
-    assert_eq!(
-        (
-            r.counters.coherence_barriers,
-            r.counters.readback_operations
-        ),
-        (1, 1)
-    );
-    check(&d[RT..RT + SIZE], &image, Some([64, 128, 191, 255]), [0; 4]);
 }
 #[test]
 #[ignore = "requires actual GPU; run explicitly"]

@@ -201,17 +201,27 @@ fn gpfifo_entry_bitfield_and_40bit_boundary_conformance() {
         Err(EntryError::Privileged)
     );
 
-    // LEVEL bit (hi bit 9): 1 = subroutine (unsupported)
-    assert_eq!(
-        Entry::decode(make_raw(0x10000, (4 << 10) | 0x200)),
-        Err(EntryError::Subroutine)
-    );
-
-    // SYNC bit (hi bit 31): 1 = SYNC_WAIT (unsupported)
-    assert_eq!(
-        Entry::decode(make_raw(0x10000, (4 << 10) | 0x8000_0000)),
-        Err(EntryError::Wait)
-    );
+    // LEVEL and SYNC are now supported descriptor metadata for the serialized,
+    // deferred-fetch path. Neither changes the address or word count. Their
+    // acceptance must not accidentally admit privileged or conditional fetches.
+    for level in [0, 1 << 9] {
+        for sync in [0, 1 << 31] {
+            let hi = (4 << 10) | level | sync;
+            let entry = Entry::decode(make_raw(0x10000, hi)).unwrap();
+            assert_eq!(entry.address(), GpuAddress(0x10000));
+            assert_eq!(entry.words(), 4);
+            assert_eq!(entry.subroutine_level(), level != 0);
+            assert_eq!(entry.sync_wait(), sync != 0);
+            assert_eq!(
+                Entry::decode(make_raw(0x10000, hi | (1 << 8))),
+                Err(EntryError::Privileged)
+            );
+            assert_eq!(
+                Entry::decode(make_raw(0x10001, hi)),
+                Err(EntryError::ConditionalFetch)
+            );
+        }
+    }
 
     // Words count (hi bits 30:10): 0 = control entry (unsupported)
     assert_eq!(

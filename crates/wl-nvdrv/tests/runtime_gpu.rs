@@ -645,7 +645,9 @@ fn runtime_service_executes_indexed_textured_draw_and_cpu_mutation() {
     h.p.memory
         .write_bytes(DATA + 0x10000, &words(&draw))
         .unwrap();
-    let entry_bytes = entry(0xb0000, draw.len());
+    let mut entry_bytes = entry(0xb0000, draw.len());
+    entry_bytes[5] |= 2; // SUBROUTINE descriptor level, not a packet CALL.
+    entry_bytes[7] |= 0x80; // WAIT / deferred command acquisition.
     let output = h.ioctl(
         channel,
         0xc018481b,

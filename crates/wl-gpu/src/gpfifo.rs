@@ -1,4 +1,4 @@
-//! B06F USER/MAIN/PROCEED GPFIFO entries, distinct from nvdrv ioctl flags.
+//! B06F user GPFIFO entries, distinct from nvdrv ioctl flags.
 //! Sources and unsupported control-entry policy are recorded in graphics sources.
 use crate::{Result, invalid, memory::GpuAddress};
 
@@ -36,6 +36,8 @@ impl std::error::Error for EntryError {}
 pub struct Entry {
     address: GpuAddress,
     words: u32,
+    subroutine_level: bool,
+    sync_wait: bool,
 }
 impl Entry {
     pub fn decode(bytes: [u8; 8]) -> std::result::Result<Self, EntryError> {
@@ -49,12 +51,6 @@ impl Entry {
         }
         if hi & 0x100 != 0 {
             return Err(EntryError::Privileged);
-        }
-        if hi & 0x200 != 0 {
-            return Err(EntryError::Subroutine);
-        }
-        if hi & 0x8000_0000 != 0 {
-            return Err(EntryError::Wait);
         }
         let words = (hi >> 10) & WIRE_MAX_WORDS;
         if words == 0 {
@@ -70,7 +66,20 @@ impl Entry {
         Ok(Self {
             address: GpuAddress(address),
             words,
+            subroutine_level: hi & 0x200 != 0,
+            sync_wait: hi & 0x8000_0000 != 0,
         })
+    }
+    /// Descriptor level, not a pushbuffer CALL or implicit branch.
+    /// USERD GET/TOP_LEVEL_GET and hardware resume scheduling are not exposed.
+    pub fn subroutine_level(self) -> bool {
+        self.subroutine_level
+    }
+    /// WAIT disables early payload acquisition. The executor fetches all
+    /// payloads at execution time, including entries following a WAIT entry.
+    /// This flag alone is not a host completion fence.
+    pub fn sync_wait(self) -> bool {
+        self.sync_wait
     }
     pub fn address(self) -> GpuAddress {
         self.address
