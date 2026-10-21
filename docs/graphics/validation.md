@@ -3433,3 +3433,30 @@ The preceding original-executable run accepted InitializeEx, both legacy/Ioctl3
 VA-region queries, AllocSpace and nvmap Create before the allocation metadata
 restriction. It executed 113,271,840 original instructions and 117 IPC requests,
 with no original GPU frame.
+
+### Cache-policy transitions without releasing GPU registrations
+
+The original executable successfully attached its 4 KiB nvmap backing and then
+requested Uncached through SVC 3. The previous blanket pin guard rejected that
+request with kernel result `0xd401` (module 1, description 106), causing the
+guest's own break path. No guest registers or instructions were patched.
+
+Runtime tests now verify complete-pin Uncached set/clear, exact stored bytes,
+unchanged RW permissions, neighboring attributes, retained registration tokens,
+and continued reprotection rejection. Partial-pin attribute changes still fail
+before splitting or writing. Region-split tests use asymmetric byte sequences
+and assert that the larger side retains the original pointer and capacity.
+They do not claim zero copying: the prefix split shifts the retained bytes.
+
+All 147 runtime CPU tests passed. The NVIDIA package passed 16 CPU tests and
+seven device scenarios on each of WSL OpenGL, native Windows D3D12 and native
+Windows Vulkan (21 explicit device passes, no skips). Its indexed textured-draw
+and fault/publication scenarios set Uncached while the backing remains pinned;
+the successful path clears it before registration teardown and repinning.
+Strict Clippy for both packages and workspace formatting passed.
+
+A runtime change invalidates dependent Rust archive identities. A standalone
+compiler preflight confirmed that reusing dependent archives from the old
+runtime fails with E0460. Rebuilding against the new runtime is required; a
+completed synthetic validation is not proof that the new original executable
+has already run.

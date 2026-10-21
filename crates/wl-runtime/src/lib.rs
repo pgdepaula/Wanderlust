@@ -142,9 +142,20 @@ impl Memory {
             return false;
         };
         let r = &mut self.regions[i];
+        let offset = (address - r.base) as usize;
+        let tail_bytes = if offset < r.bytes.len() - offset {
+            // Attribute changes often isolate one page near the start of a
+            // multi-gigabyte heap. Retain the large allocation and copy only
+            // the small prefix instead of allocating a second large heap.
+            let prefix = r.bytes[..offset].to_vec();
+            r.bytes.drain(..offset);
+            std::mem::replace(&mut r.bytes, prefix)
+        } else {
+            r.bytes.split_off(offset)
+        };
         let tail = Region {
             base: address,
-            bytes: r.bytes.split_off((address - r.base) as usize),
+            bytes: tail_bytes,
             read: r.read,
             write: r.write,
             execute: r.execute,

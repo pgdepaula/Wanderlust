@@ -18,6 +18,12 @@ const SIZE: usize = 208 * 29;
 const BG: [u8; 4] = [11, 17, 23, 255];
 const POS: [[f32; 2]; 3] = [[-0.8, -0.6], [0.6, -0.4], [-0.2, 0.7]];
 const UV: [[f32; 2]; 3] = [[0.1, 0.2], [0.9, 0.1], [0.25, 0.85]];
+fn cache_policy(h: &mut Harness, value: u64) {
+    h.cpu.x[..4].copy_from_slice(&[DATA, 0x18000, 8, value]);
+    assert_eq!(dispatch(&mut h.cpu, &mut h.p, 3).unwrap(), None);
+    assert_eq!(h.cpu.x[0], 0);
+    assert!(h.p.memory.ensure_gpu_unpinned(DATA, 0x18000).is_err());
+}
 fn method(w: &mut Vec<u32>, m: u32, v: u32) {
     w.extend([0x20010000 | (m / 4), v]);
 }
@@ -471,6 +477,7 @@ fn configured() -> (Harness, u32, u32, u32, Vec<u32>, Vec<u8>) {
     alloc.extend(DATA.to_le_bytes());
     h.ioctl(nvmap, 0xc0200104, &alloc, None);
     assert!(h.p.memory.ensure_gpu_unpinned(DATA, 4096).is_err());
+    cache_policy(&mut h, 8);
     // Explicit Switch/libnx field order, including the selected 64 KiB page.
     // This fixture retains the default VA bounds for its low-address mappings.
     let mut initialization = [0; 40];
@@ -565,6 +572,7 @@ fn runtime_service_executes_indexed_textured_draw_and_cpu_mutation() {
     }
     h.close(channel);
     h.close(space);
+    cache_policy(&mut h, 0);
     h.close(nvmap);
     let pin = h.p.memory.pin_gpu_range(DATA, 0x18000).unwrap();
     h.p.memory.release_gpu_pin(pin).unwrap();

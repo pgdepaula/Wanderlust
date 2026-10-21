@@ -851,9 +851,17 @@ fn set_memory_attribute(
     value: u32,
 ) -> Result<(), u32> {
     check_range(k, address, size)?;
-    memory
-        .ensure_gpu_unpinned(address, size)
-        .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
+    // Cache policy does not replace registered storage or alter its access
+    // permissions. Permit complete pins, but not a split inside one: the GPU
+    // borrowing contract still requires one contiguous region per backing.
+    if mask != attribute::UNCACHED
+        || memory.gpu_split_blocked(address)
+        || memory.gpu_split_blocked(address + size)
+    {
+        memory
+            .ensure_gpu_unpinned(address, size)
+            .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
+    }
     if mask | value != mask || (mask | value) & !attribute::SET_MASK != 0 {
         return Err(result::INVALID_COMBINATION);
     }

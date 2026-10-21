@@ -1512,3 +1512,12 @@ An original-executable boundary observation corroborated flags zero and
 allocation alignment 128 KiB with only page-aligned CPU storage. Only scalar
 request metadata was inspected; no original shader or executable fixture was
 added.
+
+### Horizon cache policy on device-associated storage
+
+[Atmosphère KPageTableBase::SetMemoryAttribute at
+6b0c077b4c608a3a2ee712b8dc35fee87ceb62e8](https://github.com/Atmosphere-NX/Atmosphere/blob/6b0c077b4c608a3a2ee712b8dc35fee87ceb62e8/libraries/libmesosphere/source/kern_k_page_table_base.cpp#L1531)
+checks the requested attribute capability while excluding DeviceShared from its
+rejection mask. The source is used as semantic evidence; GPL implementation code
+is not copied. Wanderlust's stricter registration lifetime guard permits only
+Uncached changes that preserve complete contiguous pins.

@@ -1815,3 +1815,20 @@ canonical backing through the existing GPU driver. Host coherence remains the
 shared write journal and explicit publication boundary; no hardware CPU cache
 maintenance or arbitrary guest memory attribute support is claimed. Invalid
 metadata fails before pinning; registration failure releases its temporary pin.
+
+### Cache-policy transitions on registered runtime storage
+
+The runtime permits `SetMemoryAttribute` Uncached transitions over complete GPU
+registrations. The request still passes normal range, memory-state and attribute
+validation. Changes that cut inside a registered span remain unsupported because
+the current guest-memory borrowing interface requires one contiguous region per
+pin. Permission changes, unmapping, alias creation and replacement of registered
+storage retain their existing guards. The registration token, canonical guest
+addresses and bytes survive cache-policy transitions; no host borrow escapes.
+This is coherent-host cache metadata, not emulation of hardware cache contents.
+
+When isolating a small interval near the beginning of a large region, the runtime
+retains the larger Vec allocation and allocates only the shorter prefix. It
+still moves the remaining bytes in place. Splitting near the end retains the
+large prefix and allocates the short tail. This avoids a second large allocation
+when a one-page cache request isolates part of a multi-gigabyte guest heap.

@@ -198,7 +198,7 @@ fn direct_split_inside_pin_fails_without_structural_changes_then_succeeds_after_
 }
 
 #[test]
-fn svc_reprotection_and_attribute_change_are_rejected_before_split_or_write() {
+fn svc_reprotection_and_partial_pin_attributes_fail_before_split_or_write() {
     for (id, args) in [
         (0x02, vec![BASE, PAGE, 1]),
         (
@@ -213,7 +213,10 @@ fn svc_reprotection_and_attribute_change_are_rejected_before_split_or_write() {
     ] {
         let (mut process, mut cpu) = process();
         normal(&mut process.memory, BASE, 8192);
-        let pin = process.memory.pin_gpu_range(BASE, PAGE).unwrap();
+        let pin = process
+            .memory
+            .pin_gpu_range(BASE, if id == 0x03 { 2 * PAGE } else { PAGE })
+            .unwrap();
         let before = snapshot(&process.memory);
         assert_ne!(svc(&mut process, &mut cpu, id, &args), result::SUCCESS);
         assert_eq!(snapshot(&process.memory), before);
@@ -227,6 +230,88 @@ fn svc_reprotection_and_attribute_change_are_rejected_before_split_or_write() {
         } else {
             assert_eq!(region.attribute & attribute::UNCACHED, attribute::UNCACHED);
         }
+    }
+}
+
+#[test]
+fn complete_gpu_pin_cache_changes_preserve_bytes_permissions_and_lifetime() {
+    let (mut process, mut cpu) = process();
+    normal(&mut process.memory, BASE, (4 * PAGE) as usize);
+    let pin = process.memory.pin_gpu_range(BASE + PAGE, PAGE).unwrap();
+    let original = process
+        .memory
+        .read_bytes(BASE, (4 * PAGE) as usize)
+        .unwrap()
+        .to_vec();
+    for value in [attribute::UNCACHED, 0, attribute::UNCACHED] {
+        assert_eq!(
+            svc(
+                &mut process,
+                &mut cpu,
+                3,
+                &[
+                    BASE + PAGE,
+                    PAGE,
+                    u64::from(attribute::UNCACHED),
+                    u64::from(value)
+                ]
+            ),
+            result::SUCCESS
+        );
+        assert_eq!(
+            process
+                .memory
+                .read_bytes(BASE + PAGE, PAGE as usize)
+                .unwrap(),
+            &original[PAGE as usize..(2 * PAGE) as usize]
+        );
+        let region = &process.memory.regions[process.memory.region_index(BASE + PAGE).unwrap()];
+        assert_eq!(region.attribute, value);
+        assert_eq!(
+            (region.read, region.write, region.execute),
+            (true, true, false)
+        );
+        assert!(
+            process
+                .memory
+                .ensure_gpu_unpinned(BASE + PAGE, PAGE)
+                .is_err()
+        );
+        assert_eq!(
+            svc(&mut process, &mut cpu, 2, &[BASE + PAGE, PAGE, 1]),
+            result::INVALID_CURRENT_MEMORY
+        );
+        assert_eq!(
+            process.memory.regions[process.memory.region_index(BASE).unwrap()].attribute,
+            0
+        );
+        assert_eq!(
+            process.memory.regions[process.memory.region_index(BASE + 2 * PAGE).unwrap()].attribute,
+            0
+        );
+    }
+    process.memory.release_gpu_pin(pin).unwrap();
+}
+
+#[test]
+fn region_split_retains_the_large_allocation_and_exact_byte_order() {
+    for split in [PAGE, 3 * PAGE] {
+        let mut memory = Memory::default();
+        let bytes: Vec<u8> = (0..4 * PAGE)
+            .map(|i| (i.wrapping_mul(31) >> 7) as u8)
+            .collect();
+        memory
+            .map_state(BASE, bytes.clone(), true, true, false, state::NORMAL)
+            .unwrap();
+        let pointer = memory.regions[0].bytes.as_ptr();
+        let capacity = memory.regions[0].bytes.capacity();
+        assert!(memory.split_at(BASE + split));
+        assert_eq!(memory.regions.len(), 2);
+        assert_eq!(memory.regions[0].bytes, &bytes[..split as usize]);
+        assert_eq!(memory.regions[1].bytes, &bytes[split as usize..]);
+        let retained = if split < PAGE * 2 { 1 } else { 0 };
+        assert_eq!(memory.regions[retained].bytes.as_ptr(), pointer);
+        assert_eq!(memory.regions[retained].bytes.capacity(), capacity);
     }
 }
 
