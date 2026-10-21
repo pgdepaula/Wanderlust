@@ -42,9 +42,9 @@ nvmap node and up to 16 channel identities over its lifetime.
 | --- | --- | --- |
 | `/dev/nvmap` | Create `c0080101` | Nonzero size aligned to 4 KiB; unique handle |
 | | Alloc `c0200104` | User-backed, flags 1, alignment 4096, kind 0, heap mask 0 |
-| `/dev/nvhost-as-gpu` | InitializeEx `40284109` | Zero/default payload |
+| `/dev/nvhost-as-gpu` | InitializeEx `40284109` | Flags 0/1, selected 64/128 KiB large pages, default or checked explicit VA bounds |
 | | BindChannel `40044101` | Initialized space and unbound channel |
-| | AllocSpace `c0184102` | Fixed address, 4 KiB pages, flags 1 |
+| | AllocSpace `c0184102` | Fixed address, 4 KiB or configured large pages, flags 1; explicit region bounds |
 | | MapBufferEx `c0284106` | Complete reservation, checked allocation subrange, flags 1/5, kind 0/default |
 | | UnmapBuffer `c0084105` | Exact mapped reservation base |
 | | FreeSpace `c0104103` | Exact unmapped reservation |
