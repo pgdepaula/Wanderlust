@@ -637,6 +637,46 @@ fn runtime_service_partial_gpu_fault_publishes_prefix_and_never_replays() {
 
 #[test]
 #[ignore = "requires the actual NVIDIA runtime backend and wgpu device"]
+fn runtime_service_reports_the_configured_gpu_va_regions() {
+    let mut h = Harness::new(vec![0; 0x18000]);
+    let fd = h.open("/dev/nvhost-as-gpu");
+    let mut init = [0; 40];
+    init[0] = 1;
+    init[8..12].copy_from_slice(&65536u32.to_le_bytes());
+    for (offset, value) in [(16, 0x4000000u64), (24, 0x2000000000), (32, 0x400000000)] {
+        init[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    h.ioctl(fd, 0x40284109, &init, None);
+    let mut input = [0; 64];
+    input[8] = 48;
+    h.p.memory.write_bytes(META + 0x1000, &input).unwrap();
+    let mut args = fd.to_le_bytes().to_vec();
+    args.extend(0xc0404108u32.to_le_bytes());
+    h.send(&Wire {
+        command: 12,
+        args: &args,
+        x: &[(META + 0x1000, 64)],
+        a: &[(0, 0)],
+        b: &[(META + 0x3000, 64), (META + 0x4000, 48)],
+        c: &[(0, 0), (0, 0)],
+        ..Wire::default()
+    });
+    assert_eq!(h.p.memory.load(h.tls() + 0x20, 4).unwrap(), 0);
+    let primary = h.p.memory.read_bytes(META + 0x3000, 64).unwrap();
+    let inline = h.p.memory.read_bytes(META + 0x4000, 48).unwrap();
+    assert_eq!(inline, &primary[16..]);
+    assert_eq!(&inline[..8], &0x4000000u64.to_le_bytes());
+    assert_eq!(&inline[8..12], &4096u32.to_le_bytes());
+    assert_eq!(&inline[16..24], &0x3fc000u64.to_le_bytes());
+    assert_eq!(&inline[24..32], &0x400000000u64.to_le_bytes());
+    assert_eq!(&inline[32..36], &65536u32.to_le_bytes());
+    assert_eq!(&inline[40..48], &0x1c0000u64.to_le_bytes());
+    assert_eq!(h.metrics.borrow().0.submissions, 0);
+    h.close(fd);
+}
+
+#[test]
+#[ignore = "requires the actual NVIDIA runtime backend and wgpu device"]
 fn runtime_service_ioctl3_characteristics_publishes_two_checked_outputs() {
     let mut h = Harness::new(vec![0; 0x18000]);
     let fd = h.open("/dev/nvhost-ctrl-gpu");

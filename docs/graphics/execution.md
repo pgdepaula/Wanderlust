@@ -1776,5 +1776,14 @@ ownership; no hardware page-table implementation is introduced. Free requests
 match the original reservation's page size as well as its address and length.
 Validation precedes marking a context initialized, and neither initialization
 nor reservation submits graphics work or publishes memory. Automatic VA
-allocation, sparse mappings and general region-query compatibility remain
-unsupported.
+allocation and sparse mappings remain unsupported.
+
+`GetVARegions` (`0xc0404108`) exposes those configured regions as two
+24-byte descriptors: 64-bit base, 32-bit page size, reserved zero, and 64-bit
+page count. It accepts a 64-byte primary request/output with the bounded buffer
+size 48. Ioctl3 additionally requires an exact 48-byte second output; both
+destinations are validated before mutation. The unused address tag is preserved
+without dereferencing it. The default configuration with unspecified ranges
+returns unsupported rather than inventing a host VA allocator or inconsistent
+region limits. Neither query changes mappings, submits GPU work nor guarantees
+completion.

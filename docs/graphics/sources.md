@@ -1484,3 +1484,10 @@ The NVIDIA-authored [nvgpu header at
 a35286a4b10fbcfb689aa77be42c201d2091dca2](https://github.com/LineageOS/android_kernel_nvidia_shield/blob/a35286a4b10fbcfb689aa77be42c201d2091dca2/include/uapi/linux/nvgpu.h#L239)
 describes fixed-offset userspace-managed address spaces. It is semantic evidence,
 not the Switch wire layout. No external emulator code is copied.
+
+The same [libnx source's GetVARegions](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/ioctl/nvhost-as-gpu.c#L100)
+specifies the 16-byte primary header plus two region descriptors and no pointer
+dereference. [Switchbrew's GET_VA_REGIONS](https://switchbrew.org/wiki/NV_services#NVGPU_AS_IOCTL_GET_VA_REGIONS)
+provides the 24-byte descriptor fields and Ioctl3 transport. Reported page counts
+are derived from the adapter's actual validated start/split/end bounds; they are
+not arbitrary emulator constants.

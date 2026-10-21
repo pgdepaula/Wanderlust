@@ -77,6 +77,24 @@ impl Configuration {
         }
         Ok(())
     }
+
+    /// The two regions are reported from the same bounds used for reservation
+    /// checks. No invented default VA allocator is exposed to the guest.
+    pub(super) fn regions(&self) -> Result<[u8; 48]> {
+        let (start, end, split) = self.range.ok_or(NvError::NotSupported)?;
+        let mut bytes = [0; 48];
+        for (i, (base, limit, page)) in [(start, split, 4096u32), (split, end, self.big_page_size)]
+            .into_iter()
+            .enumerate()
+        {
+            let at = i * 24;
+            bytes[at..at + 8].copy_from_slice(&base.to_le_bytes());
+            bytes[at + 8..at + 12].copy_from_slice(&page.to_le_bytes());
+            bytes[at + 16..at + 24]
+                .copy_from_slice(&((limit - base) / u64::from(page)).to_le_bytes());
+        }
+        Ok(bytes)
+    }
 }
 
 #[cfg(test)]
@@ -143,5 +161,21 @@ mod tests {
         let c = Configuration::decode(&[0; 40]).unwrap();
         c.validate_range(0x10000, 4096, 4096).unwrap();
         c.validate_range(0x20000, 0x20000, 0x20000).unwrap();
+        assert!(c.regions().is_err());
+    }
+    #[test]
+    fn regions_describe_exactly_the_validated_ranges() {
+        let b = Configuration::decode(&request())
+            .unwrap()
+            .regions()
+            .unwrap();
+        assert_eq!(long(&b, 0), 0x4000000);
+        assert_eq!(word(&b, 8), 4096);
+        assert_eq!(word(&b, 12), 0);
+        assert_eq!(long(&b, 16), 0x3fc000);
+        assert_eq!(long(&b, 24), 0x400000000);
+        assert_eq!(word(&b, 32), 65536);
+        assert_eq!(word(&b, 36), 0);
+        assert_eq!(long(&b, 40), 0x1c0000);
     }
 }

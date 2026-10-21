@@ -3367,3 +3367,23 @@ backend passed on WSL OpenGL, native Windows D3D12 and native Windows Vulkan
 workspace formatting passed. Device initialization/reservation scenarios do not
 claim rasterization; the existing runtime draw scenarios perform actual draws.
 No full workspace test run is included in this result.
+
+### Configured VA-region query
+
+The region-query tests assert literal bases, page sizes, reserved zeroes and
+independently specified page counts for the configured lower and upper regions.
+A too-short Ioctl3 second output leaves both destinations unchanged; legacy
+Ioctl and valid Ioctl3 return identical descriptors. Literal HIPC/CMIF coverage
+checks both output buffers against the configured bounds with no GPU submission.
+
+Validation: 13 CPU tests and seven explicit device scenarios passed per backend
+on WSL OpenGL, native Windows D3D12 and native Windows Vulkan (21 device passes,
+zero explicit-run skips). Strict package Clippy and workspace formatting passed.
+The unchanged indexed textured-draw and partial-publication/fault regressions
+remain included. No full workspace run is claimed.
+
+An original-executable run accepted the explicit InitializeEx request and then
+reached legacy GetVARegions, which the preceding backend did not support. It
+executed 113,222,743 original instructions and 110 IPC requests; it produced no
+original GPU frame. This identifies a service boundary rather than demonstrating
+general NVIDIA compatibility or presentation.

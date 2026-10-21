@@ -251,8 +251,11 @@ impl<P: Copy> Driver<P> {
             return Err(NvError::InvalidSize.into());
         }
         let f = self.file(r.fd)?;
-        let inline_query =
-            matches!(self.files[f].node, Node::ControlGpu) && control::is_inline_query(&r);
+        let inline_query = match self.files[f].node {
+            Node::ControlGpu => control::is_inline_query(&r),
+            Node::Space(_) => r.request == 0xc0404108 && r.kind == IoctlKind::Ioctl3,
+            _ => false,
+        };
         if r.request != KICKOFF_PB
             && !inline_query
             && (r.kind != IoctlKind::Ioctl
@@ -360,6 +363,23 @@ impl<P: Copy> Driver<P> {
         }
         let configuration = space.configuration.as_ref().ok_or(NvError::InvalidState)?;
         match r.request {
+            0xc0404108 => {
+                if word(r.input, 8) != 48 || word(r.input, 12) != 0 {
+                    return Err(NvError::InvalidSize.into());
+                }
+                if !r.extra_input.is_empty()
+                    || (r.kind == IoctlKind::Ioctl3 && r.extra_output.len() != 48)
+                {
+                    return Err(NvError::InvalidSize.into());
+                }
+                let regions = configuration.regions()?;
+                r.output.copy_from_slice(r.input);
+                r.output[16..].copy_from_slice(&regions);
+                if r.kind == IoctlKind::Ioctl3 {
+                    r.extra_output.copy_from_slice(&regions);
+                }
+                Ok(())
+            }
             0xc0184102 => {
                 let pages = u64::from(word(r.input, 0));
                 let page_size = word(r.input, 4);

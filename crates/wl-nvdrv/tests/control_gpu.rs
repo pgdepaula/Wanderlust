@@ -178,6 +178,48 @@ fn explicit_address_space_configuration_is_checked_before_state_changes() {
         Err(Error::Driver(NvError::AlreadyAllocated))
     ));
     let before = d.graphics_counters();
+    let mut region_input = [0xa5; 64];
+    region_input[..8].fill(0);
+    region_input[8..12].copy_from_slice(&48u32.to_le_bytes());
+    region_input[12..16].fill(0);
+    let mut region_output = [0xcc; 64];
+    query(
+        &mut d,
+        fd,
+        IoctlKind::Ioctl,
+        0xc0404108,
+        &region_input,
+        &mut region_output,
+    )
+    .unwrap();
+    assert_eq!(&region_output[16..24], &0x4000000u64.to_le_bytes());
+    assert_eq!(&region_output[40..48], &0x400000000u64.to_le_bytes());
+    let expected = region_output;
+    for length in [47, 48] {
+        region_output.fill(0xcc);
+        let mut inline = [0xdd; 48];
+        let result = d.ioctl(
+            Ioctl {
+                fd,
+                request: 0xc0404108,
+                kind: IoctlKind::Ioctl3,
+                input: &region_input,
+                output: &mut region_output,
+                extra_input: &[],
+                extra_output: &mut inline[..length],
+            },
+            &mut NoGuestAccess,
+        );
+        if length == 47 {
+            assert!(matches!(result, Err(Error::Driver(NvError::InvalidSize))));
+            assert_eq!(region_output, [0xcc; 64]);
+            assert_eq!(inline, [0xdd; 48]);
+        } else {
+            result.unwrap();
+            assert_eq!(region_output, expected);
+            assert_eq!(inline, expected[16..]);
+        }
+    }
     let mut reserve = [0; 24];
     reserve[..4].copy_from_slice(&1u32.to_le_bytes());
     reserve[4..8].copy_from_slice(&65536u32.to_le_bytes());
