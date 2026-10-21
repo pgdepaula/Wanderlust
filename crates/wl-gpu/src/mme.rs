@@ -19,6 +19,8 @@ pub enum MacroError {
     UnsupportedEmissionCount,
     MissingExit,
     UnsupportedOutput(u16),
+    UnsupportedRead(u32),
+    UninitializedScratch(u16),
 }
 
 #[derive(Debug)]
@@ -27,6 +29,7 @@ pub struct MacroEngine {
     entries: [Option<usize>; ENTRIES],
     code_pointer: Option<usize>,
     entry_pointer: Option<usize>,
+    scratch: [Option<u32>; 256],
 }
 impl Default for MacroEngine {
     fn default() -> Self {
@@ -35,12 +38,16 @@ impl Default for MacroEngine {
             entries: [None; ENTRIES],
             code_pointer: None,
             entry_pointer: None,
+            scratch: [None; 256],
         }
     }
 }
 impl MacroEngine {
     pub fn upload(&mut self, method: u16, value: u32) -> Result<bool, MacroError> {
         match method {
+            0x3400..=0x37fc if method % 4 == 0 => {
+                self.scratch[usize::from((method - 0x3400) / 4)] = Some(value);
+            }
             0x114 => {
                 if value as usize >= CODE_WORDS {
                     return Err(MacroError::UnsupportedPointer(value));
@@ -83,7 +90,8 @@ impl MacroEngine {
         Ok(true)
     }
     /// Preflight a complete supported program before exposing its one write.
-    /// No branch, method read, parameter wait, ADC, or draw emission is inferred.
+    /// Reads are limited to explicitly written scratch registers. No branch,
+    /// parameter wait, ADC, or draw emission is inferred.
     pub fn execute(&self, slot: u16, parameter: u32) -> Result<(u16, u32), MacroError> {
         let start = self
             .entries
@@ -123,6 +131,16 @@ impl MacroEngine {
                     registers[source].wrapping_add(registers[other])
                 }
                 1 => registers[source].wrapping_add(((word as i32) >> 14) as u32),
+                5 => {
+                    // READ addresses are method WORD offsets, unlike apply's
+                    // byte offsets. Reject every other register/read behavior.
+                    let method = registers[source].wrapping_add(((word as i32) >> 14) as u32);
+                    if !(0xd00..0xe00).contains(&method) {
+                        return Err(MacroError::UnsupportedRead(method));
+                    }
+                    self.scratch[(method - 0xd00) as usize]
+                        .ok_or(MacroError::UninitializedScratch((method * 4) as u16))?
+                }
                 _ => return Err(MacroError::UnsupportedInstruction(word)),
             };
             match (word >> 4) & 7 {

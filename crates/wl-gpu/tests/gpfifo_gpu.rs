@@ -188,17 +188,34 @@ fn sync(r: &mut Renderer, d: &mut [u8], t: &mut TextureChanges) -> wl_gpu::backe
 #[test]
 #[ignore = "requires actual GPU; independently assembled MME changes color mask"]
 fn gpfifo_uploaded_mme_changes_real_raster_state_and_reuses_shader() {
+    mme_raster_state(false);
+}
+#[test]
+#[ignore = "requires actual GPU; MME reads guest-programmed scratch state"]
+fn gpfifo_mme_scratch_read_changes_pixels_without_shader_recompilation() {
+    mme_raster_state(true);
+}
+fn mme_raster_state(scratch: bool) {
     let (mut data, map, mut words, image) = fixture();
     let draw = words.split_off(words.len() - 8);
     for (method_id, value) in [(0x11c, 0), (0x120, 0), (0x114, 0)] {
         method(&mut words, method_id, value);
     }
-    for bytes in include_bytes!("fixtures/mme/state-mask.bin").chunks_exact(4) {
-        method(
-            &mut words,
-            0x118,
-            u32::from_le_bytes(bytes.try_into().unwrap()),
-        );
+    // Independent envyas: maddr 0x680; read $r2 0xd1a;
+    // exit send (add $r2 0); nop;
+    let code = if scratch {
+        vec![0x01a00021, 0x03468215, 0x10c0, 0x11]
+    } else {
+        include_bytes!("fixtures/mme/state-mask.bin")
+            .chunks_exact(4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+            .collect()
+    };
+    for word in code {
+        method(&mut words, 0x118, word);
+    }
+    if scratch {
+        method(&mut words, 0x3468, 1);
     }
     method(&mut words, 0x3800, 1); // Red-only writes, produced by guest MME.
     words.extend_from_slice(&draw);
@@ -224,6 +241,9 @@ fn gpfifo_uploaded_mme_changes_real_raster_state_and_reuses_shader() {
     check(&frame.rgba, &masked, None, BG);
     let before = renderer.counters;
     let mut second = Vec::new();
+    if scratch {
+        method(&mut second, 0x3468, 0x1111);
+    }
     method(&mut second, 0x3800, 0x1111); // Same uploaded code, different input.
     second.extend_from_slice(&draw);
     put(&mut data, 0x10000, &second);

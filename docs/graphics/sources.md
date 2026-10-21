@@ -1638,3 +1638,13 @@ checks the 1000..50000 microsecond range and priority policies. Switchbrew's
 [pinned device ABI table](https://github.com/backupbrew/switchbrew/blob/12787d8d212a164c7d6f2dacb4e35ff6bff087e1/NV%20services.md#nvgpu_ioctl_channel_set_timeslice)
 defines the u32 payload and `0xc004481d` identity. These sources inform the
 serialized policy subset; no foreign implementation code is copied.
+
+B197 scratch registers use the same pinned NVIDIA header's
+`SET_MME_SHADOW_SCRATCH(i)` (`0x3400+i*4`, full u32 values). The independent
+[pinned 3D state definition](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Gpu/Engine/Threed/ThreedClassState.cs#L996)
+corroborates 256 entries. The pinned envytools macro ISA documents READ operand
+method-word addressing; its signed immediate and register source fields were
+verified by assembling `maddr 0x680; read $r2 0xd1a; exit send (add $r2 0); nop;`
+into words `01a00021 03468215 000010c0 00000011`. Tests retain these independent
+words; no commercial program is included. Only explicitly initialized scratch
+reads are supported, independently of shadow track/filter/replay behavior.

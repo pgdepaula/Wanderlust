@@ -233,7 +233,15 @@ after a supported program exits. Currently that write must target `SET_CT_WRITE(
 An independently assembled macro changes a real textured draw from red-only to
 RGBA writes by changing its guest argument, without recompiling the guest shaders.
 
-Branches, register reads, parameter fetches, method-address increments, multiple
+`SET_MME_SHADOW_SCRATCH(i)` at `0x3400 + i*4`, for 256 words, retains exact
+u32 state per channel. MME READ-immediate can consume explicitly written scratch
+values using a register plus signed 18-bit method-word offset. Reads of unwritten
+scratch or other registers fail; no power-on value or general register-read
+behavior is inferred. A separate independently assembled scratch-read macro
+changes real GPU color masks without changing the shader binaries. Scratch
+storage is distinct from the unsupported shadow-RAM tracking/replay modes.
+
+Branches, other register reads, parameter fetches, method-address increments, multiple
 emissions, macro-generated draws and general shadow/replay behavior remain
 unsupported. These fail explicitly instead of collapsing several draws into one
 effect or executing a valid prefix with unverified ordering. Ordinary GPU channel
