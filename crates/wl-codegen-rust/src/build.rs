@@ -356,6 +356,14 @@ fn build_inner(
     gpu_workspace: Option<&Path>,
 ) -> Result<BuildReport> {
     let emitted = input.emitted();
+    // A truncated diagnostic source is not an empty guest program. Reject it
+    // before rebuilding dependencies or populating an apparently valid rlib.
+    if emitted.main.trim().is_empty() {
+        return Err("empty emitted executable source".into());
+    }
+    if let Some(unit) = emitted.units.iter().find(|u| u.source.trim().is_empty()) {
+        return Err(format!("empty emitted source for unit {}", unit.name));
+    }
     fs::create_dir_all(&cfg.cache_dir).map_err(|e| format!("{}: {e}", cfg.cache_dir.display()))?;
     let version = rustc()
         .arg("-vV")
@@ -521,6 +529,50 @@ fn build_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_emitted_crates_fail_before_creating_cache_or_launching_compilers() {
+        let cache = std::env::temp_dir().join(format!(
+            "wanderlust-empty-emitted-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let cfg = BuildConfig {
+            target: None,
+            cache_dir: cache.clone(),
+            jobs: 2,
+            opt_level: 0,
+        };
+        let source = cache.join("missing-main.rs");
+        let output = cache.join("must-not-be-built");
+        for text in ["", " \n\t"] {
+            let emitted = Emitted {
+                main: text.into(),
+                units: Vec::new(),
+                blobs: Vec::new(),
+            };
+            let error = build_owned(emitted, &source, &output, &cfg, None).unwrap_err();
+            assert_eq!(error, "empty emitted executable source");
+            assert!(!cache.exists());
+            let emitted = Emitted {
+                main: "fn main() {}".into(),
+                units: vec![crate::Unit {
+                    name: "wlu_10000".into(),
+                    start: 0x10000,
+                    source: text.into(),
+                    blocks: 0,
+                    instructions: 0,
+                }],
+                blobs: Vec::new(),
+            };
+            let error = build_owned(emitted, &source, &output, &cfg, None).unwrap_err();
+            assert_eq!(error, "empty emitted source for unit wlu_10000");
+            assert!(!cache.exists());
+        }
+    }
 
     #[test]
     fn interrupted_empty_cached_archive_is_recompiled() {
