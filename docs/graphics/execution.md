@@ -1756,3 +1756,25 @@ nonzero size tag is not an allocation request, and its reserved words are not a
 legacy pointer. Both the regular mask field and the second output report mask
 three for GPC zero; the absent second GPC has a zero mask. Zero size tags and
 unsupported output extents fail before either metadata output is written.
+
+### Explicit NVIDIA address-space initialization
+
+`InitializeEx` (`0x40284109`, input-only, 40 bytes) decodes flags, signed
+address-space descriptor, large-page size and reserved word at offsets 0, 4, 8
+and 12. Three 64-bit range fields follow at 16, 24 and 32. The Switch wire order
+follows libnx; it must not be replaced by the differently ordered desktop
+`nvgpu_alloc_as_args` structure. The adapter accepts flags 0/1, descriptor zero,
+reserved zero and 64/128 KiB large pages (zero selects 128 KiB). Nonzero sharing
+descriptors and other flags remain unsupported.
+
+All-zero range fields retain the existing bounded fixed-mapping policy. Explicit
+ranges require aligned, strictly ordered start/split/end within the 40-bit GPU
+address domain. Fixed 4 KiB reservations occupy the lower region; configured
+large-page reservations occupy the upper region. Ends are checked exclusively.
+The existing GpuDriver retains reservation, mapping and canonical backing
+ownership; no hardware page-table implementation is introduced. Free requests
+match the original reservation's page size as well as its address and length.
+Validation precedes marking a context initialized, and neither initialization
+nor reservation submits graphics work or publishes memory. Automatic VA
+allocation, sparse mappings and general region-query compatibility remain
+unsupported.

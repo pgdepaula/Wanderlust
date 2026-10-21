@@ -1470,3 +1470,17 @@ both transports, a nonzero ignored size tag, three reserved words, and two
 32-bit mask slots. The pinned libnx legacy wrapper's pointer-shaped layout is
 not imposed on the separate Ioctl3 output. The one-GPC GM20B model returns
 `[3, 0]`, with either the first slot or both slots exposed by the bounded output.
+
+### Switch address-space initialization field order
+
+The ISC-licensed [libnx InitializeEx implementation at
+feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/ioctl/nvhost-as-gpu.c#L120)
+places flags at byte zero and large-page size at byte eight. This order is also
+observable at the original executable's service boundary. Switchbrew's
+[ALLOC_AS_EX description](https://switchbrew.org/wiki/NV_services#NVGPU_AS_IOCTL_ALLOC_AS_EX)
+names the three trailing range fields but reverses the first and third words
+relative to that consumer; its field order is not used for decoding.
+The NVIDIA-authored [nvgpu header at
+a35286a4b10fbcfb689aa77be42c201d2091dca2](https://github.com/LineageOS/android_kernel_nvidia_shield/blob/a35286a4b10fbcfb689aa77be42c201d2091dca2/include/uapi/linux/nvgpu.h#L239)
+describes fixed-offset userspace-managed address spaces. It is semantic evidence,
+not the Switch wire layout. No external emulator code is copied.

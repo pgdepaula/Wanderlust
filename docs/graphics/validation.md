@@ -3349,3 +3349,21 @@ nvmap descriptor or cause guest-memory dereferences. An original run reached
 characteristics query with its zero unused tag, and then identified Ioctl3 TPC
 masks as the next unsupported request. No original GPU draw or frame was
 observed in that run.
+
+### Explicit Switch address-space configuration
+
+The address-space decoder has three CPU tests covering literal field order,
+64 KiB configuration, default 128 KiB configuration, region edges, unsupported
+page sizes/sharing/flags, malformed geometry and overflowing reservations.
+A device-backed scenario verifies failed initialization followed by successful
+retry, duplicate initialization, a real 64 KiB reservation/free pair and an
+out-of-region request leaving output unchanged. Existing literal HIPC indexed
+textured-draw and partial-fault/publication tests now initialize with flag one
+and an explicit 64 KiB large-page selection.
+
+Validation: 12 CPU tests and six explicitly executed device scenarios per
+backend passed on WSL OpenGL, native Windows D3D12 and native Windows Vulkan
+(18 device passes, zero skips in the explicit runs). Package strict Clippy and
+workspace formatting passed. Device initialization/reservation scenarios do not
+claim rasterization; the existing runtime draw scenarios perform actual draws.
+No full workspace test run is included in this result.

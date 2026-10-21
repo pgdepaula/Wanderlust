@@ -471,7 +471,12 @@ fn configured() -> (Harness, u32, u32, u32, Vec<u32>, Vec<u8>) {
     alloc.extend(DATA.to_le_bytes());
     h.ioctl(nvmap, 0xc0200104, &alloc, None);
     assert!(h.p.memory.ensure_gpu_unpinned(DATA, 4096).is_err());
-    h.ioctl(space, 0x40284109, &[0; 40], None);
+    // Explicit Switch/libnx field order, including the selected 64 KiB page.
+    // This fixture retains the default VA bounds for its low-address mappings.
+    let mut initialization = [0; 40];
+    initialization[0] = 1;
+    initialization[8..12].copy_from_slice(&65536u32.to_le_bytes());
+    h.ioctl(space, 0x40284109, &initialization, None);
     h.ioctl(channel, 0x40044801, &nvmap.to_le_bytes(), None);
     h.ioctl(space, 0x40044101, &channel.to_le_bytes(), None);
     // Bound channels retain their nvmap namespace even before any VA mapping.

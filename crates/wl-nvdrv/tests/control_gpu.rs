@@ -154,3 +154,75 @@ fn control_gpu_identity_and_fd_isolation_do_not_submit_work() {
     assert_eq!(after.upload_bytes, before.upload_bytes);
     assert_eq!(after.readback_operations, before.readback_operations);
 }
+
+#[test]
+#[ignore = "initializes an actual wgpu device; execute explicitly"]
+fn explicit_address_space_configuration_is_checked_before_state_changes() {
+    let mut d = Driver::new().unwrap();
+    let fd = d.open("/dev/nvhost-as-gpu").unwrap();
+    let mut input = [0; 40];
+    input[0] = 1;
+    input[8..12].copy_from_slice(&0x10000u32.to_le_bytes());
+    for (offset, value) in [(16, 0x4000000u64), (24, 0x2000000000), (32, 0x400000000)] {
+        input[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    let mut bad = input;
+    bad[4..8].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(matches!(
+        query(&mut d, fd, IoctlKind::Ioctl, 0x40284109, &bad, &mut []),
+        Err(Error::Driver(NvError::NotSupported))
+    ));
+    query(&mut d, fd, IoctlKind::Ioctl, 0x40284109, &input, &mut []).unwrap();
+    assert!(matches!(
+        query(&mut d, fd, IoctlKind::Ioctl, 0x40284109, &input, &mut []),
+        Err(Error::Driver(NvError::AlreadyAllocated))
+    ));
+    let before = d.graphics_counters();
+    let mut reserve = [0; 24];
+    reserve[..4].copy_from_slice(&1u32.to_le_bytes());
+    reserve[4..8].copy_from_slice(&65536u32.to_le_bytes());
+    reserve[8] = 1;
+    reserve[16..].copy_from_slice(&0x400000000u64.to_le_bytes());
+    let mut output = [0xcc; 24];
+    query(
+        &mut d,
+        fd,
+        IoctlKind::Ioctl,
+        0xc0184102,
+        &reserve,
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(reserve, output);
+    let mut invalid = reserve;
+    invalid[16..].copy_from_slice(&0x2000000000u64.to_le_bytes());
+    output.fill(0xcc);
+    assert!(matches!(
+        query(
+            &mut d,
+            fd,
+            IoctlKind::Ioctl,
+            0xc0184102,
+            &invalid,
+            &mut output
+        ),
+        Err(Error::Driver(NvError::InvalidAddress))
+    ));
+    assert_eq!(output, [0xcc; 24]);
+    let mut free = [0; 16];
+    free[..8].copy_from_slice(&0x400000000u64.to_le_bytes());
+    free[8..12].copy_from_slice(&1u32.to_le_bytes());
+    free[12..].copy_from_slice(&65536u32.to_le_bytes());
+    query(
+        &mut d,
+        fd,
+        IoctlKind::Ioctl,
+        0xc0104103,
+        &free,
+        &mut [0; 16],
+    )
+    .unwrap();
+    d.close(fd, &mut NoGuestAccess).unwrap();
+    assert_eq!(d.graphics_counters().submissions, before.submissions);
+    assert_eq!(d.graphics_counters().draw_commands, before.draw_commands);
+}

@@ -2,6 +2,7 @@
 //! All requests use explicit little-endian wire decoding. This is a bounded,
 //! synchronous subset, not a Horizon handle manager or a second GPU interpreter.
 use wl_gpu::{driver::*, driver_backend::GpuDriver, memory::*};
+mod address_space;
 mod control;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +74,7 @@ struct Storage<P> {
 struct Reservation {
     address: u64,
     size: u64,
+    page_size: u32,
     id: ReservationId,
     mapping: Option<MappingId>,
     allocation: Option<u32>,
@@ -80,7 +82,7 @@ struct Reservation {
 #[derive(Debug)]
 struct Space {
     id: AddressSpaceId,
-    initialized: bool,
+    configuration: Option<address_space::Configuration>,
     reservations: Vec<Reservation>,
 }
 #[derive(Debug)]
@@ -201,7 +203,7 @@ impl<P: Copy> Driver<P> {
             }
             "/dev/nvhost-as-gpu" => Node::Space(Space {
                 id: checked(self.gpu.create_space())?,
-                initialized: false,
+                configuration: None,
                 reservations: Vec::new(),
             }),
             "/dev/nvhost-gpu" => {
@@ -326,7 +328,7 @@ impl<P: Copy> Driver<P> {
             let Node::Space(space) = &self.files[f].node else {
                 unreachable!()
             };
-            if !space.initialized {
+            if space.configuration.is_none() {
                 return Err(NvError::InvalidState.into());
             }
             let space_id = space.id;
@@ -347,33 +349,34 @@ impl<P: Copy> Driver<P> {
             unreachable!()
         };
         if r.request == 0x40284109 {
-            if space.initialized {
+            if space.configuration.is_some() {
                 return Err(NvError::AlreadyAllocated.into());
             }
-            if r.input != [0; 40] {
-                return Err(NvError::NotSupported.into());
-            }
-            space.initialized = true;
+            space.configuration = Some(address_space::Configuration::decode(r.input)?);
             return Ok(());
         }
-        if !space.initialized {
+        if space.configuration.is_none() {
             return Err(NvError::InvalidState.into());
         }
+        let configuration = space.configuration.as_ref().ok_or(NvError::InvalidState)?;
         match r.request {
             0xc0184102 => {
                 let pages = u64::from(word(r.input, 0));
-                if word(r.input, 4) != 4096 || word(r.input, 8) != 1 || word(r.input, 12) != 0 {
+                let page_size = word(r.input, 4);
+                if word(r.input, 8) != 1 || word(r.input, 12) != 0 {
                     return Err(NvError::NotSupported.into());
                 }
                 let size = pages
-                    .checked_mul(PAGE_SIZE)
+                    .checked_mul(u64::from(page_size))
                     .filter(|n| *n != 0)
                     .ok_or(NvError::InvalidSize)?;
                 let address = long(r.input, 16);
+                configuration.validate_range(address, size, page_size)?;
                 let id = checked(self.gpu.reserve_fixed(space.id, GpuAddress(address), size))?;
                 space.reservations.push(Reservation {
                     address,
                     size,
+                    page_size,
                     id,
                     mapping: None,
                     allocation: None,
@@ -444,13 +447,15 @@ impl<P: Copy> Driver<P> {
                 let size = u64::from(word(r.input, 8))
                     .checked_mul(u64::from(word(r.input, 12)))
                     .ok_or(NvError::InvalidSize)?;
-                if word(r.input, 12) != 4096 {
-                    return Err(NvError::NotSupported.into());
-                }
+                configuration.validate_range(long(r.input, 0), size, word(r.input, 12))?;
                 let index = space
                     .reservations
                     .iter()
-                    .position(|v| v.address == long(r.input, 0) && v.size == size)
+                    .position(|v| {
+                        v.address == long(r.input, 0)
+                            && v.size == size
+                            && v.page_size == word(r.input, 12)
+                    })
                     .ok_or(NvError::InvalidAddress)?;
                 if space.reservations[index].mapping.is_some() {
                     return Err(NvError::InvalidState.into());
