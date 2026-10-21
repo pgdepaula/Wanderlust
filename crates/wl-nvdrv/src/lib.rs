@@ -105,6 +105,7 @@ struct Channel {
     threshold: u32,
     entries: u32,
     priority: u32,
+    timeslice_us: u32,
     user_data: u64,
     notifier_enabled: bool,
     error_event: bool,
@@ -235,6 +236,7 @@ impl<P: Copy> Driver<P> {
                     threshold: 0,
                     entries: 0,
                     priority: 0x64,
+                    timeslice_us: 2600,
                     user_data: 0,
                     notifier_enabled: false,
                     error_event: false,
@@ -640,6 +642,19 @@ impl<P: Copy> Driver<P> {
                 // Requests execute serially in this adapter. No competing GPU
                 // jobs remain to preempt; retain the policy for channel identity.
                 state.priority = priority;
+                state.timeslice_us = match priority {
+                    0x32 => 1300,
+                    0x64 => 2600,
+                    0x96 => 5200,
+                    _ => unreachable!(),
+                };
+                Ok(())
+            }
+            0xc004481d => {
+                // Serialized execution has no competing runlist to preempt.
+                // Retain validated policy without claiming a hardware scheduler.
+                state.timeslice_us = channel::timeslice_us(r.input)?;
+                r.output.copy_from_slice(r.input);
                 Ok(())
             }
             0x40044803 => checked(self.gpu.set_completion_timeout(channel, word(r.input, 0))),
@@ -672,15 +687,13 @@ impl<P: Copy> Driver<P> {
                 // a syncpoint. The non-incrementing form returns the existing
                 // threshold and is not a new completion guarantee.
                 let flags = word(r.input, 12);
-                if !matches!(flags, 4 | 6) {
-                    return Err(NvError::NotSupported.into());
-                }
+                let increments = channel::driver_increments(flags, word(r.input, 20))?;
                 if word(r.input, 8) > state.entries {
                     return Err(NvError::InvalidSize.into());
                 }
                 let threshold = state
                     .threshold
-                    .checked_add(if flags & 2 != 0 { 2 } else { 0 })
+                    .checked_add(increments)
                     .ok_or(NvError::NotSupported)?;
                 let mut header = [0u8; 24];
                 header.copy_from_slice(r.input);

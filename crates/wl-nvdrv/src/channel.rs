@@ -4,6 +4,27 @@ use crate::{NvError, Result, word};
 
 pub(super) const ALLOC_GPFIFO_EX2: u32 = 0xc020481a;
 
+pub(super) fn timeslice_us(input: &[u8]) -> Result<u32> {
+    if input.len() != 4 {
+        return Err(NvError::InvalidSize.into());
+    }
+    let value = word(input, 0);
+    if !(1000..=50000).contains(&value) {
+        return Err(NvError::BadParameter.into());
+    }
+    Ok(value)
+}
+
+/// Bit eight reserves increments performed by guest commands. A zero reserve
+/// is valid and creates no increment. Nonzero reserves require independently
+/// implemented command-driven syncpoints, not a counter advanced by metadata.
+pub(super) fn driver_increments(flags: u32, value: u32) -> Result<u32> {
+    if flags & !0x106 != 0 || flags & 4 == 0 || (flags & 0x100 != 0 && value != 0) {
+        return Err(NvError::NotSupported.into());
+    }
+    Ok(if flags & 2 != 0 { 2 } else { 0 })
+}
+
 pub(super) fn capacity(request: u32, input: &[u8]) -> Result<u32> {
     let limit = match request {
         0x40084805 if input.len() == 8 && word(input, 4) == 0 => 2048,
@@ -38,6 +59,33 @@ pub(super) fn notifier_enabled(input: &[u8]) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn timeslice_boundaries_and_wire_size_are_checked() {
+        for value in [1000u32, 1024, 2600, 50000] {
+            assert_eq!(timeslice_us(&value.to_le_bytes()).unwrap(), value);
+        }
+        for value in [0u32, 999, 50001, u32::MAX] {
+            assert!(timeslice_us(&value.to_le_bytes()).is_err());
+        }
+        for length in [0, 1, 2, 3, 5, 8] {
+            assert!(timeslice_us(&vec![0; length]).is_err());
+        }
+    }
+    #[test]
+    fn zero_guest_increment_reservation_never_fabricates_progress() {
+        for flags in 0..1024u32 {
+            let result = driver_increments(flags, 0);
+            if [4, 6, 0x104, 0x106].contains(&flags) {
+                assert_eq!(result.unwrap(), if flags & 2 == 0 { 0 } else { 2 });
+            } else {
+                assert!(result.is_err(), "flags {flags:#x}");
+            }
+        }
+        for value in [1u32, 2, 65536, u32::MAX] {
+            assert!(driver_increments(0x104, value).is_err());
+            assert!(driver_increments(0x106, value).is_err());
+        }
+    }
     fn input() -> [u8; 32] {
         let mut b = [0; 32];
         b[..4].copy_from_slice(&32768u32.to_le_bytes());

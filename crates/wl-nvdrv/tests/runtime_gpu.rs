@@ -537,6 +537,8 @@ fn configured() -> (Harness, u32, u32, u32, Vec<u32>, Vec<u8>) {
     h.ioctl(channel, 0xc0104809, &words(&[0xb197, 0, 0, 0]), None);
     h.ioctl(channel, 0x4004480d, &0x64u32.to_le_bytes(), None);
     h.ioctl(channel, 0x40044803, &614u32.to_le_bytes(), None);
+    let timeslice = 1024u32.to_le_bytes();
+    assert_eq!(h.ioctl(channel, 0xc004481d, &timeslice, None), timeslice);
     h.ioctl(channel, 0x40084714, &u64::MAX.to_le_bytes(), None);
     (h, nvmap, space, channel, command, image)
 }
@@ -552,6 +554,7 @@ fn runtime_service_executes_indexed_textured_draw_and_cpu_mutation() {
             nvidia::NvError::AlreadyAllocated,
         ),
         (0x4004480d, words(&[0x65]), nvidia::NvError::NotSupported),
+        (0xc004481d, words(&[999]), nvidia::NvError::BadParameter),
     ] {
         let size = if request >> 30 & 2 != 0 {
             ((request >> 16) & 0x3fff) as u64
@@ -578,6 +581,34 @@ fn runtime_service_executes_indexed_textured_draw_and_cpu_mutation() {
     }
     let ranges = RANGES;
     let entry_bytes = entry(0xb0000, command.len());
+    // Unsupported guest-command increments are rejected before consuming even
+    // an otherwise valid mapped draw. They must not fabricate a threshold.
+    for value in [1, u32::MAX] {
+        h.p.memory
+            .write_bytes(META + 0x1000, &words(&[0, 0, 1, 0x104, 0, value]))
+            .unwrap();
+        h.p.memory.write_bytes(META + 0x6000, &entry_bytes).unwrap();
+        h.p.memory.write_bytes(META + 0x3000, &[0xcc; 24]).unwrap();
+        h.send(&Wire {
+            command: 11,
+            args: &words(&[channel, 0xc018481b]),
+            x: &[(META + 0x1000, 24), (META + 0x6000, 8)],
+            a: &[(0, 0), (0, 0)],
+            b: &[(META + 0x3000, 24)],
+            c: &[(0, 0)],
+            ..Wire::default()
+        });
+        assert_eq!(
+            h.p.memory.load(h.tls() + 0x20, 4).unwrap(),
+            nvidia::NvError::NotSupported as u64
+        );
+        assert_eq!(h.metrics.borrow().1.accepted, 0);
+        assert_eq!(h.metrics.borrow().0.gpfifo_command_bytes, 0);
+        assert_eq!(
+            h.p.memory.read_bytes(META + 0x3000, 24).unwrap(),
+            [0xcc; 24]
+        );
+    }
     let header = words(&[0, 0, 1, 6, 0, 0]);
     let output = h.ioctl(channel, 0xc018481b, &header, Some(&entry_bytes));
     assert_eq!(u32::from_le_bytes(output[12..16].try_into().unwrap()), 0);
@@ -606,7 +637,7 @@ fn runtime_service_executes_indexed_textured_draw_and_cpu_mutation() {
     let output = h.ioctl(
         channel,
         0xc018481b,
-        &words(&[0, 0, 1, 4, syncpoint, 2]),
+        &words(&[0, 0, 1, 0x104, 0, 0]),
         Some(&entry_bytes),
     );
     assert_eq!(

@@ -1935,6 +1935,18 @@ unpublished and retryable. Deferred draws do not acquire a blocking wait simply
 because the channel has a finite deadline. `completion_timeouts` records actual
 no-progress expiry separately from accepted submissions and completion queries.
 
+`SetTimeslice` (`0xc004481d`) validates and retains a 1000..50000 microsecond
+channel policy and preserves its in/out payload. Serialized execution has no
+competing runlist; this does not provide hardware preemption. Priority updates
+select the corresponding policy before a later explicit timeslice override.
+
+Kickoff accepts `HW_FORMAT | IncrementWithValue` when the reserved guest
+increment count is zero. It executes and publishes through the same checked
+submission path and returns the existing completed threshold, without inventing
+an increment. Nonzero guest-command increment reservations remain unsupported:
+they require command-driven syncpoint execution. The separately supported
+driver-generated fence increment still advances by two after real completion.
+
 ### SDL diagnostic status
 
 `WL_GPU_DEBUG_WINDOW=1` opens the SDL2 diagnostic window at backend creation.

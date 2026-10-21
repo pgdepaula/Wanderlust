@@ -1586,3 +1586,17 @@ Wanderlust uses actual host queue-completion callbacks as its explicitly limited
 progress signal. It does not claim equivalent prefetch, context scheduling or
 preemption. The Switch wire identity comes from the pinned libnx `SetTimeout`
 wrapper, not the Linux ioctl numbering. No kernel implementation is copied.
+
+[Pinned libnx kickoff](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/gpu_channel.c#L83-L119)
+passes the guest-command increment reservation in the fence value and uses flag
+bit eight separately from the driver's bit-one increment. The independent MIT
+[submission implementation](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs#L424-L469)
+corroborates addition of that value and the separate driver increment of two.
+Only the zero guest-reservation case is accepted here; no metadata-only
+syncpoint advancement is substituted for guest commands.
+
+The same pinned [timeslice implementation](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs#L355-L413)
+checks the 1000..50000 microsecond range and priority policies. Switchbrew's
+[pinned device ABI table](https://github.com/backupbrew/switchbrew/blob/12787d8d212a164c7d6f2dacb4e35ff6bff087e1/NV%20services.md#nvgpu_ioctl_channel_set_timeslice)
+defines the u32 payload and `0xc004481d` identity. These sources inform the
+serialized policy subset; no foreign implementation code is copied.
