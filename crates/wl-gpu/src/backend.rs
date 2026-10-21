@@ -71,6 +71,7 @@ pub struct Renderer {
     pub counters: Counters,
     pub(crate) device: wgpu::Device,
     pub(crate) queue: wgpu::Queue,
+    pub(crate) completion: crate::completion::CompletionWatchdog,
     pub(crate) last_submission: Option<wgpu::SubmissionIndex>,
     pipeline: wgpu::RenderPipeline,
     default_pipeline: wgpu::RenderPipeline,
@@ -187,6 +188,7 @@ impl Renderer {
             device,
             queue,
             last_submission: None,
+            completion: Default::default(),
             default_pipeline: pipeline.clone(),
             pipeline,
             indexed_shader: shader,
@@ -610,6 +612,7 @@ impl Renderer {
         }
         if !readback {
             self.last_submission = Some(self.queue.submit([encoder.finish()]));
+            self.completion.track(&self.queue);
             self.counters.submissions += 1;
             self.state = next;
             return Ok(None);
@@ -668,6 +671,7 @@ impl Renderer {
         }
         let submission = self.queue.submit([encoder.finish()]);
         self.last_submission = Some(submission.clone());
+        self.completion.track(&self.queue);
         self.counters.submissions += 1;
         let encode_time = start.elapsed();
         let (tx, rx) = mpsc::sync_channel(1);
@@ -677,13 +681,14 @@ impl Renderer {
             .map_async(wgpu::MapMode::Read, move |r| {
                 let _ = tx.send(r);
             });
-        self.device
-            .poll(wgpu::PollType::wait_for(submission))
-            .map_err(|e| Error(e.to_string()))?;
         self.counters.synchronization_points += 1;
-        rx.recv_timeout(Duration::from_secs(30))
-            .map_err(|e| Error(e.to_string()))?
-            .map_err(|e| Error(e.to_string()))?;
+        if let Err(error) =
+            self.completion
+                .mapping(&self.device, submission, &rx, &mut self.counters)
+        {
+            target.readback.unmap();
+            return Err(error);
+        }
         let mapped = target.readback.slice(..).get_mapped_range();
         let mut rgba = Vec::new();
         rgba.try_reserve_exact(width as usize * height as usize * 4)

@@ -362,6 +362,9 @@ fn external_cpu_notification_bounds_lifetime_and_bookkeeping() {
 fn driver_completion_publication_and_mapping_lifetime() {
     let (mut data, words, image) = fixture();
     let (mut d, space, c, b, maps) = setup_driver();
+    let before_configuration = d.graphics_counters();
+    d.set_completion_timeout(c, 614).unwrap();
+    assert_eq!(d.graphics_counters(), before_configuration);
     put(&mut data, 0x10000, &words);
     let entries = entry(0xb0000, words.len());
     let h = header(1);
@@ -482,6 +485,7 @@ fn driver_completion_publication_and_mapping_lifetime() {
     assert!(frame.rgba.chunks_exact(4).all(|p| p == BG));
     d.close(c, &mut mem(&mut data)).unwrap();
     assert!(d.query(r.token).is_err());
+    assert!(d.set_completion_timeout(c, 614).is_err());
     assert!(
         d.submit(c, KICKOFF_PB, &h, Some(&e), &mut mem(&mut data))
             .is_err()
@@ -533,6 +537,7 @@ impl GuestMemoryWrite for FailWrite<'_> {
 fn driver_fault_prefix_close_and_publication_retry_without_replay() {
     let (mut data, mut words, image) = fixture();
     let (mut d, space, c, backing, _maps) = setup_driver();
+    d.set_completion_timeout(c, 614).unwrap();
     // Earlier accepted draw survives malformed suffix. Fault prevents request replay.
     words.push(0xe0000000);
     put(&mut data, 0x10000, &words);
@@ -582,6 +587,9 @@ fn driver_fault_prefix_close_and_publication_retry_without_replay() {
 fn driver_nop_bookkeeping_capacity_and_independent_packet_state() {
     let (mut d, space, a, backing, _) = setup_driver();
     let b = d.create_channel(space).unwrap();
+    // Finite timeout configuration must preserve the allocation-free NOP path.
+    d.set_completion_timeout(a, 614).unwrap();
+    d.set_completion_timeout(b, 0).unwrap();
     let h = header(1);
     let e = entry(0xb0000, 1);
     let mut data = vec![0; 0x18000];

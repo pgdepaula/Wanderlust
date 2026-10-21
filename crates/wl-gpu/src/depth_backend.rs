@@ -7,7 +7,7 @@ use crate::{
     invalid,
     raster::{DepthCompare, DepthFormat, DepthState},
 };
-use std::{sync::mpsc, time::Duration};
+use std::sync::mpsc;
 fn host_format(format: DepthFormat) -> wgpu::TextureFormat {
     match format {
         DepthFormat::Float32 => wgpu::TextureFormat::Depth32Float,
@@ -330,6 +330,7 @@ impl Renderer {
                 pass.draw(0..3, 0..1);
             }
             self.last_submission = Some(self.queue.submit([encoder.finish()]));
+            self.completion.track(&self.queue);
             self.counters.submissions += 1;
             self.counters.upload_calls += 1;
             self.counters.staging_allocations += 1;
@@ -404,6 +405,7 @@ impl Renderer {
         );
         let submission = self.queue.submit([e.finish()]);
         self.last_submission = Some(submission.clone());
+        self.completion.track(&self.queue);
         self.counters.submissions += 1;
         let (tx, rx) = mpsc::sync_channel(1);
         d.readback
@@ -411,16 +413,11 @@ impl Renderer {
             .map_async(wgpu::MapMode::Read, move |r| {
                 let _ = tx.send(r);
             });
-        if let Err(error) = self.device.poll(wgpu::PollType::wait_for(submission)) {
-            d.readback.unmap();
-            return Err(crate::Error(error.to_string()));
-        }
         self.counters.synchronization_points += 1;
-        let mapping = rx
-            .recv_timeout(Duration::from_secs(30))
-            .map_err(|e| crate::Error(e.to_string()))
-            .and_then(|result| result.map_err(|e| crate::Error(e.to_string())));
-        if let Err(error) = mapping {
+        if let Err(error) =
+            self.completion
+                .mapping(&self.device, submission, &rx, &mut self.counters)
+        {
             d.readback.unmap();
             return Err(error);
         }

@@ -1577,3 +1577,12 @@ legacy offset/size/reserved fields from Linux's shared notifier buffer. The
 pinned libnx wrapper calls the same field `enable` with u32 type. A read-only
 original-executable boundary observation confirmed size 4096 and mem four;
 only those scalar ABI values inform the independent regression fixture.
+
+[NVIDIA channel timeout handling at a35286a4b10fbcfb689aa77be42c201d2091dca2](https://github.com/LineageOS/android_kernel_nvidia_shield/blob/a35286a4b10fbcfb689aa77be42c201d2091dca2/drivers/gpu/nvgpu/gk20a/channel_gk20a.c#L2794)
+stores the requested u32 milliseconds per channel. Its
+[progress watchdog](https://github.com/LineageOS/android_kernel_nvidia_shield/blob/a35286a4b10fbcfb689aa77be42c201d2091dca2/drivers/gpu/nvgpu/gk20a/channel_gk20a.c#L1399)
+measures lack of GPFIFO-GET progress rather than total workload duration.
+Wanderlust uses actual host queue-completion callbacks as its explicitly limited
+progress signal. It does not claim equivalent prefetch, context scheduling or
+preemption. The Switch wire identity comes from the pinned libnx `SetTimeout`
+wrapper, not the Linux ioctl numbering. No kernel implementation is copied.

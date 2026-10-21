@@ -536,7 +536,7 @@ fn configured() -> (Harness, u32, u32, u32, Vec<u32>, Vec<u8>) {
     );
     h.ioctl(channel, 0xc0104809, &words(&[0xb197, 0, 0, 0]), None);
     h.ioctl(channel, 0x4004480d, &0x64u32.to_le_bytes(), None);
-    h.ioctl(channel, 0x40044803, &0u32.to_le_bytes(), None);
+    h.ioctl(channel, 0x40044803, &614u32.to_le_bytes(), None);
     h.ioctl(channel, 0x40084714, &u64::MAX.to_le_bytes(), None);
     (h, nvmap, space, channel, command, image)
 }
@@ -552,7 +552,6 @@ fn runtime_service_executes_indexed_textured_draw_and_cpu_mutation() {
             nvidia::NvError::AlreadyAllocated,
         ),
         (0x4004480d, words(&[0x65]), nvidia::NvError::NotSupported),
-        (0x40044803, words(&[1000]), nvidia::NvError::NotSupported),
     ] {
         let size = if request >> 30 & 2 != 0 {
             ((request >> 16) & 0x3fff) as u64

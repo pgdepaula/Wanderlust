@@ -4,6 +4,8 @@
 #[cfg(feature = "wgpu-backend")]
 pub mod backend;
 pub mod command;
+#[cfg(feature = "wgpu-backend")]
+mod completion;
 pub mod compression;
 #[cfg(feature = "wgpu-backend")]
 mod depth_backend;
@@ -77,6 +79,7 @@ pub struct Counters {
     pub cache_misses: u64,
     pub submissions: u64,
     pub synchronization_points: u64,
+    pub completion_timeouts: u64,
     pub guest_texture_bytes: u64,
     pub deswizzle_bytes: u64,
     pub decompress_bytes: u64,

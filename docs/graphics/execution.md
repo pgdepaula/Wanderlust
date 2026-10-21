@@ -1920,8 +1920,20 @@ events and general Host1x events remain unsupported.
 
 Channel priority accepts the three libnx policy values under the current
 serialized execution model, which has no concurrent jobs to preempt. User data
-is retained as opaque metadata without dereferencing it. Only watchdog timeout
-zero is supported: finite timeout/preemption requires additional backend work.
+is retained as opaque metadata without dereferencing it. `SetTimeout`
+(`0x40044803`, one little-endian u32 in milliseconds) configures a per-channel
+host queue-progress deadline. Zero retains the unbounded queue-wait policy;
+positive values bound nonblocking polling for actual queue completion and buffer
+mapping callbacks. Only observed queue completion resets the deadline. Setting
+the policy does not submit work, publish memory or create a fence.
+
+This deadline is a host-side supported subset, not Maxwell instruction
+preemption or a hardware GPFIFO-GET watchdog. It cannot interrupt a backend call
+that itself blocks. Completion of an earlier token still refers to that exact
+queue prefix. Readback timeout cancels the pending map and leaves guest output
+unpublished and retryable. Deferred draws do not acquire a blocking wait simply
+because the channel has a finite deadline. `completion_timeouts` records actual
+no-progress expiry separately from accepted submissions and completion queries.
 
 ### SDL diagnostic status
 

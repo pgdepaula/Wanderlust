@@ -497,6 +497,7 @@ impl Renderer {
             return Err(crate::Error(error.to_string()));
         }
         self.last_submission = Some(self.queue.submit([prepared?]));
+        self.completion.track(&self.queue);
         self.counters.submissions += 1;
         self.counters.clear_commands += 1;
         if let Some(mut stamp) = color_stamp {

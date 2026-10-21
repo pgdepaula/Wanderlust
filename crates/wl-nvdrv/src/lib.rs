@@ -642,14 +642,7 @@ impl<P: Copy> Driver<P> {
                 state.priority = priority;
                 Ok(())
             }
-            0x40044803 => {
-                // Zero disables the watchdog. Finite GPU timeout/preemption
-                // requires a cancellable backend and remains unsupported.
-                if word(r.input, 0) != 0 {
-                    return Err(NvError::NotSupported.into());
-                }
-                Ok(())
-            }
+            0x40044803 => checked(self.gpu.set_completion_timeout(channel, word(r.input, 0))),
             0x40084714 => {
                 // Opaque channel metadata, never dereferenced as a host pointer.
                 state.user_data = long(r.input, 0);

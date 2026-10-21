@@ -63,6 +63,7 @@ struct Context {
     space: AddressSpaceId,
     engine: Channel,
     sequence: u64,
+    timeout: Option<std::time::Duration>,
 }
 pub const MAX_COMPLETIONS: usize = 64;
 /// Owns the renderer, mapping registry and canonical dirty journal. The runtime
@@ -202,8 +203,17 @@ impl GpuDriver {
             space,
             engine: Channel::default(),
             sequence: 0,
+            timeout: None,
         });
         Ok(id)
+    }
+    /// Zero disables finite host completion polling deadlines. Positive values
+    /// bound lack of observed queue progress; no hardware preemption is claimed.
+    pub fn set_completion_timeout(&mut self, channel: ChannelId, milliseconds: u32) -> Result<()> {
+        let n = self.context(channel)?;
+        self.channels[n].timeout =
+            (milliseconds != 0).then(|| std::time::Duration::from_millis(u64::from(milliseconds)));
+        Ok(())
     }
     fn context(&self, channel: ChannelId) -> Result<usize> {
         self.channels
@@ -257,6 +267,7 @@ impl GpuDriver {
         self.active = Some(channel);
         self.channels[n].sequence = sequence;
         let token = SubmissionToken { channel, sequence };
+        self.renderer.completion.configure(self.channels[n].timeout);
         let before = self.renderer.counters.submissions;
         let space = self.channels[n].space;
         let result = self.renderer.submit_gpfifo_deferred(
@@ -334,9 +345,14 @@ impl GpuDriver {
             if !host.done.load(Ordering::Acquire) {
                 self.counters.completion_waits += 1;
                 self.renderer
-                    .device
-                    .poll(wgpu::PollType::wait_for(host.index.clone()))
-                    .map_err(|e| Error(e.to_string()))?;
+                    .completion
+                    .configure(self.channels[self.context(token.channel)?].timeout);
+                self.renderer.completion.wait(
+                    &self.renderer.device,
+                    host.index.clone(),
+                    &host.done,
+                    &mut self.renderer.counters,
+                )?;
             }
         }
         self.query(token)
@@ -348,7 +364,8 @@ impl GpuDriver {
         channel: ChannelId,
         memory: &mut impl GuestMemoryWrite,
     ) -> Result<Option<Frame>> {
-        self.context(channel)?;
+        let n = self.context(channel)?;
+        self.renderer.completion.configure(self.channels[n].timeout);
         if self.renderer.target_pending && self.active != Some(channel) {
             return Err(invalid("publication channel does not own pending output"));
         }
@@ -442,7 +459,8 @@ impl GpuDriver {
     /// resources available for publication retry. Partial CPU packet state is
     /// discarded only on successful close; submitted work cannot be cancelled.
     pub fn close(&mut self, channel: ChannelId, memory: &mut impl GuestMemoryWrite) -> Result<()> {
-        self.context(channel)?;
+        let n = self.context(channel)?;
+        self.renderer.completion.configure(self.channels[n].timeout);
         if self.renderer.target_pending && self.active != Some(channel) {
             return Err(invalid("close blocked by another channel's pending output"));
         }
