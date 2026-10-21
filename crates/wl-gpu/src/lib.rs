@@ -25,6 +25,7 @@ mod index_backend;
 pub mod layout;
 pub mod maxwell;
 pub mod memory;
+pub mod mme;
 pub mod raster;
 pub mod shader;
 #[cfg(feature = "wgpu-backend")]

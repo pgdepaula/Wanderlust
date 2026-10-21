@@ -35,6 +35,7 @@ pub enum MethodError {
     UnboundSubchannel(u8),
     UnsupportedClass(u32),
     UnsupportedEngineMethod { class: u32, method: u16 },
+    Macro(crate::mme::MacroError),
     UnsupportedMethod(u16),
     UnsupportedValue { method: u16, value: u32 },
     EpochOverflow,
@@ -186,6 +187,7 @@ pub struct Maxwell3d {
     raster: crate::raster::RasterRegisters,
     indices: crate::index::IndexRegisters,
     bound: [Option<EngineClass>; 8],
+    macros: crate::mme::MacroEngine,
     modern_headers: bool,
     images: Pool,
     program_upper: Option<u32>,
@@ -218,7 +220,8 @@ impl Maxwell3d {
     pub fn bound_class(&self, subchannel: u8) -> Option<EngineClass> {
         self.bound.get(subchannel as usize).copied().flatten()
     }
-    /// Allocation-free even on errors. Caller must stop the channel on a fault.
+    /// Ordinary register writes allocate nothing. First MME code upload owns a
+    /// bounded RAM allocation; subsequent updates reuse it. Stop on a fault.
     pub fn apply(&mut self, write: MethodWrite) -> std::result::Result<MethodEffect, MethodError> {
         self.method_writes = self.method_writes.saturating_add(1);
         let MethodWrite {
@@ -253,6 +256,31 @@ impl Maxwell3d {
                     method,
                 })
             };
+        }
+        if self
+            .macros
+            .upload(method, value)
+            .map_err(MethodError::Macro)?
+        {
+            return Ok(MethodEffect::State);
+        }
+        if (0x3800..0x3c00).contains(&method) && method % 8 == 0 {
+            let (target, value) = self
+                .macros
+                .execute((method - 0x3800) / 8, value)
+                .map_err(MethodError::Macro)?;
+            // One state write only. In particular, never consume several draws
+            // and collapse their resource/state snapshots into one effect.
+            if target != 0x1a00 {
+                return Err(MethodError::Macro(
+                    crate::mme::MacroError::UnsupportedOutput(target),
+                ));
+            }
+            return self.apply(MethodWrite {
+                subchannel,
+                method: target,
+                value,
+            });
         }
         match method {
             0x1608 => {

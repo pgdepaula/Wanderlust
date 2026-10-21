@@ -186,6 +186,69 @@ fn sync(r: &mut Renderer, d: &mut [u8], t: &mut TextureChanges) -> wl_gpu::backe
     .unwrap()
 }
 #[test]
+#[ignore = "requires actual GPU; independently assembled MME changes color mask"]
+fn gpfifo_uploaded_mme_changes_real_raster_state_and_reuses_shader() {
+    let (mut data, map, mut words, image) = fixture();
+    let draw = words.split_off(words.len() - 8);
+    for (method_id, value) in [(0x11c, 0), (0x120, 0), (0x114, 0)] {
+        method(&mut words, method_id, value);
+    }
+    for bytes in include_bytes!("fixtures/mme/state-mask.bin").chunks_exact(4) {
+        method(
+            &mut words,
+            0x118,
+            u32::from_le_bytes(bytes.try_into().unwrap()),
+        );
+    }
+    method(&mut words, 0x3800, 1); // Red-only writes, produced by guest MME.
+    words.extend_from_slice(&draw);
+    put(&mut data, 0x10000, &words);
+    let mut renderer = Renderer::new().unwrap();
+    let mut channel = Channel::default();
+    let mut changes = TextureChanges::new(1);
+    let first = submit(
+        &mut renderer,
+        &mut channel,
+        &entry(0xb0000, words.len()),
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap();
+    assert_eq!(first.draws_submitted, 1);
+    let frame = sync(&mut renderer, &mut data, &mut changes);
+    let mut masked = image.clone();
+    for pixel in masked.chunks_exact_mut(4) {
+        pixel[1..].copy_from_slice(&BG[1..]);
+    }
+    check(&frame.rgba, &masked, None, BG);
+    let before = renderer.counters;
+    let mut second = Vec::new();
+    method(&mut second, 0x3800, 0x1111); // Same uploaded code, different input.
+    second.extend_from_slice(&draw);
+    put(&mut data, 0x10000, &second);
+    submit(
+        &mut renderer,
+        &mut channel,
+        &entry(0xb0000, second.len()),
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap();
+    check(
+        &sync(&mut renderer, &mut data, &mut changes).rgba,
+        &image,
+        None,
+        BG,
+    );
+    assert_eq!(renderer.counters.shader_decodes, before.shader_decodes);
+    assert_eq!(
+        renderer.counters.shader_module_allocations,
+        before.shader_module_allocations
+    );
+}
+#[test]
 #[ignore = "requires actual GPU; run explicitly"]
 fn mapped_indexed_gpfifo_split_order_warm_alias_and_remap() {
     let (mut d, m, mut w, image) = fixture();

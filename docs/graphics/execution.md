@@ -199,8 +199,9 @@ engine instance shared by its bound subchannels. It implements only:
 
 Method writes and faults allocate no heap storage. Unsupported classes, unbound
 subchannels, invalid field bits and unimplemented methods fail explicitly; the
-caller must stop a channel on fault. WFI invalidations, semaphores, render targets,
-draw registers, MME macros and shader program state are not executed. NO_WFI cache
+caller must stop a channel on fault. WFI invalidations and semaphores remain
+unsupported. Render targets, draw registers and shader program state are handled
+by the separate paths below. General MME programs remain unsupported. NO_WFI cache
 events advance descriptor epochs without asserting completion or guest memory writes.
 
 The eight subchannels retain typed class bindings. `SET_OBJECT` recognizes
@@ -212,6 +213,31 @@ method, before touching 3D registers. This is not compute, DMA, inline-upload or
 2D execution support. Shader/texture lookup requires an actual B197 binding,
 including after rebinding a subchannel away from 3D. Unknown classes and engine
 instances fail without replacing the prior binding.
+
+### Bounded MME state macros
+
+B197 `0x0114/0x0118` select and upload instruction RAM; `0x011c/0x0120`
+select and bind entry RAM. Both data ports auto-increment their respective word
+or entry pointers. The implementation budgets 2048 instruction words and 128
+entries per channel; these are explicit supported limits, not universal hardware
+RAM-size claims. Instruction storage is owned and allocated on first upload,
+then reused. Invalid pointer/data writes preserve previously uploaded contents.
+
+Entry launch methods `0x3800 + slot*8` execute a bounded straight-line subset:
+32-bit wrapping ADD and signed 18-bit ADD-immediate, MOV, method-address assignment
+and a single SEND. R0 remains zero, R1 receives the launch argument, and other
+registers require prior initialization. EXIT executes its following delay slot.
+Execution preflights at most 64 instructions and exposes one state write only
+after a supported program exits. Currently that write must target `SET_CT_WRITE(0)`
+(`0x1a00`), whose existing raster validation and pipeline identity remain active.
+An independently assembled macro changes a real textured draw from red-only to
+RGBA writes by changing its guest argument, without recompiling the guest shaders.
+
+Branches, register reads, parameter fetches, method-address increments, multiple
+emissions, macro-generated draws and general shadow/replay behavior remain
+unsupported. These fail explicitly instead of collapsing several draws into one
+effect or executing a valid prefix with unverified ordering. Ordinary GPU channel
+fault/publication semantics remain unchanged.
 
 Pool addressing is 40-bit, descriptors are 32 bytes, limits are inclusive and
 index arithmetic is checked before mapped memory reads. Pool bases must be 32-byte

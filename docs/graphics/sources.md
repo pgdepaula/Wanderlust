@@ -286,6 +286,24 @@ auxiliary classes around a real B197 textured draw and reject attempts to write
 
 ## GPFIFO channel boundary references
 
+MME instruction fields and EXIT delay slots are independently documented by the
+MIT [envytools macro ISA at f102b82381f3f11cee113d16374c87091db039d9](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/macro.c).
+The pinned Maxwell [macro interpreter](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Gpu/Engine/MME/MacroInterpreter.cs)
+corroborates assignment modes, R0, the initial argument, signed immediates and
+the delayed exit. Its [RAM ports](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoClass.cs#L197-L209)
+increment **both** upload pointers; the older envytools diagnostic observer does
+not advance the entry pointer, and is not used as the reference for that behavior.
+NVIDIA's pinned B197 class defines the four RAM ports and `SET_CT_WRITE(0)` at
+byte offset `0x1a00`. No foreign interpreter implementation is copied.
+
+`tests/fixtures/mme/state-mask.asm` was actually assembled and disassembled using
+the pinned unmodified macro ISA (`envyas -m macro -i -o state-mask.bin
+state-mask.asm`, `envydis -m macro -i state-mask.bin`). The 12-byte binary SHA-256
+is `d2f455bd19af05668dbc96b6d4c909bc28675cb1e601a9c4646f9c12595397c4`.
+The explicit expression `send (add $r1 0)` avoids the upstream assembler's
+shorthand-parser crash; instruction tables are unchanged. Signed-immediate and
+forbidden draw-emission negative fixtures were also assembled independently.
+
 - NVIDIA open-gpu-doc, MIT, revision
   `9fdf5c4062007929d9f4e6cbad9c9771fe61b880`,
   [classes/host/clb06f.h](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/host/clb06f.h),
