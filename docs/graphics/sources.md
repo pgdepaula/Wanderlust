@@ -1500,3 +1500,15 @@ not specified by this ABI and is an explicit bounded implementation policy.
 The Switchbrew region-query size field is overwritten with the available
 48-byte descriptor size. A zero-initialized header observed at the original
 executable's service boundary is a sizing query, not a null destination pointer.
+
+### nvmap user storage versus allocation alignment
+
+[libnx map.c at feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/map.c#L30)
+independently checks CPU page alignment, requested allocation alignment and
+CPU cacheability. Its call selects flags zero/one from cacheability, contrary
+to the read-only/read-write comment in the lower-level ioctl wrapper. The
+adapter follows the actual consumer and retains runtime permission checks.
+An original-executable boundary observation corroborated flags zero and
+allocation alignment 128 KiB with only page-aligned CPU storage. Only scalar
+request metadata was inspected; no original shader or executable fixture was
+added.

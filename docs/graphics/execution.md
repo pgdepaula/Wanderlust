@@ -1798,3 +1798,20 @@ reservation count and does not allocate a command buffer or page-table shadow.
 Sparse flags and automatic reservation without explicit region bounds remain
 unsupported. This allocation policy is a host implementation choice within the
 requested guest VA regions, not a claim of identical kernel allocation order.
+
+### User-backed nvmap cache metadata and alignment
+
+`NVMAP_ALLOC` accepts cache flags zero and one and a power-of-two requested
+allocation alignment of at least 4096. The user-supplied CPU address must be
+page aligned, nonzero and have a checked complete extent, but need not satisfy
+that larger allocation alignment. It refers to already allocated runtime
+storage, not a request to allocate or move guest CPU memory. Heap mask zero,
+kind zero and reserved zero remain required.
+
+The libnx consumer selects these two flag values from CPU cacheability. They
+are not interpreted as read-only/read-write permissions. Both require the
+existing checked runtime pin for one stable NORMAL RW region and register
+canonical backing through the existing GPU driver. Host coherence remains the
+shared write journal and explicit publication boundary; no hardware CPU cache
+maintenance or arbitrary guest memory attribute support is claimed. Invalid
+metadata fails before pinning; registration failure releases its temporary pin.

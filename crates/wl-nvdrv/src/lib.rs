@@ -4,6 +4,7 @@
 use wl_gpu::{driver::*, driver_backend::GpuDriver, memory::*};
 mod address_space;
 mod control;
+mod nvmap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -297,15 +298,8 @@ impl<P: Copy> Driver<P> {
                 if self.allocations[index].storage.is_some() {
                     return Err(NvError::AlreadyAllocated.into());
                 }
-                if word(r.input, 4) != 0
-                    || word(r.input, 8) != 1
-                    || word(r.input, 12) != 4096
-                    || r.input[16..24] != [0; 8]
-                {
-                    return Err(NvError::NotSupported.into());
-                }
-                let address = GuestAddress(long(r.input, 24));
                 let size = self.allocations[index].size;
+                let address = nvmap::user_backing(r.input, size)?;
                 let pin = memory
                     .pin(address, size)
                     .map_err(|_| NvError::InvalidAddress)?;

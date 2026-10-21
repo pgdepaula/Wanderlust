@@ -3407,3 +3407,29 @@ executing the same built binary succeeded: five runtime scenarios, zero
 failures. The startup failure is not counted as an executed GPU scenario.
 Strict package Clippy, workspace formatting and diff whitespace checks passed.
 No full workspace test result is claimed.
+
+### User-backed nvmap allocation metadata
+
+Two CPU decoder tests verify both cache flags, allocation alignment independent
+of CPU page alignment, reserved fields, unsupported heaps/kinds/flags, null and
+unaligned CPU addresses, size and address overflow. The literal runtime service
+scenario pins and unpins a 4 KiB backing deliberately not aligned to the
+requested 128 KiB allocation boundary. Indexed textured drawing and partial
+fault/publication regressions use cache flag zero and 128 KiB alignment.
+
+Sixteen CPU tests and seven device scenarios passed on WSL OpenGL, Windows
+D3D12 and Windows Vulkan (21 executed device passes). A WSL interop startup
+failed before the native runtime test runner started. The current Cargo-selected
+PE binary was then hash-verified and executed through a Windows-owned launcher:
+five runtime scenarios passed on each Windows backend. A stale diagnostic
+binary encountered while preparing that launcher is excluded from these totals.
+Strict package Clippy and workspace formatting passed.
+
+Additional `wl-gpu` CPU regression runs passed 337 tests with default features
+(141 ignored GPU scenarios, not counted as passes), and 336 without default
+features. No full workspace run is claimed.
+
+The preceding original-executable run accepted InitializeEx, both legacy/Ioctl3
+VA-region queries, AllocSpace and nvmap Create before the allocation metadata
+restriction. It executed 113,271,840 original instructions and 117 IPC requests,
+with no original GPU frame.

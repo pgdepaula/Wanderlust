@@ -467,7 +467,7 @@ fn configured() -> (Harness, u32, u32, u32, Vec<u32>, Vec<u8>) {
     assert_ne!(channel, space);
     let created = h.ioctl(nvmap, 0xc0080101, &words(&[0x18000, 0]), None);
     let handle = u32::from_le_bytes(created[4..8].try_into().unwrap());
-    let mut alloc = words(&[handle, 0, 1, 4096, 0, 0]);
+    let mut alloc = words(&[handle, 0, 0, 0x20000, 0, 0]);
     alloc.extend(DATA.to_le_bytes());
     h.ioctl(nvmap, 0xc0200104, &alloc, None);
     assert!(h.p.memory.ensure_gpu_unpinned(DATA, 4096).is_err());
@@ -684,6 +684,16 @@ fn runtime_service_reports_the_configured_gpu_va_regions() {
         free.extend(words(&[1, 4096]));
         h.ioctl(fd, 0xc0104103, &free, None);
     }
+    let nvmap = h.open("/dev/nvmap");
+    let created = h.ioctl(nvmap, 0xc0080101, &words(&[4096, 0]), None);
+    let handle = u32::from_le_bytes(created[4..8].try_into().unwrap());
+    let mut alloc = words(&[handle, 0, 0, 0x20000, 0, 0]);
+    // CPU storage is page aligned, but deliberately not 128 KiB aligned.
+    alloc.extend((DATA + 4096).to_le_bytes());
+    h.ioctl(nvmap, 0xc0200104, &alloc, None);
+    assert!(h.p.memory.ensure_gpu_unpinned(DATA + 4096, 4096).is_err());
+    h.close(nvmap);
+    h.p.memory.ensure_gpu_unpinned(DATA + 4096, 4096).unwrap();
     assert_eq!(h.metrics.borrow().0.submissions, 0);
     h.close(fd);
 }
