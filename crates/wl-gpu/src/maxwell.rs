@@ -4,12 +4,37 @@ use crate::{Error, Result, fifo::MethodWrite, format::Format, invalid, memory::*
 
 pub const CLASS: u32 = 0xb197;
 
+/// Classes whose SET_OBJECT and documented NOP can be routed safely. Binding
+/// a class does not imply implementation of its execution methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum EngineClass {
+    ThreeD = CLASS,
+    Compute = 0xb1c0,
+    DmaCopy = 0xb0b5,
+    InlineMemory = 0xa140,
+    TwoD = 0x902d,
+}
+impl EngineClass {
+    fn decode(value: u32) -> Option<Self> {
+        match value {
+            CLASS => Some(Self::ThreeD),
+            0xb1c0 => Some(Self::Compute),
+            0xb0b5 => Some(Self::DmaCopy),
+            0xa140 => Some(Self::InlineMemory),
+            0x902d => Some(Self::TwoD),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MethodError {
     InvalidSubchannel(u8),
     InvalidMethod(u16),
     UnboundSubchannel(u8),
     UnsupportedClass(u32),
+    UnsupportedEngineMethod { class: u32, method: u16 },
     UnsupportedMethod(u16),
     UnsupportedValue { method: u16, value: u32 },
     EpochOverflow,
@@ -160,7 +185,7 @@ pub struct Maxwell3d {
     method_writes: u64,
     raster: crate::raster::RasterRegisters,
     indices: crate::index::IndexRegisters,
-    bound: [bool; 8],
+    bound: [Option<EngineClass>; 8],
     modern_headers: bool,
     images: Pool,
     program_upper: Option<u32>,
@@ -190,6 +215,9 @@ pub struct Maxwell3d {
     pub sampler_epoch: u64,
 }
 impl Maxwell3d {
+    pub fn bound_class(&self, subchannel: u8) -> Option<EngineClass> {
+        self.bound.get(subchannel as usize).copied().flatten()
+    }
     /// Allocation-free even on errors. Caller must stop the channel on a fault.
     pub fn apply(&mut self, write: MethodWrite) -> std::result::Result<MethodEffect, MethodError> {
         self.method_writes = self.method_writes.saturating_add(1);
@@ -207,14 +235,24 @@ impl Maxwell3d {
         let bad = || MethodError::UnsupportedValue { method, value };
         if method == 0 {
             // Engine instance zero only; SET_OBJECT carries a class, not texture ID.
-            if value != CLASS {
-                return Err(MethodError::UnsupportedClass(value));
-            }
-            self.bound[subchannel as usize] = true;
+            let class = EngineClass::decode(value).ok_or(MethodError::UnsupportedClass(value))?;
+            self.bound[subchannel as usize] = Some(class);
             return Ok(MethodEffect::State);
         }
-        if !self.bound[subchannel as usize] {
-            return Err(MethodError::UnboundSubchannel(subchannel));
+        let class = self
+            .bound_class(subchannel)
+            .ok_or(MethodError::UnboundSubchannel(subchannel))?;
+        if class != EngineClass::ThreeD {
+            // All five pinned classes define their NOP at this offset. No
+            // compute, DMA, inline upload or 2D action is routed into B197.
+            return if method == 0x100 {
+                Ok(MethodEffect::State)
+            } else {
+                Err(MethodError::UnsupportedEngineMethod {
+                    class: class as u32,
+                    method,
+                })
+            };
         }
         match method {
             0x1608 => {
@@ -435,7 +473,7 @@ impl Maxwell3d {
     }
     /// Pixel pipeline index five explicitly selects its constant-binding group.
     pub fn fragment_program(&self) -> Result<FragmentSource> {
-        if !self.bound.iter().any(|b| *b) || !self.fragment_enabled {
+        if !self.bound.contains(&Some(EngineClass::ThreeD)) || !self.fragment_enabled {
             return Err(invalid("pixel program disabled or B197 unbound"));
         }
         let (Some(hi), Some(lo), Some(offset), Some(registers), Some(group)) = (
@@ -471,7 +509,7 @@ impl Maxwell3d {
         self.raster.depth_target()
     }
     pub fn vertex_program(&self) -> Result<ProgramSource> {
-        if !self.bound.iter().any(|b| *b) || !self.vertex_enabled {
+        if !self.bound.contains(&Some(EngineClass::ThreeD)) || !self.vertex_enabled {
             return Err(invalid("vertex program disabled or B197 unbound"));
         }
         let (Some(hi), Some(lo), Some(offset), Some(registers), Some(group)) = (
@@ -567,7 +605,7 @@ impl Maxwell3d {
     pub(crate) fn texture_subchannel(&self) -> Result<u8> {
         self.bound
             .iter()
-            .position(|b| *b)
+            .position(|b| *b == Some(EngineClass::ThreeD))
             .map(|n| n as u8)
             .ok_or_else(|| invalid("no bound B197 subchannel"))
     }
@@ -578,13 +616,7 @@ impl Maxwell3d {
         map: &AddressMap,
         changes: &TextureChanges,
     ) -> Result<DescriptorStamp> {
-        if !self
-            .bound
-            .get(subchannel as usize)
-            .copied()
-            .unwrap_or(false)
-            || !self.modern_headers
-        {
+        if self.bound_class(subchannel) != Some(EngineClass::ThreeD) || !self.modern_headers {
             return Err(invalid("texture engine not configured"));
         }
         let image = map.resolve(self.images.descriptor(handle & 0xfffff)?, 32)?;
@@ -608,13 +640,7 @@ impl Maxwell3d {
         map: &AddressMap,
         memory: &impl GuestMemory,
     ) -> Result<TextureDesc> {
-        if !self
-            .bound
-            .get(subchannel as usize)
-            .copied()
-            .unwrap_or(false)
-            || !self.modern_headers
-        {
+        if self.bound_class(subchannel) != Some(EngineClass::ThreeD) || !self.modern_headers {
             return Err(invalid(
                 "unbound engine or modern texture headers not selected",
             ));

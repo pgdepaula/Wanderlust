@@ -269,6 +269,21 @@ listed in execution.md to wgpu 26 blend factors; it imports no external compiler
 or emulator implementation. The output oracle evaluates the equations separately
 from shader translation and quantizes between draws on the UNORM attachment.
 
+### Subchannel engine bindings
+
+NVIDIA open-gpu-doc MIT revision `9fdf5c4062007929d9f4e6cbad9c9771fe61b880`
+defines class identities and method-zero binding in
+[`clb1c0.h`](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/compute/clb1c0.h),
+[`clb0b5.h`](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/dma-copy/clb0b5.h),
+[`cla140.h`](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/inline-to-memory/cla140.h)
+and [`cl902d.h`](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/twod/cl902d.h).
+Their NOP/NO_OPERATION registers are all `0x0100`, with a full-width parameter.
+The B06F class defines eight subchannels and the class/engine fields of
+SET_OBJECT. The supported engine-instance-zero routing keeps these identities
+separate; it imports no auxiliary engine implementation. Tests bind all four
+auxiliary classes around a real B197 textured draw and reject attempts to write
+3D shader state through those bindings.
+
 ## GPFIFO channel boundary references
 
 - NVIDIA open-gpu-doc, MIT, revision

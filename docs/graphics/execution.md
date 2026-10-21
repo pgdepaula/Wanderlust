@@ -190,7 +190,7 @@ engine instance shared by its bound subchannels. It implements only:
 
 | Byte method | Implemented interpretation |
 |---|---|
-| `0x0000` | Bind class B197, engine instance zero |
+| `0x0000` | Bind a documented engine class, engine instance zero |
 | `0x0100` | Documented no-operation |
 | `0x0f10` | Select modern Maxwell texture headers, value one |
 | `0x155c`, `0x1560`, `0x1564` | Sampler pool upper/lower address and inclusive maximum index |
@@ -202,6 +202,16 @@ subchannels, invalid field bits and unimplemented methods fail explicitly; the
 caller must stop a channel on fault. WFI invalidations, semaphores, render targets,
 draw registers, MME macros and shader program state are not executed. NO_WFI cache
 events advance descriptor epochs without asserting completion or guest memory writes.
+
+The eight subchannels retain typed class bindings. `SET_OBJECT` recognizes
+MAXWELL_B (`0xb197`), MAXWELL_COMPUTE_B (`0xb1c0`), MAXWELL_DMA_COPY_A
+(`0xb0b5`), KEPLER_INLINE_TO_MEMORY_B (`0xa140`) and FERMI_TWOD_A (`0x902d`).
+All define a no-operation at `0x0100`. Auxiliary bindings and their NOPs can
+coexist with a B197 draw; their other methods fail with the actual class and
+method, before touching 3D registers. This is not compute, DMA, inline-upload or
+2D execution support. Shader/texture lookup requires an actual B197 binding,
+including after rebinding a subchannel away from 3D. Unknown classes and engine
+instances fail without replacing the prior binding.
 
 Pool addressing is 40-bit, descriptors are 32 bytes, limits are inclusive and
 index arithmetic is checked before mapped memory reads. Pool bases must be 32-byte

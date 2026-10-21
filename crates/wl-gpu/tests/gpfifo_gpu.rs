@@ -188,7 +188,13 @@ fn sync(r: &mut Renderer, d: &mut [u8], t: &mut TextureChanges) -> wl_gpu::backe
 #[test]
 #[ignore = "requires actual GPU; run explicitly"]
 fn mapped_indexed_gpfifo_split_order_warm_alias_and_remap() {
-    let (mut d, m, w, image) = fixture();
+    let (mut d, m, mut w, image) = fixture();
+    let mut bindings = Vec::new();
+    for (subchannel, class) in [(1, 0xb1c0), (2, 0xb0b5), (3, 0x902d), (4, 0xa140)] {
+        bindings.extend([0x20010000 | (subchannel << 13), class]);
+        bindings.extend([0x20010040 | (subchannel << 13), u32::MAX]);
+    }
+    w.splice(2..2, bindings);
     put(&mut d, 0x10000, &w);
     let mut r = Renderer::new().unwrap();
     println!("adapter={:?}", r.capabilities.adapter);
@@ -501,7 +507,7 @@ fn gpfifo_preflight_fetch_and_engine_faults_are_distinct() {
     .unwrap_err();
     assert_eq!(e.phase, FaultPhase::Fetch);
     assert!(e.cause.0.contains("noncontiguous"));
-    put(&mut d, 0x10000, &[0x20010000, 0xb1c0]);
+    put(&mut d, 0x10000, &[0x20010000, 0xffff]);
     let e = submit(
         &mut r,
         &mut Channel::default(),
