@@ -95,6 +95,62 @@ impl Configuration {
         }
         Ok(bytes)
     }
+
+    /// Bounded first-fit policy within the region actually reported to guest
+    /// code. The GPU manager still performs the authoritative reservation.
+    pub(super) fn allocate(
+        &self,
+        size: u64,
+        page: u32,
+        alignment: u64,
+        occupied: impl Clone + Iterator<Item = (u64, u64)>,
+    ) -> Result<u64> {
+        if page != 4096 && page != self.big_page_size {
+            return Err(NvError::NotSupported.into());
+        }
+        let (start, end, split) = self.range.ok_or(NvError::NotSupported)?;
+        let (low, high) = if page == 4096 {
+            (start, split)
+        } else {
+            (split, end)
+        };
+        let alignment = if alignment == 0 {
+            u64::from(page)
+        } else {
+            alignment
+        };
+        if !alignment.is_power_of_two()
+            || alignment < u64::from(page)
+            || size == 0
+            || size % u64::from(page) != 0
+        {
+            return Err(NvError::InvalidSize.into());
+        }
+        let align = |value: u64| {
+            value
+                .checked_add(alignment - 1)
+                .map(|v| v & !(alignment - 1))
+        };
+        let mut address = align(low).ok_or(NvError::InvalidSize)?;
+        for _ in 0..=wl_gpu::driver::MAX_OBJECTS {
+            let limit = address
+                .checked_add(size)
+                .filter(|limit| *limit <= high)
+                .ok_or(NvError::ResourceError)?;
+            let conflict = occupied.clone().find(|&(base, length)| {
+                // All stored reservations have already passed checked range
+                // validation. Never interpret a malformed extent as free space.
+                base.checked_add(length)
+                    .is_none_or(|last| address < last && base < limit)
+            });
+            let Some((base, length)) = conflict else {
+                return Ok(address);
+            };
+            address = align(base.checked_add(length).ok_or(NvError::InvalidSize)?)
+                .ok_or(NvError::InvalidSize)?;
+        }
+        Err(NvError::ResourceError.into())
+    }
 }
 
 #[cfg(test)]
@@ -177,5 +233,46 @@ mod tests {
         assert_eq!(word(&b, 32), 65536);
         assert_eq!(word(&b, 36), 0);
         assert_eq!(long(&b, 40), 0x1c0000);
+    }
+    #[test]
+    fn automatic_reservations_are_aligned_bounded_and_reuse_holes() {
+        let c = Configuration::decode(&request()).unwrap();
+        assert_eq!(
+            c.allocate(4096, 4096, 0, [].into_iter()).unwrap(),
+            0x4000000
+        );
+        let used = [(0x4001000, 4096), (0x4000000, 4096), (0x4003000, 4096)];
+        assert_eq!(
+            c.allocate(4096, 4096, 0, used.into_iter()).unwrap(),
+            0x4002000
+        );
+        assert_eq!(
+            c.allocate(8192, 4096, 0x10000, used.into_iter()).unwrap(),
+            0x4010000
+        );
+        assert_eq!(
+            c.allocate(65536, 65536, 0, [].into_iter()).unwrap(),
+            0x400000000
+        );
+        for (size, page, align) in [
+            (0, 4096, 0),
+            (1, 4096, 0),
+            (4096, 4096, 1),
+            (4096, 4096, 12288),
+            (u64::MAX, 4096, 0),
+            (4096, 0, 0),
+        ] {
+            assert!(c.allocate(size, page, align, [].into_iter()).is_err());
+        }
+        assert!(
+            c.allocate(4096, 4096, 0, [(0x4000000, 0x3fc000000)].into_iter())
+                .is_err()
+        );
+        assert!(
+            Configuration::decode(&[0; 40])
+                .unwrap()
+                .allocate(4096, 4096, 0, [].into_iter())
+                .is_err()
+        );
     }
 }

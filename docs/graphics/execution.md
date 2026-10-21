@@ -1775,15 +1775,26 @@ The existing GpuDriver retains reservation, mapping and canonical backing
 ownership; no hardware page-table implementation is introduced. Free requests
 match the original reservation's page size as well as its address and length.
 Validation precedes marking a context initialized, and neither initialization
-nor reservation submits graphics work or publishes memory. Automatic VA
-allocation and sparse mappings remain unsupported.
+nor reservation submits graphics work or publishes memory. Sparse mappings remain unsupported.
 
 `GetVARegions` (`0xc0404108`) exposes those configured regions as two
 24-byte descriptors: 64-bit base, 32-bit page size, reserved zero, and 64-bit
 page count. It accepts a 64-byte primary request/output with the bounded buffer
-size 48. Ioctl3 additionally requires an exact 48-byte second output; both
+size zero (sizing query) or 48. The returned size is always 48. Ioctl3 additionally requires an exact 48-byte second output; both
 destinations are validated before mutation. The unused address tag is preserved
 without dereferencing it. The default configuration with unspecified ranges
 returns unsupported rather than inventing a host VA allocator or inconsistent
 region limits. Neither query changes mappings, submits GPU work nor guarantees
 completion.
+
+`AllocSpace` with flags zero interprets the final 64-bit input as an alignment,
+not a GPU address. For explicit configured regions it uses bounded first fit
+over live reservations, with zero alignment selecting the requested page size.
+Nonzero alignment must be a power of two at least that page size. Successful
+requests acquire a real reservation through the existing GpuDriver and return
+its address. Failure leaves metadata unchanged. Freed gaps can be reused; live
+reservations cannot overlap. The search uses at most the registry's bounded
+reservation count and does not allocate a command buffer or page-table shadow.
+Sparse flags and automatic reservation without explicit region bounds remain
+unsupported. This allocation policy is a host implementation choice within the
+requested guest VA regions, not a claim of identical kernel allocation order.

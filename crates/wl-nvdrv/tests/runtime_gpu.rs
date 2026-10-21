@@ -647,8 +647,9 @@ fn runtime_service_reports_the_configured_gpu_va_regions() {
         init[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
     }
     h.ioctl(fd, 0x40284109, &init, None);
-    let mut input = [0; 64];
-    input[8] = 48;
+    let input = [0; 64];
+    let legacy = h.ioctl(fd, 0xc0404108, &input, None);
+    assert_eq!(&legacy[8..12], &48u32.to_le_bytes());
     h.p.memory.write_bytes(META + 0x1000, &input).unwrap();
     let mut args = fd.to_le_bytes().to_vec();
     args.extend(0xc0404108u32.to_le_bytes());
@@ -664,6 +665,7 @@ fn runtime_service_reports_the_configured_gpu_va_regions() {
     assert_eq!(h.p.memory.load(h.tls() + 0x20, 4).unwrap(), 0);
     let primary = h.p.memory.read_bytes(META + 0x3000, 64).unwrap();
     let inline = h.p.memory.read_bytes(META + 0x4000, 48).unwrap();
+    assert_eq!(primary, legacy);
     assert_eq!(inline, &primary[16..]);
     assert_eq!(&inline[..8], &0x4000000u64.to_le_bytes());
     assert_eq!(&inline[8..12], &4096u32.to_le_bytes());
@@ -671,6 +673,17 @@ fn runtime_service_reports_the_configured_gpu_va_regions() {
     assert_eq!(&inline[24..32], &0x400000000u64.to_le_bytes());
     assert_eq!(&inline[32..36], &65536u32.to_le_bytes());
     assert_eq!(&inline[40..48], &0x1c0000u64.to_le_bytes());
+    let mut allocation = words(&[1, 4096, 0, 0]);
+    allocation.extend(0u64.to_le_bytes());
+    let first = h.ioctl(fd, 0xc0184102, &allocation, None);
+    let second = h.ioctl(fd, 0xc0184102, &allocation, None);
+    assert_eq!(&first[16..], &0x4000000u64.to_le_bytes());
+    assert_eq!(&second[16..], &0x4001000u64.to_le_bytes());
+    for address in [0x4000000u64, 0x4001000] {
+        let mut free = address.to_le_bytes().to_vec();
+        free.extend(words(&[1, 4096]));
+        h.ioctl(fd, 0xc0104103, &free, None);
+    }
     assert_eq!(h.metrics.borrow().0.submissions, 0);
     h.close(fd);
 }

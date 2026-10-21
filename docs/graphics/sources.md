@@ -1491,3 +1491,12 @@ dereference. [Switchbrew's GET_VA_REGIONS](https://switchbrew.org/wiki/NV_servic
 provides the 24-byte descriptor fields and Ioctl3 transport. Reported page counts
 are derived from the adapter's actual validated start/split/end bounds; they are
 not arbitrary emulator constants.
+
+[libnx AllocSpace at the same revision](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/ioctl/nvhost-as-gpu.c#L17)
+defines the final 64-bit field as an alignment on non-fixed input and a GPU
+address on output. Flags select fixed versus automatic reservation; sparse
+allocation is outside this adapter's supported subset. First-fit ordering is
+not specified by this ABI and is an explicit bounded implementation policy.
+The Switchbrew region-query size field is overwritten with the available
+48-byte descriptor size. A zero-initialized header observed at the original
+executable's service boundary is a sizing query, not a null destination pointer.

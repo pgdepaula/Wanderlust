@@ -3387,3 +3387,23 @@ reached legacy GetVARegions, which the preceding backend did not support. It
 executed 113,222,743 original instructions and 110 IPC requests; it produced no
 original GPU frame. This identifies a service boundary rather than demonstrating
 general NVIDIA compatibility or presentation.
+
+### Zero-size VA queries and automatic reservations
+
+Original-executable inspection showed a fully zero-initialized GetVARegions
+header. The query accepts this sizing form and returns the available 48-byte
+size with both configured descriptors. Direct and literal HIPC/CMIF tests check
+legacy Ioctl and Ioctl3 using that header. The bounded automatic-reservation
+policy has a CPU oracle for alignment, unsorted occupied ranges, holes, region
+selection, exhaustion, unsupported defaults and malformed sizes. Device tests
+reserve distinct intervals, free one, reject bad alignment without changing
+output, reuse the freed hole and release both real reservations.
+
+Fourteen CPU tests and seven device scenarios passed on WSL OpenGL, native
+Windows D3D12 and native Windows Vulkan (21 executed device passes). One Vulkan
+process launch initially failed in WSL interop with `UtilAcceptVsock` error 110
+before the Rust test runner started. After confirming no orphan test process,
+executing the same built binary succeeded: five runtime scenarios, zero
+failures. The startup failure is not counted as an executed GPU scenario.
+Strict package Clippy, workspace formatting and diff whitespace checks passed.
+No full workspace test result is claimed.

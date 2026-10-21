@@ -364,7 +364,7 @@ impl<P: Copy> Driver<P> {
         let configuration = space.configuration.as_ref().ok_or(NvError::InvalidState)?;
         match r.request {
             0xc0404108 => {
-                if word(r.input, 8) != 48 || word(r.input, 12) != 0 {
+                if !matches!(word(r.input, 8), 0 | 48) || word(r.input, 12) != 0 {
                     return Err(NvError::InvalidSize.into());
                 }
                 if !r.extra_input.is_empty()
@@ -374,6 +374,7 @@ impl<P: Copy> Driver<P> {
                 }
                 let regions = configuration.regions()?;
                 r.output.copy_from_slice(r.input);
+                out32(r.output, 8, 48);
                 r.output[16..].copy_from_slice(&regions);
                 if r.kind == IoctlKind::Ioctl3 {
                     r.extra_output.copy_from_slice(&regions);
@@ -383,14 +384,24 @@ impl<P: Copy> Driver<P> {
             0xc0184102 => {
                 let pages = u64::from(word(r.input, 0));
                 let page_size = word(r.input, 4);
-                if word(r.input, 8) != 1 || word(r.input, 12) != 0 {
+                let flags = word(r.input, 8);
+                if flags > 1 || word(r.input, 12) != 0 {
                     return Err(NvError::NotSupported.into());
                 }
                 let size = pages
                     .checked_mul(u64::from(page_size))
                     .filter(|n| *n != 0)
                     .ok_or(NvError::InvalidSize)?;
-                let address = long(r.input, 16);
+                let address = if flags == 1 {
+                    long(r.input, 16)
+                } else {
+                    configuration.allocate(
+                        size,
+                        page_size,
+                        long(r.input, 16),
+                        space.reservations.iter().map(|v| (v.address, v.size)),
+                    )?
+                };
                 configuration.validate_range(address, size, page_size)?;
                 let id = checked(self.gpu.reserve_fixed(space.id, GpuAddress(address), size))?;
                 space.reservations.push(Reservation {
@@ -402,6 +413,7 @@ impl<P: Copy> Driver<P> {
                     allocation: None,
                 });
                 r.output.copy_from_slice(r.input);
+                out64(r.output, 16, address);
                 Ok(())
             }
             0xc0284106 => {

@@ -195,6 +195,19 @@ fn explicit_address_space_configuration_is_checked_before_state_changes() {
     assert_eq!(&region_output[16..24], &0x4000000u64.to_le_bytes());
     assert_eq!(&region_output[40..48], &0x400000000u64.to_le_bytes());
     let expected = region_output;
+    // The original executable starts with a zero header. Report the available
+    // byte count without interpreting zero as a missing destination pointer.
+    region_input[8..12].fill(0);
+    query(
+        &mut d,
+        fd,
+        IoctlKind::Ioctl,
+        0xc0404108,
+        &region_input,
+        &mut region_output,
+    )
+    .unwrap();
+    assert_eq!(region_output, expected);
     for length in [47, 48] {
         region_output.fill(0xcc);
         let mut inline = [0xdd; 48];
@@ -264,6 +277,74 @@ fn explicit_address_space_configuration_is_checked_before_state_changes() {
         &mut [0; 16],
     )
     .unwrap();
+    // Non-fixed requests carry alignment, not an address. They must reserve
+    // distinct ranges and reuse a freed hole without perturbing live ranges.
+    let mut automatic = [0; 24];
+    automatic[0] = 1;
+    automatic[4..8].copy_from_slice(&4096u32.to_le_bytes());
+    let mut addresses = [0u64; 2];
+    for (i, address) in addresses.iter_mut().enumerate() {
+        query(
+            &mut d,
+            fd,
+            IoctlKind::Ioctl,
+            0xc0184102,
+            &automatic,
+            &mut output,
+        )
+        .unwrap();
+        *address = u64::from_le_bytes(output[16..24].try_into().unwrap());
+        assert_eq!(*address, 0x4000000 + i as u64 * 4096);
+    }
+    free[8..12].copy_from_slice(&1u32.to_le_bytes());
+    free[12..].copy_from_slice(&4096u32.to_le_bytes());
+    free[..8].copy_from_slice(&addresses[0].to_le_bytes());
+    query(
+        &mut d,
+        fd,
+        IoctlKind::Ioctl,
+        0xc0104103,
+        &free,
+        &mut [0; 16],
+    )
+    .unwrap();
+    let mut invalid_alignment = automatic;
+    invalid_alignment[16..].copy_from_slice(&12288u64.to_le_bytes());
+    output.fill(0xcc);
+    assert!(matches!(
+        query(
+            &mut d,
+            fd,
+            IoctlKind::Ioctl,
+            0xc0184102,
+            &invalid_alignment,
+            &mut output
+        ),
+        Err(Error::Driver(NvError::InvalidSize))
+    ));
+    assert_eq!(output, [0xcc; 24]);
+    query(
+        &mut d,
+        fd,
+        IoctlKind::Ioctl,
+        0xc0184102,
+        &automatic,
+        &mut output,
+    )
+    .unwrap();
+    assert_eq!(&output[16..], &addresses[0].to_le_bytes());
+    for address in addresses {
+        free[..8].copy_from_slice(&address.to_le_bytes());
+        query(
+            &mut d,
+            fd,
+            IoctlKind::Ioctl,
+            0xc0104103,
+            &free,
+            &mut [0; 16],
+        )
+        .unwrap();
+    }
     d.close(fd, &mut NoGuestAccess).unwrap();
     assert_eq!(d.graphics_counters().submissions, before.submissions);
     assert_eq!(d.graphics_counters().draw_commands, before.draw_commands);
