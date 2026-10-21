@@ -22,6 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .skip(1)
                 .filter(|line| {
                     line.contains("State:")
+                        || line.contains("CPU units:")
                         || line.contains("backend:")
                         || line.contains("throughput:")
                         || line.contains("draws:")
@@ -30,7 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         || line.contains("RECOMPILING")
                         || line.contains("STOPPED")
                 })
-                .take(5)
+                .take(6)
                 .copied()
                 .collect::<Vec<_>>()
                 .join(" | ");
