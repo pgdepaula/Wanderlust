@@ -211,6 +211,18 @@ fn mme_raster_state(scratch: bool, alu: bool) {
     ]);
     method(&mut words, 0x164c, 0x1000);
     for (method_id, value) in [
+        (0xf8c, 0),
+        (0x1594, 1),
+        (0x310, 0x503),
+        (0x77c, 0x01000000),
+        (0x1130, 0x13),
+        (0x374, 0),
+        (0x15cc, 0x10000),
+    ] {
+        method(&mut words, method_id, value);
+    }
+
+    for (method_id, value) in [
         (0x151c, 1),
         (0x020c, 1),
         (0x030c, 0),

@@ -30,6 +30,13 @@ pub struct AuxiliaryRasterControls {
     pub pixel_sample_mask_usage: Option<u8>,
     pub allow_float_pixel_kills: Option<bool>,
     pub zero_times_anything_is_zero: Option<bool>,
+    pub draw_generated_polygon_edges: Option<bool>,
+    pub two_sided_stencil: Option<bool>,
+    pub spa_version: Option<u16>,
+    pub local_memory_window: Option<u32>,
+    pub target_independent_raster_control: Option<u8>,
+    pub balanced_primitive_workload: Option<u8>,
+    pub geometry_selects_target_layer: Option<bool>,
 }
 
 /// Classes whose SET_OBJECT and documented NOP can be routed safely. Binding
@@ -399,6 +406,49 @@ impl Maxwell3d {
             return Ok(MethodEffect::State);
         }
         match method {
+            0x0f8c | 0x1594 => {
+                if value > 1 {
+                    return Err(bad());
+                }
+                // Polygon LINE mode and stencil enable remain rejected by
+                // raster validation, independently of these retained controls.
+                if method == 0x0f8c {
+                    self.auxiliary_raster.draw_generated_polygon_edges = Some(value == 0);
+                } else {
+                    self.auxiliary_raster.two_sided_stencil = Some(value != 0);
+                }
+            }
+            0x0310 => {
+                if value != 0x0503 {
+                    return Err(bad());
+                }
+                self.auxiliary_raster.spa_version = Some(value as u16);
+            }
+            0x077c => {
+                // A shader-local window base is not a mapped GPU allocation.
+                // Neither SPH decoder admits local-memory storage or accesses.
+                self.auxiliary_raster.local_memory_window = Some(value);
+            }
+            0x1130 | 0x0374 => {
+                let mask = if method == 0x1130 { 0x13 } else { 0x11 };
+                if value & !mask != 0 {
+                    return Err(bad());
+                }
+                if method == 0x1130 {
+                    // Only one raster/color sample, no alpha-to-coverage, and
+                    // no ZPASS query are admitted by the execution subset.
+                    self.auxiliary_raster.target_independent_raster_control = Some(value as u8);
+                } else {
+                    self.auxiliary_raster.balanced_primitive_workload = Some(value as u8);
+                }
+            }
+            0x15cc => {
+                if !matches!(value, 0 | 0x10000) {
+                    return Err(bad());
+                }
+                // Layer zero only; no geometry shader/layer export is admitted.
+                self.auxiliary_raster.geometry_selects_target_layer = Some(value != 0);
+            }
             0x0fdc => {
                 if value > 1 {
                     return Err(bad());

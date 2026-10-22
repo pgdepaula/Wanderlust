@@ -2218,3 +2218,20 @@ control produces covered and uncovered pixels, proving that the draw executes.
 The eleven draws share one translated vertex/fragment pair. Each iteration
 explicitly publishes for verification; these test readbacks are not introduced
 by either register setter or the deferred submission path.
+
+
+### Bounded shader/raster initialization
+
+The initialization state retains polygon-clip generated-edge selection (`0x0f8c`),
+two-sided-stencil selection (`0x1594`), canonical SPA 5.3 (`0x0310=0x0503`), and
+all 32 bits of the shader-local memory window base (`0x077c`). The window is not
+a GPU allocation or a host pointer. Both SPH decoders still reject nonzero local
+storage, and the ISA subset cannot access local memory. Line polygon modes,
+enabled stencil, other SPA assertions and geometry stages remain errors.
+
+TIR control (`0x1130`, defined bits 0,1,4) and balanced primitive workload
+(`0x0374`, defined bits 0,4) are retained without adding multisampling, alpha
+coverage or statistics queries. Execution remains one raster/color sample.
+RT-layer selection (`0x15cc`) admits only V=0 with either defined selector;
+all attachments have one layer and admitted shaders cannot export a layer.
+This does not introduce layered geometry or manufacture a layer from host data.

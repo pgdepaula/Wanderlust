@@ -593,3 +593,67 @@ fn normalized_blend_controls_reject_ieee_mode_and_float_targets() {
     }
     assert_eq!(e.auxiliary_raster_controls(), snapshot);
 }
+
+#[test]
+fn bounded_initialization_controls_preserve_shader_and_raster_restrictions() {
+    let mut e = Maxwell3d::default();
+    e.apply(write(0, CLASS)).unwrap();
+    for (method, value) in [
+        (0xf8c, 0),
+        (0x1594, 1),
+        (0x310, 0x503),
+        (0x77c, 0x01000000),
+        (0x1130, 0x13),
+        (0x374, 0),
+        (0x15cc, 0x10000),
+    ] {
+        e.apply(write(method, value)).unwrap();
+    }
+    let c = e.auxiliary_raster_controls();
+    assert_eq!(c.draw_generated_polygon_edges, Some(true));
+    assert_eq!(c.two_sided_stencil, Some(true));
+    assert_eq!(c.spa_version, Some(0x503));
+    assert_eq!(c.local_memory_window, Some(0x01000000));
+    assert_eq!(c.target_independent_raster_control, Some(0x13));
+    assert_eq!(c.balanced_primitive_workload, Some(0));
+    assert_eq!(c.geometry_selects_target_layer, Some(true));
+    for (method, value) in [
+        (0xf8c, 2),
+        (0x1594, 2),
+        (0x310, 0x500),
+        (0x310, 0x10503),
+        (0x1130, 4),
+        (0x1130, 0x20),
+        (0x374, 2),
+        (0x15cc, 1),
+        (0x15cc, 0x10001),
+        (0x15cc, 0x20000),
+    ] {
+        assert!(e.apply(write(method, value)).is_err());
+        assert_eq!(e.auxiliary_raster_controls(), c);
+    }
+    // The controls must never smuggle stencil, line polygons or geometry into
+    // the existing triangle/layer-zero pipeline.
+    for (method, value) in [
+        (0x1380, 1),
+        (0xdac, 0x1b01),
+        (0xdb0, 0x1b01),
+        (0x2100, 0x41),
+    ] {
+        assert!(e.apply(write(method, value)).is_err());
+    }
+    for base in [0, u32::MAX, 0xff000000] {
+        e.apply(write(0x77c, base)).unwrap();
+        assert_eq!(
+            e.auxiliary_raster_controls().local_memory_window,
+            Some(base)
+        );
+    }
+    let bytes = include_bytes!("fixtures/maxwell/red.bin");
+    for offset in [4, 8, 12] {
+        let mut local = bytes.to_vec();
+        local[offset] = 1;
+        assert!(wl_gpu::shader_program::FragmentProgram::decode(&local).is_err());
+        assert!(wl_gpu::shader::ConstantFragment::decode(&local).is_err());
+    }
+}

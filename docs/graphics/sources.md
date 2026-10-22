@@ -1786,3 +1786,16 @@ requires NaN propagation including zero weights for floating attachments, and
 clamping to the attachment's range for fixed-point attachments. Consequently,
 accepting the normalized-target subset must not be generalized into a host
 no-op for a future floating-point target implementation.
+
+
+The pinned B197 definitions distinguish generated-edge DRAW_LINE=0 from
+DO_NOT_DRAW_LINE=1 at `0x0f8c`; the retained boolean uses that distinction.
+`SET_TWO_SIDED_STENCIL_TEST` (`0x1594`) is separate from stencil enable `0x1380`.
+`SET_SPA_VERSION` (`0x0310`) has minor bits 7:0 and major bits 15:8; only the
+5.3 assertion is admitted. `SET_SHADER_LOCAL_MEMORY_WINDOW` (`0x077c`) is a
+full-width base field, distinct from local allocation address registers `0x0790+`.
+TIR control bits 0,1,4 select raster samples for ZPASS/alpha coverage and coverage
+reduction. Balanced primitive workload bits 0,4 are scheduling configuration.
+`SET_RT_LAYER` (`0x15cc`) separates layer V bits 15:0 from selector bit 16.
+The admitted SPH stage interfaces have no layer export and targets have one layer;
+nonzero V, geometry stages, line rasterization and enabled stencil remain rejected.
