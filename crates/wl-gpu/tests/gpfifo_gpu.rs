@@ -188,14 +188,19 @@ fn sync(r: &mut Renderer, d: &mut [u8], t: &mut TextureChanges) -> wl_gpu::backe
 #[test]
 #[ignore = "requires actual GPU; independently assembled MME changes color mask"]
 fn gpfifo_uploaded_mme_changes_real_raster_state_and_reuses_shader() {
-    mme_raster_state(false);
+    mme_raster_state(false, false);
 }
 #[test]
 #[ignore = "requires actual GPU; MME reads guest-programmed scratch state"]
 fn gpfifo_mme_scratch_read_changes_pixels_without_shader_recompilation() {
-    mme_raster_state(true);
+    mme_raster_state(true, false);
 }
-fn mme_raster_state(scratch: bool) {
+#[test]
+#[ignore = "requires actual GPU; assembled MME register ALU controls color masks"]
+fn gpfifo_mme_register_alu_changes_pixels_without_shader_recompilation() {
+    mme_raster_state(false, true);
+}
+fn mme_raster_state(scratch: bool, alu: bool) {
     let (mut data, map, mut words, image) = fixture();
     words.splice(0..0, [0x2001c002, 0x110e]); // Channel NOP on unbound subchannel six.
     let draw = words.split_off(words.len() - 8);
@@ -261,6 +266,11 @@ fn mme_raster_state(scratch: bool) {
     // exit send (add $r2 0); nop;
     let code = if scratch {
         vec![0x01a00021, 0x03468215, 0x10c0, 0x11]
+    } else if alu {
+        include_str!("fixtures/mme/register-alu.words")
+            .split_whitespace()
+            .map(|word| u32::from_str_radix(word, 16).unwrap())
+            .collect()
     } else {
         include_bytes!("fixtures/mme/state-mask.bin")
             .chunks_exact(4)

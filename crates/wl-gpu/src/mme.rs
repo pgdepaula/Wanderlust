@@ -123,12 +123,25 @@ impl MacroEngine {
                 return Err(MacroError::UninitializedRegister(source as u8));
             }
             let result = match word & 7 {
-                0 if word & 0xfffe_0000 == 0 => {
+                0 if word & 0xffc0_0000 == 0 => {
                     let other = ((word >> 14) & 7) as usize;
                     if !initialized[other] {
                         return Err(MacroError::UninitializedRegister(other as u8));
                     }
-                    registers[source].wrapping_add(registers[other])
+                    let left = registers[source];
+                    let right = registers[other];
+                    // Only register ALU functions with no incoming carry.
+                    // ADC/SBB remain explicit errors; no carry is fabricated.
+                    match (word >> 17) & 31 {
+                        0 => left.wrapping_add(right),
+                        2 => left.wrapping_sub(right),
+                        8 => left ^ right,
+                        9 => left | right,
+                        10 => left & right,
+                        11 => left & !right,
+                        12 => !(left & right),
+                        _ => return Err(MacroError::UnsupportedInstruction(word)),
+                    }
                 }
                 1 => registers[source].wrapping_add(((word as i32) >> 14) as u32),
                 5 => {

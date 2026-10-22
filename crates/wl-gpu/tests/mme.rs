@@ -218,3 +218,103 @@ fn scratch_reads_cover_all_slots_signed_addressing_and_channel_isolation() {
         );
     }
 }
+
+#[test]
+fn independently_assembled_register_alu_matches_fixed_bit_and_wrap_vectors() {
+    // envyas: maddr 0x680; read $r2 0xd1a;
+    // mov $r3 (OP $r1 $r2); exit send (add $r3 0); nop;
+    let instructions = [
+        0x8b10, 0x48b10, 0x108b10, 0x128b10, 0x148b10, 0x168b10, 0x188b10,
+    ];
+    let vectors = [
+        (
+            u32::MAX,
+            1,
+            [
+                0,
+                0xffff_fffe,
+                0xffff_fffe,
+                u32::MAX,
+                1,
+                0xffff_fffe,
+                0xffff_fffe,
+            ],
+        ),
+        (
+            0,
+            u32::MAX,
+            [u32::MAX, 1, u32::MAX, u32::MAX, 0, 0, u32::MAX],
+        ),
+        (
+            0xaaaa_aaaa,
+            0x5555_5555,
+            [
+                u32::MAX,
+                0x5555_5555,
+                u32::MAX,
+                u32::MAX,
+                0,
+                0xaaaa_aaaa,
+                u32::MAX,
+            ],
+        ),
+        (
+            0x8000_0000,
+            0x8000_0000,
+            [0, 0, 0, 0x8000_0000, 0x8000_0000, 0, 0x7fff_ffff],
+        ),
+    ];
+    let mut mme = MacroEngine::default();
+    mme.upload(0x11c, 0).unwrap();
+    mme.upload(0x120, 0).unwrap();
+    for (index, instruction) in instructions.into_iter().enumerate() {
+        mme.upload(0x114, 0).unwrap();
+        for word in [0x01a00021, 0x03468215, instruction, 0x18c0, 0x11] {
+            mme.upload(0x118, word).unwrap();
+        }
+        for (left, right, expected) in vectors {
+            mme.upload(0x3468, right).unwrap();
+            assert_eq!(mme.execute(0, left), Ok((0x1a00, expected[index])));
+        }
+    }
+    // Carry-dependent ADC/SBB, unknown functions and reserved high bits fail.
+    for instruction in [0x28b10, 0x68b10, 0x88b10, 0x3e8b10, 0x408b10] {
+        mme.upload(0x114, 2).unwrap();
+        mme.upload(0x118, instruction).unwrap();
+        assert_eq!(
+            mme.execute(0, 0),
+            Err(MacroError::UnsupportedInstruction(instruction))
+        );
+    }
+    // Nonzero R2 is still uninitialized unless a real instruction wrote it.
+    mme.upload(0x114, 0).unwrap();
+    for word in [0x01a00021, 0x48b10, 0x18c0, 0x11] {
+        mme.upload(0x118, word).unwrap();
+    }
+    assert_eq!(mme.execute(0, 1), Err(MacroError::UninitializedRegister(2)));
+}
+
+#[test]
+fn assembled_register_alu_chain_preserves_all_bits_through_all_functions() {
+    let mut mme = MacroEngine::default();
+    mme.upload(0x11c, 0).unwrap();
+    mme.upload(0x120, 0).unwrap();
+    mme.upload(0x114, 0).unwrap();
+    let words: Vec<u32> = include_str!("fixtures/mme/register-alu.words")
+        .split_whitespace()
+        .map(|w| u32::from_str_radix(w, 16).unwrap())
+        .collect();
+    assert_eq!(
+        words,
+        [
+            0x01a00021, 0x00040a10, 0x00101310, 0x00121c10, 0x00152510, 0x00162e10, 0x0019b710,
+            0x0019fa10, 0x000010c0, 0x00000011
+        ]
+    );
+    for word in words {
+        mme.upload(0x118, word).unwrap();
+    }
+    for parameter in [0, 1, 0x1111, 0x8000_0000, 0xdead_beef, u32::MAX] {
+        assert_eq!(mme.execute(0, parameter), Ok((0x1a00, parameter)));
+    }
+}

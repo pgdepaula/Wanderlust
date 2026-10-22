@@ -1,0 +1,10 @@
+maddr 0x680;
+mov $r2 (sub $r1 $r0);
+mov $r3 (xor $r2 $r0);
+mov $r4 (or $r3 $r0);
+mov $r5 (and $r4 $r4);
+mov $r6 (andn $r5 $r0);
+mov $r7 (nand $r6 $r6);
+mov $r2 (nand $r7 $r7);
+exit send (add $r2 0);
+nop;

@@ -2169,3 +2169,20 @@ B197 `SET_DA_OUTPUT` (`0x164c`) retains only its defined bit 12 controlling
 whether VertexID includes array start. The bounded vertex shader subset admits
 position/UV attribute loads, not VertexID reads, so this does not change their
 fetching, provide missing inputs or extend built-in shader support.
+
+
+### MME register arithmetic
+
+The bounded, single-output MME interpreter supports register ADD, SUB, XOR, OR,
+AND, ANDN and NAND. ADD/SUB wrap at 32 bits; ANDN computes left AND inverted right,
+and NAND inverts the complete 32-bit intersection. R0 remains zero, nonzero source
+registers must be initialized, and reserved instruction bits are rejected.
+ADC/SBB are not accepted: no incoming carry state is synthesized. Existing
+instruction/step budgets, exit delay slot, scratch-only reads and one validated
+state emission remain unchanged. This does not introduce branches, parameter
+waits, multiple emissions, privileged register operations or macro-generated draws.
+
+An independently assembled chain exercises all six new operations before emitting
+a B197 color mask. Actual indexed GPFIFO draws validate red-only versus full-channel
+pixels with unchanged shader resources. CPU vectors separately distinguish each
+ALU function, underflow, overflow, sign-bit handling and uninitialized sources.

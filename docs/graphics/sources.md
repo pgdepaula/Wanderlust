@@ -1749,3 +1749,16 @@ defines clip-enable at `0x0290` bit zero, SRCCOPY=3 in operation bits 2:0 at
 The pinned B197 header defines `SET_DA_OUTPUT` (`0x164c`) with the sole field
 `VERTEX_ID_USES_ARRAY_START` at bit 12. NVK's pinned initialization writes TRUE;
 accepting this setting does not admit unsupported VertexID shader loads.
+
+
+### MME register ALU corpus
+
+Pinned MIT [envytools macro opcode table](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/macro.c)
+defines arithmetic function bits 21:17 for ADD=0, SUB=2, XOR=8, OR=9,
+AND=10, ANDN=11 and NAND=12. Incoming-carry ADC/SBB remain outside the subset.
+The `register-alu.asm` fixture was assembled with that revision's unmodified
+`envyas -m macro -i`, then checked using `envydis`. Its exact little-endian words
+are retained in `register-alu.words`; the generated 40-byte binary SHA-256 is
+`68f69429167577cea88bf7d85e67e7b251a90385505677ba47119f77ba42d946`.
+CPU tests also use separately assembled two-source instructions and fixed scalar
+expectations, rather than deriving expected answers from the interpreter.
