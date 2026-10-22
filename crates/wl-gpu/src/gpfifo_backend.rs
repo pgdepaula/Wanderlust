@@ -72,6 +72,7 @@ impl Renderer {
                                     | MethodEffect::DrawIndices { .. }
                                     | MethodEffect::Clear { .. }
                                     | MethodEffect::ConstantWrite { .. }
+                                    | MethodEffect::WaitIdle
                             ) {
                                 draw = Some(effect);
                                 break;

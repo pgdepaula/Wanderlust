@@ -94,6 +94,7 @@ pub enum MethodEffect {
     DrawIndices { first: u32, count: u32 },
     Clear { color: bool, depth: bool },
     ConstantWrite { address: GpuAddress, value: u32 },
+    WaitIdle,
 }
 #[derive(Debug, Clone, Copy, Default)]
 struct Pool {
@@ -412,6 +413,12 @@ impl Maxwell3d {
             return Ok(MethodEffect::State);
         }
         match method {
+            0x0110 => {
+                if value != 0 {
+                    return Err(bad());
+                }
+                return Ok(MethodEffect::WaitIdle);
+            }
             0x2608 => {
                 if value > 31 {
                     return Err(bad());

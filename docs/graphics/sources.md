@@ -1810,3 +1810,13 @@ it must not replace the explicit LDC constant reference of an admitted TEX.B.
 defines LOW bits 15:0 and HIGH bits 31:16. The pinned NVK source documents uncertainty
 about their detailed scheduling role; only exact field retention is implemented,
 not an inferred NVIDIA scheduler or compressed allocation format.
+
+
+Pinned B197 defines `WAIT_FOR_IDLE` at byte `0x0110`, distinct from cache/header
+invalidation at `0x1334`. The bounded implementation admits canonical argument
+zero. Host completion uses the pinned wgpu queue-prefix completion callback and
+`Device::poll(PollType::wait_for(index))`, or the existing finite watchdog's
+nonblocking poll/ready loop when configured. These operations establish host
+queue completion, not guest publication or NVIDIA syncpoint/fence semantics.
+The independent test keeps guest RAM unchanged across WFI and only observes
+pixels after an explicit publication; a fault after WFI does not replay the draw.

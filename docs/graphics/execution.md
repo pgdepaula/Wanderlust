@@ -2252,3 +2252,20 @@ compression tags nor compressed render-target storage. `SET_PS_WARP_WATERMARKS`
 only LOW <= HIGH. That ordering is a conservative supported-subset limit, not a
 claim about every legal hardware combination. Host scheduling remains owned by
 wgpu; these fields introduce no completion, fence, timing or allocation promises.
+
+
+### B197 wait for idle
+
+`WAIT_FOR_IDLE` (`0x0110=0`) produces a typed execution effect. The GPFIFO
+consumer releases its guest command borrow before waiting, then reacquires any
+unread suffix. Both direct and GPFIFO paths wait for the renderer's exact last
+submitted queue prefix through the existing completion watchdog and actual wgpu
+completion mechanisms. A queue with no submitted work requires no host wait.
+Other argument values remain outside the supported subset.
+
+WFI does not submit a new draw, perform framebuffer readback, publish guest RAM,
+reset engine state or signal a fabricated guest syncpoint. Pending color/depth
+output remains resident and explicitly publishable. A subsequent channel fault
+cannot undo that earlier work or require replay. The synchronous compatibility
+path retains its already returned frame across a trailing WFI. This direct method
+support does not yet implement resumable MME emissions or general macro execution.

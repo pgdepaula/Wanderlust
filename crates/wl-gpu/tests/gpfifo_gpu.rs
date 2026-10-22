@@ -1122,3 +1122,106 @@ fn nonindexed_array_restart_policy_uses_guest_vertices_without_index_fetch() {
         assert_eq!(renderer.counters.index_upload_bytes, 0);
     }
 }
+
+#[test]
+#[ignore = "requires actual GPU; WFI completion must not publish guest output"]
+fn gpfifo_b197_wait_for_idle_completes_work_without_readback_or_publication() {
+    let (mut data, map, mut words, image) = fixture();
+    // A wait before the first guest draw has no submitted prefix to wait for.
+    let draw = words.split_off(words.len() - 8);
+    words.extend_from_slice(&[0x20010044, 0]);
+    words.extend_from_slice(&draw);
+    put(&mut data, 0x10000, &words);
+    let mut renderer = Renderer::new().unwrap();
+    let mut channel = Channel::default();
+    let mut changes = TextureChanges::new(1);
+    submit(
+        &mut renderer,
+        &mut channel,
+        &entry(0xb0000, words.len()),
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap();
+    assert_eq!(renderer.counters.synchronization_points, 0);
+    let before = renderer.counters;
+    assert!(data[RT..RT + SIZE].chunks_exact(4).all(|p| p == BG));
+    let wait = [0x20010044, 0];
+    put(&mut data, 0x10000, &wait);
+    let progress = submit(
+        &mut renderer,
+        &mut channel,
+        &entry(0xb0000, wait.len()),
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap();
+    assert_eq!(progress.draws_submitted, 0);
+    assert_eq!(progress.words_consumed, 2);
+    assert_eq!(renderer.counters.submissions, before.submissions);
+    assert_eq!(
+        renderer.counters.synchronization_points,
+        before.synchronization_points + 1
+    );
+    assert_eq!(
+        renderer.counters.readback_operations,
+        before.readback_operations
+    );
+    assert_eq!(
+        renderer.counters.guest_framebuffer_write_bytes,
+        before.guest_framebuffer_write_bytes
+    );
+    assert!(data[RT..RT + SIZE].chunks_exact(4).all(|p| p == BG));
+    // Invalid WFI data faults the channel without replaying or discarding the
+    // earlier draw. Its pending output remains explicitly publishable.
+    put(&mut data, 0x10000, &[0x20010044, 1]);
+    assert!(
+        submit(
+            &mut renderer,
+            &mut channel,
+            &entry(0xb0000, 2),
+            &map,
+            &mut data,
+            &mut changes
+        )
+        .is_err()
+    );
+    assert_eq!(renderer.counters.draw_commands, before.draw_commands);
+    assert_eq!(renderer.counters.readback_operations, 0);
+    check(
+        &sync(&mut renderer, &mut data, &mut changes).rgba,
+        &image,
+        None,
+        BG,
+    );
+    assert_eq!(renderer.counters.draw_commands, before.draw_commands);
+}
+
+#[test]
+#[ignore = "requires actual GPU; synchronous frame survives a trailing WFI"]
+fn direct_synchronous_draw_retains_frame_after_wait_for_idle() {
+    let (mut data, map, mut words, image) = fixture();
+    words.extend_from_slice(&[0x20010044, 0]);
+    let mut renderer = Renderer::new().unwrap();
+    let mut channel = Channel::default();
+    let mut changes = TextureChanges::new(1);
+    let frame = renderer
+        .submit_pushbuffer(
+            &mut channel,
+            &words,
+            &map,
+            &mut SliceMemoryMut {
+                base: GuestAddress(0),
+                bytes: &mut data,
+            },
+            &mut changes,
+        )
+        .unwrap()
+        .unwrap();
+    check(&frame.rgba, &image, None, BG);
+    assert_eq!(renderer.counters.draw_commands, 1);
+    assert_eq!(renderer.counters.readback_operations, 1);
+    assert_eq!(renderer.counters.synchronization_points, 2);
+}

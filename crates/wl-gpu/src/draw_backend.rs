@@ -8,7 +8,13 @@ use crate::{
     memory::*,
     texture::{PendingAttachment, TextureChanges},
 };
-use std::cell::Cell;
+use std::{
+    cell::Cell,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 #[derive(Clone, Copy)]
 pub(crate) struct GuestTargetStamp {
     guest: GuestAddress,
@@ -111,6 +117,7 @@ impl Renderer {
                             | MethodEffect::DrawIndices { .. }
                             | MethodEffect::Clear { .. }
                             | MethodEffect::ConstantWrite { .. }
+                            | MethodEffect::WaitIdle
                     ) {
                         if let Some(frame) = self.guest_effect(
                             &channel.engine,
@@ -352,6 +359,24 @@ impl Renderer {
         synchronous: bool,
     ) -> Result<Option<Frame>> {
         match effect {
+            MethodEffect::WaitIdle => {
+                if self.poisoned {
+                    return Err(invalid("renderer unavailable after backend failure"));
+                }
+                if let Some(index) = self.last_submission.clone() {
+                    let done = Arc::new(AtomicBool::new(false));
+                    let signal = done.clone();
+                    self.queue.on_submitted_work_done(move || {
+                        signal.store(true, Ordering::Release);
+                    });
+                    self.counters.synchronization_points += 1;
+                    self.completion
+                        .wait(&self.device, index, &done, &mut self.counters)?;
+                }
+                // Completion is not guest RAM publication. Keep resident color
+                // and depth output pending; no readback or draw replay occurs.
+                Ok(None)
+            }
             MethodEffect::ConstantWrite { address, value } => {
                 if self.poisoned {
                     return Err(invalid("renderer unavailable after backend failure"));

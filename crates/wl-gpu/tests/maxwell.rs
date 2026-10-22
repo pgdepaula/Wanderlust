@@ -190,7 +190,7 @@ fn fifo_pool_state_chunks_shared_subchannels_and_bounds() {
     assert_eq!(engine.bindless_texture_constant_slot(), Some(0));
     assert_eq!((engine.texture_header_epoch, engine.sampler_epoch), epochs);
     assert!(engine.constant_buffer(4, 0).is_err());
-    assert!(engine.apply(write(0x1334, 0)).is_err()); // WFI effects are not implemented
+    assert!(engine.apply(write(0x1334, 0)).is_err()); // unsupported header-cache invalidation method
     assert!(
         engine
             .resolve_texture(
@@ -718,5 +718,33 @@ fn compression_threshold_and_warp_watermarks_retain_exact_bounded_fields() {
     assert_eq!(
         e.auxiliary_raster_controls().pixel_warp_watermarks,
         Some((65535, 65535))
+    );
+}
+
+#[test]
+fn b197_wait_for_idle_is_an_execution_effect_not_an_engine_reset() {
+    let mut e = Maxwell3d::default();
+    assert!(e.apply(write(0x110, 0)).is_err());
+    e.apply(write(0, CLASS)).unwrap();
+    e.apply(write(0x164c, 0x1000)).unwrap();
+    assert_eq!(e.apply(write(0x110, 0)), Ok(MethodEffect::WaitIdle));
+    assert_eq!(e.vertex_id_uses_array_start(), Some(true));
+    assert!(e.apply(write(0x110, 1)).is_err());
+    assert_eq!(e.vertex_id_uses_array_start(), Some(true));
+    assert!(e.apply(write(0x111, 0)).is_err());
+    assert_eq!(e.bound_class(0), Some(EngineClass::ThreeD));
+    e.apply(MethodWrite {
+        subchannel: 3,
+        method: 0,
+        value: 0x902d,
+    })
+    .unwrap();
+    assert!(
+        e.apply(MethodWrite {
+            subchannel: 3,
+            method: 0x110,
+            value: 0
+        })
+        .is_err()
     );
 }
