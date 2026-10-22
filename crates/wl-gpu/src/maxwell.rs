@@ -48,6 +48,7 @@ pub enum MethodError {
     UnsupportedValue { method: u16, value: u32 },
     EpochOverflow,
     IncompleteConstantBuffer,
+    IncompletePrimitiveRestart,
 }
 impl std::fmt::Display for MethodError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -198,6 +199,10 @@ pub struct Maxwell3d {
     bound: [Option<EngineClass>; 8],
     macros: crate::mme::MacroEngine,
     cache_policies: [Option<CacheEviction>; 6],
+    provoking_last: Option<bool>,
+    api_call_limit: Option<u16>,
+    attribute_defaults: Option<u8>,
+    blend_other_formats: Option<bool>,
     modern_headers: bool,
     images: Pool,
     program_upper: Option<u32>,
@@ -212,7 +217,7 @@ pub struct Maxwell3d {
     vertex_limit_upper: Option<u32>,
     vertex_limit_lower: Option<u32>,
     vertex_frequency: Option<u32>,
-    vertex_instance: Option<u32>,
+    vertex_instance: [Option<u32>; 16],
     vertex_attributes: [Option<u32>; 2],
     fragment_enabled: bool,
     fragment_offset: Option<u32>,
@@ -228,6 +233,25 @@ pub struct Maxwell3d {
     pub sampler_epoch: u64,
 }
 impl Maxwell3d {
+    pub fn provoking_vertex_last(&self) -> Option<bool> {
+        self.provoking_last
+    }
+    pub fn api_call_limit(&self) -> Option<u16> {
+        self.api_call_limit
+    }
+    pub fn attribute_defaults(&self) -> Option<u8> {
+        self.attribute_defaults
+    }
+    pub fn blend_other_formats_enabled(&self) -> Option<bool> {
+        self.blend_other_formats
+    }
+    pub fn vertex_array_instance(&self, slot: usize) -> Option<bool> {
+        self.vertex_instance
+            .get(slot)
+            .copied()
+            .flatten()
+            .map(|v| v != 0)
+    }
     pub fn cache_eviction(&self, method: u16) -> Option<CacheEviction> {
         CACHE_POLICY_METHODS
             .iter()
@@ -253,6 +277,11 @@ impl Maxwell3d {
             return Err(MethodError::InvalidMethod(method));
         }
         let bad = || MethodError::UnsupportedValue { method, value };
+        // NVB06F_NOP is a channel method, independent of subchannel binding.
+        // It is distinct from engine NO_OPERATION at byte offset 0x100.
+        if method == 8 {
+            return Ok(MethodEffect::State);
+        }
         if method == 0 {
             // Engine instance zero only; SET_OBJECT carries a class, not texture ID.
             let class = EngineClass::decode(value).ok_or(MethodError::UnsupportedClass(value))?;
@@ -312,6 +341,43 @@ impl Maxwell3d {
             return Ok(MethodEffect::State);
         }
         match method {
+            0x0d64 => {
+                if value > 8 {
+                    return Err(bad());
+                }
+                self.api_call_limit = Some(if value == 0 { 0 } else { 1u16 << (value - 1) });
+            }
+            0x1140 => {
+                if value & !0x10 != 0 {
+                    return Err(bad());
+                }
+                // This gate names SNORM8/UNORM16/SNORM16, all unsupported color
+                // target formats. RGBA8 blending keeps its existing state.
+                self.blend_other_formats = Some(value != 0);
+            }
+            0x1610 => {
+                // Match the independently pinned canonical 0001 expansion.
+                // Other defaults need separately verified Float3/component
+                // expansion and interface handling, rather than host defaults.
+                if value != 0x0e {
+                    return Err(bad());
+                }
+                // Missing/default vertex attributes still fail interface checks.
+                self.attribute_defaults = Some(value as u8);
+            }
+            0x165c => {
+                if value != 0 {
+                    return Err(bad());
+                } // OGL point center; no points are rendered.
+            }
+            0x1684 => {
+                if value > 1 {
+                    return Err(bad());
+                }
+                // Guest Flat IPA remains rejected; all admitted varyings are
+                // smooth/screen-linear and cannot observe the provoking vertex.
+                self.provoking_last = Some(value != 0);
+            }
             0x16a8 | 0x1794 => {
                 // Only the SPH3/AAM2 format pairs used by this translator's
                 // pinned Maxwell layout are admitted, not a firmware emulator.
@@ -378,11 +444,12 @@ impl Maxwell3d {
                 }
                 self.vertex_frequency = Some(value);
             }
-            0x1880 => {
-                if value != 0 {
+            0x1880..=0x18bc => {
+                let slot = usize::from((method - 0x1880) / 4);
+                if value > 1 || (slot == 0 && value != 0) {
                     return Err(bad());
                 }
-                self.vertex_instance = Some(value);
+                self.vertex_instance[slot] = Some(value);
             }
             0x1160 | 0x1164 => {
                 let fields = value & !(0x3fffu32 << 7);
@@ -538,6 +605,9 @@ impl Maxwell3d {
                 if value >> 28 != 4 || count == 0 || count % 3 != 0 {
                     return Err(bad());
                 }
+                if !self.indices.nonindexed_restart_ready() {
+                    return Err(MethodError::IncompletePrimitiveRestart);
+                }
                 return Ok(MethodEffect::Draw { first, count });
             }
             0x19d0 => {
@@ -644,7 +714,7 @@ impl Maxwell3d {
             self.vertex_limit_upper,
             self.vertex_limit_lower,
             self.vertex_frequency,
-            self.vertex_instance,
+            self.vertex_instance[0],
             self.vertex_attributes,
         )
         else {

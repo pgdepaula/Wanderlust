@@ -1717,3 +1717,24 @@ independent/header sampler binding enums. Pinned
 checks SPH 3/3 and AAM 2/2. Those are the only accepted pairs in this bounded
 translator. NVIDIA defines shader exception enable at bit zero of `0x1528`;
 only FALSE is supported. Neither assertion relaxes binary header validation.
+
+Pinned NVIDIA `clb06f.h` defines NOP at byte `0x0008` with a 32-bit handle, unlike
+engine NO_OPERATION at `0x0100`. B197 independently defines the array-restart
+policy at `0x0de8` and global restart at `0x1644`. The pinned MIT
+[primitive restart state update](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs#L1058-L1064)
+corroborates the conjunction of global enable with indexed drawing or the array
+policy. The implementation admits only the proven disabled result.
+
+The pinned B197 header defines sixteen vertex-array instance flags at
+`0x1880+index*4`, six attribute-default bits at `0x1610`, FIRST/LAST selection at
+`0x1684`, OGL/D3D point centers at `0x165c`, and API call-limit encodings 0..8
+for limits 0,1,2,4,8,16,32,64,128. NO_CHECK=15 is explicitly outside this subset.
+The sole bit of `SET_BLEND_PER_FORMAT_ENABLE` at `0x1140` gates
+SNORM8/UNORM16/SNORM16, rather than the supported RGBA8 target. Existing strict
+input, topology and instruction validation keeps these otherwise inactive controls
+from implying point, flat-shading, instancing, default-input or CALL support.
+
+[NVK's canonical attribute defaults](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/vulkan/nvk_cmd_draw.c#L361-L368)
+encode `0x0e`. Only that profile is admitted here; other bit combinations require
+separate verification of component expansion and default-interface behavior.
+Retaining the profile does not supply an otherwise missing guest input.

@@ -91,3 +91,42 @@ fn unsupported_index_modes_alignment_and_40_bit_bounds() {
     assert!(set(&mut e, 0x17d4, 0x8001b));
     assert_eq!(e.index_buffer(1, 6).unwrap().bytes, 24);
 }
+
+#[test]
+fn array_restart_policy_requires_disabled_global_restart_only_when_it_can_apply() {
+    use wl_gpu::maxwell::MethodError;
+    let mut engine = Maxwell3d::default();
+    assert!(set(&mut engine, 0, 0xb197));
+    assert!(set(&mut engine, 0xde8, 1));
+    let draw = MethodWrite {
+        subchannel: 0,
+        method: 0x1214,
+        value: 0x40030000,
+    };
+    assert_eq!(
+        engine.apply(draw),
+        Err(MethodError::IncompletePrimitiveRestart)
+    );
+    assert!(!set(&mut engine, 0xde8, 2));
+    assert_eq!(
+        engine.apply(draw),
+        Err(MethodError::IncompletePrimitiveRestart)
+    );
+    assert!(set(&mut engine, 0x1644, 0));
+    assert_eq!(
+        engine.apply(draw),
+        Ok(MethodEffect::Draw { first: 0, count: 3 })
+    );
+    assert!(!set(&mut engine, 0x1644, 1));
+    assert_eq!(
+        engine.apply(draw),
+        Ok(MethodEffect::Draw { first: 0, count: 3 })
+    );
+    let mut independent = Maxwell3d::default();
+    assert!(set(&mut independent, 0, 0xb197));
+    assert!(set(&mut independent, 0xde8, 0));
+    assert_eq!(
+        independent.apply(draw),
+        Ok(MethodEffect::Draw { first: 0, count: 3 })
+    );
+}

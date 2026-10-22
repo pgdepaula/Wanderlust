@@ -2127,3 +2127,31 @@ are not implemented. Header and instruction validation remains unchanged.
 `SET_SAMPLER_BINDING=INDEPENDENTLY` (`0x1234=0`) configures the existing separate
 TIC/TSC handle path. Shader exceptions may be explicitly disabled (`0x1528=0`).
 Header-bound sampler mode and enabled guest shader exceptions remain unsupported.
+
+`NVB06F_NOP` at channel byte offset `0x0008` accepts a full-width tag independently
+of engine/subchannel binding. It is distinct from the zero packet word and from
+engine `NO_OPERATION` (`0x0100`). It preserves engine/packet state and creates no
+queue submission, memory barrier, interrupt or completion signal.
+
+`SET_DA_PRIMITIVE_RESTART_VERTEX_ARRAY` (`0x0de8`) retains its boolean policy.
+When it is TRUE, a nonindexed draw requires explicit global restart disable
+(`0x1644=0`). Indexed draws already require that state. Global restart enable,
+cut-index behavior and additional topologies remain unsupported. This distinction
+admits policy initialization without pretending that active restart is implemented.
+
+All sixteen vertex-array instance flags (`0x1880+index*4`) are retained separately.
+The supported position/UV attributes use stream zero, whose flag must remain FALSE;
+other stream flags cannot change its fetch behavior. No instanced drawing or new
+stream bindings are added. Only canonical attribute defaults `0x1610=0x0e` are retained;
+other Float3/component expansion modes remain unsupported, and
+missing/default attributes still fail existing input/linkage validation.
+
+Provoking-vertex FIRST/LAST (`0x1684`) and bounded API-visible call limits
+(`0x0d64`, zero through 128 using the documented enum) are retained. Flat guest
+interpolation and guest CALL/RET remain unsupported, so those controls do not
+specialize admitted smooth, straight-line programs. NO_CHECK is not admitted.
+Only canonical OGL point-center configuration (`0x165c=0`) is accepted; point
+rasterization remains unsupported. The `0x1140` format blend gate is retained
+for SNORM8/UNORM16/SNORM16; it does not gate the implemented RGBA8 format and does
+not add those unsupported target formats. These inactive settings cannot seed
+host geometry, manufacture default inputs or bypass shader validation.

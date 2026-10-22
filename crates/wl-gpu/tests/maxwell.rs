@@ -329,3 +329,98 @@ fn shader_format_assertions_and_existing_independent_sampler_mode_are_strict() {
         Err(MethodError::UnsupportedEngineMethod { .. })
     ));
 }
+
+#[test]
+fn channel_nop_is_independent_of_engine_binding_and_has_no_register_effects() {
+    let mut engine = Maxwell3d::default();
+    for subchannel in 0..8 {
+        for value in [0, CLASS, u32::MAX] {
+            assert_eq!(
+                engine.apply(MethodWrite {
+                    subchannel,
+                    method: 8,
+                    value
+                }),
+                Ok(MethodEffect::State)
+            );
+            assert_eq!(engine.bound_class(subchannel), None);
+        }
+    }
+    assert_eq!(engine.method_writes(), 24);
+    assert_eq!(
+        engine.apply(MethodWrite {
+            subchannel: 8,
+            method: 8,
+            value: 0
+        }),
+        Err(MethodError::InvalidSubchannel(8))
+    );
+    assert_eq!(
+        engine.apply(write(0x100, 0)),
+        Err(MethodError::UnboundSubchannel(0))
+    );
+    engine.apply(write(0, 0xb1c0)).unwrap();
+    engine.apply(write(8, u32::MAX)).unwrap();
+    assert_eq!(engine.bound_class(0), Some(EngineClass::Compute));
+}
+
+#[test]
+fn bounded_initialization_metadata_retains_values_without_vertex_defaults_or_shader_calls() {
+    let mut engine = Maxwell3d::default();
+    engine.apply(write(0, CLASS)).unwrap();
+    for value in 0..=8 {
+        engine.apply(write(0xd64, value)).unwrap();
+        assert_eq!(
+            engine.api_call_limit(),
+            Some(if value == 0 { 0 } else { 1u16 << (value - 1) })
+        );
+    }
+    for value in [9, 15, 0x100, u32::MAX] {
+        assert!(engine.apply(write(0xd64, value)).is_err());
+    }
+    assert_eq!(engine.api_call_limit(), Some(128));
+    for value in [0, 1] {
+        engine.apply(write(0x1684, value)).unwrap();
+        assert_eq!(engine.provoking_vertex_last(), Some(value != 0));
+        engine.apply(write(0x1140, value << 4)).unwrap();
+        assert_eq!(engine.blend_other_formats_enabled(), Some(value != 0));
+    }
+    assert!(engine.apply(write(0x1684, 2)).is_err());
+    assert_eq!(engine.provoking_vertex_last(), Some(true));
+    assert!(engine.apply(write(0x1140, 1)).is_err());
+    assert_eq!(engine.blend_other_formats_enabled(), Some(true));
+    engine.apply(write(0x1610, 0x0e)).unwrap();
+    for value in (0..64).filter(|v| *v != 0x0e) {
+        assert!(engine.apply(write(0x1610, value)).is_err());
+        assert_eq!(engine.attribute_defaults(), Some(0x0e));
+    }
+    assert!(engine.apply(write(0x1610, 64)).is_err());
+    assert_eq!(engine.attribute_defaults(), Some(0x0e));
+    assert!(engine.vertex_array().is_err()); // No implicit/default guest attributes are manufactured.
+    engine.apply(write(0x165c, 0)).unwrap();
+    assert!(engine.apply(write(0x165c, 1)).is_err());
+}
+
+#[test]
+fn inactive_vertex_instance_slots_cannot_alias_stream_zero() {
+    let mut engine = Maxwell3d::default();
+    engine.apply(write(0, CLASS)).unwrap();
+    assert_eq!(engine.vertex_array_instance(0), None);
+    for slot in 1..16 {
+        for value in [0, 1] {
+            engine.apply(write(0x1880 + slot * 4, value)).unwrap();
+            assert_eq!(
+                engine.vertex_array_instance(usize::from(slot)),
+                Some(value != 0)
+            );
+            assert_eq!(engine.vertex_array_instance(0), None);
+        }
+        assert!(engine.apply(write(0x1880 + slot * 4, 2)).is_err());
+        assert_eq!(engine.vertex_array_instance(usize::from(slot)), Some(true));
+    }
+    engine.apply(write(0x1880, 0)).unwrap();
+    assert_eq!(engine.vertex_array_instance(0), Some(false));
+    assert!(engine.apply(write(0x1880, 1)).is_err());
+    assert_eq!(engine.vertex_array_instance(0), Some(false));
+    assert_eq!(engine.vertex_array_instance(16), None);
+}

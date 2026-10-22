@@ -18,9 +18,13 @@ pub(crate) struct IndexRegisters {
     base: Option<i32>,
     instance: Option<u32>,
     restart: Option<u32>,
+    array_restart: Option<bool>,
     pub active: bool,
 }
 impl IndexRegisters {
+    pub(crate) fn nonindexed_restart_ready(&self) -> bool {
+        self.array_restart != Some(true) || self.restart == Some(0)
+    }
     pub fn apply(
         &mut self,
         method: u16,
@@ -28,6 +32,12 @@ impl IndexRegisters {
     ) -> std::result::Result<Option<MethodEffect>, MethodError> {
         let bad = || MethodError::UnsupportedValue { method, value };
         match method {
+            0x0de8 => {
+                if value > 1 {
+                    return Err(bad());
+                }
+                self.array_restart = Some(value != 0);
+            }
             0x17c8..=0x17d8 => {
                 let n = ((method - 0x17c8) / 4) as usize;
                 if (n == 0 || n == 2) && value > 255 || n == 4 && !matches!(value, 1 | 2) {

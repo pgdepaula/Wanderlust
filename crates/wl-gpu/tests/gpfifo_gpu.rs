@@ -197,6 +197,7 @@ fn gpfifo_mme_scratch_read_changes_pixels_without_shader_recompilation() {
 }
 fn mme_raster_state(scratch: bool) {
     let (mut data, map, mut words, image) = fixture();
+    words.splice(0..0, [0x2001c002, 0x110e]); // Channel NOP on unbound subchannel six.
     let draw = words.split_off(words.len() - 8);
     for method_id in wl_gpu::maxwell::CACHE_POLICY_METHODS {
         method(&mut words, u32::from(method_id), 0x10);
@@ -206,8 +207,17 @@ fn mme_raster_state(scratch: bool) {
         (0x1794, 0x00020002),
         (0x1234, 0),
         (0x1528, 0),
+        (0x0de8, 1), // Global restart is explicitly disabled by fixture setup.
+        (0x165c, 0),
+        (0x1684, 1),
+        (0x0d64, 8),
+        (0x1140, 0x10),
+        (0x1610, 0x0e),
     ] {
         method(&mut words, method_id, value);
+    }
+    for slot in 1..16 {
+        method(&mut words, 0x1880 + slot * 4, 1);
     }
     method(&mut words, 0x1534, 0); // Documented antialias disable, single sample.
     method(&mut words, 0x153c, 0); // No alpha-to-coverage or alpha-to-one.
@@ -780,6 +790,9 @@ fn gpfifo_inline_constants_reach_ldc_pixels_and_reuse_shader() {
     method(&mut second, 0x10cc, 0x00ff00ff);
     method(&mut second, 0x10e8, 0x003f003f);
     method(&mut second, 0x10f8, 0x1111); // Clear configuration cannot alter a draw.
+    for (method_id, value) in [(0x1684, 0), (0x1140, 0), (0x1610, 0x0e), (0x0d64, 0)] {
+        method(&mut second, method_id, value);
+    }
     for method_id in wl_gpu::maxwell::CACHE_POLICY_METHODS {
         method(&mut second, u32::from(method_id), 0x20);
     }
@@ -1009,4 +1022,56 @@ fn failed_inline_write_does_not_mark_journal_or_replay_prior_draw() {
         .is_err()
     );
     assert_eq!(renderer.counters.draw_commands, before.draw_commands);
+}
+
+#[test]
+#[ignore = "requires actual GPU; nonindexed restart policy requires global disable"]
+fn nonindexed_array_restart_policy_uses_guest_vertices_without_index_fetch() {
+    for explicit_disable in [false, true] {
+        let (mut data, map, mut words, image) = fixture();
+        words.truncate(words.len() - 8); // Remove indexed BEGIN/FIRST/COUNT/END.
+        if !explicit_disable {
+            let positions: Vec<_> = words
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| **w == 0x20010591)
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(positions.len(), 1);
+            let i = positions[0];
+            assert_eq!(words[i + 1], 0);
+            words[i] = 0;
+            words[i + 1] = 0; // No global restart state is programmed.
+        }
+        data[0x6000..0x6006].fill(0xff); // Invalid indices must not be consulted.
+        method(&mut words, 0xde8, 1);
+        method(&mut words, 0x1214, 0x40030000);
+        put(&mut data, 0x10000, &words);
+        let mut renderer = Renderer::new().unwrap();
+        let mut channel = Channel::default();
+        let mut changes = TextureChanges::new(1);
+        let result = submit(
+            &mut renderer,
+            &mut channel,
+            &entry(0xb0000, words.len()),
+            &map,
+            &mut data,
+            &mut changes,
+        );
+        if explicit_disable {
+            assert_eq!(result.unwrap().draws_submitted, 1);
+            check(
+                &sync(&mut renderer, &mut data, &mut changes).rgba,
+                &image,
+                None,
+                BG,
+            );
+        } else {
+            assert!(result.is_err());
+            assert!(channel.is_faulted());
+            assert_eq!(renderer.counters.draw_commands, 0);
+            assert!(data[RT..RT + SIZE].chunks_exact(4).all(|p| p == BG));
+        }
+        assert_eq!(renderer.counters.index_upload_bytes, 0);
+    }
 }
