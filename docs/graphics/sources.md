@@ -1703,3 +1703,17 @@ component to modify. Explicitly full-attachment scissor bounds make the existing
 full GPU attachment clear equivalent; other scissor bounds remain rejected before
 host execution. Defined but unimplemented rectangle/viewport controls are retained
 as state and rejected when used by a clear, rather than rejected by every write.
+
+The pinned NVIDIA B197 header names six separate L2 policy registers at
+`0x0218/0x1000/0x10fc/0x1290/0x12d8/0x12dc`, defines POLICY bits 5:4 with
+FIRST/NORMAL/LAST values 0/1/2, and separately defines VAF system-memory volatility
+at bit zero. Keeping that bit FALSE preserves the supported memory contract.
+These policy writes are distinct from the separately defined flush/barrier
+methods; no forced readback is inferred from a replacement preference.
+
+The same pinned header defines current/oldest 16-bit version fields and
+independent/header sampler binding enums. Pinned
+[NVK Maxwell initialization](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/vulkan/nvk_cmd_draw.c#L330-L339)
+checks SPH 3/3 and AAM 2/2. Those are the only accepted pairs in this bounded
+translator. NVIDIA defines shader exception enable at bit zero of `0x1528`;
+only FALSE is supported. Neither assertion relaxes binary header validation.

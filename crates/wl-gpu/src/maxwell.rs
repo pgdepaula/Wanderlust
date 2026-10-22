@@ -3,6 +3,14 @@
 use crate::{Error, Result, fifo::MethodWrite, format::Format, invalid, memory::*, texture::*};
 
 pub const CLASS: u32 = 0xb197;
+/// Eviction preference only, not a flush, memory barrier or visibility event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheEviction {
+    First,
+    Normal,
+    Last,
+}
+pub const CACHE_POLICY_METHODS: [u16; 6] = [0x0218, 0x1000, 0x10fc, 0x1290, 0x12d8, 0x12dc];
 
 /// Classes whose SET_OBJECT and documented NOP can be routed safely. Binding
 /// a class does not imply implementation of its execution methods.
@@ -189,6 +197,7 @@ pub struct Maxwell3d {
     indices: crate::index::IndexRegisters,
     bound: [Option<EngineClass>; 8],
     macros: crate::mme::MacroEngine,
+    cache_policies: [Option<CacheEviction>; 6],
     modern_headers: bool,
     images: Pool,
     program_upper: Option<u32>,
@@ -219,6 +228,12 @@ pub struct Maxwell3d {
     pub sampler_epoch: u64,
 }
 impl Maxwell3d {
+    pub fn cache_eviction(&self, method: u16) -> Option<CacheEviction> {
+        CACHE_POLICY_METHODS
+            .iter()
+            .position(|m| *m == method)
+            .and_then(|index| self.cache_policies[index])
+    }
     pub fn bound_class(&self, subchannel: u8) -> Option<EngineClass> {
         self.bound.get(subchannel as usize).copied().flatten()
     }
@@ -284,7 +299,35 @@ impl Maxwell3d {
                 value,
             });
         }
+        if let Some(index) = CACHE_POLICY_METHODS.iter().position(|m| *m == method) {
+            // POLICY bits 5:4 are preferences. Keep VAF system-memory volatility
+            // FALSE; TRUE needs a separately verified memory-access contract.
+            let policy = match value {
+                0 => CacheEviction::First,
+                0x10 => CacheEviction::Normal,
+                0x20 => CacheEviction::Last,
+                _ => return Err(bad()),
+            };
+            self.cache_policies[index] = Some(policy);
+            return Ok(MethodEffect::State);
+        }
         match method {
+            0x16a8 | 0x1794 => {
+                // Only the SPH3/AAM2 format pairs used by this translator's
+                // pinned Maxwell layout are admitted, not a firmware emulator.
+                let version = if method == 0x16a8 { 3 } else { 2 };
+                if value != (version | (version << 16)) {
+                    return Err(bad());
+                }
+            }
+            0x1234 | 0x1528 => {
+                // Existing path: independent TIC/TSC indices, no shader traps.
+                // Header-bound samplers and enabled shader exceptions need new
+                // resource/exception semantics and remain explicit failures.
+                if value != 0 {
+                    return Err(bad());
+                }
+            }
             0x1608 => {
                 if value > 0xff {
                     return Err(bad());

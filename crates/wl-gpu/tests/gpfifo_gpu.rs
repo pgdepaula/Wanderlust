@@ -198,6 +198,17 @@ fn gpfifo_mme_scratch_read_changes_pixels_without_shader_recompilation() {
 fn mme_raster_state(scratch: bool) {
     let (mut data, map, mut words, image) = fixture();
     let draw = words.split_off(words.len() - 8);
+    for method_id in wl_gpu::maxwell::CACHE_POLICY_METHODS {
+        method(&mut words, u32::from(method_id), 0x10);
+    }
+    for (method_id, value) in [
+        (0x16a8, 0x00030003),
+        (0x1794, 0x00020002),
+        (0x1234, 0),
+        (0x1528, 0),
+    ] {
+        method(&mut words, method_id, value);
+    }
     method(&mut words, 0x1534, 0); // Documented antialias disable, single sample.
     method(&mut words, 0x153c, 0); // No alpha-to-coverage or alpha-to-one.
     method(&mut words, 0x15b4, 0); // Nouveau's legacy CSAA disable.
@@ -769,6 +780,9 @@ fn gpfifo_inline_constants_reach_ldc_pixels_and_reuse_shader() {
     method(&mut second, 0x10cc, 0x00ff00ff);
     method(&mut second, 0x10e8, 0x003f003f);
     method(&mut second, 0x10f8, 0x1111); // Clear configuration cannot alter a draw.
+    for method_id in wl_gpu::maxwell::CACHE_POLICY_METHODS {
+        method(&mut second, u32::from(method_id), 0x20);
+    }
     second.push(0x600408e4); // Same port, four data words.
     let color = [0.25f32, 0.5, 0.75, 1.];
     second.extend(color.map(f32::to_bits));

@@ -262,3 +262,70 @@ fn descriptor_read_truncation_mapping_and_invalidation() {
     engine.apply(write(0x157c, 1)).unwrap();
     assert!(engine.resolve_texture(0, 1, 0, &pools(), &memory).is_err());
 }
+
+#[test]
+fn documented_cache_preferences_are_separate_and_do_not_accept_volatile_or_reserved_modes() {
+    let mut engine = Maxwell3d::default();
+    engine.apply(write(0, CLASS)).unwrap();
+    for method in CACHE_POLICY_METHODS {
+        assert_eq!(engine.cache_eviction(method), None);
+        for (value, policy) in [
+            (0, CacheEviction::First),
+            (0x10, CacheEviction::Normal),
+            (0x20, CacheEviction::Last),
+        ] {
+            assert_eq!(engine.apply(write(method, value)), Ok(MethodEffect::State));
+            assert_eq!(engine.cache_eviction(method), Some(policy));
+        }
+        for value in [1, 2, 0x30, 0x100, u32::MAX] {
+            assert_eq!(
+                engine.apply(write(method, value)),
+                Err(MethodError::UnsupportedValue { method, value })
+            );
+            assert_eq!(engine.cache_eviction(method), Some(CacheEviction::Last));
+        }
+        assert_eq!(
+            engine.apply(write(method + 1, 0)),
+            Err(MethodError::InvalidMethod(method + 1))
+        );
+    }
+    assert_eq!(engine.cache_eviction(0x1001), None);
+    assert_eq!(Maxwell3d::default().cache_eviction(0x1000), None);
+}
+
+#[test]
+fn shader_format_assertions_and_existing_independent_sampler_mode_are_strict() {
+    let mut engine = Maxwell3d::default();
+    engine.apply(write(0, CLASS)).unwrap();
+    for (method, good) in [
+        (0x16a8, 0x00030003),
+        (0x1794, 0x00020002),
+        (0x1234, 0),
+        (0x1528, 0),
+    ] {
+        assert_eq!(engine.apply(write(method, good)), Ok(MethodEffect::State));
+        for value in [good ^ 1, good ^ 0x10000, u32::MAX] {
+            assert_eq!(
+                engine.apply(write(method, value)),
+                Err(MethodError::UnsupportedValue { method, value })
+            );
+        }
+        assert_eq!(engine.apply(write(method, good)), Ok(MethodEffect::State));
+    }
+    // Checks on an auxiliary subchannel cannot be silently routed into B197.
+    engine
+        .apply(MethodWrite {
+            subchannel: 1,
+            method: 0,
+            value: 0xb1c0,
+        })
+        .unwrap();
+    assert!(matches!(
+        engine.apply(MethodWrite {
+            subchannel: 1,
+            method: 0x16a8,
+            value: 0x00030003
+        }),
+        Err(MethodError::UnsupportedEngineMethod { .. })
+    ));
+}

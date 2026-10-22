@@ -2110,3 +2110,20 @@ it does not block unrelated draws or silently perform a full-surface clear.
 Reserved configuration bits still fail at the write. Full-scissor clears use the
 existing real GPU attachment clear and preserve pitch/block-linear padding and
 explicit publication semantics.
+
+B197 cache eviction preferences are retained separately for ROP prefetch reads
+(`0x0218`), VAF (`0x1000`), noninterlocked reads (`0x10fc`), interlocked reads
+(`0x1290`), and noninterlocked/interlocked writes (`0x12d8/0x12dc`). POLICY values
+FIRST/NORMAL/LAST occupy bits 5:4. Only the nonvolatile form is accepted for VAF;
+reserved policy values, volatility and other bits remain unsupported. These are
+eviction preferences, not cache flushes or guest-memory visibility barriers.
+wgpu manages physical host cache policy; canonical dirty tracking and ordering
+remain mandatory. Changing a preference does not invalidate shaders or pipelines.
+
+The bounded shader formats accept `CHECK_SPH_VERSION=0x00030003` and
+`CHECK_AAM_VERSION=0x00020002`, matching the pinned Maxwell layout. Other pairs
+fail explicitly; version-setting operations and general firmware version handling
+are not implemented. Header and instruction validation remains unchanged.
+`SET_SAMPLER_BINDING=INDEPENDENTLY` (`0x1234=0`) configures the existing separate
+TIC/TSC handle path. Shader exceptions may be explicitly disabled (`0x1528=0`).
+Header-bound sampler mode and enabled guest shader exceptions remain unsupported.
