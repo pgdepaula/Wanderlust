@@ -2031,3 +2031,9 @@ units. A saved entry wrapper can otherwise compile using default trait callbacks
 while omitting newer event and diagnostic implementations. Stale wrappers fail
 explicitly. Refreshing the host-only module does not require changing guest
 instruction sources, image blobs or runtime-compatible translation libraries.
+
+`SET_ANTI_ALIAS_ENABLE` (`0x1534`) accepts only the documented FALSE value zero.
+It preserves the supported single-sample pipeline; TRUE, reserved bits and
+multisample target modes remain rejected. A failed enable write leaves the
+previous supported raster state intact. This does not implement MSAA or resolve
+operations. Literal GPFIFO draws exercise explicit disable before rasterization.

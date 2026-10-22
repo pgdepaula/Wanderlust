@@ -198,6 +198,7 @@ fn gpfifo_mme_scratch_read_changes_pixels_without_shader_recompilation() {
 fn mme_raster_state(scratch: bool) {
     let (mut data, map, mut words, image) = fixture();
     let draw = words.split_off(words.len() - 8);
+    method(&mut words, 0x1534, 0); // Documented antialias disable, single sample.
     for (method_id, value) in [(0x11c, 0), (0x120, 0), (0x114, 0)] {
         method(&mut words, method_id, value);
     }

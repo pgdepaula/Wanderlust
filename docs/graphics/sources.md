@@ -1648,3 +1648,8 @@ verified by assembling `maddr 0x680; read $r2 0xd1a; exit send (add $r2 0); nop;
 into words `01a00021 03468215 000010c0 00000011`. Tests retain these independent
 words; no commercial program is included. Only explicitly initialized scratch
 reads are supported, independently of shadow track/filter/replay behavior.
+
+The pinned NVIDIA B197 header defines `SET_ANTI_ALIAS_ENABLE` at byte `0x1534`,
+bit zero, with FALSE zero and TRUE one. The supported implementation admits only
+FALSE with its existing single-sample attachment/pipeline restrictions; this
+register is distinct from `SET_ANTI_ALIAS` target sample mode at `0x15d0`.

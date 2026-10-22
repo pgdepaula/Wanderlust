@@ -191,3 +191,30 @@ fn literal_global_blend_factors_separate_alpha_and_channel_masks() {
         assert!(set(&mut e, m, v).is_err());
     }
 }
+
+#[test]
+fn explicit_antialias_disable_preserves_single_sample_state_and_rejects_enable() {
+    let mut engine = ready();
+    let before = engine.rasterization().unwrap();
+    assert_eq!(set(&mut engine, 0x1534, 0), Ok(MethodEffect::State));
+    assert_eq!(engine.rasterization().unwrap(), before);
+    for value in [1, 2, 0x100, u32::MAX] {
+        assert_eq!(
+            set(&mut engine, 0x1534, value),
+            Err(MethodError::UnsupportedValue {
+                method: 0x1534,
+                value
+            })
+        );
+        assert_eq!(engine.rasterization().unwrap(), before);
+    }
+    assert_eq!(
+        set(&mut engine, 0x1535, 0),
+        Err(MethodError::InvalidMethod(0x1535))
+    );
+    assert_eq!(engine.rasterization().unwrap(), before);
+    // A rejected MSAA surface format cannot be disguised by the enable register.
+    assert!(set(&mut engine, 0x15d0, 1).is_err());
+    assert_eq!(set(&mut engine, 0x1534, 0), Ok(MethodEffect::State));
+    assert_eq!(engine.rasterization().unwrap(), before);
+}

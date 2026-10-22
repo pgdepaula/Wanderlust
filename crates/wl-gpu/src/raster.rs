@@ -369,9 +369,10 @@ impl RasterRegisters {
         if method % 4 != 0 {
             return Err(MethodError::InvalidMethod(method));
         }
-        // NVB197_SET_GLOBAL_COLOR_KEY_ENABLE is bit 0. Only FALSE is
-        // implemented; enabling color-key comparison requires separate semantics.
-        if method == 0x1354 {
+        // Both registers use bit zero as an enable. The current single-sample
+        // slice supports disabled antialiasing and disabled color-key comparison
+        // only; accepting either enabled mode would require separate semantics.
+        if matches!(method, 0x1354 | 0x1534) {
             return if value == 0 {
                 Ok(true)
             } else {
