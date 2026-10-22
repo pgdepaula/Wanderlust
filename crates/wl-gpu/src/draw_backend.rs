@@ -110,15 +110,18 @@ impl Renderer {
                         MethodEffect::Draw { .. }
                             | MethodEffect::DrawIndices { .. }
                             | MethodEffect::Clear { .. }
+                            | MethodEffect::ConstantWrite { .. }
                     ) {
-                        last = self.guest_effect(
+                        if let Some(frame) = self.guest_effect(
                             &channel.engine,
                             effect,
                             map,
                             memory,
                             changes,
                             synchronous,
-                        )?;
+                        )? {
+                            last = Some(frame);
+                        }
                     }
                 }
             }
@@ -349,6 +352,19 @@ impl Renderer {
         synchronous: bool,
     ) -> Result<Option<Frame>> {
         match effect {
+            MethodEffect::ConstantWrite { address, value } => {
+                if self.poisoned {
+                    return Err(invalid("renderer unavailable after backend failure"));
+                }
+                let destination = map.resolve(address, 4)?;
+                memory.validate_write(destination, 4)?;
+                self.synchronize_command_source(destination, 4, memory, changes)?;
+                changes.can_mark_write_at(destination, 4)?;
+                memory.write(destination, &value.to_le_bytes())?;
+                changes.mark_write(destination, 4)?;
+                self.counters.constant_buffer_write_bytes += 4;
+                Ok(None)
+            }
             MethodEffect::Clear { color, depth } => self.guest_clear(
                 engine.clear_surface(color, depth)?,
                 map,

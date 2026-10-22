@@ -1670,3 +1670,13 @@ independent interpretation evidence, not a public NVIDIA definition of CSAA's
 complete behavior. Only zero is admitted. NVIDIA's pinned B197 header independently
 defines alpha-to-coverage at bit zero and alpha-to-one at bit four of `0x153c`;
 only their jointly disabled value is supported.
+
+The pinned NVIDIA B197 class defines the selector SIZE/address fields at
+`0x2380/84/88`, the 16-bit `LOAD_CONSTANT_BUFFER_OFFSET` at `0x238c`, and the
+full-width data ports from `0x2390`. The independent MIT
+[ConstantBufferUpdater at 4930dced25c0d9ec33096b0f2601d262daa477bf](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Gpu/Engine/Threed/ConstantBufferUpdater.cs#L134-L153)
+corroborates `selector address + byte offset`, four-byte advancement and the same
+state offset across ports. Its 3D state defines sixteen data words. Wanderlust
+uses its existing checked GPU VA and canonical-memory journal rather than copying
+that implementation or retaining command payloads. The independent LDC shader
+fixture consumes uploaded words in the real GPFIFO pixel tests.

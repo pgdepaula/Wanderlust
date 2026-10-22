@@ -55,6 +55,7 @@ pub enum MethodEffect {
     Draw { first: u32, count: u32 },
     DrawIndices { first: u32, count: u32 },
     Clear { color: bool, depth: bool },
+    ConstantWrite { address: GpuAddress, value: u32 },
 }
 #[derive(Debug, Clone, Copy, Default)]
 struct Pool {
@@ -211,6 +212,7 @@ pub struct Maxwell3d {
     cb_size: Option<u32>,
     cb_upper: Option<u32>,
     cb_lower: Option<u32>,
+    cb_offset: Option<u32>,
     constants: [[Option<ConstantBuffer>; 32]; 5],
     samplers: Pool,
     pub texture_header_epoch: u64,
@@ -387,6 +389,29 @@ impl Maxwell3d {
                     return Err(bad());
                 }
                 self.cb_lower = Some(value);
+            }
+            0x238c => {
+                if value > 0xffff || value % 4 != 0 {
+                    return Err(bad());
+                }
+                self.cb_offset = Some(value);
+            }
+            0x2390..=0x23cc => {
+                let (Some(size), Some(hi), Some(lo), Some(offset)) =
+                    (self.cb_size, self.cb_upper, self.cb_lower, self.cb_offset)
+                else {
+                    return Err(MethodError::IncompleteConstantBuffer);
+                };
+                let end = offset.checked_add(4).ok_or_else(bad)?;
+                let base = (u64::from(hi) << 32) | u64::from(lo);
+                if end > size || base + u64::from(size) > 1 << 40 {
+                    return Err(bad());
+                }
+                self.cb_offset = Some(end);
+                return Ok(MethodEffect::ConstantWrite {
+                    address: GpuAddress(base + u64::from(offset)),
+                    value,
+                });
             }
             m if (0x2410..=0x2490).contains(&m) && (m - 0x2410) % 32 == 0 => {
                 if value & !0x1f1 != 0 {

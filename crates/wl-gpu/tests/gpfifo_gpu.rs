@@ -709,3 +709,267 @@ fn gpfifo_draw_overwrites_unread_suffix_of_its_own_entry() {
     assert_eq!(renderer.counters.gpfifo_read_calls, 2);
     assert!(channel.is_faulted());
 }
+
+#[test]
+#[ignore = "requires actual GPU; guest inline constants feed translated LDC"]
+fn gpfifo_inline_constants_reach_ldc_pixels_and_reuse_shader() {
+    let (mut data, map, mut words, image) = fixture();
+    let draw = words.split_off(words.len() - 8);
+    let binary = include_bytes!("fixtures/maxwell/ldc.bin");
+    data[0x4600..0x4600 + binary.len()].copy_from_slice(binary);
+    method(&mut words, 0x2144, 0x600);
+    for (m, v) in [(0x2380, 32), (0x2384, 0), (0x2388, 0x40000), (0x238c, 16)] {
+        method(&mut words, m, v);
+    }
+    words.push(0x200408e4); // Incrementing four LOAD_CONSTANT_BUFFER ports.
+    words.extend([0f32, 0., 1., 1.].map(f32::to_bits));
+    words.extend_from_slice(&draw);
+    put(&mut data, 0x10000, &words);
+    let mut renderer = Renderer::new().unwrap();
+    let mut channel = Channel::default();
+    let mut changes = TextureChanges::new(1);
+    submit(
+        &mut renderer,
+        &mut channel,
+        &entry(0xb0000, words.len()),
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap();
+    check(
+        &sync(&mut renderer, &mut data, &mut changes).rgba,
+        &image,
+        Some([0, 0, 255, 255]),
+        BG,
+    );
+    let before = renderer.counters;
+    let mut second = Vec::new();
+    method(&mut second, 0x238c, 16);
+    second.push(0x600408e4); // Same port, four data words.
+    let color = [0.25f32, 0.5, 0.75, 1.];
+    second.extend(color.map(f32::to_bits));
+    second.extend_from_slice(&draw);
+    put(&mut data, 0x10000, &second);
+    submit(
+        &mut renderer,
+        &mut channel,
+        &entry(0xb0000, second.len()),
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap();
+    check(
+        &sync(&mut renderer, &mut data, &mut changes).rgba,
+        &image,
+        Some([64, 128, 191, 255]),
+        BG,
+    );
+    assert_eq!(renderer.counters.constant_buffer_write_bytes, 32);
+    assert_eq!(renderer.counters.shader_decodes, before.shader_decodes);
+    assert_eq!(
+        renderer.counters.shader_module_allocations,
+        before.shader_module_allocations
+    );
+    assert_eq!(
+        renderer.counters.pipeline_allocations,
+        before.pipeline_allocations
+    );
+    for (bytes, value) in data[80..96].chunks_exact(4).zip(color) {
+        assert_eq!(bytes, value.to_le_bytes());
+    }
+    println!(
+        "inline-LDC: canonical_write_bytes={},constant_guest_bytes={},uniform_upload_bytes={},shader_decodes={},pipelines={},draws={},readbacks={}",
+        renderer.counters.constant_buffer_write_bytes,
+        renderer.counters.constant_guest_bytes,
+        renderer.counters.constant_upload_bytes,
+        renderer.counters.shader_decodes,
+        renderer.counters.pipeline_allocations,
+        renderer.counters.draw_commands,
+        renderer.counters.readback_operations
+    );
+}
+
+#[test]
+#[ignore = "requires GPU renderer; inline write replaces unread aliased command"]
+fn gpfifo_inline_write_reacquires_its_modified_command_suffix() {
+    let (mut data, map, _, _) = fixture();
+    let mut words = Vec::new();
+    for (m, v) in [
+        (0, 0xb197),
+        (0x2380, 128),
+        (0x2384, 0),
+        (0x2388, 0xc0000),
+        (0x238c, 48),
+        (0x2390, 0),
+    ] {
+        method(&mut words, m, v);
+    }
+    assert_eq!(words.len(), 12);
+    words.push(0xe0000000); // Invalid until replaced with exact NOP.
+    put(&mut data, 0x10000, &words);
+    let mut renderer = Renderer::new().unwrap();
+    let mut channel = Channel::default();
+    let mut changes = TextureChanges::new(1);
+    let progress = submit(
+        &mut renderer,
+        &mut channel,
+        &entry(0xb0000, words.len()),
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap();
+    assert_eq!(
+        (
+            progress.words_consumed,
+            progress.entries_completed,
+            progress.draws_submitted
+        ),
+        (13, 1, 0)
+    );
+    assert_eq!(&data[0x10030..0x10034], &[0; 4]);
+    assert_eq!(renderer.counters.gpfifo_read_calls, 2);
+    assert_eq!(renderer.counters.constant_buffer_write_bytes, 4);
+    assert_eq!(renderer.counters.readback_operations, 0);
+}
+
+#[test]
+#[ignore = "requires actual GPU; constant write aliases pending color output"]
+fn gpfifo_inline_constant_write_publishes_prior_alias_before_writing() {
+    let (mut data, map, words, image) = fixture();
+    put(&mut data, 0x10000, &words);
+    let mut renderer = Renderer::new().unwrap();
+    let mut channel = Channel::default();
+    let mut changes = TextureChanges::new(1);
+    submit(
+        &mut renderer,
+        &mut channel,
+        &entry(0xb0000, words.len()),
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap();
+    assert_eq!(renderer.counters.readback_operations, 0);
+    let patch = [243, 177, 29, 255];
+    let mut upload = Vec::new();
+    for (m, v) in [
+        (0x2380, 4),
+        (0x2384, 0),
+        (0x2388, 0x90000),
+        (0x238c, 0),
+        (0x2390, u32::from_le_bytes(patch)),
+    ] {
+        method(&mut upload, m, v);
+    }
+    put(&mut data, 0x12000, &upload);
+    submit(
+        &mut renderer,
+        &mut channel,
+        &entry(0xb2000, upload.len()),
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap();
+    assert_eq!(renderer.counters.readback_operations, 1);
+    assert_eq!(renderer.counters.coherence_barriers, 1);
+    assert_eq!(renderer.counters.constant_buffer_write_bytes, 4);
+    assert_eq!(&data[RT..RT + 4], &patch);
+    let mut rest = data[RT..RT + SIZE].to_vec();
+    rest[..4].copy_from_slice(&BG);
+    check(&rest, &image, None, BG); // All other pixels use the independent triangle oracle.
+}
+
+#[test]
+#[ignore = "requires actual GPU; failed inline write preserves accepted draw"]
+fn failed_inline_write_does_not_mark_journal_or_replay_prior_draw() {
+    struct FailsWrite<'a>(&'a [u8]);
+    impl GuestMemory for FailsWrite<'_> {
+        fn read(&self, address: GuestAddress, length: usize) -> wl_gpu::Result<&[u8]> {
+            let start = usize::try_from(address.0).map_err(|_| wl_gpu::Error("address".into()))?;
+            self.0
+                .get(
+                    start
+                        ..start
+                            .checked_add(length)
+                            .ok_or_else(|| wl_gpu::Error("overflow".into()))?,
+                )
+                .ok_or_else(|| wl_gpu::Error("range".into()))
+        }
+    }
+    impl GuestMemoryWrite for FailsWrite<'_> {
+        fn validate_write(&self, address: GuestAddress, length: usize) -> wl_gpu::Result<()> {
+            self.read(address, length).map(|_| ())
+        }
+        fn write(&mut self, _address: GuestAddress, _bytes: &[u8]) -> wl_gpu::Result<()> {
+            Err(wl_gpu::Error("injected atomic write failure".into()))
+        }
+    }
+    let (mut data, map, words, image) = fixture();
+    put(&mut data, 0x10000, &words);
+    let mut renderer = Renderer::new().unwrap();
+    let mut channel = Channel::default();
+    let mut changes = TextureChanges::new(1);
+    submit(
+        &mut renderer,
+        &mut channel,
+        &entry(0xb0000, words.len()),
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap();
+    let mut upload = Vec::new();
+    method(&mut upload, 0x238c, 0);
+    method(&mut upload, 0x2390, 0x12345678);
+    put(&mut data, 0x12000, &upload);
+    let stamp = changes.stamp(64..68);
+    let bytes = data[64..68].to_vec();
+    let before = renderer.counters;
+    let failure = renderer
+        .submit_gpfifo_deferred(
+            &mut channel,
+            &entry(0xb2000, upload.len()),
+            &map,
+            &mut FailsWrite(&data),
+            &mut changes,
+        )
+        .unwrap_err();
+    assert_eq!(
+        (
+            failure.progress.words_consumed,
+            failure.progress.draws_submitted
+        ),
+        (4, 0)
+    );
+    assert!(channel.is_faulted());
+    assert_eq!(&data[64..68], bytes);
+    assert_eq!(changes.stamp(64..68), stamp);
+    assert_eq!(renderer.counters.constant_buffer_write_bytes, 0);
+    assert_eq!(
+        renderer.counters.readback_operations,
+        before.readback_operations
+    );
+    check(
+        &sync(&mut renderer, &mut data, &mut changes).rgba,
+        &image,
+        None,
+        BG,
+    );
+    assert_eq!(renderer.counters.draw_commands, before.draw_commands);
+    assert!(
+        submit(
+            &mut renderer,
+            &mut channel,
+            &entry(0xb2000, upload.len()),
+            &map,
+            &mut data,
+            &mut changes
+        )
+        .is_err()
+    );
+    assert_eq!(renderer.counters.draw_commands, before.draw_commands);
+}

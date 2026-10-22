@@ -2051,3 +2051,29 @@ Nouveau's legacy `CSAA_ENABLE` at `0x15b4`. NVIDIA's public B197 header does not
 name the latter; the interpretation is corroborated by Nouveau initialization
 and NVK's Maxwell-era context discussion. Nonzero values remain unsupported.
 No coverage-sampling, MSAA, or alpha-to-one implementation is inferred.
+
+## Inline constant-buffer command writes
+
+B197 `LOAD_CONSTANT_BUFFER_OFFSET` (`0x238c`) programs an aligned 16-bit byte
+offset. The sixteen `LOAD_CONSTANT_BUFFER(i)` ports (`0x2390+i*4`) all append
+one little-endian u32 to the current selector, advancing the same offset by four.
+They do not write to `base+i*4`. Selector state is independent from the stage/slot
+binding snapshots. The existing implementation budget remains 64 KiB per selector;
+missing selectors, unsupported offsets, range overflow and 40-bit address overflow
+fault before a write effect is exposed. There is no inferred offset wraparound.
+
+A typed write effect snapshots the destination GPU VA and data. GPFIFO acquisition
+releases its command borrow before execution, validates the mapped write range,
+conditionally publishes overlapping GPU-newer attachments, preflights the shared
+journal, commits one atomic four-byte write, then marks the canonical byte range.
+It reacquires the unread command suffix afterward, so a write aliasing future
+command words cannot execute stale borrowed data. No guest pointer or borrow is
+retained. The direct synchronous pushbuffer helper retains its most recent frame
+when later non-rendering effects return no frame.
+
+`constant_buffer_write_bytes` counts committed canonical writes, separately from
+host uniform uploads. Write failures leave the journal unmodified and latch the
+channel; already accepted draws remain publishable without replay. The path does
+not implement conditional constant loads or general inline/DMA engines. Changes
+become shader resource data through the existing dirty synchronization, leaving
+shader and compatible pipeline identities unchanged.

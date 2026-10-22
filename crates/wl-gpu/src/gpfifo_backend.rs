@@ -71,6 +71,7 @@ impl Renderer {
                                 MethodEffect::Draw { .. }
                                     | MethodEffect::DrawIndices { .. }
                                     | MethodEffect::Clear { .. }
+                                    | MethodEffect::ConstantWrite { .. }
                             ) {
                                 draw = Some(effect);
                                 break;

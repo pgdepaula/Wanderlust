@@ -121,4 +121,6 @@ pub struct Counters {
     pub target_patch_bytes: u64,
     pub render_target_upload_bytes: u64,
     pub guest_framebuffer_write_bytes: u64,
+    /// Inline B197 constant words committed to canonical guest memory.
+    pub constant_buffer_write_bytes: u64,
 }

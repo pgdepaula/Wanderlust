@@ -257,3 +257,68 @@ fn literal_pixel_program_state_and_faults() {
         7
     );
 }
+
+#[test]
+fn inline_constant_ports_share_checked_auto_incrementing_selector_offset() {
+    let mut engine = Maxwell3d::default();
+    let mut apply = |method, value| {
+        engine.apply(MethodWrite {
+            subchannel: 0,
+            method,
+            value,
+        })
+    };
+    apply(0, CLASS).unwrap();
+    apply(0x238c, 0).unwrap();
+    assert_eq!(apply(0x2390, 7), Err(MethodError::IncompleteConstantBuffer));
+    for (m, v) in [(0x2380, 64), (0x2384, 0), (0x2388, 0x10000)] {
+        apply(m, v).unwrap();
+    }
+    apply(0x2490, 1).unwrap(); // Snapshot remains independent of later selectors.
+    // Every port advances the same offset; port number is not a byte address.
+    for i in 0..16u16 {
+        assert_eq!(
+            apply(0x2390 + i * 4, u32::from(i)),
+            Ok(MethodEffect::ConstantWrite {
+                address: GpuAddress(0x10000 + u64::from(i) * 4),
+                value: u32::from(i)
+            })
+        );
+    }
+    assert!(apply(0x2390, 0).is_err());
+    apply(0x238c, 60).unwrap();
+    for value in [1, 65536, u32::MAX] {
+        assert!(apply(0x238c, value).is_err());
+    }
+    assert_eq!(
+        apply(0x2390, 99),
+        Ok(MethodEffect::ConstantWrite {
+            address: GpuAddress(0x1003c),
+            value: 99
+        })
+    );
+    assert!(apply(0x23d0, 0).is_err());
+    // Inclusive last valid 40-bit word, and overflowing selector range.
+    for (m, v) in [
+        (0x2380, 4),
+        (0x2384, 255),
+        (0x2388, 0xffff_fffc),
+        (0x238c, 0),
+    ] {
+        apply(m, v).unwrap();
+    }
+    assert_eq!(
+        apply(0x2390, 1),
+        Ok(MethodEffect::ConstantWrite {
+            address: GpuAddress((1 << 40) - 4),
+            value: 1
+        })
+    );
+    apply(0x2380, 8).unwrap();
+    apply(0x238c, 0).unwrap();
+    assert!(apply(0x2390, 1).is_err());
+    assert_eq!(
+        engine.constant_buffer(4, 0).unwrap().address,
+        GpuAddress(0x10000)
+    );
+}
