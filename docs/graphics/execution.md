@@ -2186,3 +2186,18 @@ An independently assembled chain exercises all six new operations before emittin
 a B197 color mask. Actual indexed GPFIFO draws validate red-only versus full-channel
 pixels with unchanged shader resources. CPU vectors separately distinguish each
 ALU function, underflow, overflow, sign-bit handling and uninitialized sources.
+
+
+### Restricted auxiliary raster controls
+
+B197 ZCULL-statistics enable (`0x151c`) and aliased-line-width enable (`0x020c`)
+retain their documented boolean values. This does not produce ZCULL reports or
+add line topology: report/semaphore queries and line drawing remain rejected.
+Conditional constant loading can only be explicitly disabled (`0x030c=0`),
+matching the existing unconditional checked constant uploads.
+
+Pixel-shader output-mask usage (`0x0300`) retains its two boolean fields. Both
+admitted SPH decoders require the sample-mask output bit to be zero, so these
+settings cannot introduce a mask output absent from the guest program. The
+negative shader-header test preserves that restriction. Supporting sample-mask
+exports later requires implementing this control in raster execution as well.

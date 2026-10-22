@@ -20,6 +20,16 @@ pub struct TwoDConfiguration {
     pub corral_size: Option<u16>,
 }
 
+/// Configuration whose observations are restricted by the admitted shader and
+/// topology subset. This does not provide statistics reports or line rendering.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct AuxiliaryRasterControls {
+    pub zcull_statistics: Option<bool>,
+    pub aliased_line_width: Option<bool>,
+    pub conditional_constant_load: Option<bool>,
+    pub pixel_sample_mask_usage: Option<u8>,
+}
+
 /// Classes whose SET_OBJECT and documented NOP can be routed safely. Binding
 /// a class does not imply implementation of its execution methods.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,6 +218,7 @@ pub struct Maxwell3d {
     macros: crate::mme::MacroEngine,
     cache_policies: [Option<CacheEviction>; 6],
     two_d: TwoDConfiguration,
+    auxiliary_raster: AuxiliaryRasterControls,
     vertex_id_uses_array_start: Option<bool>,
     provoking_last: Option<bool>,
     api_call_limit: Option<u16>,
@@ -243,6 +254,9 @@ pub struct Maxwell3d {
     pub sampler_epoch: u64,
 }
 impl Maxwell3d {
+    pub fn auxiliary_raster_controls(&self) -> AuxiliaryRasterControls {
+        self.auxiliary_raster
+    }
     pub fn two_d_configuration(&self) -> TwoDConfiguration {
         self.two_d
     }
@@ -383,6 +397,30 @@ impl Maxwell3d {
             return Ok(MethodEffect::State);
         }
         match method {
+            0x151c | 0x020c => {
+                if value > 1 {
+                    return Err(bad());
+                }
+                if method == 0x151c {
+                    self.auxiliary_raster.zcull_statistics = Some(value != 0);
+                } else {
+                    self.auxiliary_raster.aliased_line_width = Some(value != 0);
+                }
+            }
+            0x030c => {
+                if value != 0 {
+                    return Err(bad());
+                }
+                self.auxiliary_raster.conditional_constant_load = Some(false);
+            }
+            0x0300 => {
+                if value & !3 != 0 {
+                    return Err(bad());
+                }
+                // Both strict SPH decoders reject sample-mask exports. Enabling
+                // use of a nonexistent output cannot create host sample masks.
+                self.auxiliary_raster.pixel_sample_mask_usage = Some(value as u8);
+            }
             0x164c => {
                 if value & !0x1000 != 0 {
                     return Err(bad());

@@ -502,3 +502,62 @@ fn vertex_id_array_start_control_validates_its_single_documented_bit() {
         }
     }
 }
+
+#[test]
+fn auxiliary_raster_controls_retain_state_without_fabricating_queries_or_outputs() {
+    let mut e = Maxwell3d::default();
+    e.apply(write(0, CLASS)).unwrap();
+    assert_eq!(
+        e.auxiliary_raster_controls(),
+        AuxiliaryRasterControls::default()
+    );
+    for (method, value) in [(0x151c, 1), (0x20c, 1), (0x30c, 0), (0x300, 3)] {
+        e.apply(write(method, value)).unwrap();
+    }
+    let expected = AuxiliaryRasterControls {
+        zcull_statistics: Some(true),
+        aliased_line_width: Some(true),
+        conditional_constant_load: Some(false),
+        pixel_sample_mask_usage: Some(3),
+    };
+    assert_eq!(e.auxiliary_raster_controls(), expected);
+    for (method, value) in [
+        (0x151c, 2),
+        (0x20c, 2),
+        (0x30c, 1),
+        (0x300, 4),
+        (0x300, u32::MAX),
+        (0x1b0c, 0),
+    ] {
+        assert!(e.apply(write(method, value)).is_err());
+        assert_eq!(e.auxiliary_raster_controls(), expected);
+    }
+    assert_eq!(
+        Maxwell3d::default().auxiliary_raster_controls(),
+        AuxiliaryRasterControls::default()
+    );
+    for value in 0..4 {
+        e.apply(write(0x300, value)).unwrap();
+        assert_eq!(
+            e.auxiliary_raster_controls().pixel_sample_mask_usage,
+            Some(value as u8)
+        );
+    }
+    for method in [0x151c, 0x20c] {
+        e.apply(write(method, 0)).unwrap();
+    }
+    assert_eq!(e.auxiliary_raster_controls().zcull_statistics, Some(false));
+    assert_eq!(
+        e.auxiliary_raster_controls().aliased_line_width,
+        Some(false)
+    );
+    // No admitted fragment interface may export a sample mask. This invariant
+    // must be revisited if the strict shader subset is expanded in the future.
+    let bytes = include_bytes!("fixtures/maxwell/red.bin");
+    assert!(wl_gpu::shader_program::FragmentProgram::decode(bytes).is_ok());
+    assert!(wl_gpu::shader::ConstantFragment::decode(bytes).is_ok());
+    let mut mask = bytes.to_vec();
+    mask[76] |= 1;
+    assert!(wl_gpu::shader_program::FragmentProgram::decode(&mask).is_err());
+    assert!(wl_gpu::shader::ConstantFragment::decode(&mask).is_err());
+}

@@ -1762,3 +1762,13 @@ are retained in `register-alu.words`; the generated 40-byte binary SHA-256 is
 `68f69429167577cea88bf7d85e67e7b251a90385505677ba47119f77ba42d946`.
 CPU tests also use separately assembled two-source instructions and fixed scalar
 expectations, rather than deriving expected answers from the interpreter.
+
+
+The pinned NVIDIA B197 header defines `SET_ZCULL_STATS` (`0x151c`) and
+`SET_ALIASED_LINE_WIDTH_ENABLE` (`0x020c`) as single-bit controls.
+`SET_RENDER_ENABLE_CONTROL` (`0x030c`) bit zero controls conditional constant
+loads; only FALSE is implemented. `SET_PS_OUTPUT_SAMPLE_MASK_USAGE` (`0x0300`)
+defines enable bit zero and antialias qualification bit one. The pinned NVK
+initialization sets the latter pair to TRUE/ENABLE. This does not imply a guest
+sample-mask export: the strict SPH interfaces require its final output word to
+remain zero. ZCULL statistic reporting is not inferred from its enable setter.
