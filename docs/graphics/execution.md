@@ -2235,3 +2235,20 @@ coverage or statistics queries. Execution remains one raster/color sample.
 RT-layer selection (`0x15cc`) admits only V=0 with either defined selector;
 all attachments have one layer and admitted shaders cannot export a layer.
 This does not introduce layered geometry or manufacture a layer from host data.
+
+
+### Automatic texture-handle selector and retained thresholds
+
+`SET_BINDLESS_TEXTURE` (`0x2608`) retains the five-bit constant-buffer slot
+selector. It does not bind a texture or allocate a constant buffer. The admitted
+TEX.B form instead obtains its handle from a GPR with explicit LDC provenance;
+changing the global selector to an unbound slot leaves that dataflow unchanged.
+Automatic handle forms remain unsupported and cannot inherit a hidden slot zero.
+
+`SET_COMPRESSION_THRESHOLD` (`0x1220`) retains only the documented sample-count
+enums 0 through 12 (zero through 2048 samples). This adds neither NVIDIA memory
+compression tags nor compressed render-target storage. `SET_PS_WARP_WATERMARKS`
+(`0x1450`) retains independent 16-bit LOW/HIGH values; this implementation admits
+only LOW <= HIGH. That ordering is a conservative supported-subset limit, not a
+claim about every legal hardware combination. Host scheduling remains owned by
+wgpu; these fields introduce no completion, fence, timing or allocation promises.

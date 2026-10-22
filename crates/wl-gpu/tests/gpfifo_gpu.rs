@@ -210,6 +210,10 @@ fn mme_raster_state(scratch: bool, alu: bool) {
         0x20016000, 0x902d, 0x200160ab, 3, 0x200160a4, 0, 0x20016221, 0x3f,
     ]);
     method(&mut words, 0x164c, 0x1000);
+    method(&mut words, 0x2608, 2);
+    method(&mut words, 0x1220, 5);
+    method(&mut words, 0x1450, 0x00800008);
+
     for (method_id, value) in [
         (0xf8c, 0),
         (0x1594, 1),
@@ -329,6 +333,10 @@ fn mme_raster_state(scratch: bool, alu: bool) {
     check(&frame.rgba, &masked, None, BG);
     let before = renderer.counters;
     let mut second = Vec::new();
+    // TEX.B keeps using its LDC-derived handle even when this automatic-handle
+    // selector names an unbound slot. No hidden descriptor/default is supplied.
+    method(&mut second, 0x2608, 31);
+
     if scratch {
         method(&mut second, 0x3468, 0x1111);
     }

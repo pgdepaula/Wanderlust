@@ -37,6 +37,8 @@ pub struct AuxiliaryRasterControls {
     pub target_independent_raster_control: Option<u8>,
     pub balanced_primitive_workload: Option<u8>,
     pub geometry_selects_target_layer: Option<bool>,
+    pub compression_sample_threshold: Option<u16>,
+    pub pixel_warp_watermarks: Option<(u16, u16)>,
 }
 
 /// Classes whose SET_OBJECT and documented NOP can be routed safely. Binding
@@ -228,6 +230,7 @@ pub struct Maxwell3d {
     cache_policies: [Option<CacheEviction>; 6],
     two_d: TwoDConfiguration,
     auxiliary_raster: AuxiliaryRasterControls,
+    bindless_texture_constant_slot: Option<u8>,
     vertex_id_uses_array_start: Option<bool>,
     provoking_last: Option<bool>,
     api_call_limit: Option<u16>,
@@ -263,6 +266,9 @@ pub struct Maxwell3d {
     pub sampler_epoch: u64,
 }
 impl Maxwell3d {
+    pub fn bindless_texture_constant_slot(&self) -> Option<u8> {
+        self.bindless_texture_constant_slot
+    }
     pub fn auxiliary_raster_controls(&self) -> AuxiliaryRasterControls {
         self.auxiliary_raster
     }
@@ -406,6 +412,33 @@ impl Maxwell3d {
             return Ok(MethodEffect::State);
         }
         match method {
+            0x2608 => {
+                if value > 31 {
+                    return Err(bad());
+                }
+                // TEX.B obtains its handle from a GPR and explicit LDC dataflow,
+                // not this selector. Automatic CB handle forms remain rejected.
+                self.bindless_texture_constant_slot = Some(value as u8);
+            }
+            0x1220 => {
+                if value > 12 {
+                    return Err(bad());
+                }
+                // Retain the documented sample-count enum. This does not add
+                // compression tags, compressed attachments or a physical codec.
+                self.auxiliary_raster.compression_sample_threshold =
+                    Some(if value == 0 { 0 } else { 1u16 << (value - 1) });
+            }
+            0x1450 => {
+                let low = value as u16;
+                let high = (value >> 16) as u16;
+                if low > high {
+                    return Err(bad());
+                }
+                // Ordered watermarks only. Host warp scheduling remains wgpu's
+                // responsibility, not an emulated timing/completion primitive.
+                self.auxiliary_raster.pixel_warp_watermarks = Some((low, high));
+            }
             0x0f8c | 0x1594 => {
                 if value > 1 {
                     return Err(bad());

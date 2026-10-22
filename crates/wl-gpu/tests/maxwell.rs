@@ -184,7 +184,12 @@ fn fifo_pool_state_chunks_shared_subchannels_and_bounds() {
     assert!(engine.apply(write(0xf10, 0)).is_err());
     assert!(engine.apply(write(0x157c, 0x400000)).is_err());
     assert!(engine.apply(write(0x1564, 0x100000)).is_err());
-    assert!(engine.apply(write(0x2608, 0)).is_err()); // cbuf slot is NOT a texture bind
+    // The now-supported selector is still NOT a texture/constant binding.
+    let epochs = (engine.texture_header_epoch, engine.sampler_epoch);
+    assert_eq!(engine.apply(write(0x2608, 0)), Ok(MethodEffect::State));
+    assert_eq!(engine.bindless_texture_constant_slot(), Some(0));
+    assert_eq!((engine.texture_header_epoch, engine.sampler_epoch), epochs);
+    assert!(engine.constant_buffer(4, 0).is_err());
     assert!(engine.apply(write(0x1334, 0)).is_err()); // WFI effects are not implemented
     assert!(
         engine
@@ -656,4 +661,62 @@ fn bounded_initialization_controls_preserve_shader_and_raster_restrictions() {
         assert!(wl_gpu::shader_program::FragmentProgram::decode(&local).is_err());
         assert!(wl_gpu::shader::ConstantFragment::decode(&local).is_err());
     }
+}
+
+#[test]
+fn bindless_constant_selector_has_five_bits_and_does_not_bind_resources() {
+    let mut e = Maxwell3d::default();
+    e.apply(write(0, CLASS)).unwrap();
+    assert_eq!(e.bindless_texture_constant_slot(), None);
+    for slot in 0..32 {
+        e.apply(write(0x2608, slot)).unwrap();
+        assert_eq!(e.bindless_texture_constant_slot(), Some(slot as u8));
+    }
+    for invalid in [32, 0x10002, u32::MAX] {
+        assert!(e.apply(write(0x2608, invalid)).is_err());
+        assert_eq!(e.bindless_texture_constant_slot(), Some(31));
+    }
+    assert_eq!(Maxwell3d::default().bindless_texture_constant_slot(), None);
+    assert!(e.vertex_array().is_err());
+    // Configuration does not manufacture a constant-buffer binding.
+    assert!(e.constant_buffer(4, 31).is_err());
+}
+
+#[test]
+fn compression_threshold_and_warp_watermarks_retain_exact_bounded_fields() {
+    let mut e = Maxwell3d::default();
+    e.apply(write(0, CLASS)).unwrap();
+    for (encoding, samples) in [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+        .into_iter()
+        .enumerate()
+    {
+        e.apply(write(0x1220, encoding as u32)).unwrap();
+        assert_eq!(
+            e.auxiliary_raster_controls().compression_sample_threshold,
+            Some(samples)
+        );
+    }
+    for invalid in [13, 15, 16, u32::MAX] {
+        assert!(e.apply(write(0x1220, invalid)).is_err());
+        assert_eq!(
+            e.auxiliary_raster_controls().compression_sample_threshold,
+            Some(2048)
+        );
+    }
+    for (value, expected) in [
+        (0, (0, 0)),
+        (0x00800008, (8, 128)),
+        (u32::MAX, (65535, 65535)),
+    ] {
+        e.apply(write(0x1450, value)).unwrap();
+        assert_eq!(
+            e.auxiliary_raster_controls().pixel_warp_watermarks,
+            Some(expected)
+        );
+    }
+    assert!(e.apply(write(0x1450, 0x00010002)).is_err());
+    assert_eq!(
+        e.auxiliary_raster_controls().pixel_warp_watermarks,
+        Some((65535, 65535))
+    );
 }

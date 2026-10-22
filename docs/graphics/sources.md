@@ -1799,3 +1799,14 @@ reduction. Balanced primitive workload bits 0,4 are scheduling configuration.
 `SET_RT_LAYER` (`0x15cc`) separates layer V bits 15:0 from selector bit 16.
 The admitted SPH stage interfaces have no layer export and targets have one layer;
 nonzero V, geometry stages, line rasterization and enabled stencil remain rejected.
+
+
+Pinned B197 `SET_BINDLESS_TEXTURE_CONSTANT_BUFFER_SLOT_SELECT` (`0x2608`) occupies
+bits 4:0. This selector is distinct from the GM107 TEX.B register-handle operand
+already established by the independently assembled texture fixture. Changing
+it must not replace the explicit LDC constant reference of an admitted TEX.B.
+`SET_COMPRESSION_THRESHOLD_SAMPLES` (`0x1220`) defines enum 0 as zero, then enums
+1..12 as powers of two from one to 2048. `SET_PS_WARP_WATERMARKS` (`0x1450`)
+defines LOW bits 15:0 and HIGH bits 31:16. The pinned NVK source documents uncertainty
+about their detailed scheduling role; only exact field retention is implemented,
+not an inferred NVIDIA scheduler or compressed allocation format.
