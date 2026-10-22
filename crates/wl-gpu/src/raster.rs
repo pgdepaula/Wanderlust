@@ -367,6 +367,9 @@ pub(crate) struct RasterRegisters {
     reduction_disabled: bool,
     alpha_fraction: Option<u8>,
     alpha_coverage_disabled: bool,
+    window_clip: [[Option<u32>; 2]; 8],
+    window_clip_type: Option<u8>,
+    window_clip_disabled: bool,
 }
 impl RasterRegisters {
     pub fn apply(&mut self, method: u16, value: u32) -> std::result::Result<bool, MethodError> {
@@ -424,6 +427,23 @@ impl RasterRegisters {
             return Ok(true);
         }
         match method {
+            0x0d00..=0x0d3c => {
+                let index = usize::from((method - 0xd00) / 8);
+                let axis = usize::from((method - 0xd00) % 8 / 4);
+                self.window_clip[index][axis] = Some(value);
+            }
+            0x194c => {
+                if value != 0 {
+                    return Err(bad());
+                }
+                self.window_clip_disabled = true;
+            }
+            0x1950 => {
+                if value > 2 {
+                    return Err(bad());
+                }
+                self.window_clip_type = Some(value as u8);
+            }
             0x074c => {
                 if value > 0xff {
                     return Err(bad());
@@ -465,7 +485,10 @@ impl RasterRegisters {
             0x0d80..=0x0d8c => self.clear_color[((method - 0xd80) / 4) as usize] = Some(value),
             0x0d90 => self.clear_depth = Some(value),
             0x10f8 => {
-                if value != 0 {
+                // These are configuration bits, not a clear trigger. Preserve
+                // defined encodings; resolve_clear still rejects unsupported
+                // execution modes before any attachment operation.
+                if value & !0x1111 != 0 {
                     return Err(bad());
                 }
                 self.clear_control = Some(value);
@@ -608,8 +631,20 @@ impl RasterRegisters {
         }
         Ok(())
     }
+    fn validate_window_clip_state(&self) -> Result<()> {
+        if (self.window_clip_type.is_some()
+            || self.window_clip.iter().flatten().any(Option::is_some))
+            && !self.window_clip_disabled
+        {
+            return Err(invalid(
+                "window clip state requires explicit disabled window clipping",
+            ));
+        }
+        Ok(())
+    }
     pub fn resolve(&self) -> Result<(ColorTarget, Rasterization)> {
         self.validate_reduction_state()?;
+        self.validate_window_clip_state()?;
         if self.alpha_fraction.is_some() && !self.alpha_coverage_disabled {
             return Err(invalid(
                 "alpha fraction requires explicit disabled alpha coverage",
@@ -760,6 +795,7 @@ impl RasterRegisters {
     }
     pub fn resolve_clear(&self, color: bool, depth: bool) -> Result<ClearSurface> {
         self.validate_reduction_state()?;
+        self.validate_window_clip_state()?;
         for method in [0x0138, 0x15d0] {
             let n = FIXED_RASTER_STATE
                 .iter()
@@ -771,7 +807,13 @@ impl RasterRegisters {
                 ));
             }
         }
-        if self.clear_control != Some(0) || !color && !depth {
+        let control = self
+            .clear_control
+            .ok_or_else(|| invalid("incomplete clear controls"))?;
+        // Respecting the stencil mask cannot affect a color/depth-only clear;
+        // stencil clear is rejected by the command decoder. Scissor zero is
+        // admitted below only when it describes the entire attachment.
+        if control & !0x101 != 0 || !color && !depth {
             return Err(invalid("unsupported or incomplete clear controls"));
         }
         let color = if color {
@@ -831,6 +873,14 @@ impl RasterRegisters {
             || self.surface != [Some(extent.0 << 16), Some(extent.1 << 16)]
         {
             return Err(invalid("only full surface-clip clear is implemented"));
+        }
+        if control & 0x100 != 0
+            && (self.scissor_enable[0] != Some(1)
+                || self.scissor[0] != [Some(extent.0 << 16), Some(extent.1 << 16)])
+        {
+            return Err(invalid(
+                "scissored clear requires explicit full-attachment scissor zero",
+            ));
         }
         Ok(ClearSurface { color, depth })
     }

@@ -958,18 +958,22 @@ use exact wrapping/bitwise semantics.
 (`0x3c`), ZF32 depth (`0x01`) or both (`0x3d`). Color values come from
 `0x0d80..0x0d8c`; depth from `0x0d90`. The supported subset requires explicit
 unconditional rendering `0x0138=1`, single sample `0x15d0=0`, clear controls
-`0x10f8=0` and full surface clip `0x0ff4/0x0ff8`. Selected color/depth descriptors
+`0x10f8` in `{0, 1, 0x100, 0x101}` and full surface clip `0x0ff4/0x0ff8`.
+When scissor zero is requested, it must be explicitly enabled and match the
+entire attachment exactly. Selected color/depth descriptors
 and corresponding target selection must be complete. Color supports the same
 pitch/block-linear RGBA8 layouts; depth uses block-linear ZF32 or Z16. Normalized finite
 clear values are supported, with the existing ZF32 zero/normal restrictions.
 Stencil, partial component masks, additional targets/layers, partial clips and
-optional scissor/viewport/rectangle/stencil-mask controls remain unsupported.
+partial scissors, viewport/rectangle controls and stencil operations remain unsupported.
+Respect-stencil-mask has no effect on the supported color/depth-only operations.
 
 Clears resolve raw attachment geometry independently of draw state. They require
 no guest shader, vertex/index buffer, viewport transform, blend coefficients or
 depth comparison/write enable. Draw color write masks and blending do not affect
-hardware clears; explicit clear control zero also excludes draw scissors/viewport
-clipping. Surface clipping still applies, hence the full-clip validation.
+hardware clears; clear control zero excludes draw scissors/viewport clipping.
+Only a full-attachment scissor is also admitted, never a partial region silently
+expanded to a full clear. Surface clipping still applies, hence the full-clip validation.
 Execution uses actual attachment `LoadOp::Clear`/`Store` operations, not RAM fills
 or a synthetic draw. Full clears require no old-pixel upload. ZF32 publication
 still uses the existing portable GPU depth export path.
@@ -2091,3 +2095,18 @@ limited to explicitly disabled alpha coverage/alpha-to-one (`0x153c=0`); no
 coverage table or power-on default is inferred. Invalid writes preserve earlier
 supported state. These register-only writes can precede the disabling controls,
 but rendering before the required controls have been established fails explicitly.
+
+Window clip parameters at `0x0d00 + index*8` and `+4` retain eight supported
+horizontal/vertical pairs. Inclusive, exclusive and clip-all mode encodings are
+retained by `0x1950`. Rendering or clearing after these parameters are programmed
+requires explicit `SET_WINDOW_CLIP_ENABLE=FALSE` (`0x194c=0`); enabled window
+clipping remains unsupported. This retains initialization state without guessing
+reset values or applying a host scissor as an incorrect substitute.
+
+Clear controls are latched independently from the `CLEAR_SURFACE` trigger.
+All defined configuration bits can be programmed, including combinations that
+are not executable yet. Unsupported clear execution fails before attachment work;
+it does not block unrelated draws or silently perform a full-surface clear.
+Reserved configuration bits still fail at the write. Full-scissor clears use the
+existing real GPU attachment clear and preserve pitch/block-linear padding and
+explicit publication semantics.

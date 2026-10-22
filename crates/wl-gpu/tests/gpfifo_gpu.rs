@@ -201,6 +201,13 @@ fn mme_raster_state(scratch: bool) {
     method(&mut words, 0x1534, 0); // Documented antialias disable, single sample.
     method(&mut words, 0x153c, 0); // No alpha-to-coverage or alpha-to-one.
     method(&mut words, 0x15b4, 0); // Nouveau's legacy CSAA disable.
+    for index in 0..8 {
+        method(&mut words, 0xd00 + index * 8, 0);
+        method(&mut words, 0xd04 + index * 8, 0);
+    }
+    method(&mut words, 0x194c, 0);
+    method(&mut words, 0x1950, 2); // CLIPALL is ignored only because disabled.
+    method(&mut words, 0x10f8, 0x101); // Configure only; no clear is requested.
     for (method_id, value) in [
         (0x10cc, 4),
         (0x10e0, 0xff),
@@ -761,6 +768,7 @@ fn gpfifo_inline_constants_reach_ldc_pixels_and_reuse_shader() {
     method(&mut second, 0x0d9c, 0);
     method(&mut second, 0x10cc, 0x00ff00ff);
     method(&mut second, 0x10e8, 0x003f003f);
+    method(&mut second, 0x10f8, 0x1111); // Clear configuration cannot alter a draw.
     second.push(0x600408e4); // Same port, four data words.
     let color = [0.25f32, 0.5, 0.75, 1.];
     second.extend(color.map(f32::to_bits));

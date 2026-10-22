@@ -302,3 +302,46 @@ fn alpha_fraction_is_only_usable_with_explicit_disabled_alpha_coverage() {
     assert!(set(&mut engine, 0x153c, 0x10).is_err());
     assert_eq!(engine.rasterization().unwrap(), before);
 }
+
+#[test]
+fn inactive_window_rectangles_retain_all_slots_without_guessing_enable_state() {
+    let mut engine = ready();
+    let before = engine.rasterization().unwrap();
+    for index in 0..8 {
+        for axis in 0..2 {
+            set(&mut engine, 0xd00 + index * 8 + axis * 4, u32::MAX).unwrap();
+            assert!(engine.rasterization().is_err());
+        }
+    }
+    assert!(set(&mut engine, 0x194c, 1).is_err());
+    assert!(engine.rasterization().is_err());
+    set(&mut engine, 0x194c, 0).unwrap();
+    for mode in 0..=2 {
+        set(&mut engine, 0x1950, mode).unwrap();
+        assert_eq!(engine.rasterization().unwrap(), before);
+    }
+    for mode in [3, 4, u32::MAX] {
+        assert!(set(&mut engine, 0x1950, mode).is_err());
+        assert_eq!(engine.rasterization().unwrap(), before);
+    }
+    assert!(set(&mut engine, 0xd01, 0).is_err());
+    assert!(set(&mut engine, 0xd40, 0).is_err());
+    assert_eq!(engine.rasterization().unwrap(), before);
+}
+
+#[test]
+fn clear_configuration_is_separate_from_clear_execution_and_draw_state() {
+    let mut engine = ready();
+    let before = engine.rasterization().unwrap();
+    for value in [0, 1, 0x10, 0x100, 0x1000, 0x101, 0x1111] {
+        assert_eq!(set(&mut engine, 0x10f8, value), Ok(MethodEffect::State));
+        assert_eq!(engine.rasterization().unwrap(), before);
+        if value != 0 {
+            assert!(engine.clear_surface(true, false).is_err());
+        }
+    }
+    for value in [2, 0x20, 0x200, 0x2000, u32::MAX] {
+        assert!(set(&mut engine, 0x10f8, value).is_err());
+        assert_eq!(engine.rasterization().unwrap(), before);
+    }
+}

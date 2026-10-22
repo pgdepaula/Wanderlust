@@ -86,7 +86,14 @@ fn clear_flags_values_and_partial_surface_fail_explicitly() {
     for v in [0, 2, 4, 0x7c, 0x400, 0x80000000] {
         assert!(set(&mut e, 0x19d0, v).is_err());
     }
-    for v in [1, 16, 256, 4096] {
+    for v in [16, 256, 4096] {
+        set(&mut e, 0x10f8, v).unwrap();
+        assert!(e.clear_surface(true, false).is_err());
+    }
+    set(&mut e, 0x10f8, 1).unwrap();
+    assert!(e.clear_surface(true, false).is_ok()); // No stencil clear is requested.
+    set(&mut e, 0x10f8, 0).unwrap();
+    for v in [2, 4, 0x200, 0x10000, u32::MAX] {
         assert!(set(&mut e, 0x10f8, v).is_err());
     }
     assert!(e.clear_surface(true, false).is_ok());
@@ -124,4 +131,30 @@ fn literal_incrementing_clear_values_continue_across_packet_chunks() {
     );
     c.finish().unwrap();
     assert!(c.engine.clear_surface(true, true).is_err());
+}
+
+#[test]
+fn full_scissor_clear_controls_preserve_full_target_and_reject_partial_regions() {
+    let mut e = minimal();
+    color(&mut e);
+    let expected = e.clear_surface(true, false).unwrap();
+    set(&mut e, 0x10f8, 0x101).unwrap();
+    assert!(e.clear_surface(true, false).is_err());
+    for (m, v) in [(0xe00, 1), (0xe04, 7 << 16), (0xe08, 9 << 16)] {
+        set(&mut e, m, v).unwrap();
+    }
+    assert_eq!(e.clear_surface(true, false).unwrap(), expected);
+    for value in [0x100, 0x101, 0, 1] {
+        set(&mut e, 0x10f8, value).unwrap();
+        assert_eq!(e.clear_surface(true, false).unwrap(), expected);
+    }
+    set(&mut e, 0x10f8, 0x101).unwrap();
+    for value in [(6 << 16), (7 << 16) | 1, (8 << 16)] {
+        set(&mut e, 0xe04, value).unwrap();
+        assert!(e.clear_surface(true, false).is_err());
+    }
+    set(&mut e, 0xe04, 7 << 16).unwrap();
+    assert_eq!(e.clear_surface(true, false).unwrap(), expected);
+    set(&mut e, 0x10f8, 0x1111).unwrap();
+    assert!(e.clear_surface(true, false).is_err());
 }

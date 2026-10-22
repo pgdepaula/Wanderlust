@@ -910,3 +910,39 @@ fn z16_clear_full_cpu_patch_retry_and_indexed_depth_test() {
     d.retire(third.token).unwrap();
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+#[test]
+#[ignore = "requires actual GPU; full scissor-zero clears preserve pitch/tiled storage"]
+fn guest_full_scissor_clear_control_renders_and_rejects_partial_clear() {
+    for bh in [None, Some(1)] {
+        let mut data = vec![0xa5; 0x20000];
+        let (mut d, c, _, b, _) = driver();
+        let mut words = clear_setup(7, 9, bh);
+        clear_values(&mut words, [0.25, 0.5, 0.75, 1.]);
+        for (m, v) in [
+            (0x10f8, 0x101),
+            (0xe00, 1),
+            (0xe04, 7 << 16),
+            (0xe08, 9 << 16),
+        ] {
+            method(&mut words, m, v);
+        }
+        method(&mut words, 0x19d0, 0x3c);
+        let accepted = submit(&mut d, c, b, &mut data, &words);
+        assert!(accepted.fault.is_none());
+        assert_eq!(d.graphics_counters().clear_commands, 1);
+        assert!(data[RT..RT + 252].iter().all(|v| *v == 0xa5)); // Deferred visibility.
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        let expected = expected_color(7, 9, bh, [64, 128, 191, 255]);
+        assert_eq!(&data[RT..RT + expected.len()], &expected); // Independent GOB/padding oracle.
+        let before = d.graphics_counters();
+        let mut partial = Vec::new();
+        method(&mut partial, 0xe04, 6 << 16);
+        method(&mut partial, 0x19d0, 0x3c);
+        let rejected = submit(&mut d, c, b, &mut data, &partial);
+        assert!(rejected.fault.is_some());
+        assert_eq!(d.graphics_counters().clear_commands, before.clear_commands);
+        assert_eq!(&data[RT..RT + expected.len()], &expected);
+        d.close(c, &mut mem(&mut data)).unwrap();
+    }
+}

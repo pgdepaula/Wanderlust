@@ -1689,3 +1689,17 @@ independently programs these thresholds while explicitly disabling reduction,
 and programs alpha fraction on pre-Volta hardware. These definitions justify
 retaining bounded fields while admitting rendering only under explicit inactive
 controls; they do not establish implementation of active reduction or coverage.
+
+NVIDIA's pinned B197 header independently defines window clip pairs from `0x0d00`,
+the separate enable at `0x194c`, and inclusive/exclusive/clip-all values at `0x1950`.
+Pinned [NVK discard-rectangle state](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/vulkan/nvk_cmd_draw.c#L2760-L2826)
+corroborates rectangle programming separately from enable/mode. Only explicitly
+disabled window clipping is admitted by this subset.
+
+The same NVIDIA clear definitions distinguish state programming from triggering,
+and make scissor-zero and respect-stencil-mask separate bits. The supported clear
+masks contain only color/depth, so respect-stencil-mask has no selected stencil
+component to modify. Explicitly full-attachment scissor bounds make the existing
+full GPU attachment clear equivalent; other scissor bounds remain rejected before
+host execution. Defined but unimplemented rectangle/viewport controls are retained
+as state and rejected when used by a clear, rather than rejected by every write.
