@@ -345,8 +345,8 @@ pub(crate) struct RasterRegisters {
     viewport: [Option<u32>; 6],
     surface: [Option<u32>; 2],
     clip: [Option<u32>; 2],
-    scissor: [Option<u32>; 2],
-    scissor_enable: Option<u32>,
+    scissor: [[Option<u32>; 2]; 16],
+    scissor_enable: [Option<u32>; 16],
     fixed: u64,
     blend_enabled: bool,
     blend_separate: Option<bool>,
@@ -369,10 +369,11 @@ impl RasterRegisters {
         if method % 4 != 0 {
             return Err(MethodError::InvalidMethod(method));
         }
-        // Both registers use bit zero as an enable. The current single-sample
-        // slice supports disabled antialiasing and disabled color-key comparison
-        // only; accepting either enabled mode would require separate semantics.
-        if matches!(method, 0x1354 | 0x1534) {
+        // Explicitly inactive single-sample controls only: color key, AA,
+        // alpha-to-coverage/one, and legacy coverage sampling (Nouveau CSAA).
+        // The last register is corroborated by Nouveau, not named by clb197.h.
+        // Any enabled/reserved behavior requires separate semantics.
+        if matches!(method, 0x1354 | 0x1534 | 0x153c | 0x15b4) {
             return if value == 0 {
                 Ok(true)
             } else {
@@ -508,13 +509,22 @@ impl RasterRegisters {
             }
             0x0ff4 | 0x0ff8 => self.surface[((method - 0xff4) / 4) as usize] = Some(value),
             0x0c00 | 0x0c04 => self.clip[((method - 0xc00) / 4) as usize] = Some(value),
-            0x0e00 => {
-                if value != 1 {
-                    return Err(bad());
+            0x0e00..=0x0ef8 => {
+                let slot = usize::from((method - 0xe00) / 16);
+                match method % 16 {
+                    0 => {
+                        // Supported shaders cannot export a viewport index, so
+                        // only slot zero is rasterized. Retain other slots
+                        // independently rather than aliasing them onto zero.
+                        if value > 1 || (slot == 0 && value != 1) {
+                            return Err(bad());
+                        }
+                        self.scissor_enable[slot] = Some(value);
+                    }
+                    4 | 8 => self.scissor[slot][usize::from((method % 16 - 4) / 4)] = Some(value),
+                    _ => return Ok(false), // Reserved word is not another slot.
                 }
-                self.scissor_enable = Some(value);
             }
-            0x0e04 | 0x0e08 => self.scissor[((method - 0xe04) / 4) as usize] = Some(value),
             _ => return Ok(false),
         }
         Ok(true)
@@ -560,7 +570,8 @@ impl RasterRegisters {
         Ok(target)
     }
     pub fn resolve(&self) -> Result<(ColorTarget, Rasterization)> {
-        if self.fixed != (1u64 << FIXED_RASTER_STATE.len()) - 1 || self.scissor_enable != Some(1) {
+        if self.fixed != (1u64 << FIXED_RASTER_STATE.len()) - 1 || self.scissor_enable[0] != Some(1)
+        {
             return Err(invalid("incomplete or unsupported fixed raster state"));
         }
         let blend = if self.blend_enabled {
@@ -624,7 +635,7 @@ impl RasterRegisters {
             for (word, extent) in [
                 (self.surface[axis], true),
                 (self.clip[axis], true),
-                (self.scissor[axis], false),
+                (self.scissor[0][axis], false),
             ] {
                 let word =
                     word.ok_or_else(|| invalid("incomplete surface/viewport/scissor clipping"))?;

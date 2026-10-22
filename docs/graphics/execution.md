@@ -2037,3 +2037,17 @@ It preserves the supported single-sample pipeline; TRUE, reserved bits and
 multisample target modes remain rejected. A failed enable write leaves the
 previous supported raster state intact. This does not implement MSAA or resolve
 operations. Literal GPFIFO draws exercise explicit disable before rasterization.
+
+B197 scissor arrays retain all 16 enable/horizontal/vertical slots at
+`0x0e00 + index*16`, `+4` and `+8`. The reserved `+12` word remains unsupported;
+alignment and enable values are checked before mutation. Supported vertex
+programs cannot export a viewport index, so only scissor zero is consumed by
+rasterization. Inactive scissor writes, including empty rectangles, cannot alter
+zero's clipping or pipeline identity. This does not add multi-viewport execution.
+
+The single-sample subset also accepts the inactive value zero for alpha coverage
+control `0x153c` (both alpha-to-coverage and alpha-to-one disabled), and for
+Nouveau's legacy `CSAA_ENABLE` at `0x15b4`. NVIDIA's public B197 header does not
+name the latter; the interpretation is corroborated by Nouveau initialization
+and NVK's Maxwell-era context discussion. Nonzero values remain unsupported.
+No coverage-sampling, MSAA, or alpha-to-one implementation is inferred.

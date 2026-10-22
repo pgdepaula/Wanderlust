@@ -199,6 +199,14 @@ fn mme_raster_state(scratch: bool) {
     let (mut data, map, mut words, image) = fixture();
     let draw = words.split_off(words.len() - 8);
     method(&mut words, 0x1534, 0); // Documented antialias disable, single sample.
+    method(&mut words, 0x153c, 0); // No alpha-to-coverage or alpha-to-one.
+    method(&mut words, 0x15b4, 0); // Nouveau's legacy CSAA disable.
+    for slot in 1..16 {
+        // Deliberately empty INACTIVE scissors must not affect viewport zero.
+        method(&mut words, 0xe00 + slot * 16, 1);
+        method(&mut words, 0xe04 + slot * 16, 0);
+        method(&mut words, 0xe08 + slot * 16, 0);
+    }
     for (method_id, value) in [(0x11c, 0), (0x120, 0), (0x114, 0)] {
         method(&mut words, method_id, value);
     }

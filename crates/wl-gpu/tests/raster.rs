@@ -218,3 +218,42 @@ fn explicit_antialias_disable_preserves_single_sample_state_and_rejects_enable()
     assert_eq!(set(&mut engine, 0x1534, 0), Ok(MethodEffect::State));
     assert_eq!(engine.rasterization().unwrap(), before);
 }
+
+#[test]
+fn indexed_inactive_scissors_do_not_alias_zero_or_neighboring_slots() {
+    let mut engine = ready();
+    let before = engine.rasterization().unwrap();
+    for slot in 1..16 {
+        for (lane, value) in [(0, 1), (4, 0), (8, 0), (0, 0)] {
+            assert_eq!(
+                set(&mut engine, 0xe00 + slot * 16 + lane, value),
+                Ok(MethodEffect::State)
+            );
+            assert_eq!(engine.rasterization().unwrap(), before);
+        }
+        assert!(set(&mut engine, 0xe00 + slot * 16, 2).is_err());
+        assert!(set(&mut engine, 0xe0c + slot * 16, 0).is_err());
+        assert_eq!(engine.rasterization().unwrap(), before);
+    }
+    // Slot zero remains active, rather than ignoring every indexed write.
+    set(&mut engine, 0xe04, (43 << 16) | 5).unwrap();
+    assert_eq!(engine.rasterization().unwrap().1.scissor, [5, 0, 38, 29]);
+    assert!(set(&mut engine, 0xeff, 0).is_err());
+}
+
+#[test]
+fn inactive_alpha_coverage_and_legacy_csaa_controls_are_strict() {
+    let mut engine = ready();
+    let before = engine.rasterization().unwrap();
+    for method in [0x153c, 0x15b4] {
+        assert_eq!(set(&mut engine, method, 0), Ok(MethodEffect::State));
+        for value in [1, 0x10, 0x11, 0x100, u32::MAX] {
+            assert_eq!(
+                set(&mut engine, method, value),
+                Err(MethodError::UnsupportedValue { method, value })
+            );
+            assert_eq!(engine.rasterization().unwrap(), before);
+        }
+        assert!(set(&mut engine, method + 1, 0).is_err());
+    }
+}

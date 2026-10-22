@@ -1653,3 +1653,20 @@ The pinned NVIDIA B197 header defines `SET_ANTI_ALIAS_ENABLE` at byte `0x1534`,
 bit zero, with FALSE zero and TRUE one. The supported implementation admits only
 FALSE with its existing single-sample attachment/pipeline restrictions; this
 register is distinct from `SET_ANTI_ALIAS` target sample mode at `0x15d0`.
+
+The pinned NVIDIA B197 `SET_SCISSOR_ENABLE/HORIZONTAL/VERTICAL(j)` fields establish
+the `0x0e00+j*16` array stride; the independent pinned Maxwell 3D state definition
+uses sixteen scissor states. Supported vertex output validation excludes viewport
+index exports, which justifies selecting only slot zero while retaining other
+slots without aliasing them.
+
+[MIT Nouveau initialization](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nvc0/nvc0_screen.c#L989)
+sets `CSAA_ENABLE` to zero alongside disabled multisampling and the MS1 mode.
+Its [register table](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nvc0/nvc0_3d.xml.h#L1280)
+identifies byte `0x15b4`. The same pinned
+[NVK context discussion](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/vulkan/nvk_cmd_draw.c#L282)
+notes the proprietary driver's zero write and unofficial Gallium name. This is
+independent interpretation evidence, not a public NVIDIA definition of CSAA's
+complete behavior. Only zero is admitted. NVIDIA's pinned B197 header independently
+defines alpha-to-coverage at bit zero and alpha-to-one at bit four of `0x153c`;
+only their jointly disabled value is supported.
