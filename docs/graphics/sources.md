@@ -1772,3 +1772,17 @@ defines enable bit zero and antialias qualification bit one. The pinned NVK
 initialization sets the latter pair to TRUE/ENABLE. This does not imply a guest
 sample-mask export: the strict SPH interfaces require its final output word to
 remain zero. ZCULL statistic reporting is not inferred from its enable setter.
+
+
+### Blend zero-factor behavior
+
+Pinned B197 defines `SET_BLEND_OPT_CONTROL` (`0x0fdc`) bit zero as
+ALLOW_FLOAT_PIXEL_KILLS and `SET_BLEND_FLOAT_OPTION` (`0x19c0`) bit zero as
+ZERO_TIMES_ANYTHING_IS_ZERO. The pinned NVK initialization writes TRUE to both.
+The latter is admitted only for the implemented RGBA8_UNORM attachment subset,
+with explicit nonfinite LDC GPU tests and rejection of float attachment formats.
+[Microsoft D3D11.3 section 17.5](https://microsoft.github.io/DirectX-Specs/d3d/archive/D3D11_3_FunctionalSpec.htm#17.5%20Blending%20Precision)
+requires NaN propagation including zero weights for floating attachments, and
+clamping to the attachment's range for fixed-point attachments. Consequently,
+accepting the normalized-target subset must not be generalized into a host
+no-op for a future floating-point target implementation.

@@ -519,6 +519,7 @@ fn auxiliary_raster_controls_retain_state_without_fabricating_queries_or_outputs
         aliased_line_width: Some(true),
         conditional_constant_load: Some(false),
         pixel_sample_mask_usage: Some(3),
+        ..AuxiliaryRasterControls::default()
     };
     assert_eq!(e.auxiliary_raster_controls(), expected);
     for (method, value) in [
@@ -560,4 +561,35 @@ fn auxiliary_raster_controls_retain_state_without_fabricating_queries_or_outputs
     mask[76] |= 1;
     assert!(wl_gpu::shader_program::FragmentProgram::decode(&mask).is_err());
     assert!(wl_gpu::shader::ConstantFragment::decode(&mask).is_err());
+}
+
+#[test]
+fn normalized_blend_controls_reject_ieee_mode_and_float_targets() {
+    let mut e = Maxwell3d::default();
+    e.apply(write(0, CLASS)).unwrap();
+    for value in [0, 1] {
+        e.apply(write(0xfdc, value)).unwrap();
+        assert_eq!(
+            e.auxiliary_raster_controls().allow_float_pixel_kills,
+            Some(value != 0)
+        );
+    }
+    e.apply(write(0x19c0, 1)).unwrap();
+    let snapshot = e.auxiliary_raster_controls();
+    for (method, value) in [
+        (0xfdc, 2),
+        (0xfdc, u32::MAX),
+        (0x19c0, 0),
+        (0x19c0, 2),
+        (0x19c0, u32::MAX),
+    ] {
+        assert!(e.apply(write(method, value)).is_err());
+        assert_eq!(e.auxiliary_raster_controls(), snapshot);
+    }
+    // NVIDIA RF32_GF32_BF32_AF32 and RF16_GF16_BF16_AF16 cannot
+    // inherit normalized-target behavior merely because the control was set.
+    for format in [0xc0, 0xca] {
+        assert!(e.apply(write(0x810, format)).is_err());
+    }
+    assert_eq!(e.auxiliary_raster_controls(), snapshot);
 }

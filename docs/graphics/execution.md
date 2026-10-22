@@ -2201,3 +2201,20 @@ admitted SPH decoders require the sample-mask output bit to be zero, so these
 settings cannot introduce a mask output absent from the guest program. The
 negative shader-header test preserves that restriction. Supporting sample-mask
 exports later requires implementing this control in raster execution as well.
+
+
+### Normalized-target blend controls
+
+`SET_BLEND_OPT_CONTROL` (`0x0fdc`) retains its boolean permission for float-pixel
+kill optimizations; setting it does not issue a kill or implement float targets.
+`SET_BLEND_FLOAT_OPTION` (`0x19c0`) admits only ZERO_TIMES_ANYTHING_IS_ZERO=TRUE
+alongside the existing RGBA8_UNORM color-target subset. FALSE and floating-point
+attachments remain rejected. This is not a general IEEE floating-target mode.
+
+A guest LDC fragment exercises finite values, positive/negative quiet NaNs and
+positive/negative infinities. With both literal ZERO and runtime source-alpha-zero
+weights, all destination RGBA8 bytes remain unchanged. A finite ONE/ZERO positive
+control produces covered and uncovered pixels, proving that the draw executes.
+The eleven draws share one translated vertex/fragment pair. Each iteration
+explicitly publishes for verification; these test readbacks are not introduced
+by either register setter or the deferred submission path.

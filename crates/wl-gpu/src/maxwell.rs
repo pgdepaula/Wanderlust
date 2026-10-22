@@ -28,6 +28,8 @@ pub struct AuxiliaryRasterControls {
     pub aliased_line_width: Option<bool>,
     pub conditional_constant_load: Option<bool>,
     pub pixel_sample_mask_usage: Option<u8>,
+    pub allow_float_pixel_kills: Option<bool>,
+    pub zero_times_anything_is_zero: Option<bool>,
 }
 
 /// Classes whose SET_OBJECT and documented NOP can be routed safely. Binding
@@ -397,6 +399,22 @@ impl Maxwell3d {
             return Ok(MethodEffect::State);
         }
         match method {
+            0x0fdc => {
+                if value > 1 {
+                    return Err(bad());
+                }
+                // Optimization permission, not a request to kill a fragment.
+                // Float color attachments remain outside the target subset.
+                self.auxiliary_raster.allow_float_pixel_kills = Some(value != 0);
+            }
+            0x19c0 => {
+                if value != 1 {
+                    return Err(bad());
+                }
+                // Admitted only with the existing RGBA8_UNORM color-target
+                // subset. IEEE propagation for float targets is not implied.
+                self.auxiliary_raster.zero_times_anything_is_zero = Some(true);
+            }
             0x151c | 0x020c => {
                 if value > 1 {
                     return Err(bad());
