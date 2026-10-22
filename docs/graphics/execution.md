@@ -2077,3 +2077,17 @@ channel; already accepted draws remain publishable without replay. The path does
 not implement conditional constant loads or general inline/DMA engines. Changes
 become shader resource data through the existing dirty synchronization, leaving
 shader and compatible pipeline identities unchanged.
+
+Color-reduction threshold registers (`0x10cc`, `0x10e0..0x10f0`) retain both
+hardware fields with strict reserved-bit validation. FP11 uses two 6-bit fields;
+the other formats use two 8-bit fields. Programming thresholds does not imply
+enabling or disabling reduction. If any threshold was programmed, a draw or clear
+requires an explicit `SET_REDUCE_COLOR_THRESHOLDS_ENABLE=FALSE` (`0x0d9c=0`).
+TRUE remains unsupported; no lossy reduction or precision behavior is synthesized.
+The retained disabled thresholds do not specialize the render pipeline.
+
+`SET_ALPHA_FRACTION` (`0x074c`) retains its 8-bit value. Its use is similarly
+limited to explicitly disabled alpha coverage/alpha-to-one (`0x153c=0`); no
+coverage table or power-on default is inferred. Invalid writes preserve earlier
+supported state. These register-only writes can precede the disabling controls,
+but rendering before the required controls have been established fails explicitly.

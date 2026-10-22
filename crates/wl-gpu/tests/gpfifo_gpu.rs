@@ -201,6 +201,18 @@ fn mme_raster_state(scratch: bool) {
     method(&mut words, 0x1534, 0); // Documented antialias disable, single sample.
     method(&mut words, 0x153c, 0); // No alpha-to-coverage or alpha-to-one.
     method(&mut words, 0x15b4, 0); // Nouveau's legacy CSAA disable.
+    for (method_id, value) in [
+        (0x10cc, 4),
+        (0x10e0, 0xff),
+        (0x10e4, 0xff),
+        (0x10e8, 0x3f),
+        (0x10ec, 0xff),
+        (0x10f0, 4),
+        (0x074c, 0x3f),
+        (0x0d9c, 0),
+    ] {
+        method(&mut words, method_id, value);
+    }
     for slot in 1..16 {
         // Deliberately empty INACTIVE scissors must not affect viewport zero.
         method(&mut words, 0xe00 + slot * 16, 1);
@@ -746,6 +758,9 @@ fn gpfifo_inline_constants_reach_ldc_pixels_and_reuse_shader() {
     let before = renderer.counters;
     let mut second = Vec::new();
     method(&mut second, 0x238c, 16);
+    method(&mut second, 0x0d9c, 0);
+    method(&mut second, 0x10cc, 0x00ff00ff);
+    method(&mut second, 0x10e8, 0x003f003f);
     second.push(0x600408e4); // Same port, four data words.
     let color = [0.25f32, 0.5, 0.75, 1.];
     second.extend(color.map(f32::to_bits));

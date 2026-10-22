@@ -363,6 +363,10 @@ pub(crate) struct RasterRegisters {
     cull_enabled: bool,
     front_face: Option<FrontFace>,
     cull_face: Option<CullFace>,
+    reduction_thresholds: [Option<u32>; 6],
+    reduction_disabled: bool,
+    alpha_fraction: Option<u8>,
+    alpha_coverage_disabled: bool,
 }
 impl RasterRegisters {
     pub fn apply(&mut self, method: u16, value: u32) -> std::result::Result<bool, MethodError> {
@@ -375,6 +379,9 @@ impl RasterRegisters {
         // Any enabled/reserved behavior requires separate semantics.
         if matches!(method, 0x1354 | 0x1534 | 0x153c | 0x15b4) {
             return if value == 0 {
+                if method == 0x153c {
+                    self.alpha_coverage_disabled = true;
+                }
                 Ok(true)
             } else {
                 Err(MethodError::UnsupportedValue { method, value })
@@ -417,6 +424,30 @@ impl RasterRegisters {
             return Ok(true);
         }
         match method {
+            0x074c => {
+                if value > 0xff {
+                    return Err(bad());
+                }
+                self.alpha_fraction = Some(value as u8);
+            }
+            0x0d9c => {
+                if value != 0 {
+                    return Err(bad());
+                }
+                self.reduction_disabled = true;
+            }
+            0x10cc | 0x10e0..=0x10f0 => {
+                let slot = if method == 0x10cc {
+                    0
+                } else {
+                    1 + usize::from((method - 0x10e0) / 4)
+                };
+                let mask = if slot == 3 { 0x003f003f } else { 0x00ff00ff };
+                if value & !mask != 0 {
+                    return Err(bad());
+                }
+                self.reduction_thresholds[slot] = Some(value);
+            }
             0x191c => {
                 self.front_face = Some(match value {
                     0x900 => FrontFace::Clockwise,
@@ -569,7 +600,21 @@ impl RasterRegisters {
         }
         Ok(target)
     }
+    fn validate_reduction_state(&self) -> Result<()> {
+        if self.reduction_thresholds.iter().any(Option::is_some) && !self.reduction_disabled {
+            return Err(invalid(
+                "color reduction thresholds require explicit disabled reduction",
+            ));
+        }
+        Ok(())
+    }
     pub fn resolve(&self) -> Result<(ColorTarget, Rasterization)> {
+        self.validate_reduction_state()?;
+        if self.alpha_fraction.is_some() && !self.alpha_coverage_disabled {
+            return Err(invalid(
+                "alpha fraction requires explicit disabled alpha coverage",
+            ));
+        }
         if self.fixed != (1u64 << FIXED_RASTER_STATE.len()) - 1 || self.scissor_enable[0] != Some(1)
         {
             return Err(invalid("incomplete or unsupported fixed raster state"));
@@ -714,6 +759,7 @@ impl RasterRegisters {
         Ok(target)
     }
     pub fn resolve_clear(&self, color: bool, depth: bool) -> Result<ClearSurface> {
+        self.validate_reduction_state()?;
         for method in [0x0138, 0x15d0] {
             let n = FIXED_RASTER_STATE
                 .iter()

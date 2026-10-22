@@ -257,3 +257,48 @@ fn inactive_alpha_coverage_and_legacy_csaa_controls_are_strict() {
         assert!(set(&mut engine, method + 1, 0).is_err());
     }
 }
+
+#[test]
+fn reduction_thresholds_latch_before_enable_state_but_cannot_silently_affect_draws() {
+    let mut engine = ready();
+    let before = engine.rasterization().unwrap();
+    set(&mut engine, 0x10cc, 4).unwrap();
+    assert!(engine.rasterization().is_err());
+    assert!(engine.clear_surface(true, false).is_err());
+    assert!(set(&mut engine, 0xd9c, 1).is_err());
+    assert!(engine.rasterization().is_err());
+    set(&mut engine, 0xd9c, 0).unwrap();
+    for method in [0x10cc, 0x10e0, 0x10e4, 0x10e8, 0x10ec, 0x10f0] {
+        let mask = if method == 0x10e8 {
+            0x003f003f
+        } else {
+            0x00ff00ff
+        };
+        set(&mut engine, method, mask).unwrap();
+        assert_eq!(engine.rasterization().unwrap(), before);
+        for value in [0x100, 0x01000000, u32::MAX] {
+            assert!(set(&mut engine, method, value).is_err());
+        }
+        assert_eq!(engine.rasterization().unwrap(), before);
+    }
+    assert!(set(&mut engine, 0x10e8, 0x40).is_err());
+    assert!(set(&mut engine, 0x10cd, 0).is_err());
+    assert_eq!(engine.rasterization().unwrap(), before);
+}
+
+#[test]
+fn alpha_fraction_is_only_usable_with_explicit_disabled_alpha_coverage() {
+    let mut engine = ready();
+    let before = engine.rasterization().unwrap();
+    set(&mut engine, 0x74c, 0x3f).unwrap();
+    assert!(engine.rasterization().is_err());
+    set(&mut engine, 0x153c, 0).unwrap();
+    assert_eq!(engine.rasterization().unwrap(), before);
+    for value in [0, 1, 255] {
+        set(&mut engine, 0x74c, value).unwrap();
+        assert_eq!(engine.rasterization().unwrap(), before);
+    }
+    assert!(set(&mut engine, 0x74c, 256).is_err());
+    assert!(set(&mut engine, 0x153c, 0x10).is_err());
+    assert_eq!(engine.rasterization().unwrap(), before);
+}

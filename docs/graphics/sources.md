@@ -1680,3 +1680,12 @@ state offset across ports. Its 3D state defines sixteen data words. Wanderlust
 uses its existing checked GPU VA and canonical-memory journal rather than copying
 that implementation or retaining command payloads. The independent LDC shader
 fixture consumes uploaded words in the real GPFIFO pixel tests.
+
+NVIDIA's pinned B197 header defines color-reduction threshold field pairs at
+bits 7:0/23:16, or 5:0/21:16 for FP11, and the separate enable at `0x0d9c`.
+`SET_ALPHA_FRACTION` is 8 bits at `0x074c`. The pinned
+[NVK initialization](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/vulkan/nvk_cmd_draw.c#L307-L332)
+independently programs these thresholds while explicitly disabling reduction,
+and programs alpha fraction on pre-Volta hardware. These definitions justify
+retaining bounded fields while admitting rendering only under explicit inactive
+controls; they do not establish implementation of active reduction or coverage.
