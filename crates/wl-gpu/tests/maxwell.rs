@@ -424,3 +424,81 @@ fn inactive_vertex_instance_slots_cannot_alias_stream_zero() {
     assert_eq!(engine.vertex_array_instance(0), Some(false));
     assert_eq!(engine.vertex_array_instance(16), None);
 }
+
+#[test]
+fn two_d_configuration_is_separate_and_does_not_claim_transfer_execution() {
+    let mut engine = Maxwell3d::default();
+    engine.apply(write(0, CLASS)).unwrap();
+    let auxiliary = |method, value| MethodWrite {
+        subchannel: 3,
+        method,
+        value,
+    };
+    engine.apply(auxiliary(0, 0x902d)).unwrap();
+    assert_eq!(engine.two_d_configuration(), TwoDConfiguration::default());
+    for (method, value) in [(0x2ac, 3), (0x290, 0), (0x884, 0x3f)] {
+        assert_eq!(
+            engine.apply(auxiliary(method, value)),
+            Ok(MethodEffect::State)
+        );
+    }
+    let snapshot = engine.two_d_configuration();
+    assert_eq!(
+        snapshot,
+        TwoDConfiguration {
+            source_copy: true,
+            clipping_disabled: true,
+            corral_size: Some(63)
+        }
+    );
+    for (method, value) in [
+        (0x2ac, 0),
+        (0x2ac, 7),
+        (0x2ac, 0x10003),
+        (0x290, 1),
+        (0x290, 2),
+        (0x884, 1024),
+        (0x884, u32::MAX),
+    ] {
+        assert!(engine.apply(auxiliary(method, value)).is_err());
+        assert_eq!(engine.two_d_configuration(), snapshot);
+    }
+    for method in [0x2ac, 0x290, 0x884] {
+        assert!(engine.apply(write(method, 0)).is_err());
+    }
+    // PIXELS_FROM_MEMORY_SRC_Y0_INT remains an unsupported launch.
+    assert!(matches!(
+        engine.apply(auxiliary(0x8dc, 0)),
+        Err(MethodError::UnsupportedEngineMethod {
+            class: 0x902d,
+            method: 0x8dc
+        })
+    ));
+    assert_eq!(engine.two_d_configuration(), snapshot);
+    assert_eq!(
+        Maxwell3d::default().two_d_configuration(),
+        TwoDConfiguration::default()
+    );
+    for value in [0, 1023] {
+        engine.apply(auxiliary(0x884, value)).unwrap();
+        assert_eq!(engine.two_d_configuration().corral_size, Some(value as u16));
+    }
+    // Alignment failure must not alias CORRAL_SIZE.
+    assert!(engine.apply(auxiliary(0x885, 7)).is_err());
+    assert_eq!(engine.two_d_configuration().corral_size, Some(1023));
+}
+
+#[test]
+fn vertex_id_array_start_control_validates_its_single_documented_bit() {
+    let mut engine = Maxwell3d::default();
+    engine.apply(write(0, CLASS)).unwrap();
+    assert_eq!(engine.vertex_id_uses_array_start(), None);
+    for (value, expected) in [(0x1000, true), (0, false)] {
+        engine.apply(write(0x164c, value)).unwrap();
+        assert_eq!(engine.vertex_id_uses_array_start(), Some(expected));
+        for malformed in [1, 0x1001, u32::MAX] {
+            assert!(engine.apply(write(0x164c, malformed)).is_err());
+            assert_eq!(engine.vertex_id_uses_array_start(), Some(expected));
+        }
+    }
+}

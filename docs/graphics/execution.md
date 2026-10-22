@@ -2155,3 +2155,17 @@ rasterization remains unsupported. The `0x1140` format blend gate is retained
 for SNORM8/UNORM16/SNORM16; it does not gate the implemented RGBA8 format and does
 not add those unsupported target formats. These inactive settings cannot seed
 host geometry, manufacture default inputs or bypass shader validation.
+
+
+### Auxiliary 2D configuration and vertex-ID control
+
+The NV902D engine independently retains only SRCCOPY operation (`0x02ac=3`),
+clip disabled (`0x0290=0`) and the ten-bit memory corral size (`0x0884`). These
+writes do not transfer memory or launch a copy. Other operations, enabled clip,
+reserved bits and launch methods remain explicit errors. Engine selection routes
+these fields separately from B197; channel instances retain independent state.
+
+B197 `SET_DA_OUTPUT` (`0x164c`) retains only its defined bit 12 controlling
+whether VertexID includes array start. The bounded vertex shader subset admits
+position/UV attribute loads, not VertexID reads, so this does not change their
+fetching, provide missing inputs or extend built-in shader support.

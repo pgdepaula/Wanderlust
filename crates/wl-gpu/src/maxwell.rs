@@ -12,6 +12,14 @@ pub enum CacheEviction {
 }
 pub const CACHE_POLICY_METHODS: [u16; 6] = [0x0218, 0x1000, 0x10fc, 0x1290, 0x12d8, 0x12dc];
 
+/// Retained configuration only. No 2D launch or memory transfer is implemented.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct TwoDConfiguration {
+    pub source_copy: bool,
+    pub clipping_disabled: bool,
+    pub corral_size: Option<u16>,
+}
+
 /// Classes whose SET_OBJECT and documented NOP can be routed safely. Binding
 /// a class does not imply implementation of its execution methods.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -199,6 +207,8 @@ pub struct Maxwell3d {
     bound: [Option<EngineClass>; 8],
     macros: crate::mme::MacroEngine,
     cache_policies: [Option<CacheEviction>; 6],
+    two_d: TwoDConfiguration,
+    vertex_id_uses_array_start: Option<bool>,
     provoking_last: Option<bool>,
     api_call_limit: Option<u16>,
     attribute_defaults: Option<u8>,
@@ -233,6 +243,12 @@ pub struct Maxwell3d {
     pub sampler_epoch: u64,
 }
 impl Maxwell3d {
+    pub fn two_d_configuration(&self) -> TwoDConfiguration {
+        self.two_d
+    }
+    pub fn vertex_id_uses_array_start(&self) -> Option<bool> {
+        self.vertex_id_uses_array_start
+    }
     pub fn provoking_vertex_last(&self) -> Option<bool> {
         self.provoking_last
     }
@@ -292,6 +308,32 @@ impl Maxwell3d {
             .bound_class(subchannel)
             .ok_or(MethodError::UnboundSubchannel(subchannel))?;
         if class != EngineClass::ThreeD {
+            if class == EngineClass::TwoD {
+                match method {
+                    0x02ac => {
+                        if value != 3 {
+                            return Err(bad());
+                        }
+                        self.two_d.source_copy = true;
+                        return Ok(MethodEffect::State);
+                    }
+                    0x0290 => {
+                        if value != 0 {
+                            return Err(bad());
+                        }
+                        self.two_d.clipping_disabled = true;
+                        return Ok(MethodEffect::State);
+                    }
+                    0x0884 => {
+                        if value > 0x3ff {
+                            return Err(bad());
+                        }
+                        self.two_d.corral_size = Some(value as u16);
+                        return Ok(MethodEffect::State);
+                    }
+                    _ => {}
+                }
+            }
             // All five pinned classes define their NOP at this offset. No
             // compute, DMA, inline upload or 2D action is routed into B197.
             return if method == 0x100 {
@@ -341,6 +383,14 @@ impl Maxwell3d {
             return Ok(MethodEffect::State);
         }
         match method {
+            0x164c => {
+                if value & !0x1000 != 0 {
+                    return Err(bad());
+                }
+                // Guest VertexID loads are not admitted by the shader decoder.
+                // This does not change position/UV vertex-array fetching.
+                self.vertex_id_uses_array_start = Some(value != 0);
+            }
             0x0d64 => {
                 if value > 8 {
                     return Err(bad());

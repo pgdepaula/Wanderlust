@@ -199,6 +199,13 @@ fn mme_raster_state(scratch: bool) {
     let (mut data, map, mut words, image) = fixture();
     words.splice(0..0, [0x2001c002, 0x110e]); // Channel NOP on unbound subchannel six.
     let draw = words.split_off(words.len() - 8);
+    // Independent literal NV902D binding on subchannel three and configuration.
+    // No 2D launch is submitted; the indexed B197 draw below remains unchanged.
+    words.extend_from_slice(&[
+        0x20016000, 0x902d, 0x200160ab, 3, 0x200160a4, 0, 0x20016221, 0x3f,
+    ]);
+    method(&mut words, 0x164c, 0x1000);
+
     for method_id in wl_gpu::maxwell::CACHE_POLICY_METHODS {
         method(&mut words, u32::from(method_id), 0x10);
     }

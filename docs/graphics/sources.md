@@ -1738,3 +1738,14 @@ from implying point, flat-shading, instancing, default-input or CALL support.
 encode `0x0e`. Only that profile is admitted here; other bit combinations require
 separate verification of component expansion and default-interface behavior.
 Retaining the profile does not supply an otherwise missing guest input.
+
+
+### NV902D configuration fields
+
+Pinned NVIDIA [cl902d.h](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/twod/cl902d.h)
+defines clip-enable at `0x0290` bit zero, SRCCOPY=3 in operation bits 2:0 at
+`0x02ac`, and memory corral size bits 9:0 at `0x0884`. These are state setters;
+`PIXELS_FROM_MEMORY_SRC_Y0_INT` (`0x08dc`) is not accepted as configuration.
+The pinned B197 header defines `SET_DA_OUTPUT` (`0x164c`) with the sole field
+`VERTEX_ID_USES_ARRAY_START` at bit 12. NVK's pinned initialization writes TRUE;
+accepting this setting does not admit unsupported VertexID shader loads.
