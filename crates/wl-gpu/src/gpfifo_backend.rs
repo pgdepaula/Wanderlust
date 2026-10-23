@@ -86,6 +86,12 @@ impl Renderer {
                 }
                 progress.entries_completed += 1;
             }
+            if channel.engine.macro_waiting_for_parameter() {
+                phase = FaultPhase::Execute;
+                return Err(invalid(
+                    "unsupported MME parameter continuation across submissions",
+                ));
+            }
             Ok(())
         })();
         progress.draws_submitted = self.counters.gpu_target_writes - before_draws;

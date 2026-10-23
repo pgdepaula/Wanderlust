@@ -188,24 +188,40 @@ fn sync(r: &mut Renderer, d: &mut [u8], t: &mut TextureChanges) -> wl_gpu::backe
 #[test]
 #[ignore = "requires actual GPU; independently assembled MME changes color mask"]
 fn gpfifo_uploaded_mme_changes_real_raster_state_and_reuses_shader() {
-    mme_raster_state(false, false, false);
+    mme_raster_state(MmeFixture::ArgumentMask);
 }
 #[test]
 #[ignore = "requires actual GPU; MME reads guest-programmed scratch state"]
 fn gpfifo_mme_scratch_read_changes_pixels_without_shader_recompilation() {
-    mme_raster_state(true, false, false);
+    mme_raster_state(MmeFixture::ScratchRead);
 }
 #[test]
 #[ignore = "requires actual GPU; assembled MME register ALU controls color masks"]
 fn gpfifo_mme_register_alu_changes_pixels_without_shader_recompilation() {
-    mme_raster_state(false, true, false);
+    mme_raster_state(MmeFixture::RegisterAlu);
 }
 #[test]
 #[ignore = "requires actual GPU; resumed MME state follows real WFI completion"]
 fn gpfifo_resumable_mme_state_and_maddrsend_control_real_pixels() {
-    mme_raster_state(false, false, true);
+    mme_raster_state(MmeFixture::StreamingState);
 }
-fn mme_raster_state(scratch: bool, alu: bool, streaming: bool) {
+#[test]
+#[ignore = "requires actual GPU; MME arguments cross GPFIFO entries without default values"]
+fn gpfifo_mme_parameters_and_incremented_scratch_writes_control_pixels() {
+    mme_raster_state(MmeFixture::ParameterState);
+}
+enum MmeFixture {
+    ArgumentMask,
+    ScratchRead,
+    RegisterAlu,
+    StreamingState,
+    ParameterState,
+}
+fn mme_raster_state(program: MmeFixture) {
+    let scratch = matches!(program, MmeFixture::ScratchRead);
+    let alu = matches!(program, MmeFixture::RegisterAlu);
+    let streaming = matches!(program, MmeFixture::StreamingState);
+    let parameters = matches!(program, MmeFixture::ParameterState);
     let (mut data, map, mut words, image) = fixture();
     words.splice(0..0, [0x2001c002, 0x110e]); // Channel NOP on unbound subchannel six.
     let draw = words.split_off(words.len() - 8);
@@ -295,7 +311,12 @@ fn mme_raster_state(scratch: bool, alu: bool, streaming: bool) {
     }
     // Independent envyas: maddr 0x680; read $r2 0xd1a;
     // exit send (add $r2 0); nop;
-    let code = if streaming {
+    let code = if parameters {
+        include_str!("fixtures/mme/parameter-state.words")
+            .split_whitespace()
+            .map(|w| u32::from_str_radix(w, 16).unwrap())
+            .collect()
+    } else if streaming {
         include_str!("fixtures/mme/streaming-state.words")
             .split_whitespace()
             .map(|w| u32::from_str_radix(w, 16).unwrap())
@@ -319,8 +340,26 @@ fn mme_raster_state(scratch: bool, alu: bool, streaming: bool) {
     if scratch {
         method(&mut words, 0x3468, 1);
     }
-    method(&mut words, 0x3800, 1); // Red-only writes, produced by guest MME.
+    let macro_start = words.len();
+    if parameters {
+        // Literal increment-once packet: launch, then four DATA parameters.
+        words.extend_from_slice(&[0xa0050e00, 0, 0x89abcdef, 0x01234567, 1, 0xfedcba98]);
+    } else {
+        method(&mut words, 0x3800, 1); // Red-only writes, produced by guest MME.
+    }
     words.extend_from_slice(&draw);
+    let entries = if parameters {
+        // Stop immediately after the launch argument. DATA is fetched from the
+        // next entry through a GPU VA alias of the same canonical backing.
+        let cut = macro_start + 2;
+        [
+            entry(0xb0000, cut),
+            entry(0xc0000 + cut as u64 * 4, words.len() - cut),
+        ]
+        .concat()
+    } else {
+        entry(0xb0000, words.len()).to_vec()
+    };
     put(&mut data, 0x10000, &words);
     let mut renderer = Renderer::new().unwrap();
     let mut channel = Channel::default();
@@ -328,13 +367,14 @@ fn mme_raster_state(scratch: bool, alu: bool, streaming: bool) {
     let first = submit(
         &mut renderer,
         &mut channel,
-        &entry(0xb0000, words.len()),
+        &entries,
         &map,
         &mut data,
         &mut changes,
     )
     .unwrap();
     assert_eq!(first.draws_submitted, 1);
+    assert_eq!(first.entries_completed, if parameters { 2 } else { 1 });
     let frame = sync(&mut renderer, &mut data, &mut changes);
     let mut masked = image.clone();
     for pixel in masked.chunks_exact_mut(4) {
@@ -350,7 +390,11 @@ fn mme_raster_state(scratch: bool, alu: bool, streaming: bool) {
     if scratch {
         method(&mut second, 0x3468, 0x1111);
     }
-    method(&mut second, 0x3800, 0x1111); // Same uploaded code, different input.
+    if parameters {
+        second.extend_from_slice(&[0xa0050e00, 0, 0x01234567, 0x89abcdef, 0x1111, 0x76543210]);
+    } else {
+        method(&mut second, 0x3800, 0x1111); // Same uploaded code, different input.
+    }
     second.extend_from_slice(&draw);
     put(&mut data, 0x10000, &second);
     submit(
@@ -368,7 +412,7 @@ fn mme_raster_state(scratch: bool, alu: bool, streaming: bool) {
         None,
         BG,
     );
-    if streaming {
+    if streaming || parameters {
         assert_eq!(renderer.counters.synchronization_points, 3);
         assert_eq!(renderer.counters.readback_operations, 2);
     }
@@ -1311,4 +1355,98 @@ fn gpfifo_resumed_macro_fault_preserves_prior_draw_without_replay() {
         BG,
     );
     assert_eq!(renderer.counters.draw_commands, before.draw_commands);
+}
+
+#[test]
+#[ignore = "requires actual GPU; missing/wrong/unmapped macro arguments preserve prior work"]
+fn gpfifo_macro_argument_faults_keep_completed_draws_and_do_not_default_to_zero() {
+    for failure in 0..4 {
+        let (mut data, map, words, image) = fixture();
+        put(&mut data, 0x10000, &words);
+        let mut renderer = Renderer::new().unwrap();
+        let mut channel = Channel::default();
+        let mut changes = TextureChanges::new(1);
+        submit(
+            &mut renderer,
+            &mut channel,
+            &entry(0xb0000, words.len()),
+            &map,
+            &mut data,
+            &mut changes,
+        )
+        .unwrap();
+        let before = renderer.counters;
+        let mut commands = Vec::new();
+        for (m, v) in [(0x11c, 0), (0x120, 0), (0x114, 0)] {
+            method(&mut commands, m, v);
+        }
+        for word in include_str!("fixtures/mme/parameter-state.words").split_whitespace() {
+            method(&mut commands, 0x118, u32::from_str_radix(word, 16).unwrap());
+        }
+        method(&mut commands, 0x3800, 0);
+        if failure == 3 {
+            for value in [0x89abcdef, 0x01234567, 1] {
+                method(&mut commands, 0x3804, value);
+            }
+            // Mode 3 has emitted the mask, but its final argument is absent.
+        }
+        if failure == 1 {
+            method(&mut commands, 0x380c, 1);
+        } // Wrong macro DATA port.
+        put(&mut data, 0x10000, &commands);
+        let mut entries = entry(0xb0000, commands.len()).to_vec();
+        if failure == 2 {
+            entries.extend_from_slice(&entry(0xe0000, 1));
+        }
+        let error = submit(
+            &mut renderer,
+            &mut channel,
+            &entries,
+            &map,
+            &mut data,
+            &mut changes,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.phase,
+            if failure == 2 {
+                FaultPhase::Fetch
+            } else {
+                FaultPhase::Execute
+            }
+        );
+        assert_eq!(error.progress.draws_submitted, 0);
+        if failure == 0 {
+            assert!(error.cause.to_string().contains("parameter continuation"));
+        }
+        assert_eq!(renderer.counters.draw_commands, before.draw_commands);
+        assert_eq!(
+            renderer.counters.synchronization_points,
+            before.synchronization_points + 1
+        );
+        assert_eq!(renderer.counters.readback_operations, 0);
+        assert!(data[RT..RT + SIZE].chunks_exact(4).all(|p| p == BG));
+        assert!(
+            submit(
+                &mut renderer,
+                &mut channel,
+                &entries,
+                &map,
+                &mut data,
+                &mut changes
+            )
+            .is_err()
+        );
+        assert_eq!(
+            renderer.counters.synchronization_points,
+            before.synchronization_points + 1
+        );
+        check(
+            &sync(&mut renderer, &mut data, &mut changes).rgba,
+            &image,
+            None,
+            BG,
+        );
+        assert_eq!(renderer.counters.draw_commands, before.draw_commands);
+    }
 }

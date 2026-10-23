@@ -228,7 +228,7 @@ pub struct Maxwell3d {
     indices: crate::index::IndexRegisters,
     bound: [Option<EngineClass>; 8],
     macros: crate::mme::MacroEngine,
-    active_macro: Option<(u8, crate::mme::Invocation)>,
+    active_macro: Option<ActiveMacro>,
     cache_policies: [Option<CacheEviction>; 6],
     two_d: TwoDConfiguration,
     auxiliary_raster: AuxiliaryRasterControls,
@@ -267,39 +267,56 @@ pub struct Maxwell3d {
     pub texture_header_epoch: u64,
     pub sampler_epoch: u64,
 }
+#[derive(Debug)]
+struct ActiveMacro {
+    subchannel: u8,
+    parameter_method: u16,
+    invocation: crate::mme::Invocation,
+    backend_pending: bool,
+}
 impl Maxwell3d {
     /// Resume only after the previously returned backend effect was executed.
     pub(crate) fn resume_macro(
         &mut self,
     ) -> std::result::Result<Option<MethodEffect>, MethodError> {
-        let Some((subchannel, mut invocation)) = self.active_macro.take() else {
+        let Some(mut active) = self.active_macro.take() else {
             return Ok(None);
         };
+        active.backend_pending = false;
         loop {
             let Some((method, value)) = self
                 .macros
-                .next_output(&mut invocation)
+                .next_output(&mut active.invocation)
                 .map_err(MethodError::Macro)?
             else {
+                if active.invocation.waiting_for_parameter() {
+                    self.active_macro = Some(active);
+                }
                 return Ok(None);
             };
-            // This delivery only emits the established color mask and WFI.
+            // Only the established color mask, scratch state and WFI are emitted.
             // Never recurse into SET_OBJECT, RAM uploads, or macro launches.
-            if !matches!(method, 0x1a00 | 0x0110) {
+            if !matches!(method, 0x1a00 | 0x0110 | 0x3400..=0x37fc) {
                 return Err(MethodError::Macro(
                     crate::mme::MacroError::UnsupportedOutput(method),
                 ));
             }
             let effect = self.apply(MethodWrite {
-                subchannel,
+                subchannel: active.subchannel,
                 method,
                 value,
             })?;
             if effect != MethodEffect::State {
-                self.active_macro = Some((subchannel, invocation));
+                active.backend_pending = true;
+                self.active_macro = Some(active);
                 return Ok(Some(effect));
             }
         }
+    }
+    pub(crate) fn macro_waiting_for_parameter(&self) -> bool {
+        self.active_macro.as_ref().is_some_and(|active| {
+            !active.backend_pending && active.invocation.waiting_for_parameter()
+        })
     }
     pub fn bindless_texture_constant_slot(&self) -> Option<u8> {
         self.bindless_texture_constant_slot
@@ -356,7 +373,17 @@ impl Maxwell3d {
         if method % 4 != 0 || method > 0x3ffc {
             return Err(MethodError::InvalidMethod(method));
         }
-        if self.active_macro.is_some() {
+        if let Some(active) = self.active_macro.as_mut() {
+            if !active.backend_pending
+                && subchannel == active.subchannel
+                && method == active.parameter_method
+            {
+                active
+                    .invocation
+                    .provide_parameter(value)
+                    .map_err(MethodError::Macro)?;
+                return Ok(self.resume_macro()?.unwrap_or(MethodEffect::State));
+            }
             return Err(MethodError::Macro(crate::mme::MacroError::ActiveInvocation));
         }
         let bad = || MethodError::UnsupportedValue { method, value };
@@ -424,7 +451,12 @@ impl Maxwell3d {
                 .macros
                 .begin((method - 0x3800) / 8, value)
                 .map_err(MethodError::Macro)?;
-            self.active_macro = Some((subchannel, invocation));
+            self.active_macro = Some(ActiveMacro {
+                subchannel,
+                parameter_method: method + 4,
+                invocation,
+                backend_pending: false,
+            });
             return Ok(self.resume_macro()?.unwrap_or(MethodEffect::State));
         }
         if let Some(index) = CACHE_POLICY_METHODS.iter().position(|m| *m == method) {

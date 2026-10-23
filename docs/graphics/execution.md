@@ -225,11 +225,12 @@ then reused. Invalid pointer/data writes preserve previously uploaded contents.
 
 Entry launch methods `0x3800 + slot*8` execute a bounded straight-line subset:
 32-bit wrapping register arithmetic, signed 18-bit ADD-immediate, MOV,
-method-address assignment, SEND and zero-increment MADDRSEND. R0 remains zero,
+method-address assignment, SEND and MADDRSEND with bounded method increments. R0 remains zero,
 R1 receives the launch argument, and other registers require prior initialization.
 EXIT executes its following delay slot. A resumable invocation executes at most
 64 instructions in total across all yields. Emissions currently target only
-`SET_CT_WRITE(0)` (`0x1a00`) or canonical `WAIT_FOR_IDLE` (`0x0110=0`). The backend
+`SET_CT_WRITE(0)` (`0x1a00`), scratch registers `0x3400..0x37fc`, or canonical
+`WAIT_FOR_IDLE` (`0x0110=0`). The backend
 executes each effect before resuming the invocation; state/register writes and
 reads cannot run ahead of an earlier wait. Existing raster validation and
 pipeline identity remain active.
@@ -244,8 +245,8 @@ behavior is inferred. A separate independently assembled scratch-read macro
 changes real GPU color masks without changing the shader binaries. Scratch
 storage is distinct from the unsupported shadow-RAM tracking/replay modes.
 
-Branches, other register reads, parameter fetches, nonzero method-address increments,
-macro-generated draws and general shadow/replay behavior remain unsupported.
+Branches, other register reads, address wraparound, macro-generated draws and
+general shadow/replay behavior remain unsupported.
 Multiple supported state/wait emissions execute in order. A later fault does not
 roll back earlier accepted effects or replay prior GPU work. The pure
 `MacroEngine::execute` compatibility helper still preflights exactly one emission,
@@ -2285,9 +2286,34 @@ same invocation, and only then acquires the unread FIFO suffix. Guest register
 rebinding, code upload or nested macro launch cannot replace an invocation while
 its backend effect is outstanding. The step budget is not reset on resumption.
 
-MADDRSEND with zero method increment emits zero at the selected method, matching
-the independently assembled WFI instruction. Nonzero increments remain rejected.
+MADDRSEND emits bits 17:12 and advances the method by the encoded word increment.
+Method-address wraparound remains unsupported. The independently assembled WFI
+instruction selects byte method `0x0110` with zero data and zero increment.
 A synthetic macro emits a color-mask write, a real WFI and another color-mask
 write; its guest argument changes verified texture pixels. Fault injection after
 WFI preserves an earlier real draw and permits publication without draw replay.
-Firmware mailboxes, parameter waits and macro draw emissions remain unsupported.
+Firmware mailboxes and macro draw emissions remain unsupported.
+
+
+### MME parameter ports and scratch emissions
+
+Parameter assignment modes 0, 3, 5 and 6 retain explicit pending state. They
+consume one complete u32 from the exact DATA method (`launch+4`) on the launching
+subchannel. An absent parameter is never replaced with zero. Mode 3 sends its
+previous ALU result before fetching the new destination; mode 6 preserves its
+ALU result in the destination and sends the fetched value. Parameter-dependent
+EXIT completes its following delay slot only after the parameter is consumed.
+An outstanding backend effect cannot be acknowledged by supplying a DATA word.
+
+Methods retain 12-bit word addresses and six-bit word increments, converted to
+checked byte offsets. Incrementing outside `0x0000..0x3ffc` is rejected, without
+assuming address wrap. MME output may update the already supported scratch range
+`0x3400..0x37fc`; these are actual guest instruction writes, not firmware replies.
+Waits and color masks remain supported; privileged/firmware outputs remain errors.
+
+Parameters can continue across GPFIFO entries and GPU VA aliases in the same API
+submission. Waiting for an argument at the end of an API submission is explicitly
+unsupported and faults that channel; it does not return a completed/fake fence.
+This restriction is distinct from ordinary B06F packet continuation across calls.
+Failures retain earlier GPU work for publication and prevent submission replay.
+The 64-instruction budget persists across all parameter and backend resumptions.

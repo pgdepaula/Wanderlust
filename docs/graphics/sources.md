@@ -1826,11 +1826,31 @@ pixels after an explicit publication; a fault after WFI does not replay the draw
 
 The pinned envytools macro source defines MADDRSEND as setting the method address,
 sending result bits 17:12, and retaining the result in its destination register.
-Those bits also describe the method increment. The admitted zero-increment subset
-therefore emits data zero; nonzero increments are rejected rather than ignored.
+Those bits also describe the method increment. The admitted implementation uses
+them for both emitted data and checked word-address advancement; it does not
+assume method-address wraparound.
 The independent `streaming-state.asm` fixture, assembled with unmodified pinned
 `envyas -m macro -i`, yields exact words in `streaming-state.words` and binary
 SHA-256 `a2509d11e1585fcc6e66c9ff055c9c84023e2d529200d294b7b42bf6172a7365`.
 Its `0x00110071` instruction emits B197 WFI, not a synthetic syncpoint update.
 CPU tests distinguish individual yields, exit-delay execution and a total 64-step
 budget; GPU tests distinguish resumed color masks and fault-safe prior output.
+
+
+### MME parameter assignment corpus
+
+The pinned envytools `macro.c` describes assignment modes 0 (fetch), 3 (send then
+fetch), 5 (set method address then fetch), and 6 (store/set address then fetch and
+send). Its primary ordering for mode 3 is preserved explicitly instead of
+assuming that fetching a missing argument may produce zero. Only the exact DATA
+port of the launching macro/subchannel is admitted. Pending argument storage owns
+scalar values and register/PC state, never a borrowed guest command array.
+
+`parameter-state.asm` was assembled and disassembled with the unmodified pinned
+envytools tools; exact words are retained in `parameter-state.words`. Its generated
+28-byte binary SHA-256 is
+`c12404f20e255a881031411c680184c6aa74e993077998c164e7cc8a968670f1`.
+The fixture covers all four assignments, incremented scratch writes, WFI and a
+parameter-dependent EXIT. CPU tests check bit-exact arguments and destination
+behavior; GPU tests split arguments across aliased GPFIFO entries and reject
+missing, wrong-port and unmapped continuations without replaying prior draws.

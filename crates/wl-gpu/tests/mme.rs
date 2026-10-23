@@ -351,3 +351,35 @@ fn pending_macro_backend_effect_prevents_register_rebinding_or_ram_replacement()
     }
     assert_eq!(engine.bound_class(0), Some(EngineClass::ThreeD));
 }
+
+#[test]
+fn macro_data_port_is_exact_and_does_not_supply_missing_or_extra_parameters() {
+    use wl_gpu::fifo::MethodWrite;
+    let mut engine = Maxwell3d::default();
+    let set = |engine: &mut Maxwell3d, subchannel, method, value| {
+        engine.apply(MethodWrite {
+            subchannel,
+            method,
+            value,
+        })
+    };
+    for (method, value) in [(0, CLASS), (0x11c, 2), (0x120, 0), (0x114, 0)] {
+        set(&mut engine, 0, method, value).unwrap();
+    }
+    // envyas: parm $r2 maddr 0x680; exit send (add $r2 0); nop;
+    for word in [0x01a00251, 0x10c0, 0x11] {
+        set(&mut engine, 0, 0x118, word).unwrap();
+    }
+    assert_eq!(set(&mut engine, 0, 0x3810, 0), Ok(MethodEffect::State));
+    for (subchannel, method, value) in [
+        (0, 0x3804, 7),
+        (1, 0x3814, 7),
+        (0, 0x114, 0),
+        (0, 0x3810, 0),
+    ] {
+        assert!(set(&mut engine, subchannel, method, value).is_err());
+    }
+    assert_eq!(set(&mut engine, 0, 0x3814, 0x1111), Ok(MethodEffect::State));
+    assert!(set(&mut engine, 0, 0x3814, 0).is_err());
+    assert_eq!(engine.bound_class(0), Some(EngineClass::ThreeD));
+}

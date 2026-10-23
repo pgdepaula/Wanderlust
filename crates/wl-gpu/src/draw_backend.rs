@@ -127,6 +127,11 @@ impl Renderer {
                     }
                 }
             }
+            if channel.engine.macro_waiting_for_parameter() {
+                return Err(invalid(
+                    "unsupported MME parameter continuation across submissions",
+                ));
+            }
             Ok(last)
         })();
         if result.is_err() {
