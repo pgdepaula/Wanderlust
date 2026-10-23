@@ -223,14 +223,15 @@ entries per channel; these are explicit supported limits, not universal hardware
 RAM-size claims. Instruction storage is owned and allocated on first upload,
 then reused. Invalid pointer/data writes preserve previously uploaded contents.
 
-Entry launch methods `0x3800 + slot*8` execute a bounded straight-line subset:
+Entry launch methods `0x3800 + slot*8` execute a bounded subset:
 32-bit wrapping register arithmetic, signed 18-bit ADD-immediate, MOV,
 method-address assignment, SEND and MADDRSEND with bounded method increments. R0 remains zero,
 R1 receives the launch argument, and other registers require prior initialization.
 EXIT executes its following delay slot. A resumable invocation executes at most
 64 instructions in total across all yields. Emissions currently target only
 `SET_CT_WRITE(0)` (`0x1a00`), scratch registers `0x3400..0x37fc`, or canonical
-`WAIT_FOR_IDLE` (`0x0110=0`). The backend
+`WAIT_FOR_IDLE` (`0x0110=0`), engine NOP, and the restricted privileged
+initialization requests described below. The backend
 executes each effect before resuming the invocation; state/register writes and
 reads cannot run ahead of an earlier wait. Existing raster validation and
 pipeline identity remain active.
@@ -2292,7 +2293,8 @@ instruction selects byte method `0x0110` with zero data and zero increment.
 A synthetic macro emits a color-mask write, a real WFI and another color-mask
 write; its guest argument changes verified texture pixels. Fault injection after
 WFI preserves an earlier real draw and permits publication without draw replay.
-Firmware mailboxes and macro draw emissions remain unsupported.
+General firmware requests and macro draw emissions remain unsupported; the
+restricted privileged initialization protocol is described below.
 
 
 ### MME parameter ports and scratch emissions
@@ -2309,7 +2311,8 @@ Methods retain 12-bit word addresses and six-bit word increments, converted to
 checked byte offsets. Incrementing outside `0x0000..0x3ffc` is rejected, without
 assuming address wrap. MME output may update the already supported scratch range
 `0x3400..0x37fc`; these are actual guest instruction writes, not firmware replies.
-Waits and color masks remain supported; privileged/firmware outputs remain errors.
+Waits and color masks remain supported; privileged outputs outside the exact
+initialization profile below remain errors.
 
 Parameters can continue across GPFIFO entries and GPU VA aliases in the same API
 submission. Waiting for an argument at the end of an API submission is explicitly
@@ -2334,4 +2337,31 @@ both parameter waits and backend yields without retaining guest borrows.
 Backward branches share the existing total 64-instruction invocation budget;
 neither a jump nor a backend resumption resets it. Budget failure faults the
 channel while preserving already submitted GPU output for explicit publication.
-This does not implement firmware mailboxes or acknowledge privileged requests.
+Branch execution itself does not acknowledge privileged requests; only the
+separate validated initialization protocol below can do so.
+
+
+### Privileged initialization through MME
+
+MME output `SET_FALCON04` (`0x2310`) admits only the seven exact baseline masked
+writes listed in the source ledger. Firmware scratch word zero must contain
+request flag zero; words one and two must be explicitly initialized value and
+mask. The channel must have completed a macro-emitted WFI before each request.
+The backend's private resume boundary supplies that completion; a guest DATA
+word cannot acknowledge a wait. No other GPU work is emitted by this macro
+subset between WFI and the context update.
+
+The implementation updates fixed-size per-channel context-register storage,
+preserves all previously known bits outside the mask, and then writes the
+completion flag. Unknown reset bits carry a separate unknown mask instead of
+invented reset values. Each operation consumes its WFI authorization. Direct
+firmware method calls without this guarded macro protocol remain unsupported.
+An engine NO_OPERATION emission is admitted for the guest polling sequence;
+it does not submit work, publish memory, or invent a guest syncpoint.
+
+This is a baseline initialization HLE, not a Falcon instruction interpreter or
+general MMIO implementation. The exact source-verified baseline does not add
+support for alternative privileged raster modes. Unsupported requests fault
+before context mutation or acknowledgement, preserving earlier queued draws
+for explicit framebuffer publication. No additional readback is needed merely
+to acknowledge an admitted context write.

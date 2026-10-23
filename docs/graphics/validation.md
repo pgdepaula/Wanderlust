@@ -3500,3 +3500,30 @@ completion-watchdog unit test. Windows tests were executed as native processes
 with verified executable hashes and recorded exit status, not only compiled.
 These are synthetic conformance workloads; they do not establish original-game
 firmware handling, submitted draws, display output or frames.
+
+
+### Privileged baseline initialization and acknowledgement ordering
+
+CPU tests cover all seven source-verified startup writes, partial known-bit
+updates, repeated writes, independent context initialization and preservation of
+unknown reset bits. Missing WFI, absent scratch fields, nonzero request flags,
+unknown addresses, different masks/values, zero masks, combined unsupported
+writes and nonzero conservative-raster values fail before context mutation or
+acknowledgement.
+
+The independent GPFIFO fixture executes WFI, supplies real DATA arguments,
+performs the admitted context write, reads and tests its completion flag through
+MME instructions, and then selects a color mask for a genuine indexed textured
+draw. A second invocation changes verified pixels without another shader module.
+Counters retain two explicit readbacks for two framebuffer publications and one
+additional WFI wait after prior GPU work; context updates themselves submit no
+GPU commands and perform no readback. Adversarial requests after a valid pending
+draw preserve that output, latch channel failure and prevent replay.
+
+Strict Clippy and formatting passed. Default GPU/NVIDIA CPU suites passed 419
+tests, with 170 device tests separately ignored there; the no-default GPU suite
+passed 394 tests. Explicit graphics execution passed 24 scenarios each on WSL
+OpenGL, native Windows D3D12 and native Windows Vulkan, with no failures or skips.
+Each native backend also passed the completion-watchdog unit test. These results
+validate a bounded initialization HLE, not execution of Falcon firmware code,
+general privileged register semantics or original-game frames.

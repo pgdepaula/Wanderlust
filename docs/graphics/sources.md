@@ -1872,3 +1872,34 @@ a two-iteration backward delayed branch and a shared EXIT. Additional literal
 assembler cases test conditional EXIT, parameter fetching and SEND in delay
 slots. Unknown reserved bits, invalid targets, unready condition registers,
 unuploaded code and instruction-budget exhaustion remain explicit errors.
+
+
+### Bounded privileged-context initialization
+
+The zlib-licensed [deko3d startup sequence](https://github.com/devkitPro/deko3d/blob/373bfd43d8b2d805fa2eb7d406dbb823032df958/source/maxwell/gpu_3d_base.cpp)
+issues these exact address/value/mask triples during ordinary 3D initialization:
+`418800/1/1`, `419a08/0/10`, `419f78/0/8`,
+`404468/07ffffff/3fffffff`, `419a04/1/1`, `419a04/2/2`,
+and `418800/0/01800000` (all hexadecimal).
+Its [PGRAPH macro](https://github.com/devkitPro/deko3d/blob/373bfd43d8b2d805fa2eb7d406dbb823032df958/source/maxwell/pgraph.mme)
+specifies a masked context-register write: WFI, request flag zero, value and mask
+in firmware scratch words 0..2, firmware call 4, then polling word zero for one.
+The independently implemented [Mesa NVK protocol](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/vulkan/nvk_cmd_draw.c)
+corroborates this ordering and identifies `418800` bits 23..24 with conservative
+raster state; only their zero baseline is admitted. It separately identifies
+`419f78` bit 3 with fragment-helper memory-load control. The other physical
+bit meanings are not generalized from these startup recipes.
+
+The bounded HLE retains masked context bits and their known-bit masks per
+channel; unknown reset bits remain unknown. It acknowledges only the listed
+initialization writes after a completed WFI and a successful context update.
+There is no unconditional success response, physical MMIO or firmware-code
+execution. Unknown addresses, different values/masks and missing request fields
+remain errors. These baseline recipes do not implement conservative rendering,
+general exceptions, arbitrary privileged state changes or general Falcon calls.
+No implementation source was copied from either reference.
+
+The independent `privileged-state.asm` uses the pinned envytools assembler,
+including an acknowledgement polling branch and a guest-selected color mask.
+Its 68-byte little-endian binary SHA-256 is
+`ad04cc0f18a5b6fcbf036fae1d8b067002ba11ed1ec80ea80777ca6e823a307d`.

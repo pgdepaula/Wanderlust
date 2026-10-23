@@ -215,6 +215,11 @@ fn gpfifo_mme_parameters_and_incremented_scratch_writes_control_pixels() {
 fn gpfifo_mme_conditional_branches_and_backward_loop_control_real_pixels() {
     mme_raster_state(MmeFixture::Branches);
 }
+#[test]
+#[ignore = "requires actual GPU; bounded privileged initialization follows real WFI"]
+fn gpfifo_mme_privileged_initialization_acknowledges_only_completed_context_writes() {
+    mme_raster_state(MmeFixture::Privileged);
+}
 enum MmeFixture {
     ArgumentMask,
     ScratchRead,
@@ -222,6 +227,7 @@ enum MmeFixture {
     StreamingState,
     ParameterState,
     Branches,
+    Privileged,
 }
 fn mme_raster_state(program: MmeFixture) {
     let scratch = matches!(program, MmeFixture::ScratchRead);
@@ -229,6 +235,7 @@ fn mme_raster_state(program: MmeFixture) {
     let streaming = matches!(program, MmeFixture::StreamingState);
     let parameters = matches!(program, MmeFixture::ParameterState);
     let branches = matches!(program, MmeFixture::Branches);
+    let privileged = matches!(program, MmeFixture::Privileged);
     let (mut data, map, mut words, image) = fixture();
     words.splice(0..0, [0x2001c002, 0x110e]); // Channel NOP on unbound subchannel six.
     let draw = words.split_off(words.len() - 8);
@@ -318,7 +325,12 @@ fn mme_raster_state(program: MmeFixture) {
     }
     // Independent envyas: maddr 0x680; read $r2 0xd1a;
     // exit send (add $r2 0); nop;
-    let code = if branches {
+    let code = if privileged {
+        include_str!("fixtures/mme/privileged-state.words")
+            .split_whitespace()
+            .map(|w| u32::from_str_radix(w, 16).unwrap())
+            .collect()
+    } else if branches {
         include_str!("fixtures/mme/branch-state.words")
             .split_whitespace()
             .map(|w| u32::from_str_radix(w, 16).unwrap())
@@ -353,14 +365,16 @@ fn mme_raster_state(program: MmeFixture) {
         method(&mut words, 0x3468, 1);
     }
     let macro_start = words.len();
-    if parameters {
+    if privileged {
+        words.extend_from_slice(&[0xa0040e00, 0x418800, 1, 1, 1]);
+    } else if parameters {
         // Literal increment-once packet: launch, then four DATA parameters.
         words.extend_from_slice(&[0xa0050e00, 0, 0x89abcdef, 0x01234567, 1, 0xfedcba98]);
     } else {
         method(&mut words, 0x3800, 1); // Red-only writes, produced by guest MME.
     }
     words.extend_from_slice(&draw);
-    let entries = if parameters {
+    let entries = if parameters || privileged {
         // Stop immediately after the launch argument. DATA is fetched from the
         // next entry through a GPU VA alias of the same canonical backing.
         let cut = macro_start + 2;
@@ -386,7 +400,10 @@ fn mme_raster_state(program: MmeFixture) {
     )
     .unwrap();
     assert_eq!(first.draws_submitted, 1);
-    assert_eq!(first.entries_completed, if parameters { 2 } else { 1 });
+    assert_eq!(
+        first.entries_completed,
+        if parameters || privileged { 2 } else { 1 }
+    );
     let frame = sync(&mut renderer, &mut data, &mut changes);
     let mut masked = image.clone();
     for pixel in masked.chunks_exact_mut(4) {
@@ -402,7 +419,9 @@ fn mme_raster_state(program: MmeFixture) {
     if scratch {
         method(&mut second, 0x3468, 0x1111);
     }
-    if parameters {
+    if privileged {
+        second.extend_from_slice(&[0xa0040e00, 0x418800, 1, 1, 0x1111]);
+    } else if parameters {
         second.extend_from_slice(&[0xa0050e00, 0, 0x01234567, 0x89abcdef, 0x1111, 0x76543210]);
     } else {
         method(&mut second, 0x3800, 0x1111); // Same uploaded code, different input.
@@ -424,7 +443,7 @@ fn mme_raster_state(program: MmeFixture) {
         None,
         BG,
     );
-    if streaming || parameters {
+    if streaming || parameters || privileged {
         assert_eq!(renderer.counters.synchronization_points, 3);
         assert_eq!(renderer.counters.readback_operations, 2);
     }
@@ -1530,6 +1549,95 @@ fn gpfifo_macro_branch_faults_preserve_prior_output_without_replay_or_publicatio
         assert_eq!(
             renderer.counters.synchronization_points,
             before.synchronization_points + 1
+        );
+        check(
+            &sync(&mut renderer, &mut data, &mut changes).rgba,
+            &image,
+            None,
+            BG,
+        );
+        assert_eq!(renderer.counters.draw_commands, before.draw_commands);
+    }
+}
+
+#[test]
+#[ignore = "requires actual GPU; unknown privileged writes must not acknowledge or replay"]
+fn gpfifo_privileged_request_failures_preserve_pending_output_and_fault_the_channel() {
+    for failure in 0..4 {
+        let (mut data, map, words, image) = fixture();
+        put(&mut data, 0x10000, &words);
+        let mut renderer = Renderer::new().unwrap();
+        let mut channel = Channel::default();
+        let mut changes = TextureChanges::new(1);
+        submit(
+            &mut renderer,
+            &mut channel,
+            &entry(0xb0000, words.len()),
+            &map,
+            &mut data,
+            &mut changes,
+        )
+        .unwrap();
+        let before = renderer.counters;
+        let mut commands = Vec::new();
+        for (m, v) in [(0x11c, 0), (0x120, 0), (0x114, 0)] {
+            method(&mut commands, m, v);
+        }
+        let mut code: Vec<u32> = include_str!("fixtures/mme/privileged-state.words")
+            .split_whitespace()
+            .map(|w| u32::from_str_radix(w, 16).unwrap())
+            .collect();
+        if failure == 0 {
+            code[0] = 0x11;
+        } // Omit the required WFI.
+        if failure == 3 {
+            code[2] = 0x4041;
+        } // Request flag must be zero.
+        for word in code {
+            method(&mut commands, 0x118, word);
+        }
+        commands.extend_from_slice(&[
+            0xa0040e00,
+            if failure == 1 { 0x418804 } else { 0x418800 },
+            1,
+            if failure == 2 { 0 } else { 1 },
+            0x1111,
+        ]);
+        put(&mut data, 0x10000, &commands);
+        let entries = entry(0xb0000, commands.len());
+        let error = submit(
+            &mut renderer,
+            &mut channel,
+            &entries,
+            &map,
+            &mut data,
+            &mut changes,
+        )
+        .unwrap_err();
+        assert_eq!(error.phase, FaultPhase::Execute);
+        assert!(error.cause.to_string().contains(match failure {
+            0 => "MissingFirmwareIdle",
+            3 => "InvalidFirmwareRequest",
+            _ => "UnsupportedPrivilegedWrite",
+        }));
+        assert_eq!(renderer.counters.submissions, before.submissions);
+        assert_eq!(renderer.counters.draw_commands, before.draw_commands);
+        assert_eq!(renderer.counters.readback_operations, 0);
+        assert_eq!(
+            renderer.counters.synchronization_points,
+            before.synchronization_points + u64::from(failure != 0)
+        );
+        assert!(data[RT..RT + SIZE].chunks_exact(4).all(|p| p == BG));
+        assert!(
+            submit(
+                &mut renderer,
+                &mut channel,
+                &entries,
+                &map,
+                &mut data,
+                &mut changes
+            )
+            .is_err()
         );
         check(
             &sync(&mut renderer, &mut data, &mut changes).rgba,

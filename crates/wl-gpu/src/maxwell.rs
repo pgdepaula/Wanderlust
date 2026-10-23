@@ -273,6 +273,7 @@ struct ActiveMacro {
     parameter_method: u16,
     invocation: crate::mme::Invocation,
     backend_pending: bool,
+    idle_completed: bool,
 }
 impl Maxwell3d {
     /// Resume only after the previously returned backend effect was executed.
@@ -282,6 +283,11 @@ impl Maxwell3d {
         let Some(mut active) = self.active_macro.take() else {
             return Ok(None);
         };
+        // WFI is currently the only macro-emitted backend operation. This
+        // private entry point is called only after its real completion wait.
+        if active.backend_pending {
+            active.idle_completed = true;
+        }
         active.backend_pending = false;
         loop {
             let Some((method, value)) = self
@@ -294,9 +300,17 @@ impl Maxwell3d {
                 }
                 return Ok(None);
             };
-            // Only the established color mask, scratch state and WFI are emitted.
+            if method == 0x2310 {
+                self.method_writes = self.method_writes.saturating_add(1);
+                self.macros
+                    .initialize_privileged_register(value, active.idle_completed)
+                    .map_err(MethodError::Macro)?;
+                active.idle_completed = false;
+                continue;
+            }
+            // Only the established color mask, scratch state, NOP and WFI are emitted.
             // Never recurse into SET_OBJECT, RAM uploads, or macro launches.
-            if !matches!(method, 0x1a00 | 0x0110 | 0x3400..=0x37fc) {
+            if !matches!(method, 0x1a00 | 0x0100 | 0x0110 | 0x3400..=0x37fc) {
                 return Err(MethodError::Macro(
                     crate::mme::MacroError::UnsupportedOutput(method),
                 ));
@@ -456,6 +470,7 @@ impl Maxwell3d {
                 parameter_method: method + 4,
                 invocation,
                 backend_pending: false,
+                idle_completed: false,
             });
             return Ok(self.resume_macro()?.unwrap_or(MethodEffect::State));
         }

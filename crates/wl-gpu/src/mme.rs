@@ -25,7 +25,29 @@ pub enum MacroError {
     MissingParameter,
     UnexpectedParameter,
     InvalidBranchTarget(i64),
+    MissingFirmwareIdle,
+    InvalidFirmwareRequest(u32),
+    UnsupportedPrivilegedWrite { address: u32, value: u32, mask: u32 },
 }
+
+/// Only known bits are represented; unknown reset values are never invented.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct PrivilegedBits {
+    value: u32,
+    known_mask: u32,
+}
+const PRIVILEGED_ADDRESSES: [u32; 5] = [0x418800, 0x419a08, 0x419f78, 0x404468, 0x419a04];
+// Exact baseline initialization writes from deko3d 373bfd43, gpu_3d_base.cpp.
+// This is not a general MMIO interface or support for arbitrary raster modes.
+const PRIVILEGED_INITIALIZATION: [(u32, u32, u32); 7] = [
+    (0x418800, 1, 1),
+    (0x419a08, 0, 0x10),
+    (0x419f78, 0, 8),
+    (0x404468, 0x07ffffff, 0x3fffffff),
+    (0x419a04, 1, 1),
+    (0x419a04, 2, 2),
+    (0x418800, 0, 0x01800000),
+];
 
 #[derive(Debug)]
 struct PendingParameter {
@@ -85,6 +107,7 @@ pub struct MacroEngine {
     code_pointer: Option<usize>,
     entry_pointer: Option<usize>,
     scratch: [Option<u32>; 256],
+    privileged: [PrivilegedBits; 5],
 }
 impl Default for MacroEngine {
     fn default() -> Self {
@@ -94,10 +117,53 @@ impl Default for MacroEngine {
             code_pointer: None,
             entry_pointer: None,
             scratch: [None; 256],
+            privileged: [PrivilegedBits::default(); 5],
         }
     }
 }
 impl MacroEngine {
+    /// Bounded firmware function 4 HLE: an actual masked context write, followed
+    /// by acknowledgement. The owning channel must first complete its WFI.
+    /// No firmware machine code, physical MMIO, or unknown mode is emulated.
+    pub(crate) fn initialize_privileged_register(
+        &mut self,
+        address: u32,
+        idle_completed: bool,
+    ) -> Result<(), MacroError> {
+        if !idle_completed {
+            return Err(MacroError::MissingFirmwareIdle);
+        }
+        let [request, value, mask] = [0, 1, 2].map(|i| {
+            self.scratch[i].ok_or(MacroError::UninitializedScratch(0x3400 + i as u16 * 4))
+        });
+        let request = request?;
+        let value = value?;
+        let mask = mask?;
+        if request != 0 {
+            return Err(MacroError::InvalidFirmwareRequest(request));
+        }
+        if !PRIVILEGED_INITIALIZATION.contains(&(address, value, mask)) {
+            return Err(MacroError::UnsupportedPrivilegedWrite {
+                address,
+                value,
+                mask,
+            });
+        }
+        let index = PRIVILEGED_ADDRESSES
+            .iter()
+            .position(|&a| a == address)
+            .ok_or(MacroError::UnsupportedPrivilegedWrite {
+                address,
+                value,
+                mask,
+            })?;
+        let register = &mut self.privileged[index];
+        register.value = (register.value & !mask) | (value & mask);
+        register.known_mask |= mask;
+        // Publish success only after every validation and the context update.
+        self.scratch[0] = Some(1);
+        Ok(())
+    }
     pub fn upload(&mut self, method: u16, value: u32) -> Result<bool, MacroError> {
         match method {
             0x3400..=0x37fc if method % 4 == 0 => {
@@ -369,6 +435,106 @@ mod streaming_tests {
             engine.upload(0x118, word).unwrap();
         }
         engine
+    }
+    fn request(engine: &mut MacroEngine, value: u32, mask: u32) {
+        for (method, data) in [(0x3400, 0), (0x3404, value), (0x3408, mask)] {
+            engine.upload(method, data).unwrap();
+        }
+    }
+    #[test]
+    fn privileged_initialization_updates_only_known_masked_bits_before_acknowledgement() {
+        let mut engine = MacroEngine::default();
+        for (address, value, mask) in PRIVILEGED_INITIALIZATION {
+            request(&mut engine, value, mask);
+            assert_eq!(engine.scratch[0], Some(0));
+            engine
+                .initialize_privileged_register(address, true)
+                .unwrap();
+            assert_eq!(engine.scratch[0], Some(1));
+            let i = PRIVILEGED_ADDRESSES
+                .iter()
+                .position(|&a| a == address)
+                .unwrap();
+            assert_eq!(engine.privileged[i].value & mask, value);
+            assert_eq!(engine.privileged[i].known_mask & mask, mask);
+        }
+        assert_eq!(
+            engine.privileged[0],
+            PrivilegedBits {
+                value: 1,
+                known_mask: 0x01800001
+            }
+        );
+        assert_eq!(
+            engine.privileged[4],
+            PrivilegedBits {
+                value: 3,
+                known_mask: 3
+            }
+        );
+        request(&mut engine, 1, 1);
+        engine
+            .initialize_privileged_register(0x419a04, true)
+            .unwrap();
+        assert_eq!(
+            engine.privileged[4],
+            PrivilegedBits {
+                value: 3,
+                known_mask: 3
+            }
+        );
+        // Independent channel/context reset values are unknown, not copied.
+        assert_eq!(
+            MacroEngine::default().privileged,
+            [PrivilegedBits::default(); 5]
+        );
+    }
+    #[test]
+    fn privileged_requests_reject_missing_idle_inputs_and_unknown_modes_without_ack() {
+        let mut engine = MacroEngine::default();
+        assert_eq!(
+            engine.initialize_privileged_register(0x418800, false),
+            Err(MacroError::MissingFirmwareIdle)
+        );
+        for index in 0..3 {
+            assert_eq!(
+                engine.initialize_privileged_register(0x418800, true),
+                Err(MacroError::UninitializedScratch(0x3400 + index * 4))
+            );
+            engine
+                .upload(0x3400 + index * 4, if index == 0 { 0 } else { 1 })
+                .unwrap();
+        }
+        for (address, value, mask) in [
+            (0x418804, 1, 1),
+            (0x418800, 0, 1),
+            (0x418800, 1, 0),
+            (0x418800, 3, 1),
+            (0x418800, 1, 0x01800001),
+            (0x419a04, 3, 3),
+            (0x418800, 0x01800000, 0x01800000),
+        ] {
+            request(&mut engine, value, mask);
+            let before = engine.privileged;
+            assert_eq!(
+                engine.initialize_privileged_register(address, true),
+                Err(MacroError::UnsupportedPrivilegedWrite {
+                    address,
+                    value,
+                    mask
+                })
+            );
+            assert_eq!(engine.privileged, before);
+            assert_eq!(engine.scratch[0], Some(0));
+        }
+        request(&mut engine, 1, 1);
+        engine.upload(0x3400, 7).unwrap();
+        assert_eq!(
+            engine.initialize_privileged_register(0x418800, true),
+            Err(MacroError::InvalidFirmwareRequest(7))
+        );
+        assert_eq!(engine.scratch[0], Some(7));
+        assert_eq!(engine.privileged, [PrivilegedBits::default(); 5]);
     }
     #[test]
     fn independently_assembled_branches_select_masks_and_execute_backward_slots() {
