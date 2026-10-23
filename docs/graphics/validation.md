@@ -3527,3 +3527,23 @@ OpenGL, native Windows D3D12 and native Windows Vulkan, with no failures or skip
 Each native backend also passed the completion-watchdog unit test. These results
 validate a bounded initialization HLE, not execution of Falcon firmware code,
 general privileged register semantics or original-game frames.
+
+
+### MME bitfield replacement and extraction
+
+An independent bit-at-a-time oracle verifies 1,536 deterministic combinations
+across replacement and both extraction/shift forms. Cases include zero/31-bit
+widths, high positions, truncated source/destination spans and old-input reads
+when the result aliases a source. Negative cases reject unready operands,
+nonzero unused fields and unsupported variable shifts of 32, 33 and UINT_MAX.
+The independent assembler corpus executes all three operations in a GPFIFO-driven
+indexed textured draw. Changing its guest argument changes the color mask and
+verified pixels while preserving the existing shader module.
+
+Strict package Clippy and workspace formatting passed. Default GPU/NVIDIA CPU
+suites passed 422 tests (171 device tests separately ignored); no-default GPU
+passed 397 tests. Explicit graphics runs passed 25 scenarios on WSL OpenGL,
+25 on native Windows D3D12 and 25 on native Windows Vulkan, without skips or
+failures. The native completion-watchdog unit test also passed on both backends.
+These are actual device executions of synthetic fixtures; no original-game
+frame or general MME compatibility follows from these results.

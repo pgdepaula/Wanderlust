@@ -1903,3 +1903,24 @@ The independent `privileged-state.asm` uses the pinned envytools assembler,
 including an acknowledgement polling branch and a guest-selected color mask.
 Its 68-byte little-endian binary SHA-256 is
 `ad04cc0f18a5b6fcbf036fae1d8b067002ba11ed1ec80ea80777ca6e823a307d`.
+
+
+### MME bitfield operations
+
+The pinned envytools macro ISA defines EXTRINSRT (replace), EXTRSHL with a
+register extraction position and immediate shift, and EXTRSHL with an immediate
+extraction position and register shift (opcodes 2, 3, 4). Position and width fields
+are unsigned five-bit values. The independent MIT-licensed
+[Maxwell macro reference](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Gpu/Engine/MME/MacroInterpreter.cs)
+corroborates logical extraction, zero-width masks and 32-bit destination
+truncation. Unused fields must be zero. Variable shift operands above 31 remain
+explicitly unsupported; host-language shift-count masking is not presumed to be
+a hardware guarantee.
+
+`bitfield-state.asm` independently assembles all three operations with the pinned
+unmodified envytools tools. The 28-byte binary SHA-256 is
+`2c7e4f1d950e744aabed4b0313cf4f5413e6be9d7bba1314958ff57d007e410e`.
+A separate scalar bit-by-bit oracle validates 1,536 deterministic operand/field
+combinations, including zero widths, high bits and truncated source/destination
+edges. Alias and uninitialized-register tests do not use the production mask
+expression as their expected-value oracle.

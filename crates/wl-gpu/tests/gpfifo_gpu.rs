@@ -220,6 +220,11 @@ fn gpfifo_mme_conditional_branches_and_backward_loop_control_real_pixels() {
 fn gpfifo_mme_privileged_initialization_acknowledges_only_completed_context_writes() {
     mme_raster_state(MmeFixture::Privileged);
 }
+#[test]
+#[ignore = "requires actual GPU; independent MME bitfield program controls raster state"]
+fn gpfifo_mme_bitfield_replace_and_extract_shifts_control_real_pixels() {
+    mme_raster_state(MmeFixture::Bitfields);
+}
 enum MmeFixture {
     ArgumentMask,
     ScratchRead,
@@ -228,6 +233,7 @@ enum MmeFixture {
     ParameterState,
     Branches,
     Privileged,
+    Bitfields,
 }
 fn mme_raster_state(program: MmeFixture) {
     let scratch = matches!(program, MmeFixture::ScratchRead);
@@ -236,6 +242,7 @@ fn mme_raster_state(program: MmeFixture) {
     let parameters = matches!(program, MmeFixture::ParameterState);
     let branches = matches!(program, MmeFixture::Branches);
     let privileged = matches!(program, MmeFixture::Privileged);
+    let bitfields = matches!(program, MmeFixture::Bitfields);
     let (mut data, map, mut words, image) = fixture();
     words.splice(0..0, [0x2001c002, 0x110e]); // Channel NOP on unbound subchannel six.
     let draw = words.split_off(words.len() - 8);
@@ -325,7 +332,12 @@ fn mme_raster_state(program: MmeFixture) {
     }
     // Independent envyas: maddr 0x680; read $r2 0xd1a;
     // exit send (add $r2 0); nop;
-    let code = if privileged {
+    let code = if bitfields {
+        include_str!("fixtures/mme/bitfield-state.words")
+            .split_whitespace()
+            .map(|w| u32::from_str_radix(w, 16).unwrap())
+            .collect()
+    } else if privileged {
         include_str!("fixtures/mme/privileged-state.words")
             .split_whitespace()
             .map(|w| u32::from_str_radix(w, 16).unwrap())

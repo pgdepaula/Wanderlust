@@ -28,6 +28,7 @@ pub enum MacroError {
     MissingFirmwareIdle,
     InvalidFirmwareRequest(u32),
     UnsupportedPrivilegedWrite { address: u32, value: u32, mask: u32 },
+    UnsupportedBitfieldShift(u32),
 }
 
 /// Only known bits are represented; unknown reset values are never invented.
@@ -350,6 +351,40 @@ impl MacroEngine {
                     }
                 }
                 1 => registers[source].wrapping_add(((word as i32) >> 14) as u32),
+                operation @ 2..=4 => {
+                    // EXTRINSRT, EXTRSHL-immediate and EXTRSHL-register share
+                    // unsigned five-bit position/width fields. Unused fields
+                    // must be zero; variable shifts >=32 remain unsupported.
+                    if (operation == 3 && word & 0x003e_0000 != 0)
+                        || (operation == 4 && word & 0xf800_0000 != 0)
+                    {
+                        return Err(MacroError::UnsupportedInstruction(word));
+                    }
+                    let other = ((word >> 14) & 7) as usize;
+                    if !initialized[other] {
+                        return Err(MacroError::UninitializedRegister(other as u8));
+                    }
+                    let source_position = (word >> 17) & 31;
+                    let width = (word >> 22) & 31;
+                    let destination_position = (word >> 27) & 31;
+                    let mask = (1u32 << width) - 1;
+                    let left = registers[source];
+                    let right = registers[other];
+                    if operation == 2 {
+                        (left & !(mask << destination_position))
+                            | (((right >> source_position) & mask) << destination_position)
+                    } else {
+                        if left >= 32 {
+                            return Err(MacroError::UnsupportedBitfieldShift(left));
+                        }
+                        let (extract, shift) = if operation == 3 {
+                            (left, destination_position)
+                        } else {
+                            (source_position, left)
+                        };
+                        ((right >> extract) & mask) << shift
+                    }
+                }
                 5 => {
                     // READ addresses are method WORD offsets, unlike apply's
                     // byte offsets. Reject every other register/read behavior.
@@ -442,9 +477,123 @@ mod streaming_tests {
         }
     }
     #[test]
+    fn independent_bitfield_fixture_preserves_guest_mask_through_all_three_operations() {
+        let words: Vec<u32> = include_str!("../tests/fixtures/mme/bitfield-state.words")
+            .split_whitespace()
+            .map(|w| u32::from_str_radix(w, 16).unwrap())
+            .collect();
+        assert_eq!(
+            words,
+            [
+                0x04004212, 0x310, 0x04009a13, 0x04009a14, 0x01a00021, 0x10c0, 0x11
+            ]
+        );
+        let engine = loaded(&words);
+        for parameter in [0, 1, 0x1111, 0xffff, 0xffff0001, u32::MAX] {
+            assert_eq!(
+                engine.execute(0, parameter),
+                Ok((0x1a00, parameter & 0xffff))
+            );
+        }
+    }
+    #[test]
+    fn bitfield_operations_match_an_independent_scalar_bit_oracle() {
+        // Source B is an explicitly written scratch word. R1 is source A and
+        // R3 is the result. The oracle moves individual bits and never uses
+        // the production extraction/mask expression.
+        let mut engine = loaded(&[0x03400215, 0x11, 0x03400021, 0x18c0, 0x11]);
+        let mut random = 0xa8f137c5u32;
+        for operation in 2..=4 {
+            for sample in 0..512u32 {
+                random = random.wrapping_mul(1664525).wrapping_add(1013904223);
+                let right = random;
+                random = random.rotate_left(13).wrapping_add(0x79b97531);
+                let left = if operation == 2 { random } else { sample % 32 };
+                let width = sample % 32;
+                let source_position = if operation == 3 { 0 } else { (sample / 2) % 32 };
+                let destination_position = if operation == 4 { 0 } else { (sample / 3) % 32 };
+                let word = operation
+                    | 0x8b10
+                    | (source_position << 17)
+                    | (width << 22)
+                    | (destination_position << 27);
+                engine.upload(0x114, 1).unwrap();
+                engine.upload(0x118, word).unwrap();
+                engine.upload(0x3400, right).unwrap();
+                let (input_bit, output_bit) = match operation {
+                    2 => (source_position, destination_position),
+                    3 => (left, destination_position),
+                    _ => (source_position, left),
+                };
+                let mut expected = if operation == 2 { left } else { 0 };
+                for bit in 0..width {
+                    if output_bit + bit >= 32 {
+                        continue;
+                    }
+                    let value = input_bit + bit < 32 && (right >> (input_bit + bit)) & 1 != 0;
+                    let output_mask = 1u32 << (output_bit + bit);
+                    if value {
+                        expected |= output_mask;
+                    } else {
+                        expected &= !output_mask;
+                    }
+                }
+                assert_eq!(
+                    engine.execute(0, left),
+                    Ok((0x3400, expected)),
+                    "operation={operation} sample={sample} word={word:08x}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn bitfields_reject_unknown_shift_behavior_unused_fields_and_unready_sources() {
+        for operation in [3, 4] {
+            let mut engine = loaded(&[
+                0x03400215,
+                operation | 0x8b10 | (1 << 22),
+                0x03400021,
+                0x18c0,
+                0x11,
+            ]);
+            engine.upload(0x3400, u32::MAX).unwrap();
+            for shift in [32, 33, u32::MAX] {
+                assert_eq!(
+                    engine.execute(0, shift),
+                    Err(MacroError::UnsupportedBitfieldShift(shift))
+                );
+            }
+            let reserved = if operation == 3 { 1 << 17 } else { 1 << 27 };
+            let word = operation | 0x8b10 | reserved;
+            engine.upload(0x114, 1).unwrap();
+            engine.upload(0x118, word).unwrap();
+            assert_eq!(
+                engine.execute(0, 0),
+                Err(MacroError::UnsupportedInstruction(word))
+            );
+        }
+        assert_eq!(
+            loaded(&[0x8b12]).execute(0, 0),
+            Err(MacroError::UninitializedRegister(2))
+        );
+        // Source/result aliasing must read both old inputs before assignment.
+        let mut engine = loaded(&[0x03400215, 0x02008912, 0x03400021, 0x8c0, 0x11]);
+        engine.upload(0x3400, 0xa5).unwrap();
+        assert_eq!(engine.execute(0, 0x12345678), Ok((0x3400, 0x123456a5)));
+    }
+    #[test]
     fn privileged_initialization_updates_only_known_masked_bits_before_acknowledgement() {
         let mut engine = MacroEngine::default();
-        for (address, value, mask) in PRIVILEGED_INITIALIZATION {
+        // Literal source-derived requests, independent of the production table.
+        for (address, value, mask) in [
+            (0x418800, 1, 1),
+            (0x419a08, 0, 0x10),
+            (0x419f78, 0, 8),
+            (0x404468, 0x07ffffff, 0x3fffffff),
+            (0x419a04, 1, 1),
+            (0x419a04, 2, 2),
+            (0x418800, 0, 0x01800000),
+        ] {
             request(&mut engine, value, mask);
             assert_eq!(engine.scratch[0], Some(0));
             engine

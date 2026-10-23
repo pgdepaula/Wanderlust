@@ -2365,3 +2365,15 @@ support for alternative privileged raster modes. Unsupported requests fault
 before context mutation or acknowledgement, preserving earlier queued draws
 for explicit framebuffer publication. No additional readback is needed merely
 to acknowledge an admitted context write.
+
+
+### MME bitfield dataflow
+
+EXTRINSRT replaces the selected destination bits of source A with logically
+extracted source-B bits. The two EXTRSHL forms extract source-B bits and shift
+them into a zero-initialized result, using either source A as the extraction
+position or as the destination shift. The zero register, old-input reads before
+aliased assignment, parameter modes, SEND ordering and total instruction budget
+remain shared with the existing interpreter. Width zero produces no inserted
+bits; bits extending outside a 32-bit source or destination are zero/truncated.
+Unused encodings and variable shifts outside 0..31 fail explicitly.
