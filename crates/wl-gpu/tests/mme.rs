@@ -318,3 +318,36 @@ fn assembled_register_alu_chain_preserves_all_bits_through_all_functions() {
         assert_eq!(mme.execute(0, parameter), Ok((0x1a00, parameter)));
     }
 }
+
+#[test]
+fn pending_macro_backend_effect_prevents_register_rebinding_or_ram_replacement() {
+    use wl_gpu::fifo::MethodWrite;
+    let mut engine = Maxwell3d::default();
+    let set = |engine: &mut Maxwell3d, method, value| {
+        engine.apply(MethodWrite {
+            subchannel: 0,
+            method,
+            value,
+        })
+    };
+    for (method, value) in [(0, CLASS), (0x11c, 0), (0x120, 0), (0x114, 0)] {
+        set(&mut engine, method, value).unwrap();
+    }
+    for word in include_str!("fixtures/mme/streaming-state.words").split_whitespace() {
+        set(&mut engine, 0x118, u32::from_str_radix(word, 16).unwrap()).unwrap();
+    }
+    assert_eq!(set(&mut engine, 0x3800, 1), Ok(MethodEffect::WaitIdle));
+    for (method, value) in [
+        (0, 0x902d),
+        (0x114, 0),
+        (0x118, 0x11),
+        (0x3400, 7),
+        (0x3800, 0),
+    ] {
+        assert_eq!(
+            set(&mut engine, method, value),
+            Err(MethodError::Macro(MacroError::ActiveInvocation))
+        );
+    }
+    assert_eq!(engine.bound_class(0), Some(EngineClass::ThreeD));
+}

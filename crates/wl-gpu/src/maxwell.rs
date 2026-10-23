@@ -228,6 +228,7 @@ pub struct Maxwell3d {
     indices: crate::index::IndexRegisters,
     bound: [Option<EngineClass>; 8],
     macros: crate::mme::MacroEngine,
+    active_macro: Option<(u8, crate::mme::Invocation)>,
     cache_policies: [Option<CacheEviction>; 6],
     two_d: TwoDConfiguration,
     auxiliary_raster: AuxiliaryRasterControls,
@@ -267,6 +268,39 @@ pub struct Maxwell3d {
     pub sampler_epoch: u64,
 }
 impl Maxwell3d {
+    /// Resume only after the previously returned backend effect was executed.
+    pub(crate) fn resume_macro(
+        &mut self,
+    ) -> std::result::Result<Option<MethodEffect>, MethodError> {
+        let Some((subchannel, mut invocation)) = self.active_macro.take() else {
+            return Ok(None);
+        };
+        loop {
+            let Some((method, value)) = self
+                .macros
+                .next_output(&mut invocation)
+                .map_err(MethodError::Macro)?
+            else {
+                return Ok(None);
+            };
+            // This delivery only emits the established color mask and WFI.
+            // Never recurse into SET_OBJECT, RAM uploads, or macro launches.
+            if !matches!(method, 0x1a00 | 0x0110) {
+                return Err(MethodError::Macro(
+                    crate::mme::MacroError::UnsupportedOutput(method),
+                ));
+            }
+            let effect = self.apply(MethodWrite {
+                subchannel,
+                method,
+                value,
+            })?;
+            if effect != MethodEffect::State {
+                self.active_macro = Some((subchannel, invocation));
+                return Ok(Some(effect));
+            }
+        }
+    }
     pub fn bindless_texture_constant_slot(&self) -> Option<u8> {
         self.bindless_texture_constant_slot
     }
@@ -321,6 +355,9 @@ impl Maxwell3d {
         }
         if method % 4 != 0 || method > 0x3ffc {
             return Err(MethodError::InvalidMethod(method));
+        }
+        if self.active_macro.is_some() {
+            return Err(MethodError::Macro(crate::mme::MacroError::ActiveInvocation));
         }
         let bad = || MethodError::UnsupportedValue { method, value };
         // NVB06F_NOP is a channel method, independent of subchannel binding.
@@ -383,22 +420,12 @@ impl Maxwell3d {
             return Ok(MethodEffect::State);
         }
         if (0x3800..0x3c00).contains(&method) && method % 8 == 0 {
-            let (target, value) = self
+            let invocation = self
                 .macros
-                .execute((method - 0x3800) / 8, value)
+                .begin((method - 0x3800) / 8, value)
                 .map_err(MethodError::Macro)?;
-            // One state write only. In particular, never consume several draws
-            // and collapse their resource/state snapshots into one effect.
-            if target != 0x1a00 {
-                return Err(MethodError::Macro(
-                    crate::mme::MacroError::UnsupportedOutput(target),
-                ));
-            }
-            return self.apply(MethodWrite {
-                subchannel,
-                method: target,
-                value,
-            });
+            self.active_macro = Some((subchannel, invocation));
+            return Ok(self.resume_macro()?.unwrap_or(MethodEffect::State));
         }
         if let Some(index) = CACHE_POLICY_METHODS.iter().position(|m| *m == method) {
             // POLICY bits 5:4 are preferences. Keep VAF system-memory volatility
@@ -1155,6 +1182,19 @@ pub struct Channel {
     pub(crate) faulted: bool,
 }
 impl Channel {
+    pub(crate) fn resume_macro(&mut self) -> Result<Option<MethodEffect>> {
+        if self.faulted {
+            return Err(invalid("GPU channel fault is latched"));
+        }
+        let result = self
+            .engine
+            .resume_macro()
+            .map_err(|e| crate::Error(e.to_string()));
+        if result.is_err() {
+            self.faulted = true;
+        }
+        result
+    }
     /// Shared FIFO/engine boundary; consumes one LE-decoded word and latches errors.
     /// A returned draw effect still requires backend execution by the caller.
     pub fn push_word(&mut self, word: u32) -> Result<MethodEffect> {

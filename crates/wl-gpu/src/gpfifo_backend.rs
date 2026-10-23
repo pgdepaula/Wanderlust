@@ -80,7 +80,7 @@ impl Renderer {
                         }
                     } // No guest borrow survives a mutable draw or conditional barrier.
                     if let Some(effect) = draw {
-                        self.guest_effect(&channel.engine, effect, map, memory, changes, false)?;
+                        self.channel_effect(channel, effect, map, memory, changes, false)?;
                     }
                     phase = FaultPhase::Fetch;
                 }

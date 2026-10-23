@@ -119,14 +119,9 @@ impl Renderer {
                             | MethodEffect::ConstantWrite { .. }
                             | MethodEffect::WaitIdle
                     ) {
-                        if let Some(frame) = self.guest_effect(
-                            &channel.engine,
-                            effect,
-                            map,
-                            memory,
-                            changes,
-                            synchronous,
-                        )? {
+                        if let Some(frame) =
+                            self.channel_effect(channel, effect, map, memory, changes, synchronous)?
+                        {
                             last = Some(frame);
                         }
                     }
@@ -348,6 +343,27 @@ impl Renderer {
             self.synchronize_target(memory, changes)?;
         }
         Ok(())
+    }
+    pub(crate) fn channel_effect(
+        &mut self,
+        channel: &mut Channel,
+        effect: MethodEffect,
+        map: &AddressMap,
+        memory: &mut impl GuestMemoryWrite,
+        changes: &mut TextureChanges,
+        synchronous: bool,
+    ) -> Result<Option<Frame>> {
+        let mut current = Some(effect);
+        let mut last = None;
+        while let Some(effect) = current {
+            if let Some(frame) =
+                self.guest_effect(&channel.engine, effect, map, memory, changes, synchronous)?
+            {
+                last = Some(frame);
+            }
+            current = channel.resume_macro()?;
+        }
+        Ok(last)
     }
     pub(crate) fn guest_effect(
         &mut self,

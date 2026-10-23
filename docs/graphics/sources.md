@@ -1820,3 +1820,17 @@ nonblocking poll/ready loop when configured. These operations establish host
 queue completion, not guest publication or NVIDIA syncpoint/fence semantics.
 The independent test keeps guest RAM unchanged across WFI and only observes
 pixels after an explicit publication; a fault after WFI does not replay the draw.
+
+
+### Resumable MADDRSEND/state corpus
+
+The pinned envytools macro source defines MADDRSEND as setting the method address,
+sending result bits 17:12, and retaining the result in its destination register.
+Those bits also describe the method increment. The admitted zero-increment subset
+therefore emits data zero; nonzero increments are rejected rather than ignored.
+The independent `streaming-state.asm` fixture, assembled with unmodified pinned
+`envyas -m macro -i`, yields exact words in `streaming-state.words` and binary
+SHA-256 `a2509d11e1585fcc6e66c9ff055c9c84023e2d529200d294b7b42bf6172a7365`.
+Its `0x00110071` instruction emits B197 WFI, not a synthetic syncpoint update.
+CPU tests distinguish individual yields, exit-delay execution and a total 64-step
+budget; GPU tests distinguish resumed color masks and fault-safe prior output.

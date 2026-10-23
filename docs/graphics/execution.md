@@ -224,12 +224,15 @@ RAM-size claims. Instruction storage is owned and allocated on first upload,
 then reused. Invalid pointer/data writes preserve previously uploaded contents.
 
 Entry launch methods `0x3800 + slot*8` execute a bounded straight-line subset:
-32-bit wrapping ADD and signed 18-bit ADD-immediate, MOV, method-address assignment
-and a single SEND. R0 remains zero, R1 receives the launch argument, and other
-registers require prior initialization. EXIT executes its following delay slot.
-Execution preflights at most 64 instructions and exposes one state write only
-after a supported program exits. Currently that write must target `SET_CT_WRITE(0)`
-(`0x1a00`), whose existing raster validation and pipeline identity remain active.
+32-bit wrapping register arithmetic, signed 18-bit ADD-immediate, MOV,
+method-address assignment, SEND and zero-increment MADDRSEND. R0 remains zero,
+R1 receives the launch argument, and other registers require prior initialization.
+EXIT executes its following delay slot. A resumable invocation executes at most
+64 instructions in total across all yields. Emissions currently target only
+`SET_CT_WRITE(0)` (`0x1a00`) or canonical `WAIT_FOR_IDLE` (`0x0110=0`). The backend
+executes each effect before resuming the invocation; state/register writes and
+reads cannot run ahead of an earlier wait. Existing raster validation and
+pipeline identity remain active.
 An independently assembled macro changes a real textured draw from red-only to
 RGBA writes by changing its guest argument, without recompiling the guest shaders.
 
@@ -241,11 +244,13 @@ behavior is inferred. A separate independently assembled scratch-read macro
 changes real GPU color masks without changing the shader binaries. Scratch
 storage is distinct from the unsupported shadow-RAM tracking/replay modes.
 
-Branches, other register reads, parameter fetches, method-address increments, multiple
-emissions, macro-generated draws and general shadow/replay behavior remain
-unsupported. These fail explicitly instead of collapsing several draws into one
-effect or executing a valid prefix with unverified ordering. Ordinary GPU channel
-fault/publication semantics remain unchanged.
+Branches, other register reads, parameter fetches, nonzero method-address increments,
+macro-generated draws and general shadow/replay behavior remain unsupported.
+Multiple supported state/wait emissions execute in order. A later fault does not
+roll back earlier accepted effects or replay prior GPU work. The pure
+`MacroEngine::execute` compatibility helper still preflights exactly one emission,
+using the same interpreter core; it is not the production dispatch path.
+Ordinary GPU channel fault/publication semantics remain unchanged.
 
 Pool addressing is 40-bit, descriptors are 32 bytes, limits are inclusive and
 index arithmetic is checked before mapped memory reads. Pool bases must be 32-byte
@@ -2173,14 +2178,14 @@ fetching, provide missing inputs or extend built-in shader support.
 
 ### MME register arithmetic
 
-The bounded, single-output MME interpreter supports register ADD, SUB, XOR, OR,
+The bounded MME interpreter supports register ADD, SUB, XOR, OR,
 AND, ANDN and NAND. ADD/SUB wrap at 32 bits; ANDN computes left AND inverted right,
 and NAND inverts the complete 32-bit intersection. R0 remains zero, nonzero source
 registers must be initialized, and reserved instruction bits are rejected.
 ADC/SBB are not accepted: no incoming carry state is synthesized. Existing
-instruction/step budgets, exit delay slot, scratch-only reads and one validated
-state emission remain unchanged. This does not introduce branches, parameter
-waits, multiple emissions, privileged register operations or macro-generated draws.
+instruction/step budgets, exit delay slot and scratch-only reads remain enforced.
+Emissions are restricted to validated state writes and waits; this does not
+introduce branches, parameter waits, privileged registers or macro-generated draws.
 
 An independently assembled chain exercises all six new operations before emitting
 a B197 color mask. Actual indexed GPFIFO draws validate red-only versus full-channel
@@ -2269,3 +2274,20 @@ output remains resident and explicitly publishable. A subsequent channel fault
 cannot undo that earlier work or require replay. The synchronous compatibility
 path retains its already returned frame across a trailing WFI. This direct method
 support does not yet implement resumable MME emissions or general macro execution.
+
+
+### Resumable MME state emissions
+
+An invocation owns only fixed-size PC/register/readiness state and references the
+existing bounded uploaded RAM through the owning engine. No guest command borrow
+survives a backend yield. The consumer executes the returned effect, resumes the
+same invocation, and only then acquires the unread FIFO suffix. Guest register
+rebinding, code upload or nested macro launch cannot replace an invocation while
+its backend effect is outstanding. The step budget is not reset on resumption.
+
+MADDRSEND with zero method increment emits zero at the selected method, matching
+the independently assembled WFI instruction. Nonzero increments remain rejected.
+A synthetic macro emits a color-mask write, a real WFI and another color-mask
+write; its guest argument changes verified texture pixels. Fault injection after
+WFI preserves an earlier real draw and permits publication without draw replay.
+Firmware mailboxes, parameter waits and macro draw emissions remain unsupported.

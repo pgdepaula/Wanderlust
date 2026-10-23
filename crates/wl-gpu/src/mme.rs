@@ -1,4 +1,4 @@
-//! Bounded Fermi MME uploads and single-write, straight-line state macros.
+//! Bounded Fermi MME uploads and resumable straight-line state emissions.
 //! ISA reference: envytools f102b82381f3f11cee113d16374c87091db039d9.
 //! These are implementation budgets, not claims about every Maxwell RAM size.
 pub const CODE_WORDS: usize = 2048;
@@ -21,6 +21,19 @@ pub enum MacroError {
     UnsupportedOutput(u16),
     UnsupportedRead(u32),
     UninitializedScratch(u16),
+    ActiveInvocation,
+}
+
+/// Resumable straight-line state. No guest borrow or GPU resource is retained.
+#[derive(Debug)]
+pub(crate) struct Invocation {
+    pc: usize,
+    steps: usize,
+    registers: [u32; 8],
+    initialized: [bool; 8],
+    address: Option<u16>,
+    delay_slot: bool,
+    finished: bool,
 }
 
 #[derive(Debug)]
@@ -93,6 +106,17 @@ impl MacroEngine {
     /// Reads are limited to explicitly written scratch registers. No branch,
     /// parameter wait, ADC, or draw emission is inferred.
     pub fn execute(&self, slot: u16, parameter: u32) -> Result<(u16, u32), MacroError> {
+        let mut invocation = self.begin(slot, parameter)?;
+        let mut output = None;
+        while let Some(emission) = self.next_output(&mut invocation)? {
+            if output.is_some() {
+                return Err(MacroError::UnsupportedEmissionCount);
+            }
+            output = Some(emission);
+        }
+        output.ok_or(MacroError::UnsupportedEmissionCount)
+    }
+    pub(crate) fn begin(&self, slot: u16, parameter: u32) -> Result<Invocation, MacroError> {
         let start = self
             .entries
             .get(slot as usize)
@@ -104,10 +128,32 @@ impl MacroEngine {
         initialized[0] = true;
         initialized[1] = true;
         registers[1] = parameter;
-        let mut address = None;
-        let mut output = None;
-        let mut delay_slot = false;
-        for pc in start..start + MAX_STEPS {
+        Ok(Invocation {
+            pc: start,
+            steps: 0,
+            registers,
+            initialized,
+            address: None,
+            delay_slot: false,
+            finished: false,
+        })
+    }
+    /// Yield after each emission. The caller must execute that method before
+    /// resuming, so scratch reads and later state cannot precede earlier effects.
+    pub(crate) fn next_output(
+        &self,
+        invocation: &mut Invocation,
+    ) -> Result<Option<(u16, u32)>, MacroError> {
+        while !invocation.finished {
+            if invocation.steps == MAX_STEPS {
+                return Err(MacroError::MissingExit);
+            }
+            let pc = invocation.pc;
+            let delay_slot = invocation.delay_slot;
+            let registers = &mut invocation.registers;
+            let initialized = &mut invocation.initialized;
+            let address = &mut invocation.address;
+            let mut output = None;
             let word = self
                 .code
                 .get(pc)
@@ -158,16 +204,19 @@ impl MacroEngine {
             };
             match (word >> 4) & 7 {
                 1 => {} // MOV, including the independently assembled NOP.
-                2 => {
+                2 | 7 => {
                     if result & 0x3f000 != 0 {
                         return Err(MacroError::UnsupportedIncrement);
                     }
-                    address = Some(((result & 0xfff) * 4) as u16);
+                    let method = ((result & 0xfff) * 4) as u16;
+                    *address = Some(method);
+                    if (word >> 4) & 7 == 7 {
+                        // MADDRSEND emits bits 17:12 as data. The bounded
+                        // zero-increment subset therefore emits zero only.
+                        output = Some((method, (result >> 12) & 63));
+                    }
                 }
                 4 => {
-                    if output.is_some() {
-                        return Err(MacroError::UnsupportedEmissionCount);
-                    }
                     output = Some((address.ok_or(MacroError::MissingMethodAddress)?, result));
                 }
                 _ => return Err(MacroError::UnsupportedInstruction(word)),
@@ -178,10 +227,86 @@ impl MacroEngine {
                 initialized[destination] = true;
             }
             if delay_slot {
-                return output.ok_or(MacroError::UnsupportedEmissionCount);
+                invocation.finished = true;
             }
-            delay_slot = exit;
+            invocation.delay_slot = exit;
+            invocation.pc += 1;
+            invocation.steps += 1;
+            if output.is_some() {
+                return Ok(output);
+            }
         }
-        Err(MacroError::MissingExit)
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+    fn loaded(words: &[u32]) -> MacroEngine {
+        let mut engine = MacroEngine::default();
+        engine.upload(0x11c, 0).unwrap();
+        engine.upload(0x120, 0).unwrap();
+        engine.upload(0x114, 0).unwrap();
+        for &word in words {
+            engine.upload(0x118, word).unwrap();
+        }
+        engine
+    }
+    #[test]
+    fn independent_maddrsend_fixture_yields_each_output_and_finishes_delay_slot() {
+        let words: Vec<u32> = include_str!("../tests/fixtures/mme/streaming-state.words")
+            .split_whitespace()
+            .map(|w| u32::from_str_radix(w, 16).unwrap())
+            .collect();
+        assert_eq!(
+            words,
+            [
+                0x01a00021, 0x04444041, 0x00110071, 0x01a00021, 0x000008c0, 0x00000011
+            ]
+        );
+        let engine = loaded(&words);
+        let mut run = engine.begin(0, 1).unwrap();
+        assert_eq!(engine.next_output(&mut run), Ok(Some((0x1a00, 0x1111))));
+        assert_eq!(engine.next_output(&mut run), Ok(Some((0x110, 0))));
+        assert_eq!(engine.next_output(&mut run), Ok(Some((0x1a00, 1))));
+        assert!(!run.finished); // EXIT's NOP still must execute.
+        assert_eq!(engine.next_output(&mut run), Ok(None));
+        assert!(run.finished);
+        assert_eq!(engine.next_output(&mut run), Ok(None));
+        assert_eq!(
+            engine.execute(0, 1),
+            Err(MacroError::UnsupportedEmissionCount)
+        );
+    }
+    #[test]
+    fn resumption_does_not_reset_the_instruction_budget() {
+        let mut words = vec![0x01a00021];
+        words.extend([0x840; 63]);
+        let engine = loaded(&words);
+        let mut run = engine.begin(0, 7).unwrap();
+        for _ in 0..63 {
+            assert_eq!(engine.next_output(&mut run), Ok(Some((0x1a00, 7))));
+        }
+        assert_eq!(engine.next_output(&mut run), Err(MacroError::MissingExit));
+    }
+    #[test]
+    fn later_scratch_read_occurs_only_after_the_earlier_emission_is_returned() {
+        let mut engine = loaded(&[0x01a00021, 0x840, 0x03468215, 0x10c0, 0x11]);
+        let mut run = engine.begin(0, 1).unwrap();
+        assert_eq!(engine.next_output(&mut run), Ok(Some((0x1a00, 1))));
+        engine.upload(0x3468, 0x1111).unwrap();
+        assert_eq!(engine.next_output(&mut run), Ok(Some((0x1a00, 0x1111))));
+        assert_eq!(engine.next_output(&mut run), Ok(None));
+    }
+    #[test]
+    fn nonzero_maddrsend_increment_is_explicitly_rejected() {
+        // envyas: maddrsend (add $r1 0); exit; nop;
+        let engine = loaded(&[0x871, 0x91, 0x11]);
+        let mut run = engine.begin(0, 0x1044).unwrap();
+        assert_eq!(
+            engine.next_output(&mut run),
+            Err(MacroError::UnsupportedIncrement)
+        );
     }
 }
