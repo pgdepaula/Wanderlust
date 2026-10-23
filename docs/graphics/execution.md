@@ -2377,3 +2377,19 @@ aliased assignment, parameter modes, SEND ordering and total instruction budget
 remain shared with the existing interpreter. Width zero produces no inserted
 bits; bits extending outside a 32-bit source or destination are zero/truncated.
 Unused encodings and variable shifts outside 0..31 fail explicitly.
+
+
+### Hierarchical Z/stencil controls
+
+`0x1968` and `0x196c` accept only bits 0 and 4. `0x1590` retains a six-bit region
+identifier. `0x0dd8` accepts comparison 0..7, eight-bit stencil reference and mask,
+with reserved and no-invalidate/force-match bits zero. It may be emitted by the
+bounded MME interpreter. Invalid fields preserve the previous control state.
+
+These are hierarchy optimization controls. The backend continues performing
+complete supported fragment depth tests/writes; a hierarchy hint cannot enable
+functional depth/stencil tests or change their comparisons. Functional stencil
+enabling remains unsupported. No ZCULL auxiliary storage, statistics reports,
+flush/sync operation or reconstruction is implied. Unsupported ZCULL sync and
+report methods still fault. The optimization controls do not specialize shaders
+or render pipelines.

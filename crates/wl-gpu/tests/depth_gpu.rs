@@ -287,6 +287,20 @@ fn driver_depth_comparisons_write_masks_and_order() {
             d.write_backing(b, RT as u64, &bg, &mut mem(&mut data))
                 .unwrap();
             let mut w = setup.clone();
+            // Independent hierarchy hints must preserve the complete fragment
+            // comparison/write oracle for every supported depth function.
+            let controls = [0, 1, 0x10, 0x11];
+            let draw_start = w.len() - 8;
+            w.splice(
+                draw_start..draw_start,
+                [
+                    0x2002065a,
+                    controls[f % 4],
+                    controls[(f + 1) % 4],
+                    0x20010564,
+                    if f % 2 == 0 { 0 } else { 0x3f },
+                ],
+            );
             depth_setup(&mut w, 0x200 + f as u32, write);
             let report = submit(&mut d, c, b, &mut data, &w);
             assert!(report.fault.is_none(), "{:?}", report.fault);

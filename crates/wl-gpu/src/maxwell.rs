@@ -25,6 +25,13 @@ pub struct TwoDConfiguration {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct AuxiliaryRasterControls {
     pub zcull_statistics: Option<bool>,
+    /// Hierarchical-test permissions (depth, stencil), not fragment-test enables.
+    pub zcull_tests: Option<(bool, bool)>,
+    /// Hierarchical bounds hints (minimum unbounded, maximum unbounded).
+    pub zcull_unbounded: Option<(bool, bool)>,
+    pub zcull_region: Option<u8>,
+    /// Packed SFUNC/SREF/SMASK; force-match/no-invalidate remain unsupported.
+    pub zcull_stencil_criterion: Option<u32>,
     pub aliased_line_width: Option<bool>,
     pub conditional_constant_load: Option<bool>,
     pub pixel_sample_mask_usage: Option<u8>,
@@ -310,7 +317,7 @@ impl Maxwell3d {
             }
             // Only the established color mask, scratch state, NOP and WFI are emitted.
             // Never recurse into SET_OBJECT, RAM uploads, or macro launches.
-            if !matches!(method, 0x1a00 | 0x0100 | 0x0110 | 0x3400..=0x37fc) {
+            if !matches!(method, 0x0dd8 | 0x1a00 | 0x0100 | 0x0110 | 0x3400..=0x37fc) {
                 return Err(MethodError::Macro(
                     crate::mme::MacroError::UnsupportedOutput(method),
                 ));
@@ -487,6 +494,32 @@ impl Maxwell3d {
             return Ok(MethodEffect::State);
         }
         match method {
+            0x0dd8 => {
+                if value & 0x0000_ff00 != 0 || value & 0xff > 7 {
+                    return Err(bad());
+                }
+                self.auxiliary_raster.zcull_stencil_criterion = Some(value);
+            }
+            0x1590 => {
+                if value > 0x3f {
+                    return Err(bad());
+                }
+                self.auxiliary_raster.zcull_region = Some(value as u8);
+            }
+            0x1968 | 0x196c => {
+                if value & !0x11 != 0 {
+                    return Err(bad());
+                }
+                // Keep the optimization controls while performing complete
+                // per-fragment host tests. No ZCULL metadata or reports are
+                // synthesized, and these hints cannot enable stencil/depth.
+                let bits = Some((value & 1 != 0, value & 0x10 != 0));
+                if method == 0x1968 {
+                    self.auxiliary_raster.zcull_tests = bits;
+                } else {
+                    self.auxiliary_raster.zcull_unbounded = bits;
+                }
+            }
             0x0110 => {
                 if value != 0 {
                     return Err(bad());

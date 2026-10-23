@@ -225,6 +225,11 @@ fn gpfifo_mme_privileged_initialization_acknowledges_only_completed_context_writ
 fn gpfifo_mme_bitfield_replace_and_extract_shifts_control_real_pixels() {
     mme_raster_state(MmeFixture::Bitfields);
 }
+#[test]
+#[ignore = "requires actual GPU; MME hierarchy hints must not enable fragment stencil tests"]
+fn gpfifo_mme_zcull_criterion_preserves_real_pixels_and_shader_reuse() {
+    mme_raster_state(MmeFixture::ZCullCriterion);
+}
 enum MmeFixture {
     ArgumentMask,
     ScratchRead,
@@ -234,6 +239,7 @@ enum MmeFixture {
     Branches,
     Privileged,
     Bitfields,
+    ZCullCriterion,
 }
 fn mme_raster_state(program: MmeFixture) {
     let scratch = matches!(program, MmeFixture::ScratchRead);
@@ -243,6 +249,7 @@ fn mme_raster_state(program: MmeFixture) {
     let branches = matches!(program, MmeFixture::Branches);
     let privileged = matches!(program, MmeFixture::Privileged);
     let bitfields = matches!(program, MmeFixture::Bitfields);
+    let zcull_criterion = matches!(program, MmeFixture::ZCullCriterion);
     let (mut data, map, mut words, image) = fixture();
     words.splice(0..0, [0x2001c002, 0x110e]); // Channel NOP on unbound subchannel six.
     let draw = words.split_off(words.len() - 8);
@@ -255,6 +262,10 @@ fn mme_raster_state(program: MmeFixture) {
     method(&mut words, 0x2608, 2);
     method(&mut words, 0x1220, 5);
     method(&mut words, 0x1450, 0x00800008);
+    // Literal contiguous SET_ZCULL / SET_ZCULL_BOUNDS packet. Neither enables
+    // a fragment depth/stencil test or fabricates hierarchical metadata.
+    words.extend_from_slice(&[0x2002065a, 0x11, 0]);
+    method(&mut words, 0x1590, 0);
 
     for (method_id, value) in [
         (0xf8c, 0),
@@ -332,7 +343,11 @@ fn mme_raster_state(program: MmeFixture) {
     }
     // Independent envyas: maddr 0x680; read $r2 0xd1a;
     // exit send (add $r2 0); nop;
-    let code = if bitfields {
+    let code = if zcull_criterion {
+        // envyas: maddr 0x376; send (add $r0 5); maddr 0x680;
+        // exit send (add $r1 0); nop;
+        vec![0x00dd8021, 0x14041, 0x01a00021, 0x8c0, 0x11]
+    } else if bitfields {
         include_str!("fixtures/mme/bitfield-state.words")
             .split_whitespace()
             .map(|w| u32::from_str_radix(w, 16).unwrap())

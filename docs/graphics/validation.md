@@ -3547,3 +3547,29 @@ passed 397 tests. Explicit graphics runs passed 25 scenarios on WSL OpenGL,
 failures. The native completion-watchdog unit test also passed on both backends.
 These are actual device executions of synthetic fixtures; no original-game
 frame or general MME compatibility follows from these results.
+
+
+### ZCULL configuration with complete fragment tests
+
+The literal incrementing B06F packet `[2002065a, 11, 0]` independently selects
+`SET_ZCULL` and `SET_ZCULL_BOUNDS`. CPU tests exercise all four depth/stencil and
+min/max flag combinations, valid six-bit region IDs, eight stencil comparisons,
+asymmetric stencil reference/mask bytes, channel isolation, invalid bits,
+unaligned methods and preservation of prior state on failure. ZCULL sync,
+statistics reports and functional stencil activation remain explicit failures.
+
+Real indexed textured GPFIFO draws include these hierarchy controls; a separate
+assembled macro emits the criterion and preserves independently checked pixels.
+The depth comparison suite changes hierarchy flags and enabled/disabled region
+selection while exercising every supported fragment comparison with depth
+writes on/off. Its independent color/depth oracle must remain unchanged.
+The full existing depth suite also covers Z16/ZF32 transfers, aliases, CPU patches,
+publication retry, clipping and overlapping blended geometry.
+
+Strict Clippy and formatting passed. Default GPU/NVIDIA CPU suites passed 423
+tests (172 device tests separately ignored); no-default GPU passed 398 tests.
+Explicit graphics execution passed 37 scenarios on each of WSL OpenGL, native
+Windows D3D12 and native Windows Vulkan, with no skips/failures. The native
+completion-watchdog unit also passed on each backend. Retained hierarchy controls
+do not imply auxiliary ZCULL memory, query reports or stencil rasterization.
+No original-game frames are established by these synthetic tests.

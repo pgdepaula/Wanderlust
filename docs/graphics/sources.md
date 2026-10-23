@@ -1924,3 +1924,23 @@ A separate scalar bit-by-bit oracle validates 1,536 deterministic operand/field
 combinations, including zero widths, high bits and truncated source/destination
 edges. Alias and uninitialized-register tests do not use the production mask
 expression as their expected-value oracle.
+
+
+### Hierarchical-culling configuration without metadata emulation
+
+Pinned NVIDIA `clb197.h` defines `SET_ZCULL` at `0x1968` with independent depth
+bit 0 and stencil bit 4; `SET_ZCULL_BOUNDS` at `0x196c` with unbounded-minimum bit 0
+and unbounded-maximum bit 4; and `SET_ACTIVE_ZCULL_REGION` at `0x1590` with six-bit
+ID. `SET_ZCULL_CRITERION` at `0x0dd8` defines SFUNC values 0..7, SREF in 23:16,
+SMASK in 31:24, and separate no-invalidate/force-match flags. Only zero flags are
+admitted by this implementation.
+
+The pinned Mesa `nvk_cmd_draw.c` initializes these controls (lines 508..515)
+separately from optional ZCULL auxiliary-plane allocation and region activation
+(lines 1496..1593). `nvc0_screen.c` independently uses region `0x3f` to disable
+hierarchical culling. These controls do not replace depth comparison, depth
+write-enable or functional stencil state. Wanderlust retains them while doing
+complete per-fragment host tests, without creating a hierarchy or synthesizing
+ZCULL statistics/memory. The pinned deko3d `state.mme` independently emits the
+stencil criterion from a cached scratch value; the admitted macro output runs
+through the same register validation as a direct method.

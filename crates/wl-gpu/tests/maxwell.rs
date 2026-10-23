@@ -748,3 +748,83 @@ fn b197_wait_for_idle_is_an_execution_effect_not_an_engine_reset() {
         .is_err()
     );
 }
+
+#[test]
+fn zcull_hints_preserve_fragment_tests_and_validate_literal_packet_fields() {
+    let mut channel = Channel::default();
+    // Independent literal FIFO packet: bind MAXWELL_B, then consecutive
+    // byte offsets 1968 and 196c (word index65a), exactly two arguments.
+    for word in [0x20010000, 0xb197, 0x2002065a, 0x11, 0] {
+        assert_eq!(channel.push_word(word).unwrap(), MethodEffect::State);
+    }
+    channel.finish().unwrap();
+    let controls = channel.engine.auxiliary_raster_controls();
+    assert_eq!(controls.zcull_tests, Some((true, true)));
+    assert_eq!(controls.zcull_unbounded, Some((false, false)));
+    assert_eq!(controls.zcull_statistics, None);
+    for value in [0, 1, 0x10, 0x11] {
+        for method in [0x1968, 0x196c] {
+            channel.engine.apply(write(method, value)).unwrap();
+        }
+        let controls = channel.engine.auxiliary_raster_controls();
+        let expected = Some((value & 1 != 0, value & 0x10 != 0));
+        assert_eq!(controls.zcull_tests, expected);
+        assert_eq!(controls.zcull_unbounded, expected);
+    }
+    let before = channel.engine.auxiliary_raster_controls();
+    for method in [0x1968, 0x196c] {
+        for value in [2, 4, 0x20, 0x100, u32::MAX] {
+            assert!(channel.engine.apply(write(method, value)).is_err());
+            assert_eq!(channel.engine.auxiliary_raster_controls(), before);
+        }
+    }
+    for (method, value) in [
+        (0x1969, 0),
+        (0x196d, 0),
+        (0x1978, 0),
+        (0x1b0c, 0),
+        (0x1380, 1),
+    ] {
+        assert!(channel.engine.apply(write(method, value)).is_err());
+        assert_eq!(channel.engine.auxiliary_raster_controls(), before);
+    }
+    assert_eq!(
+        Maxwell3d::default().auxiliary_raster_controls().zcull_tests,
+        None
+    );
+    for region in [0, 1, 7, 0x3f] {
+        channel.engine.apply(write(0x1590, region)).unwrap();
+        assert_eq!(
+            channel.engine.auxiliary_raster_controls().zcull_region,
+            Some(region as u8)
+        );
+    }
+    for region in [0x40, 0x100, u32::MAX] {
+        assert!(channel.engine.apply(write(0x1590, region)).is_err());
+        assert_eq!(
+            channel.engine.auxiliary_raster_controls().zcull_region,
+            Some(0x3f)
+        );
+    }
+    for comparison in 0..8 {
+        let value = 0xa7850000 | comparison;
+        channel.engine.apply(write(0xdd8, value)).unwrap();
+        assert_eq!(
+            channel
+                .engine
+                .auxiliary_raster_controls()
+                .zcull_stencil_criterion,
+            Some(value)
+        );
+    }
+    for value in [8, 0x80, 0x100, 0x200, 0x400, u32::MAX] {
+        assert!(channel.engine.apply(write(0xdd8, value)).is_err());
+        assert_eq!(
+            channel
+                .engine
+                .auxiliary_raster_controls()
+                .zcull_stencil_criterion,
+            Some(0xa7850007)
+        );
+    }
+}
