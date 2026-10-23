@@ -239,6 +239,8 @@ pub struct Maxwell3d {
     cache_policies: [Option<CacheEviction>; 6],
     two_d: TwoDConfiguration,
     auxiliary_raster: AuxiliaryRasterControls,
+    instrumentation_header: Option<u32>,
+    instrumentation_data: Option<u32>,
     bindless_texture_constant_slot: Option<u8>,
     vertex_id_uses_array_start: Option<bool>,
     provoking_last: Option<bool>,
@@ -283,6 +285,10 @@ struct ActiveMacro {
     idle_completed: bool,
 }
 impl Maxwell3d {
+    /// Retained source-verified initialization metadata, not profiling results.
+    pub fn instrumentation_initialization(&self) -> (Option<u32>, Option<u32>) {
+        (self.instrumentation_header, self.instrumentation_data)
+    }
     /// Resume only after the previously returned backend effect was executed.
     pub(crate) fn resume_macro(
         &mut self,
@@ -494,6 +500,24 @@ impl Maxwell3d {
             return Ok(MethodEffect::State);
         }
         match method {
+            0x0150 => {
+                // Only the deko3d baseline initialization pair is admitted.
+                // Unknown instrumentation protocols remain explicit errors.
+                if value != 0x49000000 {
+                    return Err(bad());
+                }
+                self.instrumentation_header = Some(value);
+                self.instrumentation_data = None;
+            }
+            0x0154 => {
+                if self.instrumentation_header != Some(0x49000000)
+                    || self.instrumentation_data.is_some()
+                    || value != 0x49000001
+                {
+                    return Err(bad());
+                }
+                self.instrumentation_data = Some(value);
+            }
             0x0dd8 => {
                 if value & 0x0000_ff00 != 0 || value & 0xff > 7 {
                     return Err(bad());

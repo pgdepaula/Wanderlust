@@ -3573,3 +3573,20 @@ Windows D3D12 and native Windows Vulkan, with no skips/failures. The native
 completion-watchdog unit also passed on each backend. Retained hierarchy controls
 do not imply auxiliary ZCULL memory, query reports or stencil rasterization.
 No original-game frames are established by these synthetic tests.
+
+
+### Ordered instrumentation initialization metadata
+
+Literal FIFO packets verify HEADER/DATA byte offsets, exact payloads, retained
+per-context values, reinitialization, and rejection of missing headers, duplicate
+DATA, unknown payloads and unaligned methods without changing earlier metadata.
+The existing indexed textured GPFIFO device fixtures include the exact pair and
+still verify asymmetric color masks, coherent publication and shader reuse.
+No profiling result or instrumentation completion is synthesized.
+
+Strict Clippy and formatting passed. GPU/NVIDIA CPU suites passed 424 default
+tests (172 device tests separately ignored); GPU no-default passed 399 tests.
+Explicit graphics runs passed 37 scenarios on each of WSL OpenGL, native Windows
+D3D12 and native Windows Vulkan, with no skips/failures. Each native backend also
+passed its completion-watchdog unit test. These results validate only the stated
+initialization subset, not arbitrary instrumentation packet interpretation.

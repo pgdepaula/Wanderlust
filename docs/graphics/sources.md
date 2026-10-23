@@ -1944,3 +1944,14 @@ complete per-fragment host tests, without creating a hierarchy or synthesizing
 ZCULL statistics/memory. The pinned deko3d `state.mme` independently emits the
 stencil criterion from a cached scratch value; the admitted macro output runs
 through the same register validation as a direct method.
+
+
+### Instrumentation initialization fields
+
+NVIDIA `clb197.h` at pinned revision `9fdf5c4` defines full-u32 fields for
+`SET_INSTRUMENTATION_METHOD_HEADER` (`0x0150`) and DATA (`0x0154`). The pinned
+deko3d `gpu_3d_base.cpp` writes `0x49000000` then `0x49000001` during engine
+initialization. Wanderlust admits and retains only this exact ordered pair.
+The numeric payload is opaque; no meaning of other packets is inferred from
+its prefix. No instrumented-method execution, profiler, trace producer, timing
+result or instrumentation completion event is implemented.

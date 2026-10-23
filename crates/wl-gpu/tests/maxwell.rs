@@ -828,3 +828,40 @@ fn zcull_hints_preserve_fragment_tests_and_validate_literal_packet_fields() {
         );
     }
 }
+
+#[test]
+fn instrumentation_initialization_is_ordered_bounded_and_channel_local() {
+    let mut engine = Maxwell3d::default();
+    engine.apply(write(0, CLASS)).unwrap();
+    assert_eq!(engine.instrumentation_initialization(), (None, None));
+    assert!(engine.apply(write(0x154, 0x49000001)).is_err());
+    assert_eq!(engine.instrumentation_initialization(), (None, None));
+    // Literal FIFO sequence checks byte-vs-word method addressing.
+    let mut channel = Channel::default();
+    for word in [0x20010000, CLASS, 0x20020054, 0x49000000, 0x49000001] {
+        assert_eq!(channel.push_word(word).unwrap(), MethodEffect::State);
+    }
+    channel.finish().unwrap();
+    let expected = (Some(0x49000000), Some(0x49000001));
+    assert_eq!(channel.engine.instrumentation_initialization(), expected);
+    for (method, value) in [
+        (0x150, 0),
+        (0x150, 0x49000001),
+        (0x154, 0),
+        (0x154, 0x49000001),
+        (0x151, 0x49000000),
+    ] {
+        assert!(channel.engine.apply(write(method, value)).is_err());
+        assert_eq!(channel.engine.instrumentation_initialization(), expected);
+    }
+    channel.engine.apply(write(0x150, 0x49000000)).unwrap();
+    assert_eq!(
+        channel.engine.instrumentation_initialization(),
+        (Some(0x49000000), None)
+    );
+    channel.engine.apply(write(0x154, 0x49000001)).unwrap();
+    assert_eq!(
+        Maxwell3d::default().instrumentation_initialization(),
+        (None, None)
+    );
+}

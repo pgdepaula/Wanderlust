@@ -2393,3 +2393,15 @@ enabling remains unsupported. No ZCULL auxiliary storage, statistics reports,
 flush/sync operation or reconstruction is implied. Unsupported ZCULL sync and
 report methods still fault. The optimization controls do not specialize shaders
 or render pipelines.
+
+
+### Retained instrumentation initialization
+
+The exact source-verified header/data pair `49000000/49000001` (hexadecimal)
+is retained per B197 context. HEADER resets the previously retained DATA; DATA
+requires the admitted HEADER and can be supplied once. Different payloads,
+DATA without HEADER, or additional DATA words remain unsupported. The fields
+persist across ordinary channel submissions without sharing another channel's
+state. They do not issue host work, create guest-visible profiling results or
+specialize a render pipeline. This is initialization-field support, not general
+instrumentation protocol execution.

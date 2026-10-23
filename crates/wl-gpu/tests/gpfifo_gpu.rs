@@ -266,6 +266,8 @@ fn mme_raster_state(program: MmeFixture) {
     // a fragment depth/stencil test or fabricates hierarchical metadata.
     words.extend_from_slice(&[0x2002065a, 0x11, 0]);
     method(&mut words, 0x1590, 0);
+    // NVIDIA's two full-u32 fields, with deko3d's exact initialization pair.
+    words.extend_from_slice(&[0x20020054, 0x49000000, 0x49000001]);
 
     for (method_id, value) in [
         (0xf8c, 0),
