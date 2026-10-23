@@ -3474,3 +3474,29 @@ Windows D3D12 and native Windows Vulkan (21 device executions, zero skips in
 explicit runs). Strict package Clippy and workspace formatting passed. This
 adds a source-verified query subset; it does not claim that an original game
 has already exercised this new request.
+
+
+### Bounded MME branch execution
+
+The independently assembled branch corpus verifies forward ANNUL and backward
+ordinary branches, exact register conditions, conditional EXIT, signed targets
+and delay-slot execution. CPU cases retain delayed targets across parameter
+waits and SEND yields; reject unknown fields, unready registers, missing uploads
+and control flow in delay slots; and enforce one total 64-instruction budget.
+
+The GPFIFO device fixture chooses red-only versus full color writes from guest
+macro arguments, executes a backward loop, and checks asymmetric indexed texture
+pixels without creating another shader module. Fault scenarios issue a real WFI
+after an earlier draw, then hit an infinite loop or an invalid delay-slot branch.
+They check that guest RAM remains unpublished, retry cannot replay the draw, and
+explicit publication still produces the independent expected image.
+
+Strict package Clippy and workspace formatting passed. The default GPU/NVIDIA
+CPU suites passed 417 tests; 168 device tests remained separately ignored there.
+The no-default GPU suite passed 392 tests. Explicit device runs passed 22 graphics
+scenarios on WSL OpenGL, 22 on native Windows D3D12, and 22 on native Windows
+Vulkan, with no skips or failures. Each Windows run additionally passed the
+completion-watchdog unit test. Windows tests were executed as native processes
+with verified executable hashes and recorded exit status, not only compiled.
+These are synthetic conformance workloads; they do not establish original-game
+firmware handling, submitted draws, display output or frames.

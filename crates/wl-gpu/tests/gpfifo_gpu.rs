@@ -210,18 +210,25 @@ fn gpfifo_resumable_mme_state_and_maddrsend_control_real_pixels() {
 fn gpfifo_mme_parameters_and_incremented_scratch_writes_control_pixels() {
     mme_raster_state(MmeFixture::ParameterState);
 }
+#[test]
+#[ignore = "requires actual GPU; assembled MME branches choose the raster mask"]
+fn gpfifo_mme_conditional_branches_and_backward_loop_control_real_pixels() {
+    mme_raster_state(MmeFixture::Branches);
+}
 enum MmeFixture {
     ArgumentMask,
     ScratchRead,
     RegisterAlu,
     StreamingState,
     ParameterState,
+    Branches,
 }
 fn mme_raster_state(program: MmeFixture) {
     let scratch = matches!(program, MmeFixture::ScratchRead);
     let alu = matches!(program, MmeFixture::RegisterAlu);
     let streaming = matches!(program, MmeFixture::StreamingState);
     let parameters = matches!(program, MmeFixture::ParameterState);
+    let branches = matches!(program, MmeFixture::Branches);
     let (mut data, map, mut words, image) = fixture();
     words.splice(0..0, [0x2001c002, 0x110e]); // Channel NOP on unbound subchannel six.
     let draw = words.split_off(words.len() - 8);
@@ -311,7 +318,12 @@ fn mme_raster_state(program: MmeFixture) {
     }
     // Independent envyas: maddr 0x680; read $r2 0xd1a;
     // exit send (add $r2 0); nop;
-    let code = if parameters {
+    let code = if branches {
+        include_str!("fixtures/mme/branch-state.words")
+            .split_whitespace()
+            .map(|w| u32::from_str_radix(w, 16).unwrap())
+            .collect()
+    } else if parameters {
         include_str!("fixtures/mme/parameter-state.words")
             .split_whitespace()
             .map(|w| u32::from_str_radix(w, 16).unwrap())
@@ -1419,6 +1431,84 @@ fn gpfifo_macro_argument_faults_keep_completed_draws_and_do_not_default_to_zero(
         if failure == 0 {
             assert!(error.cause.to_string().contains("parameter continuation"));
         }
+        assert_eq!(renderer.counters.draw_commands, before.draw_commands);
+        assert_eq!(
+            renderer.counters.synchronization_points,
+            before.synchronization_points + 1
+        );
+        assert_eq!(renderer.counters.readback_operations, 0);
+        assert!(data[RT..RT + SIZE].chunks_exact(4).all(|p| p == BG));
+        assert!(
+            submit(
+                &mut renderer,
+                &mut channel,
+                &entries,
+                &map,
+                &mut data,
+                &mut changes
+            )
+            .is_err()
+        );
+        assert_eq!(
+            renderer.counters.synchronization_points,
+            before.synchronization_points + 1
+        );
+        check(
+            &sync(&mut renderer, &mut data, &mut changes).rgba,
+            &image,
+            None,
+            BG,
+        );
+        assert_eq!(renderer.counters.draw_commands, before.draw_commands);
+    }
+}
+
+#[test]
+#[ignore = "requires actual GPU; bounded macro loops preserve pending draws on fault"]
+fn gpfifo_macro_branch_faults_preserve_prior_output_without_replay_or_publication() {
+    for tail in [&[0x27][..], &[0x8007, 0x27][..]] {
+        let (mut data, map, words, image) = fixture();
+        put(&mut data, 0x10000, &words);
+        let mut renderer = Renderer::new().unwrap();
+        let mut channel = Channel::default();
+        let mut changes = TextureChanges::new(1);
+        submit(
+            &mut renderer,
+            &mut channel,
+            &entry(0xb0000, words.len()),
+            &map,
+            &mut data,
+            &mut changes,
+        )
+        .unwrap();
+        let before = renderer.counters;
+        let mut commands = Vec::new();
+        for (m, v) in [(0x11c, 0), (0x120, 0), (0x114, 0)] {
+            method(&mut commands, m, v);
+        }
+        // Independently assembled WFI, then either a self-loop or an invalid
+        // branch in a branch delay slot. Neither can replay the earlier draw.
+        for &word in [0x00110071].iter().chain(tail) {
+            method(&mut commands, 0x118, word);
+        }
+        method(&mut commands, 0x3800, 0);
+        put(&mut data, 0x10000, &commands);
+        let entries = entry(0xb0000, commands.len());
+        let error = submit(
+            &mut renderer,
+            &mut channel,
+            &entries,
+            &map,
+            &mut data,
+            &mut changes,
+        )
+        .unwrap_err();
+        assert_eq!(error.phase, FaultPhase::Execute);
+        assert!(error.cause.to_string().contains(if tail.len() == 1 {
+            "MissingExit"
+        } else {
+            "UnsupportedInstruction"
+        }));
         assert_eq!(renderer.counters.draw_commands, before.draw_commands);
         assert_eq!(
             renderer.counters.synchronization_points,

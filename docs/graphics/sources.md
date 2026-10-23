@@ -1854,3 +1854,21 @@ The fixture covers all four assignments, incremented scratch writes, WFI and a
 parameter-dependent EXIT. CPU tests check bit-exact arguments and destination
 behavior; GPU tests split arguments across aliased GPFIFO entries and reject
 missing, wrong-port and unmapped continuations without replaying prior draws.
+
+### MME conditional-branch corpus
+
+The MIT-licensed [envytools macro ISA](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/macro.c)
+defines the signed PC-relative 18-bit branch field, zero/nonzero tests, taken
+ANNUL behavior, conditional EXIT and the prohibition on branches in delay slots.
+These semantics are implemented in the same resumable interpreter used for ALU
+and parameter operations; no second command interpreter is introduced.
+
+`branch-state.asm` is independently assembled by that revision's unmodified
+`envyas -m macro -i`, then disassembled with `envydis -m macro -i -n`. Its 52-byte
+little-endian binary has SHA-256
+`3f5b7384b2526688e4f08bee72e5449f2265a351e3ffb9e9abc5002fecb68847`.
+The retained words distinguish a forward taken ANNUL branch, a skipped SEND,
+a two-iteration backward delayed branch and a shared EXIT. Additional literal
+assembler cases test conditional EXIT, parameter fetching and SEND in delay
+slots. Unknown reserved bits, invalid targets, unready condition registers,
+unuploaded code and instruction-budget exhaustion remain explicit errors.

@@ -2317,3 +2317,21 @@ unsupported and faults that channel; it does not return a completed/fake fence.
 This restriction is distinct from ordinary B06F packet continuation across calls.
 Failures retain earlier GPU work for publication and prevent submission replay.
 The 64-instruction budget persists across all parameter and backend resumptions.
+
+### Bounded MME conditional branches
+
+BRAZ and BRANZ test a ready u32 register against zero. Their signed 18-bit
+displacement is relative to the current instruction in instruction-word units.
+A taken ordinary branch executes one delay-slot instruction before jumping;
+a taken ANNUL branch jumps immediately. An untaken ANNUL branch still executes
+the following instruction. A branch's EXIT modifier applies only when the
+branch is not taken, retaining the ordinary EXIT delay slot.
+
+Branch targets are checked against uploaded-RAM capacity; an unuploaded target
+does not become an implicit NOP. A branch in any delay slot is rejected. EXIT in
+a branch delay slot is also explicitly unsupported. Delayed targets survive
+both parameter waits and backend yields without retaining guest borrows.
+Backward branches share the existing total 64-instruction invocation budget;
+neither a jump nor a backend resumption resets it. Budget failure faults the
+channel while preserving already submitted GPU output for explicit publication.
+This does not implement firmware mailboxes or acknowledge privileged requests.

@@ -1,4 +1,4 @@
-//! Bounded Fermi MME uploads and resumable straight-line state emissions.
+//! Bounded Fermi MME uploads and resumable state/control-flow execution.
 //! ISA reference: envytools f102b82381f3f11cee113d16374c87091db039d9.
 //! These are implementation budgets, not claims about every Maxwell RAM size.
 pub const CODE_WORDS: usize = 2048;
@@ -24,6 +24,7 @@ pub enum MacroError {
     ActiveInvocation,
     MissingParameter,
     UnexpectedParameter,
+    InvalidBranchTarget(i64),
 }
 
 #[derive(Debug)]
@@ -34,7 +35,7 @@ struct PendingParameter {
     delay_slot: bool,
 }
 
-/// Resumable straight-line state. No guest borrow or GPU resource is retained.
+/// Resumable state. No guest borrow or GPU resource is retained.
 #[derive(Debug)]
 pub(crate) struct Invocation {
     pc: usize,
@@ -46,6 +47,7 @@ pub(crate) struct Invocation {
     pending_parameter: Option<PendingParameter>,
     parameter: Option<u32>,
     delay_slot: bool,
+    branch_target: Option<usize>,
     finished: bool,
 }
 impl Invocation {
@@ -71,7 +73,7 @@ impl Invocation {
     fn finish_instruction(&mut self, exit: bool, delay_slot: bool) {
         self.finished = delay_slot;
         self.delay_slot = exit;
-        self.pc += 1;
+        self.pc = self.branch_target.take().unwrap_or(self.pc + 1);
         self.steps += 1;
     }
 }
@@ -143,8 +145,8 @@ impl MacroEngine {
         Ok(true)
     }
     /// Preflight a complete supported program before exposing its one write.
-    /// Reads are limited to explicitly written scratch registers. No branch,
-    /// parameter wait, ADC, or draw emission is inferred.
+    /// Reads are limited to explicitly written scratch registers. Missing
+    /// parameters, ADC, firmware replies, and draw emission are not inferred.
     pub fn execute(&self, slot: u16, parameter: u32) -> Result<(u16, u32), MacroError> {
         let mut invocation = self.begin(slot, parameter)?;
         let mut output = None;
@@ -181,6 +183,7 @@ impl MacroEngine {
             pending_parameter: None,
             parameter: None,
             delay_slot: false,
+            branch_target: None,
             finished: false,
         })
     }
@@ -216,6 +219,7 @@ impl MacroEngine {
             }
             let pc = invocation.pc;
             let delay_slot = invocation.delay_slot;
+            let branch_delay_slot = invocation.branch_target.is_some();
             let registers = &mut invocation.registers;
             let initialized = &mut invocation.initialized;
             let mut output = None;
@@ -226,12 +230,37 @@ impl MacroEngine {
                 .flatten()
                 .ok_or(MacroError::MissingInstruction(pc))?;
             let exit = word & 0x80 != 0;
-            if word & 8 != 0 || (delay_slot && exit) {
+            if word & 8 != 0 || ((delay_slot || branch_delay_slot) && exit) {
                 return Err(MacroError::UnsupportedInstruction(word));
             }
             let source = ((word >> 11) & 7) as usize;
             if !initialized[source] {
                 return Err(MacroError::UninitializedRegister(source as u8));
+            }
+            if word & 7 == 7 {
+                // BRAZ/BRANZ: signed 18-bit displacement in instruction words,
+                // relative to this instruction, not the following one. Taken
+                // ANNUL branches skip the slot; non-taken ANNUL still falls
+                // through. EXIT applies only when the branch is not taken.
+                if word & 0x748 != 0 || delay_slot || branch_delay_slot {
+                    return Err(MacroError::UnsupportedInstruction(word));
+                }
+                let taken = (registers[source] != 0) == (word & 0x10 != 0);
+                if taken {
+                    let target = pc as i64 + i64::from((word as i32) >> 14);
+                    if !(0..CODE_WORDS as i64).contains(&target) {
+                        return Err(MacroError::InvalidBranchTarget(target));
+                    }
+                    invocation.finish_instruction(false, false);
+                    if word & 0x20 != 0 {
+                        invocation.pc = target as usize;
+                    } else {
+                        invocation.branch_target = Some(target as usize);
+                    }
+                } else {
+                    invocation.finish_instruction(exit, false);
+                }
+                continue;
             }
             let result = match word & 7 {
                 0 if word & 0xffc0_0000 == 0 => {
@@ -340,6 +369,135 @@ mod streaming_tests {
             engine.upload(0x118, word).unwrap();
         }
         engine
+    }
+    #[test]
+    fn independently_assembled_branches_select_masks_and_execute_backward_slots() {
+        let words: Vec<u32> = include_str!("../tests/fixtures/mme/branch-state.words")
+            .split_whitespace()
+            .map(|w| u32::from_str_radix(w, 16).unwrap())
+            .collect();
+        assert_eq!(
+            words,
+            [
+                0x01a00021, 0xffffca11, 0x00011037, 0x00004041, 0x0001c027, 0x04444041, 0x00008311,
+                0xffffdb11, 0xffffd817, 0x11, 0x04444041, 0x91, 0x11,
+            ]
+        );
+        let engine = loaded(&words);
+        for (parameter, expected, steps) in [(1, 1, 7), (0x1111, 0x1111, 13)] {
+            assert_eq!(engine.execute(0, parameter), Ok((0x1a00, expected)));
+            let mut run = engine.begin(0, parameter).unwrap();
+            assert_eq!(engine.next_output(&mut run), Ok(Some((0x1a00, expected))));
+            assert_eq!(engine.next_output(&mut run), Ok(None));
+            assert!(run.finished);
+            assert_eq!(run.steps, steps);
+            assert_eq!(run.registers[0], 0);
+        }
+    }
+    #[test]
+    fn branch_exit_is_conditional_and_annul_only_skips_taken_slots() {
+        // envyas: maddr 0x680; exit braz [annul] $r1 #again;
+        // send (add $r0 1); send (add $r0 0x1111);
+        // again: exit send (add $r0 0x1111); nop;
+        for branch in [0x0000c887, 0x0000c8a7] {
+            let engine = loaded(&[0x01a00021, branch, 0x4041, 0x04444041, 0x044440c1, 0x11]);
+            // Not taken: even ANNUL executes the delay-slot SEND and exits.
+            assert_eq!(engine.execute(0, 1), Ok((0x1a00, 1)));
+            let mut run = engine.begin(0, 0).unwrap();
+            if branch & 0x20 == 0 {
+                assert_eq!(engine.next_output(&mut run), Ok(Some((0x1a00, 1))));
+            }
+            // Taken: branch's EXIT is suppressed, then target EXIT executes.
+            assert_eq!(engine.next_output(&mut run), Ok(Some((0x1a00, 0x1111))));
+            assert_eq!(engine.next_output(&mut run), Ok(None));
+            assert!(run.finished);
+        }
+    }
+    #[test]
+    fn delayed_branch_retains_target_across_parameter_and_backend_yields() {
+        // envyas: maddr 0x680; bra #target; parm $r2;
+        // send (add $r0 999); target: exit send (add $r2 0); nop;
+        let engine = loaded(&[0x01a00021, 0xc007, 0x201, 0x00f9c041, 0x10c0, 0x11]);
+        let mut run = engine.begin(0, 0).unwrap();
+        assert_eq!(engine.next_output(&mut run), Ok(None));
+        assert!(run.waiting_for_parameter());
+        assert_eq!(run.branch_target, Some(4));
+        assert_eq!(run.steps, 2);
+        run.provide_parameter(0x89abcdef).unwrap();
+        assert_eq!(engine.next_output(&mut run), Ok(Some((0x1a00, 0x89abcdef))));
+        assert_eq!(engine.next_output(&mut run), Ok(None));
+        assert_eq!(run.steps, 5);
+        // Same branch, but a SEND in its slot. Resumption must start at the
+        // target, never at the skipped emission of 999.
+        let engine = loaded(&[0x01a00021, 0xc007, 0x840, 0x00f9c041, 0x044440c1, 0x11]);
+        let mut run = engine.begin(0, 7).unwrap();
+        assert_eq!(engine.next_output(&mut run), Ok(Some((0x1a00, 7))));
+        assert_eq!(run.pc, 4);
+        assert_eq!(engine.next_output(&mut run), Ok(Some((0x1a00, 0x1111))));
+        assert_eq!(engine.next_output(&mut run), Ok(None));
+    }
+    #[test]
+    fn branches_reject_invalid_targets_reserved_bits_and_delay_slot_control_flow() {
+        for (word, target) in [
+            (0xffffc027, -1),
+            (0x7fffc027, 131071),
+            (0x80000027, -131072),
+        ] {
+            assert_eq!(
+                loaded(&[word]).execute(0, 0),
+                Err(MacroError::InvalidBranchTarget(target))
+            );
+        }
+        // An untaken branch must not fetch an invalid speculative target.
+        assert_eq!(
+            loaded(&[0xffffc817, 0x91, 0x11]).execute(0, 0),
+            Err(MacroError::UnsupportedEmissionCount)
+        );
+        assert_eq!(
+            loaded(&[0x1027]).execute(0, 0),
+            Err(MacroError::UninitializedRegister(2))
+        );
+        for bit in [3, 6, 8, 9, 10] {
+            let word = 0x27 | (1 << bit);
+            assert_eq!(
+                loaded(&[word]).execute(0, 0),
+                Err(MacroError::UnsupportedInstruction(word))
+            );
+        }
+        // A branch in either another branch's or EXIT's delay slot is invalid.
+        for words in [[0x8007, 0x27], [0x91, 0x27]] {
+            assert_eq!(
+                loaded(&words).execute(0, 0),
+                Err(MacroError::UnsupportedInstruction(0x27))
+            );
+        }
+        // EXIT in a branch delay slot is conservatively unsupported.
+        assert_eq!(
+            loaded(&[0x8007, 0x91]).execute(0, 0),
+            Err(MacroError::UnsupportedInstruction(0x91))
+        );
+        // Taken target is in RAM but not uploaded: no fabricated NOP/EXIT.
+        assert_eq!(
+            loaded(&[0x8027]).execute(0, 0),
+            Err(MacroError::MissingInstruction(2))
+        );
+    }
+    #[test]
+    fn backward_branches_cannot_reset_the_total_execution_budget() {
+        for words in [&[0x27][..], &[0x7, 0x11][..]] {
+            let engine = loaded(words);
+            let mut run = engine.begin(0, 0).unwrap();
+            assert_eq!(engine.next_output(&mut run), Err(MacroError::MissingExit));
+            assert_eq!(run.steps, MAX_STEPS);
+        }
+        // SEND in a backward branch's delay slot yields on each iteration.
+        let engine = loaded(&[0x01a00021, 0x7, 0x840]);
+        let mut run = engine.begin(0, 1).unwrap();
+        for _ in 0..31 {
+            assert_eq!(engine.next_output(&mut run), Ok(Some((0x1a00, 1))));
+        }
+        assert_eq!(engine.next_output(&mut run), Err(MacroError::MissingExit));
+        assert_eq!(run.steps, MAX_STEPS);
     }
     #[test]
     fn independent_maddrsend_fixture_yields_each_output_and_finishes_delay_slot() {
