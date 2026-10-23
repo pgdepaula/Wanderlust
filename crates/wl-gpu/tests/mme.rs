@@ -91,7 +91,7 @@ fn macro_dispatch_updates_state_only_and_preserves_failure_latching() {
 }
 
 #[test]
-fn assembler_signed_immediate_wraps_and_macro_draw_is_rejected_before_execution() {
+fn assembler_signed_immediate_wraps_and_macro_draw_uses_the_existing_validator() {
     let mut mme = loaded();
     mme.upload(0x114, 5).unwrap();
     // envyas: maddr 0x680; mov $r2 -1; exit send (add $r2 2); nop;
@@ -124,7 +124,10 @@ fn assembler_signed_immediate_wraps_and_macro_draw_is_rejected_before_execution(
             method: 0x3800,
             value: 3
         }),
-        Err(MethodError::Macro(MacroError::UnsupportedOutput(0x1214)))
+        Err(MethodError::UnsupportedValue {
+            method: 0x1214,
+            value: 3
+        })
     );
 }
 
@@ -382,4 +385,78 @@ fn macro_data_port_is_exact_and_does_not_supply_missing_or_extra_parameters() {
     assert_eq!(set(&mut engine, 0, 0x3814, 0x1111), Ok(MethodEffect::State));
     assert!(set(&mut engine, 0, 0x3814, 0).is_err());
     assert_eq!(engine.bound_class(0), Some(EngineClass::ThreeD));
+}
+
+#[test]
+fn macro_dispatch_cannot_rebind_mutate_running_code_or_launch_recursively() {
+    use wl_gpu::fifo::MethodWrite;
+    for method in [0, 8, 0x114, 0x118, 0x11c, 0x120, 0x3808, 0x3804] {
+        let mut engine = Maxwell3d::default();
+        for (m, v) in [(0, CLASS), (0x11c, 0), (0x120, 0), (0x114, 0)] {
+            engine
+                .apply(MethodWrite {
+                    subchannel: 0,
+                    method: m,
+                    value: v,
+                })
+                .unwrap();
+        }
+        // Independently specified MADDR layout plus assembled EXIT SEND/NOP.
+        for word in [(u32::from(method) / 4) << 14 | 0x21, 0x8c0, 0x11] {
+            engine
+                .apply(MethodWrite {
+                    subchannel: 0,
+                    method: 0x118,
+                    value: word,
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            engine.apply(MethodWrite {
+                subchannel: 0,
+                method: 0x3800,
+                value: CLASS
+            }),
+            Err(MethodError::Macro(MacroError::UnsupportedOutput(method)))
+        );
+        assert_eq!(engine.bound_class(0), Some(EngineClass::ThreeD));
+    }
+}
+
+#[test]
+fn macro_descriptor_invalidation_finishes_as_ordered_state_not_a_pending_gpu_operation() {
+    use wl_gpu::fifo::MethodWrite;
+    let mut engine = Maxwell3d::default();
+    for (m, v) in [(0, CLASS), (0x11c, 0), (0x120, 0), (0x114, 0)] {
+        engine
+            .apply(MethodWrite {
+                subchannel: 0,
+                method: m,
+                value: v,
+            })
+            .unwrap();
+    }
+    // envyas: maddr 0x50a; send (add $r0 0);
+    // maddr 0x509; exit send (add $r0 0); nop;
+    for word in [0x01428021, 0x40, 0x01424021, 0xc0, 0x11] {
+        engine
+            .apply(MethodWrite {
+                subchannel: 0,
+                method: 0x118,
+                value: word,
+            })
+            .unwrap();
+    }
+    for expected in [1, 2] {
+        assert_eq!(
+            engine.apply(MethodWrite {
+                subchannel: 0,
+                method: 0x3800,
+                value: 0
+            }),
+            Ok(MethodEffect::State)
+        );
+        assert_eq!(engine.texture_header_epoch, expected);
+        assert_eq!(engine.sampler_epoch, expected);
+    }
 }

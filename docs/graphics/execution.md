@@ -228,10 +228,9 @@ Entry launch methods `0x3800 + slot*8` execute a bounded subset:
 method-address assignment, SEND and MADDRSEND with bounded method increments. R0 remains zero,
 R1 receives the launch argument, and other registers require prior initialization.
 EXIT executes its following delay slot. A resumable invocation executes at most
-64 instructions in total across all yields. Emissions currently target only
-`SET_CT_WRITE(0)` (`0x1a00`), scratch registers `0x3400..0x37fc`, or canonical
-`WAIT_FOR_IDLE` (`0x0110=0`), engine NOP, and the restricted privileged
-initialization requests described below. The backend
+64 instructions in total across all yields. Emissions reuse the strict B197
+method dispatcher, with rebinding, running-program mutation and recursive
+launches excluded. The backend
 executes each effect before resuming the invocation; state/register writes and
 reads cannot run ahead of an earlier wait. Existing raster validation and
 pipeline identity remain active.
@@ -2274,8 +2273,8 @@ WFI does not submit a new draw, perform framebuffer readback, publish guest RAM,
 reset engine state or signal a fabricated guest syncpoint. Pending color/depth
 output remains resident and explicitly publishable. A subsequent channel fault
 cannot undo that earlier work or require replay. The synchronous compatibility
-path retains its already returned frame across a trailing WFI. This direct method
-support does not yet implement resumable MME emissions or general macro execution.
+path retains its already returned frame across a trailing WFI. The same effect
+is available through the bounded resumable MME interpreter.
 
 
 ### Resumable MME state emissions
@@ -2293,8 +2292,8 @@ instruction selects byte method `0x0110` with zero data and zero increment.
 A synthetic macro emits a color-mask write, a real WFI and another color-mask
 write; its guest argument changes verified texture pixels. Fault injection after
 WFI preserves an earlier real draw and permits publication without draw replay.
-General firmware requests and macro draw emissions remain unsupported; the
-restricted privileged initialization protocol is described below.
+General firmware requests remain unsupported; the restricted privileged
+initialization protocol and validated draw routing are described below.
 
 
 ### MME parameter ports and scratch emissions
@@ -2348,8 +2347,8 @@ writes listed in the source ledger. Firmware scratch word zero must contain
 request flag zero; words one and two must be explicitly initialized value and
 mask. The channel must have completed a macro-emitted WFI before each request.
 The backend's private resume boundary supplies that completion; a guest DATA
-word cannot acknowledge a wait. No other GPU work is emitted by this macro
-subset between WFI and the context update.
+word cannot acknowledge a wait. Any intervening non-WFI backend effect revokes
+the authorization, including a draw, clear or checked guest-memory write.
 
 The implementation updates fixed-size per-channel context-register storage,
 preserves all previously known bits outside the mask, and then writes the
@@ -2405,3 +2404,29 @@ persist across ordinary channel submissions without sharing another channel's
 state. They do not issue host work, create guest-visible profiling results or
 specialize a render pipeline. This is initialization-field support, not general
 instrumentation protocol execution.
+
+
+### MME emissions reuse the supported B197 execution path
+
+A SEND is routed to the existing strict method validator on its launching
+subchannel. No method receives a less strict value, geometry, format or memory
+check because it originated in MME. SET_OBJECT/channel methods below `0x100`,
+MME RAM/entry writes `0x114..0x120`, and macro ports `0x3800..0x3ffc` remain
+explicitly unsupported as emissions. Scratch writes are ordinary validated state.
+Unknown B197 methods still fail; this does not add unspecified hardware methods.
+
+Constant-buffer selectors and group binding, indexed/nonindexed draws, checked
+constant writes and supported clears produce the same state/effects as direct
+packets. A fixed-size pending-effect value retains its actual type. The consumer
+releases guest command borrows, executes the backend operation, and resumes the
+same invocation only afterward. A DATA word cannot acknowledge backend work.
+Only completion of a WFI grants the separate privileged-initialization permission;
+a completed memory write or draw is never an idle receipt. Descriptor-cache
+invalidations update the same engine epochs inline and do not strand a pending
+macro expecting an unnecessary backend callback.
+
+The original total instruction budget, strict register readiness, parameter
+ports and failure latching still apply. An error after earlier GPU work does not
+roll back or replay that work. Two unchanged macro-driven draws can retain the
+resident target until one explicit publication, without a per-draw readback or
+wait; each draw still has its own host queue submission.

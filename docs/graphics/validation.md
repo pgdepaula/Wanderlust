@@ -3590,3 +3590,32 @@ Explicit graphics runs passed 37 scenarios on each of WSL OpenGL, native Windows
 D3D12 and native Windows Vulkan, with no skips/failures. Each native backend also
 passed its completion-watchdog unit test. These results validate only the stated
 initialization subset, not arbitrary instrumentation packet interpretation.
+
+
+### MME dispatch through existing B197 validation
+
+CPU tests reject emitted SET_OBJECT/channel methods, mutation of running MME
+RAM/entry state, and nested launches. Invalid draw arguments now fail in the
+same existing draw validator as direct packets. Descriptor invalidation macros
+finish inline with exact epoch increments, rather than leaving an unacknowledged
+backend effect.
+
+Independent GPFIFO fixtures prove that MME alone binds the CB used by LDC/TEX
+(the prior binding is explicitly removed) and that MME alone initiates an indexed
+draw (all caller draw methods are removed). Two unchanged macro-driven draws
+retain one resident target until one publication/readback. MME constant writes
+change actual mapped guest bytes and independently expected solid LDC colors
+from `[64,128,191,255]` to `[255,0,0,255]` without another shader decode or pipeline.
+An MME clear produces the expected complete RGBA target while draw/shader-decode
+counts remain zero. A completed constant write after WFI cannot authorize a
+privileged request: it faults, preserves the earlier pending draw, and cannot
+replay on retry. Reentrant-RAM fault injection retains the earlier completed WFI
+and draw for explicit publication.
+
+Strict GPU Clippy, workspace Clippy and formatting passed. Default GPU/NVIDIA
+CPU suites passed 426 tests (177 device tests separately ignored); GPU no-default
+passed 401 tests. Explicit graphics execution passed 42 scenarios on each of
+WSL OpenGL, native Windows D3D12 and native Windows Vulkan, without failures or
+skips. Native watchdog unit tests passed on both backends. These are synthetic
+conformance fixtures, not original-game frame evidence. Queue submission remains
+per draw; only the explicit final publication reads back the repeated-draw image.

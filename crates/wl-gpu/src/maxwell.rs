@@ -281,7 +281,7 @@ struct ActiveMacro {
     subchannel: u8,
     parameter_method: u16,
     invocation: crate::mme::Invocation,
-    backend_pending: bool,
+    pending_backend: Option<MethodEffect>,
     idle_completed: bool,
 }
 impl Maxwell3d {
@@ -296,12 +296,11 @@ impl Maxwell3d {
         let Some(mut active) = self.active_macro.take() else {
             return Ok(None);
         };
-        // WFI is currently the only macro-emitted backend operation. This
-        // private entry point is called only after its real completion wait.
-        if active.backend_pending {
-            active.idle_completed = true;
+        // Only a completed WFI grants privileged initialization permission.
+        // Draws, writes and invalidations must never masquerade as idle waits.
+        if let Some(effect) = active.pending_backend.take() {
+            active.idle_completed = effect == MethodEffect::WaitIdle;
         }
-        active.backend_pending = false;
         loop {
             let Some((method, value)) = self
                 .macros
@@ -321,9 +320,10 @@ impl Maxwell3d {
                 active.idle_completed = false;
                 continue;
             }
-            // Only the established color mask, scratch state, NOP and WFI are emitted.
-            // Never recurse into SET_OBJECT, RAM uploads, or macro launches.
-            if !matches!(method, 0x0dd8 | 0x1a00 | 0x0100 | 0x0110 | 0x3400..=0x37fc) {
+            // Reuse the strict B197 dispatcher. Channel/engine rebinding,
+            // mutation of the running program and recursive launches are not
+            // permitted through this bounded MME execution interface.
+            if method < 0x100 || (0x114..=0x120).contains(&method) || method >= 0x3800 {
                 return Err(MethodError::Macro(
                     crate::mme::MacroError::UnsupportedOutput(method),
                 ));
@@ -333,8 +333,13 @@ impl Maxwell3d {
                 method,
                 value,
             })?;
-            if effect != MethodEffect::State {
-                active.backend_pending = true;
+            if !matches!(
+                effect,
+                MethodEffect::State
+                    | MethodEffect::TextureHeadersInvalidated(_)
+                    | MethodEffect::SamplersInvalidated(_)
+            ) {
+                active.pending_backend = Some(effect);
                 self.active_macro = Some(active);
                 return Ok(Some(effect));
             }
@@ -342,7 +347,7 @@ impl Maxwell3d {
     }
     pub(crate) fn macro_waiting_for_parameter(&self) -> bool {
         self.active_macro.as_ref().is_some_and(|active| {
-            !active.backend_pending && active.invocation.waiting_for_parameter()
+            active.pending_backend.is_none() && active.invocation.waiting_for_parameter()
         })
     }
     pub fn bindless_texture_constant_slot(&self) -> Option<u8> {
@@ -401,7 +406,7 @@ impl Maxwell3d {
             return Err(MethodError::InvalidMethod(method));
         }
         if let Some(active) = self.active_macro.as_mut() {
-            if !active.backend_pending
+            if active.pending_backend.is_none()
                 && subchannel == active.subchannel
                 && method == active.parameter_method
             {
@@ -482,7 +487,7 @@ impl Maxwell3d {
                 subchannel,
                 parameter_method: method + 4,
                 invocation,
-                backend_pending: false,
+                pending_backend: None,
                 idle_completed: false,
             });
             return Ok(self.resume_macro()?.unwrap_or(MethodEffect::State));

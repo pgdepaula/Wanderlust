@@ -1,0 +1,10 @@
+maddr 0x18e0;
+send (add $r1 0);
+parmsend maddr (add $r0 0x18e1);
+parmsend maddr (add $r0 0x18e2);
+maddr 0x924;
+send (add $r0 1);
+parm $r2;
+maddr 0x680;
+exit send (add $r2 0);
+nop;

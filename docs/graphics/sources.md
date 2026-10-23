@@ -1955,3 +1955,28 @@ initialization. Wanderlust admits and retains only this exact ordered pair.
 The numeric payload is opaque; no meaning of other packets is inferred from
 its prefix. No instrumented-method execution, profiler, trace producer, timing
 result or instrumentation completion event is implemented.
+
+
+### Validated MME method routing corpus
+
+The pinned envytools `macro.c` defines SEND as dispatching its result at the
+current method address, then advancing by the encoded increment. It does not
+restrict hardware SEND to color masks. Wanderlust routes supported emissions
+through its existing B197 method validator and backend, retaining conservative
+restrictions against engine rebinding, RAM/entry modification and recursion.
+No second draw interpreter, memory mapper or resource resolver is introduced.
+
+Independent pinned-envyas programs exercise the supported path:
+
+| Assembly fixture | Binary SHA-256 |
+| --- | --- |
+| `cb-selectors.asm` | `aceb47b74dd2851bd214f40a41c2a4944bf13314275e53dce5f57c96a1015494` |
+| `indexed-draw.asm` | `f3a0376feab8ee6fb9c68d4691341bb65d8e27d861b87ba3c1e884a7b7b6c7de` |
+| `constant-write.asm` | `ab9060f35795745f004c1c6c04bae93f2e5e8533931b9f9dffcb1ede401c1482` |
+
+The binding fixture removes the prior fragment CB binding before each macro,
+so ignoring its output cannot still produce successful LDC/TEX pixels. The draw
+fixture removes every caller-side draw method. The write fixture supplies raw
+u32 color data through guest DATA arguments and the real checked CB upload ports;
+translated LDC reads those mapped bytes. Separate literal assembled programs
+validate color clear dispatch and rejected attempts to rewrite running MME RAM.

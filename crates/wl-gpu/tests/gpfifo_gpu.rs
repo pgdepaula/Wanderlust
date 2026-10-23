@@ -230,6 +230,11 @@ fn gpfifo_mme_bitfield_replace_and_extract_shifts_control_real_pixels() {
 fn gpfifo_mme_zcull_criterion_preserves_real_pixels_and_shader_reuse() {
     mme_raster_state(MmeFixture::ZCullCriterion);
 }
+#[test]
+#[ignore = "requires actual GPU; only MME binds the constant buffer used by LDC/TEX"]
+fn gpfifo_mme_constant_selectors_bind_real_fragment_resources() {
+    mme_raster_state(MmeFixture::CbSelectors);
+}
 enum MmeFixture {
     ArgumentMask,
     ScratchRead,
@@ -240,6 +245,7 @@ enum MmeFixture {
     Privileged,
     Bitfields,
     ZCullCriterion,
+    CbSelectors,
 }
 fn mme_raster_state(program: MmeFixture) {
     let scratch = matches!(program, MmeFixture::ScratchRead);
@@ -250,6 +256,7 @@ fn mme_raster_state(program: MmeFixture) {
     let privileged = matches!(program, MmeFixture::Privileged);
     let bitfields = matches!(program, MmeFixture::Bitfields);
     let zcull_criterion = matches!(program, MmeFixture::ZCullCriterion);
+    let cb_selectors = matches!(program, MmeFixture::CbSelectors);
     let (mut data, map, mut words, image) = fixture();
     words.splice(0..0, [0x2001c002, 0x110e]); // Channel NOP on unbound subchannel six.
     let draw = words.split_off(words.len() - 8);
@@ -345,7 +352,12 @@ fn mme_raster_state(program: MmeFixture) {
     }
     // Independent envyas: maddr 0x680; read $r2 0xd1a;
     // exit send (add $r2 0); nop;
-    let code = if zcull_criterion {
+    let code = if cb_selectors {
+        include_str!("fixtures/mme/cb-selectors.words")
+            .split_whitespace()
+            .map(|w| u32::from_str_radix(w, 16).unwrap())
+            .collect()
+    } else if zcull_criterion {
         // envyas: maddr 0x376; send (add $r0 5); maddr 0x680;
         // exit send (add $r1 0); nop;
         vec![0x00dd8021, 0x14041, 0x01a00021, 0x8c0, 0x11]
@@ -393,8 +405,13 @@ fn mme_raster_state(program: MmeFixture) {
     if scratch {
         method(&mut words, 0x3468, 1);
     }
+    if cb_selectors {
+        method(&mut words, 0x2490, 0); // LDC must fail unless the macro really binds it.
+    }
     let macro_start = words.len();
-    if privileged {
+    if cb_selectors {
+        words.extend_from_slice(&[0xa0040e00, 32, 0, 0x40000, 1]);
+    } else if privileged {
         words.extend_from_slice(&[0xa0040e00, 0x418800, 1, 1, 1]);
     } else if parameters {
         // Literal increment-once packet: launch, then four DATA parameters.
@@ -403,7 +420,7 @@ fn mme_raster_state(program: MmeFixture) {
         method(&mut words, 0x3800, 1); // Red-only writes, produced by guest MME.
     }
     words.extend_from_slice(&draw);
-    let entries = if parameters || privileged {
+    let entries = if parameters || privileged || cb_selectors {
         // Stop immediately after the launch argument. DATA is fetched from the
         // next entry through a GPU VA alias of the same canonical backing.
         let cut = macro_start + 2;
@@ -431,7 +448,11 @@ fn mme_raster_state(program: MmeFixture) {
     assert_eq!(first.draws_submitted, 1);
     assert_eq!(
         first.entries_completed,
-        if parameters || privileged { 2 } else { 1 }
+        if parameters || privileged || cb_selectors {
+            2
+        } else {
+            1
+        }
     );
     let frame = sync(&mut renderer, &mut data, &mut changes);
     let mut masked = image.clone();
@@ -448,7 +469,10 @@ fn mme_raster_state(program: MmeFixture) {
     if scratch {
         method(&mut second, 0x3468, 0x1111);
     }
-    if privileged {
+    if cb_selectors {
+        method(&mut second, 0x2490, 0);
+        second.extend_from_slice(&[0xa0040e00, 32, 0, 0x40000, 0x1111]);
+    } else if privileged {
         second.extend_from_slice(&[0xa0040e00, 0x418800, 1, 1, 0x1111]);
     } else if parameters {
         second.extend_from_slice(&[0xa0050e00, 0, 0x01234567, 0x89abcdef, 0x1111, 0x76543210]);
@@ -1370,7 +1394,7 @@ fn gpfifo_resumed_macro_fault_preserves_prior_draw_without_replay() {
         .split_whitespace()
         .map(|w| u32::from_str_radix(w, 16).unwrap())
         .collect();
-    code[3] = 0x01214021; // envyas maddr 0x485 -> unsupported macro Draw output.
+    code[3] = 0x00118021; // envyas maddr 0x46 -> forbidden running-code upload.
     for word in code {
         method(&mut commands, 0x118, word);
     }
@@ -1676,4 +1700,265 @@ fn gpfifo_privileged_request_failures_preserve_pending_output_and_fault_the_chan
         );
         assert_eq!(renderer.counters.draw_commands, before.draw_commands);
     }
+}
+
+fn macro_code(text: &str) -> Vec<u32> {
+    text.split_whitespace()
+        .map(|w| u32::from_str_radix(w, 16).unwrap())
+        .collect()
+}
+fn upload_macro(words: &mut Vec<u32>, code: &[u32]) {
+    for (m, v) in [(0x11c, 0), (0x120, 0), (0x114, 0)] {
+        method(words, m, v);
+    }
+    for &word in code {
+        method(words, 0x118, word);
+    }
+}
+
+#[test]
+#[ignore = "requires actual GPU; the sole indexed draw trigger originates in assembled MME"]
+fn gpfifo_mme_indexed_draw_submits_real_geometry_and_resumes_after_the_draw() {
+    let (mut data, map, mut words, image) = fixture();
+    words.truncate(words.len() - 8); // Remove every caller-side draw method.
+    upload_macro(
+        &mut words,
+        &macro_code(include_str!("fixtures/mme/indexed-draw.words")),
+    );
+    method(&mut words, 0x3800, 0);
+    put(&mut data, 0x10000, &words);
+    let mut renderer = Renderer::new().unwrap();
+    let mut channel = Channel::default();
+    let mut changes = TextureChanges::new(1);
+    let first = submit(
+        &mut renderer,
+        &mut channel,
+        &entry(0xb0000, words.len()),
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap();
+    assert_eq!(first.draws_submitted, 1);
+    assert_eq!(renderer.counters.draw_commands, 1);
+    assert_eq!(renderer.counters.readback_operations, 0);
+    assert_eq!(renderer.counters.synchronization_points, 0);
+    assert!(data[RT..RT + SIZE].chunks_exact(4).all(|p| p == BG));
+    let before = renderer.counters;
+    let again = [0x20010e00, 0];
+    put(&mut data, 0x10000, &again);
+    assert_eq!(
+        submit(
+            &mut renderer,
+            &mut channel,
+            &entry(0xb0000, again.len()),
+            &map,
+            &mut data,
+            &mut changes
+        )
+        .unwrap()
+        .draws_submitted,
+        1
+    );
+    assert_eq!(renderer.counters.shader_decodes, before.shader_decodes);
+    assert_eq!(
+        renderer.counters.pipeline_allocations,
+        before.pipeline_allocations
+    );
+    check(
+        &sync(&mut renderer, &mut data, &mut changes).rgba,
+        &image,
+        None,
+        BG,
+    );
+    assert_eq!(renderer.counters.draw_commands, 2);
+    assert_eq!(renderer.counters.readback_operations, 1);
+}
+
+#[test]
+#[ignore = "requires actual GPU; macro writes mapped constant bytes consumed by genuine LDC"]
+fn gpfifo_mme_constant_writes_change_pixels_without_shader_recompilation() {
+    let (mut data, map, mut words, image) = fixture();
+    let program = include_bytes!("fixtures/maxwell/ldc.bin");
+    data[0x4500..0x4500 + program.len()].copy_from_slice(program);
+    let draw = words.split_off(words.len() - 8);
+    method(&mut words, 0x2144, 0x500); // Guest-selected independently assembled LDC PS.
+    upload_macro(
+        &mut words,
+        &macro_code(include_str!("fixtures/mme/constant-write.words")),
+    );
+    let mut renderer = Renderer::new().unwrap();
+    let mut channel = Channel::default();
+    let mut changes = TextureChanges::new(1);
+    for (iteration, color, expected) in [
+        (0, [0.25f32, 0.5, 0.75, 1.], [64, 128, 191, 255]),
+        (1, [1.0, 0.0, 0.0, 1.], [255, 0, 0, 255]),
+    ] {
+        let before = renderer.counters;
+        let mut commands = if iteration == 0 {
+            words.clone()
+        } else {
+            Vec::new()
+        };
+        commands.push(0xa0040e00);
+        commands.extend(color.map(f32::to_bits));
+        commands.extend_from_slice(&draw);
+        put(&mut data, 0x10000, &commands);
+        assert_eq!(
+            submit(
+                &mut renderer,
+                &mut channel,
+                &entry(0xb0000, commands.len()),
+                &map,
+                &mut data,
+                &mut changes
+            )
+            .unwrap()
+            .draws_submitted,
+            1
+        );
+        let written: Vec<u8> = color.into_iter().flat_map(|v| v.to_le_bytes()).collect();
+        assert_eq!(&data[80..96], &written);
+        assert_eq!(
+            renderer.counters.constant_buffer_write_bytes,
+            before.constant_buffer_write_bytes + 16
+        );
+        check(
+            &sync(&mut renderer, &mut data, &mut changes).rgba,
+            &image,
+            Some(expected),
+            BG,
+        );
+        if iteration != 0 {
+            assert_eq!(renderer.counters.shader_decodes, before.shader_decodes);
+            assert_eq!(
+                renderer.counters.pipeline_allocations,
+                before.pipeline_allocations
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires actual GPU; completed memory writes must never grant WFI authorization"]
+fn gpfifo_mme_write_completion_cannot_acknowledge_privileged_initialization() {
+    let (mut data, map, words, image) = fixture();
+    put(&mut data, 0x10000, &words);
+    let mut renderer = Renderer::new().unwrap();
+    let mut channel = Channel::default();
+    let mut changes = TextureChanges::new(1);
+    submit(
+        &mut renderer,
+        &mut channel,
+        &entry(0xb0000, words.len()),
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap();
+    let before = renderer.counters;
+    let mut code = vec![0x00110071]; // Independently assembled actual WFI.
+    let writes = macro_code(include_str!("fixtures/mme/constant-write.words"));
+    code.extend_from_slice(&writes[..writes.len() - 2]);
+    code.extend_from_slice(&[0x02310021, 0x8c0, 0x11]); // Firmware04, EXIT send R1, NOP.
+    let mut commands = Vec::new();
+    for (m, v) in [(0x3400, 0), (0x3404, 1), (0x3408, 1)] {
+        method(&mut commands, m, v);
+    }
+    upload_macro(&mut commands, &code);
+    commands.extend_from_slice(&[0xa0040e00, 0x418800, 1, 2, 3]);
+    put(&mut data, 0x10000, &commands);
+    let entries = entry(0xb0000, commands.len());
+    let error = submit(
+        &mut renderer,
+        &mut channel,
+        &entries,
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap_err();
+    assert!(error.cause.to_string().contains("MissingFirmwareIdle"));
+    assert_eq!(
+        renderer.counters.constant_buffer_write_bytes,
+        before.constant_buffer_write_bytes + 16
+    );
+    assert_eq!(
+        renderer.counters.synchronization_points,
+        before.synchronization_points + 1
+    );
+    assert_eq!(renderer.counters.draw_commands, before.draw_commands);
+    assert_eq!(renderer.counters.readback_operations, 0);
+    assert_eq!(
+        u32::from_le_bytes(data[80..84].try_into().unwrap()),
+        0x418800
+    );
+    assert!(
+        submit(
+            &mut renderer,
+            &mut channel,
+            &entries,
+            &map,
+            &mut data,
+            &mut changes
+        )
+        .is_err()
+    );
+    assert_eq!(
+        renderer.counters.constant_buffer_write_bytes,
+        before.constant_buffer_write_bytes + 16
+    );
+    check(
+        &sync(&mut renderer, &mut data, &mut changes).rgba,
+        &image,
+        None,
+        BG,
+    );
+}
+
+#[test]
+#[ignore = "requires actual GPU; an MME clear executes through guest color-target state"]
+fn gpfifo_mme_clear_preserves_deferred_visibility_without_inventing_a_draw() {
+    let (mut data, map, mut words, _) = fixture();
+    words.truncate(words.len() - 8);
+    for (m, v) in [
+        (0x138, 1),
+        (0x15d0, 0),
+        (0x121c, 1),
+        (0x10f8, 0),
+        (0xff4, 52 << 16),
+        (0xff8, 29 << 16),
+        (0x1a00, 0),
+        (0x1360, 1),
+    ] {
+        method(&mut words, m, v);
+    }
+    for (component, value) in [0.25f32, 0.5, 0.75, 1.].into_iter().enumerate() {
+        method(&mut words, 0xd80 + component as u32 * 4, value.to_bits());
+    }
+    // envyas: maddr 0x674; exit send (add $r1 0); nop;
+    upload_macro(&mut words, &[0x019d0021, 0x8c0, 0x11]);
+    method(&mut words, 0x3800, 0x3c);
+    put(&mut data, 0x10000, &words);
+    let mut renderer = Renderer::new().unwrap();
+    let mut channel = Channel::default();
+    let mut changes = TextureChanges::new(1);
+    let report = submit(
+        &mut renderer,
+        &mut channel,
+        &entry(0xb0000, words.len()),
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap();
+    assert_eq!(report.draws_submitted, 0);
+    assert_eq!(renderer.counters.draw_commands, 0);
+    assert_eq!(renderer.counters.readback_operations, 0);
+    assert_eq!(renderer.counters.shader_decodes, 0);
+    assert!(data[RT..RT + SIZE].chunks_exact(4).all(|p| p == BG));
+    let frame = sync(&mut renderer, &mut data, &mut changes);
+    assert!(frame.rgba.chunks_exact(4).all(|p| p == [64, 128, 191, 255]));
+    assert_eq!(&data[RT..RT + SIZE], &frame.rgba);
+    assert_eq!(renderer.counters.readback_operations, 1);
 }
