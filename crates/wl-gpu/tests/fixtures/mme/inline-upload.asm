@@ -1,0 +1,13 @@
+maddr 0x1060;
+send (add $r0 16);
+send (add $r0 1);
+send (add $r0 0);
+send (add $r1 0);
+maddr 0x6c;
+send (add $r0 0x1011);
+parmsend maddr (add $r0 0x6d);
+parmsend maddr (add $r0 0x6d);
+parmsend maddr (add $r0 0x6d);
+parmsend maddr (add $r0 0x6d);
+exit;
+nop;

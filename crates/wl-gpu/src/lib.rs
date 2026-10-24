@@ -123,4 +123,6 @@ pub struct Counters {
     pub guest_framebuffer_write_bytes: u64,
     /// Inline B197 constant words committed to canonical guest memory.
     pub constant_buffer_write_bytes: u64,
+    /// B197 one-row pitch inline words committed to canonical guest memory.
+    pub inline_upload_write_bytes: u64,
 }

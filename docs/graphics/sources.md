@@ -2008,3 +2008,29 @@ likewise programs `VertexRunoutBufferIova` during initialization.
 These references justify retaining the address, not general substitute-fetch
 format semantics. Vertex/index bounds checks remain mandatory; out-of-range
 fetch substitution is unsupported and explicitly rejected.
+
+
+### B197 one-row pitch inline upload
+
+The pinned NVIDIA B197 header defines `LINE_LENGTH_IN` (byte length, `0x180`),
+`LINE_COUNT` (`0x184`), 40-bit `OFFSET_OUT_UPPER/OFFSET_OUT` (`0x188/0x18c`),
+`LAUNCH_DMA` (`0x1b0`) and full-u32 `LOAD_INLINE_DATA` (`0x1b4`). Accepted launch
+`0x1011` selects PITCH, FLUSH_ONLY, no interrupt/reduction, and the one-word
+semaphore structure; no semaphore is released. A one-row pitch transfer uses
+contiguous output bytes, independent of row stride or block geometry.
+
+The MIT [InlineToMemoryClass reference](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Gpu/Engine/InlineToMemory/InlineToMemoryClass.cs)
+and its state definition at the same pinned revision calculate transfer bytes
+from line length/count, reconstruct the 40-bit output address, and retain no
+required data words for zero length. It also supports the 3D embedded inline
+engine. This is semantic corroboration, not copied implementation. Wanderlust
+restricts this to one row, word-aligned address/length, at most 65536 bytes, and
+exact launch flags; these are implementation limits, not hardware field widths.
+Zero length has no memory effects. Other layouts, partial words, multiple rows,
+interrupts, reduction and semaphore release remain unsupported.
+
+`inline-upload.asm` was independently assembled by pinned envytools envyas
+(MIT, `f102b82381f3f11cee113d16374c87091db039d9`, machine `macro`). Its 52-byte
+little-endian encoding in `inline-upload.words` has SHA-256
+`90b1934b210f19ae470285b66041955660666d42176f8c81645ccb0dba0c91a7`.
+Only this independently authored fixture, not commercial command code, is stored.

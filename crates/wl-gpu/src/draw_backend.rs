@@ -126,6 +126,8 @@ impl Renderer {
                             | MethodEffect::DrawIndices { .. }
                             | MethodEffect::Clear { .. }
                             | MethodEffect::ConstantWrite { .. }
+                            | MethodEffect::InlineUploadStart { .. }
+                            | MethodEffect::InlineWrite { .. }
                             | MethodEffect::WaitIdle
                     ) {
                         if let Some(frame) =
@@ -407,7 +409,22 @@ impl Renderer {
                 // and depth output pending; no readback or draw replay occurs.
                 Ok(None)
             }
-            MethodEffect::ConstantWrite { address, value } => {
+            MethodEffect::InlineUploadStart { address, length } => {
+                if self.poisoned {
+                    return Err(invalid("renderer unavailable after backend failure"));
+                }
+                if length == 0 {
+                    return Ok(None); // Empty transfer performs no guest access or flush work.
+                }
+                let length = length as usize;
+                let destination = map.resolve(address, length)?;
+                memory.validate_write(destination, length)?;
+                changes.can_mark_write_at(destination, length)?;
+                self.synchronize_command_source(destination, length, memory, changes)?;
+                Ok(None)
+            }
+            MethodEffect::ConstantWrite { address, value }
+            | MethodEffect::InlineWrite { address, value } => {
                 if self.poisoned {
                     return Err(invalid("renderer unavailable after backend failure"));
                 }
@@ -417,7 +434,11 @@ impl Renderer {
                 changes.can_mark_write_at(destination, 4)?;
                 memory.write(destination, &value.to_le_bytes())?;
                 changes.mark_write(destination, 4)?;
-                self.counters.constant_buffer_write_bytes += 4;
+                if matches!(effect, MethodEffect::InlineWrite { .. }) {
+                    self.counters.inline_upload_write_bytes += 4;
+                } else {
+                    self.counters.constant_buffer_write_bytes += 4;
+                }
                 Ok(None)
             }
             MethodEffect::Clear { color, depth } => self.guest_clear(

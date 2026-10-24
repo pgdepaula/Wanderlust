@@ -3666,3 +3666,32 @@ Formatting and strict package Clippy passed. Default GPU/NVIDIA CPU suites passe
 Explicit graphics runs passed 45 scenarios on each of WSL OpenGL, native Windows
 D3D12 and native Windows Vulkan, without skips or failures. Completion-watchdog
 unit tests also passed on both native backends.
+
+
+### B197 inline pitch uploads
+
+CPU tests cover exact launch flags, address width/overflow, descriptor bounds,
+zero/max length, missing state, active-transfer mutation rejection, surplus data,
+channel isolation, packet continuation and explicit finish with missing words.
+An independent envyas MME configures and writes actual mapped constant bytes;
+its LDC fragment changes covered pixels from `[64,128,191,255]` to `[255,0,0,255]`
+without shader retranslation or pipeline recreation. Each draw is still genuine
+GPFIFO/B06F/B197 execution, with explicit publication for the pixel assertion.
+
+Adversarial device scenarios verify unread command-suffix replacement through a
+GPU VA alias, publication of prior pending color output before an aliased inline
+write, and injected atomic-write failure preserving the journal and prior draw
+without replay. Another scenario proves that a zero-length unmapped upload makes
+no guest access; a nonempty transfer crossing its mapping fails at launch before
+DATA, and two requests continue one nonincrementing DATA packet in correct byte
+order. The metadata/data-only scenario adds no queue submission, wait or readback.
+Completed bytes are counted in `inline_upload_write_bytes`, separately from CB
+method-port writes. No zero-copy GPU transfer claim is made.
+
+Formatting and strict package Clippy passed. Default GPU/NVIDIA CPU suites passed
+432 tests (185 device scenarios separately ignored); GPU no-default passed 407.
+Explicit execution passed 50 graphics/device scenarios on each of WSL OpenGL,
+native Windows D3D12 and native Windows Vulkan, including bounds-only cases that
+initialize a device without rasterizing. Completion-watchdog unit tests also
+passed on both native backends. Live-worktree workspace Clippy passed, and the
+workspace suite passed 792 tests with 186 separately ignored device tests.

@@ -916,3 +916,149 @@ fn vertex_substitute_address_is_40_bit_partial_persistent_and_channel_local() {
         Some(GpuAddress(0x12345679))
     );
 }
+
+fn inline_engine(length: u32, address: u64) -> Maxwell3d {
+    let mut engine = Maxwell3d::default();
+    for (m, v) in [
+        (0, CLASS),
+        (0x180, length),
+        (0x184, 1),
+        (0x188, (address >> 32) as u32),
+        (0x18c, address as u32),
+    ] {
+        engine.apply(write(m, v)).unwrap();
+    }
+    engine
+}
+
+#[test]
+fn inline_upload_validates_descriptor_flags_and_exact_word_extent() {
+    let mut engine = inline_engine(8, 0x1234567800);
+    for (m, v) in [
+        (0x180, 3),
+        (0x180, 65540),
+        (0x184, 2),
+        (0x188, 256),
+        (0x181, 8),
+    ] {
+        assert!(engine.apply(write(m, v)).is_err());
+    }
+    for bit in 0..32 {
+        assert!(engine.apply(write(0x1b0, 0x1011 ^ (1 << bit))).is_err());
+    }
+    assert!(matches!(
+        engine.apply(write(0x1b4, 1)),
+        Err(MethodError::IncompleteInlineUpload)
+    ));
+    assert_eq!(
+        engine.apply(write(0x1b0, 0x1011)).unwrap(),
+        MethodEffect::InlineUploadStart {
+            address: GpuAddress(0x1234567800),
+            length: 8
+        }
+    );
+    for m in [0x180, 0x184, 0x188, 0x18c, 0x1b0] {
+        assert_eq!(
+            engine.apply(write(m, 0)),
+            Err(MethodError::InlineUploadActive)
+        );
+    }
+    for (address, value) in [(0x1234567800, 0x12345678), (0x1234567804, 0xabcdef01)] {
+        assert_eq!(
+            engine.apply(write(0x1b4, value)).unwrap(),
+            MethodEffect::InlineWrite {
+                address: GpuAddress(address),
+                value
+            }
+        );
+    }
+    assert_eq!(
+        engine.apply(write(0x1b4, 0)),
+        Err(MethodError::IncompleteInlineUpload)
+    );
+    // New launch snapshots the persistent descriptor; it does not inherit cursor.
+    assert_eq!(
+        engine.apply(write(0x1b0, 0x1011)).unwrap(),
+        MethodEffect::InlineUploadStart {
+            address: GpuAddress(0x1234567800),
+            length: 8
+        }
+    );
+    assert!(
+        inline_engine(4, 0xfffffffffc)
+            .apply(write(0x1b0, 0x1011))
+            .is_ok()
+    );
+    assert!(
+        inline_engine(8, 0xfffffffffc)
+            .apply(write(0x1b0, 0x1011))
+            .is_err()
+    );
+    assert!(inline_engine(4, 3).apply(write(0x1b0, 0x1011)).is_err());
+    let mut empty = inline_engine(0, 0xa512345678);
+    assert_eq!(
+        empty.apply(write(0x1b0, 0x1011)).unwrap(),
+        MethodEffect::InlineUploadStart {
+            address: GpuAddress(0xa512345678),
+            length: 0
+        }
+    );
+    assert_eq!(
+        empty.apply(write(0x1b4, 0)),
+        Err(MethodError::IncompleteInlineUpload)
+    );
+    empty.apply(write(0x180, 4)).unwrap();
+    assert!(
+        inline_engine(65536, 0x1000)
+            .apply(write(0x1b0, 0x1011))
+            .is_ok()
+    );
+}
+
+#[test]
+fn inline_upload_packet_continuation_is_channel_local_and_finish_detects_truncation() {
+    let mut channel = Channel::default();
+    for word in [
+        0x20010000, CLASS, 0x20040060, 8, 1, 0, 0x123400, 0x2001006c, 0x1011, 0x6002006d,
+    ] {
+        channel.push_word(word).unwrap();
+    }
+    assert_eq!(
+        channel.push_word(0x04030201).unwrap(),
+        MethodEffect::InlineWrite {
+            address: GpuAddress(0x123400),
+            value: 0x04030201
+        }
+    );
+    assert_eq!(
+        channel.push_word(0x08070605).unwrap(),
+        MethodEffect::InlineWrite {
+            address: GpuAddress(0x123404),
+            value: 0x08070605
+        }
+    );
+    channel.finish().unwrap();
+    let mut other = Maxwell3d::default();
+    other.apply(write(0, CLASS)).unwrap();
+    assert_eq!(
+        other.apply(write(0x1b0, 0x1011)),
+        Err(MethodError::IncompleteInlineUpload)
+    );
+    assert_eq!(
+        other.apply(write(0x1b4, 0)),
+        Err(MethodError::IncompleteInlineUpload)
+    );
+    let mut unfinished = Channel::default();
+    for (m, v) in [
+        (0, CLASS),
+        (0x180, 8),
+        (0x184, 1),
+        (0x188, 0),
+        (0x18c, 0x1000),
+    ] {
+        unfinished.engine.apply(write(m, v)).unwrap();
+    }
+    unfinished.engine.apply(write(0x1b0, 0x1011)).unwrap();
+    assert!(unfinished.finish().is_err());
+    assert!(unfinished.is_faulted());
+}

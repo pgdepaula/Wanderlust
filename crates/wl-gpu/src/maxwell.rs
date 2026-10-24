@@ -84,6 +84,8 @@ pub enum MethodError {
     UnsupportedValue { method: u16, value: u32 },
     EpochOverflow,
     IncompleteConstantBuffer,
+    IncompleteInlineUpload,
+    InlineUploadActive,
     IncompletePrimitiveRestart,
 }
 impl std::fmt::Display for MethodError {
@@ -101,7 +103,19 @@ pub enum MethodEffect {
     DrawIndices { first: u32, count: u32 },
     Clear { color: bool, depth: bool },
     ConstantWrite { address: GpuAddress, value: u32 },
+    InlineUploadStart { address: GpuAddress, length: u32 },
+    InlineWrite { address: GpuAddress, value: u32 },
     WaitIdle,
+}
+/// Bounded pitch-linear, one-row B197 inline upload. Configuration remains
+/// separate from the active transfer snapshot; no guest memory is retained.
+#[derive(Debug, Default)]
+struct InlineUpload {
+    length: Option<u32>,
+    lines: Option<u32>,
+    upper: Option<u8>,
+    lower: Option<u32>,
+    active: Option<(GpuAddress, u32)>,
 }
 #[derive(Debug, Clone, Copy, Default)]
 struct Pool {
@@ -240,6 +254,7 @@ pub struct Maxwell3d {
     cache_policies: [Option<CacheEviction>; 6],
     two_d: TwoDConfiguration,
     auxiliary_raster: AuxiliaryRasterControls,
+    inline_upload: InlineUpload,
     instrumentation_header: Option<u32>,
     instrumentation_data: Option<u32>,
     bindless_texture_constant_slot: Option<u8>,
@@ -523,6 +538,63 @@ impl Maxwell3d {
             return Ok(MethodEffect::State);
         }
         match method {
+            0x0180..=0x018c => {
+                if self.inline_upload.active.is_some() {
+                    return Err(MethodError::InlineUploadActive);
+                }
+                match method {
+                    // Supported budget, not a hardware field-width limit.
+                    0x0180 if value <= 65536 && value % 4 == 0 => {
+                        self.inline_upload.length = Some(value);
+                    }
+                    0x0184 if value == 1 => self.inline_upload.lines = Some(value),
+                    0x0188 if value <= 0xff => self.inline_upload.upper = Some(value as u8),
+                    0x018c => self.inline_upload.lower = Some(value),
+                    _ => return Err(bad()),
+                }
+            }
+            0x01b0 => {
+                if self.inline_upload.active.is_some() {
+                    return Err(MethodError::InlineUploadActive);
+                }
+                // PITCH, FLUSH_ONLY, no interrupt/reduction, one-word semaphore
+                // size (unused without RELEASE_SEMAPHORE). No guessed flags.
+                if value != 0x1011 {
+                    return Err(bad());
+                }
+                let (Some(length), Some(1), Some(upper), Some(lower)) = (
+                    self.inline_upload.length,
+                    self.inline_upload.lines,
+                    self.inline_upload.upper,
+                    self.inline_upload.lower,
+                ) else {
+                    return Err(MethodError::IncompleteInlineUpload);
+                };
+                let address = (u64::from(upper) << 32) | u64::from(lower);
+                if address % 4 != 0
+                    || address
+                        .checked_add(u64::from(length))
+                        .is_none_or(|end| end > 1 << 40)
+                {
+                    return Err(bad());
+                }
+                self.inline_upload.active = (length != 0).then_some((GpuAddress(address), length));
+                return Ok(MethodEffect::InlineUploadStart {
+                    address: GpuAddress(address),
+                    length,
+                });
+            }
+            0x01b4 => {
+                let Some((address, remaining)) = self.inline_upload.active else {
+                    return Err(MethodError::IncompleteInlineUpload);
+                };
+                self.inline_upload.active = if remaining == 4 {
+                    None
+                } else {
+                    Some((GpuAddress(address.0 + 4), remaining - 4))
+                };
+                return Ok(MethodEffect::InlineWrite { address, value });
+            }
             0x0f84 => {
                 if value > 0xff {
                     return Err(bad());
@@ -1355,6 +1427,10 @@ impl Channel {
     pub fn finish(&mut self) -> Result<()> {
         if self.faulted {
             return Err(invalid("GPU channel fault is latched"));
+        }
+        if self.engine.inline_upload.active.is_some() {
+            self.faulted = true;
+            return Err(invalid("incomplete B197 inline upload at channel finish"));
         }
         self.fifo.finish().map_err(|e| {
             self.faulted = true;

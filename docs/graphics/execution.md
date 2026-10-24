@@ -2459,3 +2459,22 @@ unused by supported in-bounds vertex fetches: configuring it does not make an
 unmapped vertex stream or an out-of-range indexed/nonindexed draw valid.
 Actual substitute fetches remain unsupported. Updating the address does not
 invalidate otherwise compatible shaders or force a guest-memory read.
+
+
+B197 inline uploads support a single pitch-linear row of 0..65536 bytes in
+aligned four-byte words. The exact supported `LAUNCH_DMA` value is `0x1011`.
+Launch snapshots the descriptor, checks the complete nonempty destination through
+AddressMap/GuestMemoryWrite, and publishes earlier aliased pending output before
+accepting data. Each DATA word is committed little-endian with an atomic checked
+four-byte write followed by journal notification. Backend failure latches the
+channel and preserves the successfully written prefix; no transfer-wide rollback
+or automatic command replay is claimed. Empty launches read/write no guest bytes.
+
+Inline launch/data effects release command borrows, resume MME only after actual
+backend processing, and reacquire unread command suffixes. Ordinary DATA packets
+can continue across GPFIFO submissions; explicit channel finish rejects incomplete
+transfers. Configuration/relaunch while data is pending is explicitly unsupported.
+No guest span or permanent whole-transfer shadow is retained. Flush-only writes
+are already ordered canonical CPU writes in this implementation; they do not
+synthesize a GPU fence or guest syncpoint, and add no unrelated queue submission,
+GPU wait or framebuffer publication. Actual alias hazards use existing barriers.

@@ -76,6 +76,8 @@ impl Renderer {
                                     | MethodEffect::DrawIndices { .. }
                                     | MethodEffect::Clear { .. }
                                     | MethodEffect::ConstantWrite { .. }
+                                    | MethodEffect::InlineUploadStart { .. }
+                                    | MethodEffect::InlineWrite { .. }
                                     | MethodEffect::WaitIdle
                             ) {
                                 draw = Some(effect);
