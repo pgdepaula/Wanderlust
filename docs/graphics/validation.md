@@ -3646,3 +3646,23 @@ separately ignored tests, without failures. Explicit graphics execution passed
 45 scenarios each on WSL OpenGL, native Windows D3D12 and native Windows Vulkan;
 watchdog unit tests also passed natively. These synthetic results do not establish
 original-game frames or general unlimited MME execution.
+
+
+### Vertex-stream substitute register retention
+
+A literal incrementing B06F packet writes `0x0f84/0x0f88` at the maximum
+40-bit address. Tests verify independent partial writes, invalid upper bits,
+unaligned methods, zero address, channel isolation, and unchanged state after
+rejection. A configured substitute does not create missing vertex state or
+relax inclusive vertex-span/overflow checks.
+
+The MME indexed-raster fixtures configure an intentionally unmapped substitute
+address. Their independently expected masked/textured pixels and shader reuse
+prove that supported in-bounds geometry does not dereference it. Actual runout
+fetches remain unsupported.
+
+Formatting and strict package Clippy passed. Default GPU/NVIDIA CPU suites passed
+430 tests (180 device tests separately ignored); GPU no-default passed 405 tests.
+Explicit graphics runs passed 45 scenarios on each of WSL OpenGL, native Windows
+D3D12 and native Windows Vulkan, without skips or failures. Completion-watchdog
+unit tests also passed on both native backends.

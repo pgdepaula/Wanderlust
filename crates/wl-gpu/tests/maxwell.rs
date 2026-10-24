@@ -865,3 +865,54 @@ fn instrumentation_initialization_is_ordered_bounded_and_channel_local() {
         (None, None)
     );
 }
+
+#[test]
+fn vertex_substitute_address_is_40_bit_partial_persistent_and_channel_local() {
+    let mut channel = Channel::default();
+    for word in [0x20010000, CLASS, 0x200203e1, 0xff, u32::MAX] {
+        assert_eq!(channel.push_word(word).unwrap(), MethodEffect::State);
+    }
+    channel.finish().unwrap();
+    let maximum = Some(GpuAddress(0xffffffffff));
+    assert_eq!(channel.engine.vertex_stream_substitute_address(), maximum);
+    for (method, value) in [(0xf84, 0x100), (0xf84, u32::MAX), (0xf85, 0), (0xf89, 0)] {
+        assert!(channel.engine.apply(write(method, value)).is_err());
+        assert_eq!(channel.engine.vertex_stream_substitute_address(), maximum);
+    }
+    channel.engine.apply(write(0xf88, 0x12345679)).unwrap();
+    assert_eq!(
+        channel.engine.vertex_stream_substitute_address(),
+        Some(GpuAddress(0xff12345679))
+    );
+    channel.engine.apply(write(0xf84, 0)).unwrap();
+    assert_eq!(
+        channel.engine.vertex_stream_substitute_address(),
+        Some(GpuAddress(0x12345679))
+    );
+    let mut independent = Maxwell3d::default();
+    independent.apply(write(0, CLASS)).unwrap();
+    assert_eq!(independent.vertex_stream_substitute_address(), None);
+    independent.apply(write(0xf88, 0)).unwrap();
+    assert_eq!(independent.vertex_stream_substitute_address(), None);
+    independent.apply(write(0xf84, 0)).unwrap();
+    assert_eq!(
+        independent.vertex_stream_substitute_address(),
+        Some(GpuAddress(0))
+    );
+    let bounded = VertexArray {
+        address: GpuAddress(0x1000),
+        limit: GpuAddress(0x1047),
+        stride: 24,
+        offsets: [0, 16],
+        position_format: PositionFormat::Float32x4,
+    };
+    assert_eq!(bounded.span(0, 3).unwrap(), 72);
+    assert!(bounded.span(1, 3).is_err());
+    assert!(bounded.span(u32::MAX, 3).is_err());
+    // A configured pointer does not manufacture a missing vertex array.
+    assert!(independent.vertex_array().is_err());
+    assert_eq!(
+        channel.engine.vertex_stream_substitute_address(),
+        Some(GpuAddress(0x12345679))
+    );
+}

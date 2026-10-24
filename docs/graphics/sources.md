@@ -1992,3 +1992,19 @@ supported CB data port. Its 36-byte little-endian binary SHA-256 is
 `8a63c2d2f625aa92b812139fa386410c64f82fc0f6affb71a3993c19f0bb74c7`.
 The new 1024-step invocation and 1,048,576-step submission bounds are explicit
 implementation budgets; no NVIDIA hardware maximum is inferred from them.
+
+
+### Vertex-stream substitute address
+
+The pinned NVIDIA B197 class header defines `SET_VERTEX_STREAM_SUBSTITUTE_A`
+(`0x0f84`, address bits 39:32 in field 7:0) and `_B` (`0x0f88`, bits 31:0).
+The backend retains these fields without inventing an additional alignment rule.
+Mesa's pinned [`nvc0_screen.c`](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nvc0/nvc0_screen.c)
+initializes a zero-valued vertex runout allocation; pinned
+[`nvk_cmd_draw.c`](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/vulkan/nvk_cmd_draw.c)
+programs the substitute address from a zero page. Deko3d
+[`gpu_3d_base.cpp`](https://github.com/devkitPro/deko3d/blob/373bfd43d8b2d805fa2eb7d406dbb823032df958/source/maxwell/gpu_3d_base.cpp)
+likewise programs `VertexRunoutBufferIova` during initialization.
+These references justify retaining the address, not general substitute-fetch
+format semantics. Vertex/index bounds checks remain mandatory; out-of-range
+fetch substitution is unsupported and explicitly rejected.

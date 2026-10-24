@@ -2450,3 +2450,12 @@ The direct pushbuffer API also shares the existing 1,048,576-word input bound.
 These are software resource limits, not hardware fault rules or physical RAM
 claims. Exceeding either work bound preserves already executed writes/draws and
 prevents command replay; completion/publication remains explicit.
+
+
+The B197 vertex-stream substitute address (`0x0f84/0x0f88`) is retained as
+independent upper-eight/lower-32-bit register state. Both halves must have been
+written before the complete configured address is available. This address is
+unused by supported in-bounds vertex fetches: configuring it does not make an
+unmapped vertex stream or an out-of-range indexed/nonindexed draw valid.
+Actual substitute fetches remain unsupported. Updating the address does not
+invalidate otherwise compatible shaders or force a guest-memory read.

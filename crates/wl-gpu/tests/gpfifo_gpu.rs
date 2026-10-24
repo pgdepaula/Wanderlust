@@ -275,6 +275,8 @@ fn mme_raster_state(program: MmeFixture) {
     method(&mut words, 0x1590, 0);
     // NVIDIA's two full-u32 fields, with deko3d's exact initialization pair.
     words.extend_from_slice(&[0x20020054, 0x49000000, 0x49000001]);
+    // In-bounds geometry must not dereference an unused, unmapped runout VA.
+    words.extend_from_slice(&[0x200203e1, 0xa5, 0x12345678]);
 
     for (method_id, value) in [
         (0xf8c, 0),

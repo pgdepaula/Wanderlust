@@ -261,6 +261,8 @@ pub struct Maxwell3d {
     vertex_lower: Option<u32>,
     vertex_limit_upper: Option<u32>,
     vertex_limit_lower: Option<u32>,
+    vertex_substitute_upper: Option<u8>,
+    vertex_substitute_lower: Option<u32>,
     vertex_frequency: Option<u32>,
     vertex_instance: [Option<u32>; 16],
     vertex_attributes: [Option<u32>; 2],
@@ -286,6 +288,14 @@ struct ActiveMacro {
     idle_completed: bool,
 }
 impl Maxwell3d {
+    /// Configured runout address. Supported fetches still require in-bounds
+    /// geometry; no substitute data or host default is silently read.
+    pub fn vertex_stream_substitute_address(&self) -> Option<GpuAddress> {
+        Some(GpuAddress(
+            (u64::from(self.vertex_substitute_upper?) << 32)
+                | u64::from(self.vertex_substitute_lower?),
+        ))
+    }
     pub(crate) fn begin_submission(&mut self) -> std::result::Result<(), MethodError> {
         if self.active_macro.is_some() {
             return Err(MethodError::Macro(crate::mme::MacroError::ActiveInvocation));
@@ -513,6 +523,13 @@ impl Maxwell3d {
             return Ok(MethodEffect::State);
         }
         match method {
+            0x0f84 => {
+                if value > 0xff {
+                    return Err(bad());
+                }
+                self.vertex_substitute_upper = Some(value as u8);
+            }
+            0x0f88 => self.vertex_substitute_lower = Some(value),
             0x0150 => {
                 // Only the deko3d baseline initialization pair is admitted.
                 // Unknown instrumentation protocols remain explicit errors.
