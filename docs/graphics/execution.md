@@ -2478,3 +2478,14 @@ No guest span or permanent whole-transfer shadow is retained. Flush-only writes
 are already ordered canonical CPU writes in this implementation; they do not
 synthesize a GPU fence or guest syncpoint, and add no unrelated queue submission,
 GPU wait or framebuffer publication. Actual alias hazards use existing barriers.
+
+
+`SET_BLEND_STATE_PER_TARGET` selects between the retained global coefficient
+bank and the per-target bank for the active color target zero. The seven words
+at `0x1e00 + j*32` retain independent state for `j=0..7`; bank selection does not
+enable blending or increase the number of render attachments. Enabling blending
+requires complete selected RGB state and explicit separate-alpha selection;
+separate alpha additionally requires all three selected alpha fields. Other
+banks never alias target zero, and invalid/reserved writes preserve prior state.
+Pipeline identity uses resolved blend semantics, so equivalent global/per-target
+and OGL/D3D encodings reuse compatible pipelines and shader modules.

@@ -349,6 +349,8 @@ pub(crate) struct RasterRegisters {
     scissor_enable: [Option<u32>; 16],
     fixed: u64,
     blend_enabled: bool,
+    blend_per_target: bool,
+    target_blend: [[Option<u32>; 7]; 8],
     blend_separate: Option<bool>,
     blend: [Option<u32>; 6],
     write_mask: u8,
@@ -372,6 +374,55 @@ pub(crate) struct RasterRegisters {
     window_clip_disabled: bool,
 }
 impl RasterRegisters {
+    fn resolve_blend(&self) -> Result<Option<BlendState>> {
+        if !self.blend_enabled {
+            return Ok(None);
+        }
+        let (separate, registers) = if self.blend_per_target {
+            let bank = &self.target_blend[0];
+            (
+                bank[0].ok_or_else(|| invalid("missing per-target alpha blend selection"))? != 0,
+                &bank[1..],
+            )
+        } else {
+            (
+                self.blend_separate
+                    .ok_or_else(|| invalid("missing explicit alpha blend selection"))?,
+                self.blend.as_slice(),
+            )
+        };
+        let get = |n: usize| {
+            registers[n].ok_or_else(|| {
+                invalid(if self.blend_per_target {
+                    "incomplete per-target blend state"
+                } else {
+                    "incomplete global blend state"
+                })
+            })
+        };
+        let color_operation = blend_operation(get(0)?).unwrap();
+        // Canonicalize ignored MIN/MAX factors only in the resolved pipeline
+        // state. Raw registers remain intact for a later ADD/SUBTRACT write.
+        let color = blend_factors(
+            color_operation,
+            [factor(get(1)?).unwrap(), factor(get(2)?).unwrap()],
+        );
+        let (alpha_operation, alpha) = if separate {
+            let op = blend_operation(get(3)?).unwrap();
+            (
+                op,
+                blend_factors(op, [factor(get(4)?).unwrap(), factor(get(5)?).unwrap()]),
+            )
+        } else {
+            (color_operation, color)
+        };
+        Ok(Some(BlendState {
+            color,
+            alpha,
+            color_operation,
+            alpha_operation,
+        }))
+    }
     pub fn apply(&mut self, method: u16, value: u32) -> std::result::Result<bool, MethodError> {
         if method % 4 != 0 {
             return Err(MethodError::InvalidMethod(method));
@@ -410,6 +461,11 @@ impl RasterRegisters {
                     return Err(bad());
                 }
                 self.cull_enabled = value != 0;
+            } else if method == 0x12e4 {
+                if value > 1 {
+                    return Err(bad());
+                }
+                self.blend_per_target = value != 0;
             } else if method == 0x1360 {
                 if value > 1 {
                     return Err(bad());
@@ -427,6 +483,20 @@ impl RasterRegisters {
             return Ok(true);
         }
         match method {
+            0x1e00..=0x1efc => {
+                let bank = usize::from((method - 0x1e00) / 32);
+                let field = usize::from((method - 0x1e00) % 32 / 4);
+                let valid = match field {
+                    0 => value <= 1,
+                    1 | 4 => blend_operation(value).is_some(),
+                    2 | 3 | 5 | 6 => factor(value).is_some(),
+                    _ => false, // Reserved word, not the following bank.
+                };
+                if !valid {
+                    return Err(bad());
+                }
+                self.target_blend[bank][field] = Some(value);
+            }
             0x0d00..=0x0d3c => {
                 let index = usize::from((method - 0xd00) / 8);
                 let axis = usize::from((method - 0xd00) % 8 / 4);
@@ -654,37 +724,7 @@ impl RasterRegisters {
         {
             return Err(invalid("incomplete or unsupported fixed raster state"));
         }
-        let blend = if self.blend_enabled {
-            let separate = self
-                .blend_separate
-                .ok_or_else(|| invalid("missing explicit alpha blend selection"))?;
-            let get =
-                |n: usize| self.blend[n].ok_or_else(|| invalid("incomplete global blend state"));
-            let color_operation = blend_operation(get(0)?).unwrap();
-            // Canonicalize ignored MIN/MAX factors only in the resolved pipeline
-            // state. Raw registers remain intact for a later ADD/SUBTRACT write.
-            let color = blend_factors(
-                color_operation,
-                [factor(get(1)?).unwrap(), factor(get(2)?).unwrap()],
-            );
-            let (alpha_operation, alpha) = if separate {
-                let op = blend_operation(get(3)?).unwrap();
-                (
-                    op,
-                    blend_factors(op, [factor(get(4)?).unwrap(), factor(get(5)?).unwrap()]),
-                )
-            } else {
-                (color_operation, color)
-            };
-            Some(BlendState {
-                color,
-                alpha,
-                color_operation,
-                alpha_operation,
-            })
-        } else {
-            None
-        };
+        let blend = self.resolve_blend()?;
         let color = ColorState {
             blend,
             write_mask: self.write_mask,
@@ -889,6 +929,86 @@ impl RasterRegisters {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn independent_blend_selects_target_zero_without_inheriting_global_alpha() {
+        let mut r = RasterRegisters::default();
+        for (m, v) in [
+            (0x1360, 1),
+            (0x133c, 1),
+            (0x1340, 1),
+            (0x1344, 5),
+            (0x1348, 6),
+            (0x134c, 1),
+            (0x1350, 2),
+            (0x1358, 6),
+        ] {
+            r.apply(m, v).unwrap();
+        }
+        let global = r.resolve_blend().unwrap();
+        r.apply(0x12e4, 1).unwrap();
+        assert!(r.resolve_blend().is_err());
+        for (m, v) in [
+            (0x1e00, 0),
+            (0x1e04, 0x8006),
+            (0x1e08, 0x4302),
+            (0x1e0c, 0x4303),
+        ] {
+            r.apply(m, v).unwrap();
+        }
+        let coupled = r.resolve_blend().unwrap().unwrap();
+        assert_eq!(coupled.color, coupled.alpha);
+        r.apply(0x1e00, 1).unwrap();
+        assert!(r.resolve_blend().is_err());
+        for (m, v) in [(0x1e10, 0x8006), (0x1e14, 0x4001), (0x1e18, 0x4303)] {
+            r.apply(m, v).unwrap();
+        }
+        assert_eq!(r.resolve_blend().unwrap(), global);
+        for bank in 1..8 {
+            for (field, value) in [1, 2, 1, 2, 3, 2, 1].into_iter().enumerate() {
+                r.apply(0x1e00 + bank * 32 + field as u16 * 4, value)
+                    .unwrap();
+            }
+            assert_eq!(r.resolve_blend().unwrap(), global);
+        }
+        r.apply(0x1344, 1).unwrap(); // Inactive global bank changes independently.
+        assert_eq!(r.resolve_blend().unwrap(), global);
+        r.apply(0x12e4, 0).unwrap();
+        assert_ne!(r.resolve_blend().unwrap(), global);
+        r.apply(0x12e4, 1).unwrap();
+        assert_eq!(r.resolve_blend().unwrap(), global);
+        assert_eq!(RasterRegisters::default().target_blend, [[None; 7]; 8]);
+    }
+    #[test]
+    fn independent_blend_rejects_holes_modifiers_and_unaligned_methods_atomically() {
+        let mut r = RasterRegisters::default();
+        r.apply(0x12e4, 1).unwrap();
+        for bank in 0..8 {
+            let base = 0x1e00 + bank * 32;
+            let values = [1, 1, 5, 6, 1, 2, 6];
+            for (field, value) in values.into_iter().enumerate() {
+                r.apply(base + field as u16 * 4, value).unwrap();
+            }
+            for (offset, value) in [
+                (0, 2),
+                (4, 0),
+                (8, 14),
+                (12, 16),
+                (16, 0x8009),
+                (20, 0),
+                (24, u32::MAX),
+                (28, 0),
+                (1, 1),
+            ] {
+                assert!(r.apply(base + offset, value).is_err());
+                assert_eq!(r.target_blend[bank as usize], values.map(Some));
+            }
+        }
+        assert!(r.apply(0x12e4, 2).is_err());
+        assert!(r.blend_per_target);
+        assert!(!r.apply(0x1f00, 0).unwrap());
+        assert_eq!(r.blend, [None; 6]);
+        assert_eq!(r.blend_separate, None);
+    }
     #[test]
     fn unaligned_direct_method_cannot_alias_register() {
         let mut r = RasterRegisters::default();

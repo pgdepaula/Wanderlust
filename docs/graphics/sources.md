@@ -2034,3 +2034,22 @@ interrupts, reduction and semaphore release remain unsupported.
 little-endian encoding in `inline-upload.words` has SHA-256
 `90b1934b210f19ae470285b66041955660666d42176f8c81645ccb0dba0c91a7`.
 Only this independently authored fixture, not commercial command code, is stored.
+
+
+### Per-target blend coefficients for color target zero
+
+The pinned NVIDIA B197 header defines `SET_BLEND_STATE_PER_TARGET` (`0x12e4`,
+bit zero) and eight 32-byte coefficient banks starting at `0x1e00`. The seven
+words are separate-alpha enable, RGB operation/source/destination, and alpha
+operation/source/destination; the final word is not a coefficient. The operation
+and coefficient enums match the implemented OGL/D3D global blend encodings.
+Mesa's pinned [`nvc0_state.c`](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nvc0/nvc0_state.c)
+selects independent coefficients with `BLEND_INDEPENDENT` and emits each bank's
+RGB/alpha state through `IBLEND_EQUATION_RGB`. Blend enables remain separately
+programmed, rather than implicitly enabled by the bank selector.
+
+Wanderlust retains all eight coefficient banks but executes only the existing
+single active color target zero. Missing selected coefficients reject the draw;
+no global-bank or power-on values are substituted. Separate-alpha disabled uses
+the selected RGB operation/factors for alpha as in the global path. Multiple
+color outputs, dual-source factors and constant blend factors remain unsupported.

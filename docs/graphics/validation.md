@@ -3695,3 +3695,27 @@ native Windows D3D12 and native Windows Vulkan, including bounds-only cases that
 initialize a device without rasterizing. Completion-watchdog unit tests also
 passed on both native backends. Live-worktree workspace Clippy passed, and the
 workspace suite passed 792 tests with 186 separately ignored device tests.
+
+
+### Per-target blend bank selection
+
+CPU tests verify independent storage of all eight seven-word banks, selection
+of target zero, separate/shared alpha requirements, global-bank preservation,
+reserved words, invalid factors/operations, unaligned writes and failed-write
+atomicity. Existing omitted-global-field tests retain their diagnostic contract.
+
+Three explicit blend scenes cover the original global path, per-target zero
+with conflicting bank-one state, and global-to-per-target switching. Their
+independent scalar oracle checks both overlapping asymmetric triangles, separate
+RGB/alpha arithmetic, uncovered pixels and channel write masks. Equivalent bank
+selection and OGL/D3D encodings create no extra pipeline or shader module. An
+incomplete newly selected channel fails before drawing and cannot reuse the
+previous resident blend state or modify published framebuffer bytes.
+
+The explicit graphics/device batch passed 53 scenarios on each of WSL OpenGL,
+native Windows D3D12 and native Windows Vulkan; completion-watchdog unit tests
+also passed on both native backends. Bounds-only device scenarios are included
+in this count. Default GPU/NVIDIA CPU suites passed 434 tests, with 187 device
+tests separately ignored. No-default GPU CPU suites passed 409 tests. Formatting
+and strict package Clippy passed. Multiple color attachments remain
+unsupported; retaining inactive banks does not claim MRT rasterization.
