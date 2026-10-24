@@ -1479,15 +1479,7 @@ pub(crate) fn request(
                 ],
                 &[],
             );
-            let dst_info = req
-                .recvs
-                .first()
-                .or(req.statics.first())
-                .or(req.sends.first());
-            if let Some(&(dst, buf_size)) = dst_info {
-                let to_copy = reply.len().min(buf_size as usize);
-                let _ = memory.write_bytes(dst, &reply[..to_copy]);
-            }
+            write_binder_parcel(memory, req, &reply)?;
             Done::ok()
         }
         (HostObject::HosBinderDriver, 1) => {
@@ -1580,6 +1572,22 @@ fn copy_event(k: &mut Kernel, e: usize) -> Done {
         },
         Err(code) => Done::failure(code),
     }
+}
+
+/// AutoSelect output may contain an empty B descriptor followed by the active
+/// C descriptor. Never write a reply to an input buffer or silently truncate it.
+fn write_binder_parcel(memory: &mut Memory, req: &Request, parcel: &[u8]) -> Result<(), String> {
+    let mut active = req.recvs.iter().copied().filter(|&(_, size)| size != 0);
+    let (address, size) = active
+        .next()
+        .ok_or("Binder parcel has no active output buffer")?;
+    if active.next().is_some() {
+        return Err("Binder parcel has multiple active output buffers".into());
+    }
+    if u64::try_from(parcel.len()).map_err(|_| "Binder parcel size overflow")? > size {
+        return Err("Binder parcel output buffer is too small".into());
+    }
+    memory.write_bytes(address, parcel)
 }
 
 fn make_parcel(data: &[u8], objs: &[u8]) -> Vec<u8> {
@@ -1738,5 +1746,56 @@ fn log(k: &mut Kernel, _process_id: u64, packet: &[u8]) {
         }
     } else {
         partial.push((thread_id, message));
+    }
+}
+
+#[cfg(test)]
+mod binder_output_tests {
+    use super::*;
+    #[test]
+    fn auto_select_empty_b_uses_active_c_and_preserves_inputs() {
+        let mut memory = Memory::default();
+        memory
+            .map(0x1000, vec![0xa5; 128], true, true, false)
+            .unwrap();
+        let mut request = Request::default();
+        request.sends = vec![(0x1000, 32)];
+        request.statics = vec![(0, 0)];
+        request.recvs = vec![(0, 0), (0x1040, 64)];
+        let parcel = make_parcel(
+            &[
+                0, 5, 0, 0, 0xd0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            &[],
+        );
+        write_binder_parcel(&mut memory, &request, &parcel).unwrap();
+        assert_eq!(memory.read_bytes(0x1040, parcel.len()).unwrap(), parcel);
+        assert_eq!(memory.read_bytes(0x1000, 64).unwrap(), [0xa5; 64]);
+        assert_eq!(
+            memory
+                .read_bytes(0x1040 + parcel.len() as u64, 64 - parcel.len())
+                .unwrap(),
+            vec![0xa5; 64 - parcel.len()]
+        );
+    }
+    #[test]
+    fn missing_ambiguous_short_and_unmapped_outputs_do_not_write_inputs() {
+        let mut memory = Memory::default();
+        memory
+            .map(0x1000, vec![0xa5; 128], true, true, false)
+            .unwrap();
+        for recvs in [
+            vec![],
+            vec![(0, 0)],
+            vec![(0x1000, 2)],
+            vec![(0x1000, 8), (0x1040, 8)],
+            vec![(0x3000, 8)],
+        ] {
+            let mut req = Request::default();
+            req.recvs = recvs;
+            req.sends = vec![(0x1000, 128)];
+            assert!(write_binder_parcel(&mut memory, &req, &[1, 2, 3, 4]).is_err());
+            assert_eq!(memory.read_bytes(0x1000, 128).unwrap(), [0xa5; 128]);
+        }
     }
 }
