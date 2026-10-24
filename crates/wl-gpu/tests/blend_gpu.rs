@@ -163,6 +163,7 @@ fn blend_scene(per_target: bool, switch: bool) {
     let mut words = common::hardware::setup();
     method(&mut words, 0x2144, 0x500);
     method(&mut words, 0x1f04, 0x7008f);
+    method(&mut words, 0x15e4, 1);
     if per_target {
         method(&mut words, 0x12e4, 1);
     }
@@ -190,6 +191,7 @@ fn blend_scene(per_target: bool, switch: bool) {
     changes.mark_write(GuestAddress(80), 16).unwrap();
     // Numerically equivalent D3D encodings must reuse the existing pipeline.
     let mut words = Vec::new();
+    method(&mut words, 0x15e4, 0); // Marking must not erase filled triangle edges.
     if switch {
         method(&mut words, 0x12e4, 1);
     }

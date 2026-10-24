@@ -2489,3 +2489,9 @@ separate alpha additionally requires all three selected alpha fields. Other
 banks never alias target zero, and invalid/reserved writes preserve prior state.
 Pipeline identity uses resolved blend semantics, so equivalent global/per-target
 and OGL/D3D encodings reuse compatible pipelines and shader modules.
+
+
+B197 `SET_EDGE_FLAG` retains the literal one-bit edge mark in auxiliary channel
+state. Supported draws require polygon FILL for both faces, where edge marking
+has no coverage effect. Changing the bit therefore preserves filled geometry
+and compatible pipelines. Unsupported polygon POINT/LINE modes remain rejected.

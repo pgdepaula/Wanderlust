@@ -38,6 +38,8 @@ pub struct AuxiliaryRasterControls {
     pub allow_float_pixel_kills: Option<bool>,
     pub zero_times_anything_is_zero: Option<bool>,
     pub draw_generated_polygon_edges: Option<bool>,
+    /// Vertex edge marking, inert under the strictly supported polygon FILL mode.
+    pub edge_flag: Option<bool>,
     pub two_sided_stencil: Option<bool>,
     pub spa_version: Option<u16>,
     pub local_memory_window: Option<u32>,
@@ -678,6 +680,14 @@ impl Maxwell3d {
                 // Ordered watermarks only. Host warp scheduling remains wgpu's
                 // responsibility, not an emulated timing/completion primitive.
                 self.auxiliary_raster.pixel_warp_watermarks = Some((low, high));
+            }
+            0x15e4 => {
+                if value > 1 {
+                    return Err(bad());
+                }
+                // Edge marking affects polygon POINT/LINE rasterization. Both
+                // polygon faces remain strictly FILL in the supported draw path.
+                self.auxiliary_raster.edge_flag = Some(value != 0);
             }
             0x0f8c | 0x1594 => {
                 if value > 1 {

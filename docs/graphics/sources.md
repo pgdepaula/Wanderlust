@@ -2053,3 +2053,14 @@ single active color target zero. Missing selected coefficients reject the draw;
 no global-bank or power-on values are substituted. Separate-alpha disabled uses
 the selected RGB operation/factors for alpha as in the global path. Multiple
 color outputs, dual-source factors and constant blend factors remain unsupported.
+
+
+### Vertex edge flag under polygon fill
+
+The pinned NVIDIA B197 header defines `SET_EDGE_FLAG` (`0x15e4`) with one
+boolean bit. Khronos' [OpenGL 2.1 edge-flag reference](https://registry.khronos.org/OpenGL-Refpages/gl2.1/xhtml/glEdgeFlag.xml)
+limits edge-marking effects to polygon POINT/LINE modes. The implemented Maxwell
+path requires FILL independently for both polygon faces, so either edge flag has
+the same filled-triangle raster result. The raw bit is retained per channel;
+reserved bits and POINT/LINE polygon modes remain explicit errors. No wireframe,
+edge-attribute shader input or per-vertex edge-marking execution is claimed.

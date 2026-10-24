@@ -1062,3 +1062,38 @@ fn inline_upload_packet_continuation_is_channel_local_and_finish_detects_truncat
     assert!(unfinished.finish().is_err());
     assert!(unfinished.is_faulted());
 }
+
+#[test]
+fn edge_flag_retains_only_one_bit_and_does_not_enable_wireframe() {
+    let mut channel = Channel::default();
+    for word in [0x20010000, CLASS, 0x20010579, 1] {
+        assert_eq!(channel.push_word(word).unwrap(), MethodEffect::State);
+    }
+    channel.finish().unwrap();
+    assert_eq!(
+        channel.engine.auxiliary_raster_controls().edge_flag,
+        Some(true)
+    );
+    for (method, value) in [
+        (0x15e4, 2),
+        (0x15e4, u32::MAX),
+        (0x15e5, 0),
+        (0xdac, 0x1b01),
+        (0xdb0, 0x1b00),
+    ] {
+        assert!(channel.engine.apply(write(method, value)).is_err());
+        assert_eq!(
+            channel.engine.auxiliary_raster_controls().edge_flag,
+            Some(true)
+        );
+    }
+    channel.engine.apply(write(0x15e4, 0)).unwrap();
+    assert_eq!(
+        channel.engine.auxiliary_raster_controls().edge_flag,
+        Some(false)
+    );
+    assert_eq!(
+        Maxwell3d::default().auxiliary_raster_controls().edge_flag,
+        None
+    );
+}

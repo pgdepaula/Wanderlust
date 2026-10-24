@@ -3719,3 +3719,17 @@ in this count. Default GPU/NVIDIA CPU suites passed 434 tests, with 187 device
 tests separately ignored. No-default GPU CPU suites passed 409 tests. Formatting
 and strict package Clippy passed. Multiple color attachments remain
 unsupported; retaining inactive banks does not claim MRT rasterization.
+
+
+### Filled-triangle edge marking
+
+A literal FIFO packet verifies B197 edge-flag retention, reserved-bit rejection,
+unaligned-method rejection, channel isolation and continued refusal of polygon
+POINT/LINE modes. Maxwell integration tests passed 22 cases in both feature
+configurations; strict package Clippy and formatting passed. Three asymmetric
+blending scenes toggle edge marking from true to false between genuine draws,
+then verify the same independent filled-coverage, alpha and write-mask oracle.
+All three scenes passed on WSL OpenGL, native Windows D3D12 and native Windows
+Vulkan; native completion-watchdog unit tests also passed. The toggle adds no
+shader/pipeline recreation or forced intermediate readback. This validates only
+FILL-mode invariance, not wireframe or per-vertex boundary-edge rendering.
