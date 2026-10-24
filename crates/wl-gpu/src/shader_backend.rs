@@ -30,6 +30,21 @@ pub(crate) struct SelectedShader {
     observed: (u64, u64),
 }
 impl Renderer {
+    pub(crate) fn invalidate_shader_caches(&mut self, flags: u32) {
+        if flags & 1 != 0 {
+            self.selected_shader = None;
+            self.selected_vertex = None;
+            self.vertex_ready = false;
+        }
+        if flags & 0x1000 != 0 {
+            if let Some(fragment) = self.resource_fragment.as_mut() {
+                fragment.stamps.fill(None);
+            }
+        }
+        // No admitted shader instruction performs cached global-memory loads.
+        // The GLOBAL_DATA bit therefore has no resident LDG data to discard.
+    }
+
     /// Select/load the guest binary using actual B197 pixel-program state. This
     /// synchronizes fragment resources; draw geometry is still the explicit harness.
     pub fn sync_selected_fragment(

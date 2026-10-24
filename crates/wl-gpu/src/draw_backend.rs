@@ -129,6 +129,9 @@ impl Renderer {
                             | MethodEffect::InlineUploadStart { .. }
                             | MethodEffect::InlineWrite { .. }
                             | MethodEffect::WaitIdle
+                            | MethodEffect::HostCacheMaintenance
+                            | MethodEffect::ShaderCachesInvalidated(_)
+                            | MethodEffect::TextureDataInvalidated
                     ) {
                         if let Some(frame) =
                             self.channel_effect(channel, effect, map, memory, changes, synchronous)?
@@ -391,6 +394,25 @@ impl Renderer {
         synchronous: bool,
     ) -> Result<Option<Frame>> {
         match effect {
+            MethodEffect::TextureDataInvalidated => {
+                self.invalidate_texture_data();
+                Ok(None)
+            }
+            MethodEffect::HostCacheMaintenance => {
+                // Stronger than hardware cache timing: make pending attachment
+                // output canonical before later memory reads. No fabricated fence.
+                if self.poisoned {
+                    return Err(invalid("renderer unavailable after backend failure"));
+                }
+                if self.target_pending {
+                    self.counters.coherence_barriers += 1;
+                }
+                self.synchronize_target(memory, changes)
+            }
+            MethodEffect::ShaderCachesInvalidated(flags) => {
+                self.invalidate_shader_caches(flags);
+                Ok(None)
+            }
             MethodEffect::WaitIdle => {
                 if self.poisoned {
                     return Err(invalid("renderer unavailable after backend failure"));

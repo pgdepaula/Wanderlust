@@ -2118,3 +2118,48 @@ and inclusive limit pairs at `0x1f00/0x1f04 + j*8`: upper fields are eight bits,
 lower fields are 32 bits. Inactive pairs are retained independently. The accepted
 vertex attribute subset still selects stream zero exclusively; no new vertex
 format, multi-stream fetch or B-stream support is implied by these state fields.
+
+### Initialization controls and cache actions
+
+NVIDIA `open-gpu-doc` revision
+`9fdf5c4062007929d9f4e6cbad9c9771fe61b880`,
+[`clb197.h`](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/3d/clb197.h)
+and [`clb1c0.h`](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/compute/clb1c0.h),
+defines the retained raster fields and isolated compute configuration. Compute
+`SET_BINDLESS_TEXTURE` has a three-bit slot, unlike the B197 field. Program
+region upper/lower fields are eight/32 bits. Window bases are retained as
+32-bit values; no undocumented alignment or memory allocation is inferred.
+Compute dispatch remains unsupported.
+
+The public deko3d baseline at revision
+`373bfd43d8b2d805fa2eb7d406dbb823032df958`,
+[`gpu_3d_base.cpp`](https://github.com/devkitPro/deko3d/blob/373bfd43d8b2d805fa2eb7d406dbb823032df958/source/gpu_3d_base.cpp),
+provides the exact disabled tile-cache configuration and 22 additional masked
+privileged initialization requests. Only these literal request triples are
+admitted. Known masked bits are updated before scratch acknowledgement;
+unknown bits remain unknown and actual prior WFI is required. This is bounded
+initialization HLE, not physical MMIO, a firmware interpreter or cache timing.
+
+The same revision's
+[`engine_gpfifo.def`](https://github.com/devkitPro/deko3d/blob/373bfd43d8b2d805fa2eb7d406dbb823032df958/source/maxwell/engine_gpfifo.def)
+defines Switch host `MemOpB` at word `0x0b` (byte `0x2c`), with operation bits
+31:27: dirty L2 flush `16` and system-memory invalidation `14`. Do not substitute
+the newer desktop B06F C/D offsets: that header explicitly relocated A/B.
+Only operand-free `0x80000000` and `0x70000000` are supported. The renderer uses
+a conservative guest-publication barrier, stronger than physical cache timing;
+this is neither a hardware-equivalent cache model nor an nvhost fence.
+
+B197 `INVALIDATE_SHADER_CACHES_NO_WFI` (`0xda4`) uses instruction bit 0,
+global-data bit 4 and constant bit 12. Instruction invalidation discards selected
+binary observations; constant invalidation discards acquired uniform-word
+observations. Compatible compiled shaders/pipelines remain reusable. No admitted
+shader performs LDG, so there is no global-load cache to discard. Whole texture
+data invalidation (`0x1288 = 0`) invalidates resident mip observations without
+destroying bindings. Per-tag data invalidation remains unsupported. Neither
+NO_WFI operation inserts a completion wait or publishes framebuffer memory.
+
+ZBC disable masks `0x7a4/0x7a8` accept only `0x7fff` (all slots disabled).
+Statistics enables do not implement reports. Clip enables rely on the strict
+shader subset exporting no user clip distances; point controls rely on triangle
+assembly; stencil reference/masks rely on stencil remaining disabled. Enabling
+conservative raster, TIR, coverage-to-color, tile cache or ZBC remains unsupported.

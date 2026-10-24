@@ -88,6 +88,16 @@ pub enum TextureUploadPolicy {
 }
 
 impl Renderer {
+    pub(crate) fn invalidate_texture_data(&mut self) {
+        for texture in self.textures.values_mut() {
+            for (range, _) in &mut texture.stamps {
+                // Every validated mip has a nonempty source range. An empty
+                // range forces reacquisition without discarding GPU bindings.
+                *range = 0..0;
+            }
+        }
+    }
+
     pub fn texture_host_format(&self, id: TextureId) -> Result<wgpu::TextureFormat> {
         self.textures
             .get(&id)

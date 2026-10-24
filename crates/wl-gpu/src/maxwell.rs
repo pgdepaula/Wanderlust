@@ -20,11 +20,45 @@ pub struct TwoDConfiguration {
     pub corral_size: Option<u16>,
 }
 
+/// Configuration only. Compute dispatch and shader execution remain unsupported.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ComputeConfiguration {
+    pub shader_exceptions: Option<bool>,
+    pub bindless_constant_slot: Option<u8>,
+    pub local_memory_window: Option<u32>,
+    pub shared_memory_window: Option<u32>,
+    pub program_upper: Option<u8>,
+    pub program_lower: Option<u32>,
+    pub spa_version: Option<u16>,
+}
+
 /// Configuration whose observations are restricted by the admitted shader and
 /// topology subset. This does not provide statistics reports or line rendering.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct AuxiliaryRasterControls {
     pub zcull_statistics: Option<bool>,
+    /// Enable state only; ZPASS report/reset methods remain unsupported.
+    pub zpass_pixel_count: Option<bool>,
+    /// Admitted VTG headers/AST outputs export no user clip distances.
+    pub user_clip_enable: Option<u8>,
+    /// Inert while the required raster sample-mask controls remain disabled.
+    pub sample_masks: [Option<u16>; 4],
+    /// Point controls are retained; supported primitive assembly is triangles.
+    pub point_sprite: Option<bool>,
+    pub point_sprite_select: Option<u16>,
+    pub point_size_attribute: Option<u16>,
+    pub point_size_bits: Option<u32>,
+    /// Front ref/read/write mask, then back ref/write/read mask; stencil stays disabled.
+    pub stencil_refs_masks: [Option<u8>; 6],
+    pub conservative_raster: Option<bool>,
+    pub raster_bounding_box: Option<u8>,
+    pub tir_mode: Option<u8>,
+    pub tir_modulation: Option<u8>,
+    pub coverage_to_color: Option<bool>,
+    pub alpha_coverage_qualifier: Option<u8>,
+    /// Disabled tile cache and exact public-driver baseline tuning words only.
+    pub tile_cache_profile: [Option<u32>; 7],
+    pub zero_bandwidth_clear_disable_masks: [Option<u16>; 2],
     /// Hierarchical-test permissions (depth, stencil), not fragment-test enables.
     pub zcull_tests: Option<(bool, bool)>,
     /// Hierarchical bounds hints (minimum unbounded, maximum unbounded).
@@ -193,13 +227,35 @@ pub enum MethodEffect {
     State,
     TextureHeadersInvalidated(Option<u32>),
     SamplersInvalidated(Option<u32>),
-    Draw { first: u32, count: u32 },
-    DrawIndices { first: u32, count: u32 },
-    Clear { color: bool, depth: bool },
-    ConstantWrite { address: GpuAddress, value: u32 },
-    InlineUploadStart { address: GpuAddress, length: u32 },
-    InlineWrite { address: GpuAddress, value: u32 },
+    Draw {
+        first: u32,
+        count: u32,
+    },
+    DrawIndices {
+        first: u32,
+        count: u32,
+    },
+    Clear {
+        color: bool,
+        depth: bool,
+    },
+    ConstantWrite {
+        address: GpuAddress,
+        value: u32,
+    },
+    InlineUploadStart {
+        address: GpuAddress,
+        length: u32,
+    },
+    InlineWrite {
+        address: GpuAddress,
+        value: u32,
+    },
     WaitIdle,
+    /// Conservative guest visibility barrier, not a Switch fence.
+    HostCacheMaintenance,
+    ShaderCachesInvalidated(u32),
+    TextureDataInvalidated,
 }
 /// Bounded pitch-linear, one-row B197 inline upload. Configuration remains
 /// separate from the active transfer snapshot; no guest memory is retained.
@@ -348,6 +404,7 @@ pub struct Maxwell3d {
     active_macro: Option<ActiveMacro>,
     cache_policies: [Option<CacheEviction>; 6],
     two_d: TwoDConfiguration,
+    compute: ComputeConfiguration,
     auxiliary_raster: AuxiliaryRasterControls,
     inline_upload: InlineUpload,
     instrumentation_header: Option<u32>,
@@ -507,6 +564,9 @@ impl Maxwell3d {
     pub fn auxiliary_raster_controls(&self) -> AuxiliaryRasterControls {
         self.auxiliary_raster
     }
+    pub fn compute_configuration(&self) -> ComputeConfiguration {
+        self.compute
+    }
     pub fn two_d_configuration(&self) -> TwoDConfiguration {
         self.two_d
     }
@@ -602,6 +662,14 @@ impl Maxwell3d {
         if method == 8 {
             return Ok(MethodEffect::State);
         }
+        // Switch Maxwell host MEM_OP_B (word 0x0b); only operand-free
+        // L2 dirty flush/system invalidation. Other operations remain unsupported.
+        if method == 0x2c {
+            if !matches!(value, 0x8000_0000 | 0x7000_0000) {
+                return Err(bad());
+            }
+            return Ok(MethodEffect::HostCacheMaintenance);
+        }
         if method == 0 {
             // Engine instance zero only; SET_OBJECT carries a class, not texture ID.
             let class = EngineClass::decode(value).ok_or(MethodError::UnsupportedClass(value))?;
@@ -612,6 +680,26 @@ impl Maxwell3d {
             .bound_class(subchannel)
             .ok_or(MethodError::UnboundSubchannel(subchannel))?;
         if class != EngineClass::ThreeD {
+            if class == EngineClass::Compute {
+                match method {
+                    0x100 => {}
+                    0x1528 if value <= 1 => self.compute.shader_exceptions = Some(value != 0),
+                    0x2608 if value <= 7 => self.compute.bindless_constant_slot = Some(value as u8),
+                    0x077c => self.compute.local_memory_window = Some(value),
+                    0x0214 => self.compute.shared_memory_window = Some(value),
+                    0x1608 if value <= 255 => self.compute.program_upper = Some(value as u8),
+                    0x160c => self.compute.program_lower = Some(value),
+                    0x0310 if value == 0x503 => self.compute.spa_version = Some(value as u16),
+                    0x1528 | 0x2608 | 0x1608 | 0x0310 => return Err(bad()),
+                    _ => {
+                        return Err(MethodError::UnsupportedEngineMethod {
+                            class: class as u32,
+                            method,
+                        });
+                    }
+                }
+                return Ok(MethodEffect::State);
+            }
             if class == EngineClass::TwoD {
                 match method {
                     0x02ac => {
@@ -683,6 +771,28 @@ impl Maxwell3d {
             return Ok(MethodEffect::State);
         }
         match method {
+            0x07a4 | 0x07a8 => {
+                // All 15 hardware ZBC slots disabled. Compressed ZBC surfaces
+                // and enabling an individual slot remain unsupported.
+                if value != 0x7fff {
+                    return Err(bad());
+                }
+                self.auxiliary_raster.zero_bandwidth_clear_disable_masks
+                    [usize::from(method == 0x7a8)] = Some(value as u16);
+            }
+            0x1288 => {
+                // Whole-cache invalidation only; per-tag forms are unsupported.
+                if value != 0 {
+                    return Err(bad());
+                }
+                return Ok(MethodEffect::TextureDataInvalidated);
+            }
+            0x0da4 => {
+                if value & !0x1011 != 0 {
+                    return Err(bad());
+                }
+                return Ok(MethodEffect::ShaderCachesInvalidated(value));
+            }
             0x0124 => {
                 self.shadow.mode = Some(match value {
                     0 => ShadowMode::Track,
@@ -832,6 +942,101 @@ impl Maxwell3d {
                 // Ordered watermarks only. Host warp scheduling remains wgpu's
                 // responsibility, not an emulated timing/completion primitive.
                 self.auxiliary_raster.pixel_warp_watermarks = Some((low, high));
+            }
+            0x0fbc..=0x0fc8 => {
+                if value > 0xffff {
+                    return Err(bad());
+                }
+                self.auxiliary_raster.sample_masks[usize::from((method - 0xfbc) / 4)] =
+                    Some(value as u16);
+            }
+            0x16b4 => {
+                if value > 3 {
+                    return Err(bad());
+                }
+                self.auxiliary_raster.alpha_coverage_qualifier = Some(value as u8);
+            }
+            0xf60 | 0xf64 | 0xf68 | 0xf6c | 0x1108 | 0xf70 | 0x1134 => {
+                let (slot, expected) = match method {
+                    0xf60 => (0, 0),
+                    0xf64 => (1, 0x00800080),
+                    0xf68 => (2, 0x1109),
+                    0xf6c => (3, 0x08080202),
+                    0x1108 => (4, 0x1f),
+                    0xf70 => (5, 0x00080001),
+                    _ => (6, 0),
+                };
+                if value != expected {
+                    return Err(bad());
+                }
+                self.auxiliary_raster.tile_cache_profile[slot] = Some(value);
+            }
+            0x1148 | 0x02ec | 0xfb4 | 0xfd8 | 0x11f8 => {
+                // Ordinary filled bounding-box rasterization with TIR and
+                // coverage-to-color disabled. Enabled forms are not implemented.
+                if value != 0 {
+                    return Err(bad());
+                }
+                match method {
+                    0x1148 => self.auxiliary_raster.conservative_raster = Some(false),
+                    0x02ec => self.auxiliary_raster.raster_bounding_box = Some(0),
+                    0xfb4 => self.auxiliary_raster.tir_mode = Some(0),
+                    0xfd8 => self.auxiliary_raster.tir_modulation = Some(0),
+                    _ => self.auxiliary_raster.coverage_to_color = Some(false),
+                }
+            }
+            0x1394 | 0x1398 | 0x139c | 0xf54 | 0xf58 | 0xf5c => {
+                if value > 255 {
+                    return Err(bad());
+                }
+                let slot = match method {
+                    0x1394 => 0,
+                    0x1398 => 1,
+                    0x139c => 2,
+                    0xf54 => 3,
+                    0xf58 => 4,
+                    _ => 5,
+                };
+                self.auxiliary_raster.stencil_refs_masks[slot] = Some(value as u8);
+            }
+            0x1520 => {
+                if value > 1 {
+                    return Err(bad());
+                }
+                self.auxiliary_raster.point_sprite = Some(value != 0);
+            }
+            0x1604 => {
+                if value & !0x1fff != 0 || value & 3 == 3 {
+                    return Err(bad());
+                }
+                self.auxiliary_raster.point_sprite_select = Some(value as u16);
+            }
+            0x1910 => {
+                if value & !0xff1 != 0 {
+                    return Err(bad());
+                }
+                self.auxiliary_raster.point_size_attribute = Some(value as u16);
+            }
+            0x1518 => {
+                let size = f32::from_bits(value);
+                if !size.is_finite() || size <= 0. {
+                    return Err(bad());
+                }
+                self.auxiliary_raster.point_size_bits = Some(value);
+            }
+            0x1510 => {
+                if value > 255 {
+                    return Err(bad());
+                }
+                // Current exact VTG SPH and AST subset exports no clip-distance
+                // values. Enabling unused planes cannot add a clipping output.
+                self.auxiliary_raster.user_clip_enable = Some(value as u8);
+            }
+            0x1514 => {
+                if value > 1 {
+                    return Err(bad());
+                }
+                self.auxiliary_raster.zpass_pixel_count = Some(value != 0);
             }
             0x15e4 => {
                 if value > 1 {
@@ -1158,7 +1363,7 @@ impl Maxwell3d {
                 };
                 self.constants[group][slot] = binding;
             }
-            0x0100 => {} // documented NO_OPERATION
+            0x0100 | 0x1a2c => {} // documented NO_OPERATION and PIPE_NOP
             0x0f10 => {
                 if value != 1 {
                     return Err(bad());

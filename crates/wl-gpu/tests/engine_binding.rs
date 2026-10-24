@@ -38,13 +38,25 @@ fn engine_bindings_route_without_leaking_auxiliary_writes_into_3d() {
                 Ok(MethodEffect::State)
             );
         }
-        assert_eq!(
-            engine.apply(write(subchannel, 0x160c, 0xdead0000)),
-            Err(MethodError::UnsupportedEngineMethod {
-                class,
-                method: 0x160c
-            })
-        );
+        if expected == EngineClass::Compute {
+            assert_eq!(
+                engine.apply(write(subchannel, 0x160c, 0xdead0000)),
+                Ok(MethodEffect::State)
+            );
+            assert_eq!(
+                engine.compute_configuration().program_lower,
+                Some(0xdead0000)
+            );
+            assert!(engine.apply(write(subchannel, 0x2b4, 1)).is_err());
+        } else {
+            assert_eq!(
+                engine.apply(write(subchannel, 0x160c, 0xdead0000)),
+                Err(MethodError::UnsupportedEngineMethod {
+                    class,
+                    method: 0x160c
+                })
+            );
+        }
         assert_eq!(engine.fragment_program().unwrap(), original);
     }
     assert_eq!(engine.bound_class(0), Some(EngineClass::ThreeD));

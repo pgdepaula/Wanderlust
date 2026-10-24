@@ -1237,3 +1237,108 @@ fn inactive_vertex_a_addresses_are_40_bit_independent_banks_without_fetch_defaul
     assert_eq!(Maxwell3d::default().vertex_stream_address(1), None);
     assert!(e.vertex_array().is_err()); // Addresses do not supply a missing layout.
 }
+
+#[test]
+fn compute_initialization_is_isolated_and_does_not_admit_dispatch() {
+    let mut e = Maxwell3d::default();
+    e.apply(write(0, CLASS)).unwrap();
+    e.apply(write(0x310, 0x503)).unwrap();
+    e.apply(write(0, EngineClass::Compute as u32)).unwrap();
+    for (m, v) in [
+        (0x1528, 0),
+        (0x2608, 7),
+        (0x77c, 0x1000000),
+        (0x214, 0x3000000),
+        (0x1608, 255),
+        (0x160c, u32::MAX),
+        (0x310, 0x503),
+    ] {
+        assert_eq!(e.apply(write(m, v)), Ok(MethodEffect::State));
+    }
+    let old = e.compute_configuration();
+    assert_eq!(old.program_upper, Some(255));
+    assert_eq!(old.bindless_constant_slot, Some(7));
+    for (m, v) in [
+        (0x1528, 2),
+        (0x2608, 8),
+        (0x1608, 256),
+        (0x310, 0x504),
+        (0x2b4, 1),
+    ] {
+        assert!(e.apply(write(m, v)).is_err());
+        assert_eq!(e.compute_configuration(), old);
+    }
+    assert_eq!(e.auxiliary_raster_controls().spa_version, Some(0x503));
+    assert!(e.vertex_program().is_err());
+}
+#[test]
+fn cache_methods_are_actions_with_strict_fields_and_no_engine_binding_requirement_for_host() {
+    let mut e = Maxwell3d::default();
+    for v in [0x70000000, 0x80000000] {
+        assert_eq!(
+            e.apply(write(0x2c, v)),
+            Ok(MethodEffect::HostCacheMaintenance)
+        );
+    }
+    for v in [0, 0x80000001, 0x48000000] {
+        assert!(e.apply(write(0x2c, v)).is_err());
+    }
+    e.apply(write(0, CLASS)).unwrap();
+    for v in [0, 1, 0x10, 0x1000, 0x1011] {
+        assert_eq!(
+            e.apply(write(0xda4, v)),
+            Ok(MethodEffect::ShaderCachesInvalidated(v))
+        );
+    }
+    assert!(e.apply(write(0xda4, 2)).is_err());
+    assert_eq!(
+        e.apply(write(0x1288, 0)),
+        Ok(MethodEffect::TextureDataInvalidated)
+    );
+    assert!(e.apply(write(0x1288, 1)).is_err());
+    for m in [0x7a4, 0x7a8] {
+        e.apply(write(m, 0x7fff)).unwrap();
+        assert!(e.apply(write(m, 0)).is_err());
+    }
+    assert_eq!(
+        e.auxiliary_raster_controls()
+            .zero_bandwidth_clear_disable_masks,
+        [Some(0x7fff); 2]
+    );
+}
+#[test]
+fn inactive_triangle_initialization_fields_validate_before_mutating() {
+    let mut e = Maxwell3d::default();
+    e.apply(write(0, CLASS)).unwrap();
+    for (m, v, bad) in [
+        (0x1514, 1, 2),
+        (0x1510, 255, 256),
+        (0xfbc, 65535, 65536),
+        (0x1520, 1, 2),
+        (0x1604, 8, 3),
+        (0x1910, 1, 2),
+        (0x1518, 0x3f800000, 0x7fc00000),
+        (0x1398, 255, 256),
+        (0x1148, 0, 1),
+        (0x2ec, 0, 1),
+        (0xfb4, 0, 1),
+        (0xfd8, 0, 1),
+        (0x1130, 0x13, 4),
+        (0x11f8, 0, 1),
+        (0x16b4, 3, 4),
+        (0xf60, 0, 1),
+        (0xf64, 0x800080, 0),
+        (0xf68, 0x1109, 0),
+        (0xf6c, 0x08080202, 0),
+        (0x1108, 0x1f, 0),
+        (0xf70, 0x80001, 0),
+        (0x1134, 0, 1),
+    ] {
+        e.apply(write(m, v)).unwrap();
+        let old = e.auxiliary_raster_controls();
+        assert!(e.apply(write(m, bad)).is_err(), "{m:x}");
+        assert_eq!(e.auxiliary_raster_controls(), old, "{m:x}");
+    }
+    assert!(e.apply(write(0x1380, 1)).is_err()); // No stencil enable.
+    assert!(e.apply(write(0x15dc, 0)).is_err()); // No statistics report.
+}

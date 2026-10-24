@@ -2523,3 +2523,152 @@ fn gpfifo_shadow_unknown_replay_preserves_pending_draw_and_latches_fault() {
         assert_eq!(renderer.counters.draw_commands, before.draw_commands);
     }
 }
+
+#[test]
+#[ignore = "requires actual GPU; source-derived initialization and cache barriers preserve pixels"]
+fn gpfifo_public_initialization_cache_actions_and_privileged_tile_baseline() {
+    let (mut data, map, mut commands, image) = fixture();
+    let draw = commands.split_off(commands.len() - 8);
+    // Public hardware baseline only. No proprietary command bytes are fixtures.
+    for (m, v) in [
+        (5396, 1),
+        (5392, 255),
+        (4028, 65535),
+        (4032, 65535),
+        (4036, 65535),
+        (4040, 65535),
+        (5408, 1),
+        (5636, 8),
+        (6416, 1),
+        (5400, 1065353216),
+        (5016, 255),
+        (5020, 255),
+        (3928, 255),
+        (3932, 255),
+        (4424, 0),
+        (748, 0),
+        (4020, 0),
+        (4056, 0),
+        (4400, 19),
+        (4600, 0),
+        (5812, 0),
+        (3940, 8388736),
+        (3944, 4361),
+        (3948, 134742530),
+        (4360, 31),
+        (3952, 524289),
+        (4404, 0),
+        (1956, 32767),
+        (1960, 32767),
+    ] {
+        method(&mut commands, m, v);
+    }
+    // Separate compute subchannel; no compute dispatch or memory accesses.
+    commands.extend([0x20012000, 0xb1c0]);
+    for (m, v) in [
+        (0x1528, 0),
+        (0x2608, 2),
+        (0x77c, 0x1000000),
+        (0x214, 0x3000000),
+        (0x1608, 4),
+        (0x160c, 0),
+        (0x310, 0x503),
+    ] {
+        commands.extend([0x20012000 | (m / 4), v]);
+    }
+    commands.extend_from_slice(&draw);
+    let mut renderer = Renderer::new().unwrap();
+    let mut channel = Channel::default();
+    let mut changes = TextureChanges::new(1);
+    put(&mut data, 0x10000, &commands);
+    submit(
+        &mut renderer,
+        &mut channel,
+        &entry(0xb0000, commands.len()),
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap();
+    assert_eq!(renderer.counters.readback_operations, 0);
+    assert!(data[RT..RT + SIZE].chunks_exact(4).all(|p| p == BG));
+    let before = renderer.counters;
+    let mut commands = Vec::new();
+    upload_macro(
+        &mut commands,
+        &macro_code(include_str!("fixtures/mme/privileged-state.words")),
+    );
+    for (a, v, m) in [
+        (0x418e40, 0x7, 0xf),
+        (0x418e58, 0x842, 0xffff),
+        (0x418e40, 0x70, 0xf0),
+        (0x418e58, 0x4f10000, 0xffff0000),
+        (0x418e40, 0x700, 0xf00),
+        (0x418e5c, 0x53, 0xffff),
+        (0x418e40, 0x7000, 0xf000),
+        (0x418e5c, 0xe90000, 0xffff0000),
+        (0x418e40, 0x70000, 0xf0000),
+        (0x418e60, 0xea, 0xffff),
+        (0x418e40, 0x700000, 0xf00000),
+        (0x418e60, 0xeb0000, 0xffff0000),
+        (0x418e40, 0x7000000, 0xf000000),
+        (0x418e64, 0x208, 0xffff),
+        (0x418e40, 0x70000000, 0xf0000000),
+        (0x418e64, 0x2090000, 0xffff0000),
+        (0x418e44, 0x7, 0xf),
+        (0x418e68, 0x20a, 0xffff),
+        (0x418e44, 0x70, 0xf0),
+        (0x418e68, 0x20b0000, 0xffff0000),
+        (0x418e44, 0x700, 0xf00),
+        (0x418e6c, 0x644, 0xffff),
+    ] {
+        commands.extend([0xa0040e00, a, v, m, 0x1111]);
+    }
+    method(&mut commands, 0x1288, 0);
+    method(&mut commands, 0xda4, 0x1011);
+    method(&mut commands, 0x1428, 0);
+    method(&mut commands, 0x1424, 0);
+    commands.extend_from_slice(&draw);
+    put(&mut data, 0x10000, &commands);
+    submit(
+        &mut renderer,
+        &mut channel,
+        &entry(0xb0000, commands.len()),
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap();
+    assert_eq!(renderer.counters.draw_commands, before.draw_commands + 1);
+    assert_eq!(renderer.counters.readback_operations, 0);
+    assert_eq!(
+        renderer.counters.synchronization_points,
+        before.synchronization_points + 22
+    );
+    assert_eq!(
+        renderer.counters.pipeline_allocations,
+        before.pipeline_allocations
+    );
+    assert_eq!(
+        renderer.counters.shader_module_allocations,
+        before.shader_module_allocations
+    );
+    assert!(renderer.counters.guest_texture_bytes > before.guest_texture_bytes);
+    assert!(renderer.counters.constant_guest_bytes > before.constant_guest_bytes);
+    assert!(renderer.counters.shader_binary_bytes > before.shader_binary_bytes);
+    // Host operation is independent of engine binding, even an unbound subchannel.
+    let commands = [0x2001c00b, 0x80000000, 0x2001c00b, 0x70000000];
+    put(&mut data, 0x10000, &commands);
+    submit(
+        &mut renderer,
+        &mut channel,
+        &entry(0xb0000, commands.len()),
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap();
+    assert_eq!(renderer.counters.readback_operations, 1);
+    assert_eq!(renderer.counters.draw_commands, before.draw_commands + 1);
+    check(&data[RT..RT + SIZE], &image, None, BG);
+}

@@ -2537,3 +2537,20 @@ All sixteen A-stream addresses and inclusive bounds can be programmed without
 aliasing stream zero. Unsupported inactive stream formats/frequencies and
 attributes selecting other streams remain errors. Merely setting an unused,
 unmapped stream address or limit does not read guest memory or supply geometry.
+
+Initialization accepts bounded inactive point/stencil/sample controls, the
+source-derived disabled tile-cache baseline and separate B1C0 configuration.
+These fields do not enable unsupported topology, stencil, MSAA or compute
+execution. Exact public masked privileged initialization requests still require
+an actual preceding WFI; unknown requests cannot acknowledge completion.
+
+Switch host `0x2c` dirty-flush/system-invalidate operations conservatively publish
+pending attachments through the existing retryable publication transaction.
+They work independently of engine/subchannel binding. Empty barriers do not
+submit, wait or read back. Publication failure latches ordinary channel faults;
+previously accepted output remains retryable without command replay.
+
+B197 shader and whole texture-data NO_WFI invalidations release command borrows
+and run as ordered backend effects, including when emitted by MME. Shader code,
+constant words or texture bytes are reacquired on next use. Existing compatible
+GPU resources remain reusable; these invalidations do not imply completion.

@@ -3794,3 +3794,38 @@ separately ignored device tests. Explicit graphics/device batches passed 56
 scenarios on each of WSL OpenGL, native Windows D3D12 and native Windows Vulkan;
 native watchdog unit tests also passed. Hardware filtering, general resource
 replay and original-game frame rendering are not established by these fixtures.
+
+### Initialization and ordered cache actions
+
+The initialization-control batch passed 444 CPU tests across `wl-gpu` and
+`wl-nvdrv` with default features, plus 419 `wl-gpu` tests with default features
+disabled. Strict package Clippy and workspace formatting passed. A previous
+engine-binding regression expected every compute program-address write to fail;
+it now verifies isolated retained compute state, unchanged B197 program state,
+and continued rejection of compute execution.
+
+The source-derived GPFIFO initialization scene executes an indexed textured
+triangle, 22 literal public-driver privileged requests, cache invalidations,
+and another draw. Independent triangle/UV coverage verifies the result. All
+22 privileged requests require actual WFI; none reads back the framebuffer.
+Shader/constant/texture cache invalidation increases the corresponding guest
+acquisition counters, reuses compatible shader modules and pipelines, and
+performs no implicit readback. A subsequent host dirty-flush publishes exactly
+once; the following system invalidation performs no second readback or draw.
+Unit tests separately verify final masked privileged context bits, unknown upper
+bits, invalid requests without acknowledgement, field bounds and atomic state
+preservation.
+
+The GL regression selection passed 57 device/graphics scenarios: 41 GPFIFO,
+12 depth, three blend and one zero-coefficient blend scenario. These are
+synthetic validation workloads, not original-game frames. Full workspace tests
+were not repeated for this batch; the prior 800-test workspace result remains
+historical.
+
+The identical selection also executed natively on Windows D3D12 and Vulkan:
+57 scenarios per backend plus the device-completion watchdog unit on each.
+All ten native processes exited zero after binary SHA-256 verification.
+The first WSL launcher failed before process startup (`UtilAcceptVsock`);
+selecting the working `/run/WSL/1_interop` socket allowed the actual native runs.
+The launch failure is not included in the GPU pass count. No independent peer
+review is claimed for this batch.

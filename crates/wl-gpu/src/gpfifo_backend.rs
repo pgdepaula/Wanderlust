@@ -79,6 +79,9 @@ impl Renderer {
                                     | MethodEffect::InlineUploadStart { .. }
                                     | MethodEffect::InlineWrite { .. }
                                     | MethodEffect::WaitIdle
+                                    | MethodEffect::HostCacheMaintenance
+                                    | MethodEffect::ShaderCachesInvalidated(_)
+                                    | MethodEffect::TextureDataInvalidated
                             ) {
                                 draw = Some(effect);
                                 break;

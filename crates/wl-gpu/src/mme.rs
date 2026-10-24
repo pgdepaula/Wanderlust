@@ -65,10 +65,13 @@ struct PrivilegedBits {
     value: u32,
     known_mask: u32,
 }
-const PRIVILEGED_ADDRESSES: [u32; 5] = [0x418800, 0x419a08, 0x419f78, 0x404468, 0x419a04];
+const PRIVILEGED_ADDRESSES: [u32; 13] = [
+    0x418800, 0x419a08, 0x419f78, 0x404468, 0x419a04, 0x418e40, 0x418e58, 0x418e5c, 0x418e60,
+    0x418e64, 0x418e44, 0x418e68, 0x418e6c,
+];
 // Exact baseline initialization writes from deko3d 373bfd43, gpu_3d_base.cpp.
 // This is not a general MMIO interface or support for arbitrary raster modes.
-const PRIVILEGED_INITIALIZATION: [(u32, u32, u32); 7] = [
+const PRIVILEGED_INITIALIZATION: [(u32, u32, u32); 29] = [
     (0x418800, 1, 1),
     (0x419a08, 0, 0x10),
     (0x419f78, 0, 8),
@@ -76,6 +79,28 @@ const PRIVILEGED_INITIALIZATION: [(u32, u32, u32); 7] = [
     (0x419a04, 1, 1),
     (0x419a04, 2, 2),
     (0x418800, 0, 0x01800000),
+    (0x418e40, 0x00000007, 0x0000000f),
+    (0x418e58, 0x00000842, 0x0000ffff),
+    (0x418e40, 0x00000070, 0x000000f0),
+    (0x418e58, 0x04f10000, 0xffff0000),
+    (0x418e40, 0x00000700, 0x00000f00),
+    (0x418e5c, 0x00000053, 0x0000ffff),
+    (0x418e40, 0x00007000, 0x0000f000),
+    (0x418e5c, 0x00e90000, 0xffff0000),
+    (0x418e40, 0x00070000, 0x000f0000),
+    (0x418e60, 0x000000ea, 0x0000ffff),
+    (0x418e40, 0x00700000, 0x00f00000),
+    (0x418e60, 0x00eb0000, 0xffff0000),
+    (0x418e40, 0x07000000, 0x0f000000),
+    (0x418e64, 0x00000208, 0x0000ffff),
+    (0x418e40, 0x70000000, 0xf0000000),
+    (0x418e64, 0x02090000, 0xffff0000),
+    (0x418e44, 0x00000007, 0x0000000f),
+    (0x418e68, 0x0000020a, 0x0000ffff),
+    (0x418e44, 0x00000070, 0x000000f0),
+    (0x418e68, 0x020b0000, 0xffff0000),
+    (0x418e44, 0x00000700, 0x00000f00),
+    (0x418e6c, 0x00000644, 0x0000ffff),
 ];
 
 #[derive(Debug)]
@@ -136,7 +161,7 @@ pub struct MacroEngine {
     code_pointer: Option<usize>,
     entry_pointer: Option<usize>,
     scratch: [Option<u32>; 256],
-    privileged: [PrivilegedBits; 5],
+    privileged: [PrivilegedBits; PRIVILEGED_ADDRESSES.len()],
 }
 impl Default for MacroEngine {
     fn default() -> Self {
@@ -146,7 +171,7 @@ impl Default for MacroEngine {
             code_pointer: None,
             entry_pointer: None,
             scratch: [None; 256],
-            privileged: [PrivilegedBits::default(); 5],
+            privileged: [PrivilegedBits::default(); PRIVILEGED_ADDRESSES.len()],
         }
     }
 }
@@ -750,7 +775,7 @@ mod streaming_tests {
         // Independent channel/context reset values are unknown, not copied.
         assert_eq!(
             MacroEngine::default().privileged,
-            [PrivilegedBits::default(); 5]
+            [PrivilegedBits::default(); PRIVILEGED_ADDRESSES.len()]
         );
     }
     #[test]
@@ -798,7 +823,10 @@ mod streaming_tests {
             Err(MacroError::InvalidFirmwareRequest(7))
         );
         assert_eq!(engine.scratch[0], Some(7));
-        assert_eq!(engine.privileged, [PrivilegedBits::default(); 5]);
+        assert_eq!(
+            engine.privileged,
+            [PrivilegedBits::default(); PRIVILEGED_ADDRESSES.len()]
+        );
     }
     #[test]
     fn independently_assembled_branches_select_masks_and_execute_backward_slots() {
@@ -1125,5 +1153,71 @@ mod streaming_tests {
         // by the GPFIFO integration tests, not fabricated in this unit test.
         assert_eq!(engine.resume_macro().unwrap(), None);
         assert_eq!(set(&mut engine, 0x3804, 9), Ok(MethodEffect::State));
+    }
+    #[test]
+    fn public_tile_baseline_privileged_masks_require_idle_and_preserve_unknown_bits() {
+        let mut engine = MacroEngine::default();
+        // Pinned public deko3d baseline, not the production allow-list as oracle.
+        for (address, value, mask) in [
+            (0x418e40, 0x7, 0xf),
+            (0x418e58, 0x842, 0xffff),
+            (0x418e40, 0x70, 0xf0),
+            (0x418e58, 0x4f10000, 0xffff0000),
+            (0x418e40, 0x700, 0xf00),
+            (0x418e5c, 0x53, 0xffff),
+            (0x418e40, 0x7000, 0xf000),
+            (0x418e5c, 0xe90000, 0xffff0000),
+            (0x418e40, 0x70000, 0xf0000),
+            (0x418e60, 0xea, 0xffff),
+            (0x418e40, 0x700000, 0xf00000),
+            (0x418e60, 0xeb0000, 0xffff0000),
+            (0x418e40, 0x7000000, 0xf000000),
+            (0x418e64, 0x208, 0xffff),
+            (0x418e40, 0x70000000, 0xf0000000),
+            (0x418e64, 0x2090000, 0xffff0000),
+            (0x418e44, 0x7, 0xf),
+            (0x418e68, 0x20a, 0xffff),
+            (0x418e44, 0x70, 0xf0),
+            (0x418e68, 0x20b0000, 0xffff0000),
+            (0x418e44, 0x700, 0xf00),
+            (0x418e6c, 0x644, 0xffff),
+        ] {
+            request(&mut engine, value, mask);
+            assert_eq!(
+                engine.initialize_privileged_register(address, false),
+                Err(MacroError::MissingFirmwareIdle)
+            );
+            assert_eq!(engine.scratch[0], Some(0));
+            engine
+                .initialize_privileged_register(address, true)
+                .unwrap();
+            assert_eq!(engine.scratch[0], Some(1));
+        }
+        for (address, value, known_mask) in [
+            (0x418e40, 0x77777777, 0xffffffff),
+            (0x418e58, 0x04f10842, 0xffffffff),
+            (0x418e5c, 0x00e90053, 0xffffffff),
+            (0x418e60, 0x00eb00ea, 0xffffffff),
+            (0x418e64, 0x02090208, 0xffffffff),
+            (0x418e44, 0x777, 0xfff),
+            (0x418e68, 0x020b020a, 0xffffffff),
+            (0x418e6c, 0x644, 0xffff),
+        ] {
+            let index = PRIVILEGED_ADDRESSES
+                .iter()
+                .position(|&a| a == address)
+                .unwrap();
+            assert_eq!(
+                engine.privileged[index],
+                PrivilegedBits { value, known_mask }
+            );
+        }
+        request(&mut engine, 0x644, 0xffffffff);
+        assert!(
+            engine
+                .initialize_privileged_register(0x418e6c, true)
+                .is_err()
+        );
+        assert_eq!(engine.scratch[0], Some(0));
     }
 }
