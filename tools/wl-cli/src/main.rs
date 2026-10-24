@@ -887,17 +887,25 @@ fn run(args: &[OsString]) -> Result<()> {
             .map(|u| u.source.len())
             .sum::<usize>();
     let unit_count = generated.units.len();
+    let mut dir = source.as_os_str().to_owned();
+    dir.push(".units");
+    let dir = PathBuf::from(dir);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let mut files = Vec::with_capacity(unit_count);
+    for unit in &generated.units {
+        let path = dir.join(format!("{}.rs", unit.name));
+        fs::write(&path, &unit.source).map_err(|e| e.to_string())?;
+        files.push(wl_codegen_rust::build::UnitFile {
+            name: unit.name.clone(),
+            path,
+            sha256: wl_codegen_rust::build::source_sha256(&unit.source),
+        });
+    }
+    let main_sha256 = wl_codegen_rust::build::source_sha256(&generated.main);
+    // Compilation needs only file descriptors, not every generated unit string.
+    drop(generated);
     let started = Instant::now();
     let report = if o.emit_only {
-        // Emit-only writes the unit sources beside the executable crate for inspection.
-        let mut dir = source.as_os_str().to_owned();
-        dir.push(".units");
-        let dir = PathBuf::from(dir);
-        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        for unit in &generated.units {
-            fs::write(dir.join(format!("{}.rs", unit.name)), &unit.source)
-                .map_err(|e| e.to_string())?;
-        }
         None
     } else {
         let cache_dir = o
@@ -920,14 +928,28 @@ fn run(args: &[OsString]) -> Result<()> {
             opt_level: o.opt_level,
         };
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        Some(wl_codegen_rust::build::build_owned(
-            generated,
+        Some(wl_codegen_rust::build::build_files(
+            files.clone(),
             &source,
+            &main_sha256,
             &output,
             &cfg,
             o.native_gpu.then_some(workspace.as_path()),
         )?)
     };
+    if !o.emit_only {
+        // Successful builds retain keyed cached sources. Remove only unchanged
+        // staging files written by this invocation; preserve diagnostics on failure.
+        for file in files {
+            if fs::read_to_string(&file.path)
+                .ok()
+                .is_some_and(|s| wl_codegen_rust::build::source_sha256(&s) == file.sha256)
+            {
+                let _ = fs::remove_file(&file.path);
+            }
+        }
+        let _ = fs::remove_dir(&dir);
+    }
     let compile_seconds = started.elapsed().as_secs_f64();
     let executable_bytes = fs::metadata(&output)
         .ok()

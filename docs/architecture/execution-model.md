@@ -55,3 +55,21 @@ In harness mode the only implemented SVC is 0x07, `ExitProcess` (`status=exit_pr
 Execution is limited to the [implemented A64 set](../platform/aarch64.md) and to control flow recovered statically or from metadata. Indirect branches reach only recovered blocks. The Horizon process environment has threads, waits, user-mode locks and condition variables, and IPC to the service manager `sm:`, but no events or other services ([limits](../platform/horizon-process.md#limits)); graphics and audio are not connected. Translation cost remains the principal scaling limit: about 1.8 ms of compiler CPU per guest instruction, in parallel units of bounded memory ([ADR-0004](../decisions/ADR-0004-separate-translation-units.md)).
 
 Implementation: [intake](../../crates/wl-package/src/lib.rs), [NSO/MOD0](../../crates/wl-nso/src/lib.rs), [dynamic metadata](../../crates/wl-nso/src/dynamic.rs), [loader](../../crates/wl-loader/src/lib.rs), [decoder](../../crates/wl-aarch64/src/lib.rs), [analysis](../../crates/wl-analysis/src/lib.rs), [code generator](../../crates/wl-codegen-rust/src/lib.rs), [runtime](../../crates/wl-runtime/src/lib.rs), [Horizon environment](../../crates/wl-runtime/src/horizon.rs), [indirect-target analysis](../../crates/wl-analysis/src/flow.rs). Validation: [methodology](../testing/validation-methodology.md).
+
+### File-backed native compilation
+
+The CLI publishes generated Rust units to a temporary sidecar directory and releases
+its in-memory source collection before compilation. `build::build_files` validates
+source SHA-256 values before cache population and reacquires each bounded unit in its
+worker. Unit text is retained only until that unit's compiler process completes;
+worker count, rather than the entire program's source size, determines acquisition
+memory. Each generated source file is limited to 64 MiB. Source files must remain
+immutable for the duration of the build; changed or truncated bytes fail validation.
+
+The runtime identity, generated source bytes, compiler identity, target and flags use
+the same cache keys as the in-memory builder. Tests execute both builds and verify
+identical runtime/unit keys and a complete cache hit on the second path. The main
+source digest is checked again before linking. Successful CLI builds remove only
+unchanged staging units, retaining the keyed cached sources; failed builds preserve
+the staging files for diagnosis. This trades a bounded staging write and reread for
+lower compiler-parent memory use; it is not a zero-copy compilation path.

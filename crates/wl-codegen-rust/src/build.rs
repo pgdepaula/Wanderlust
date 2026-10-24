@@ -7,6 +7,7 @@
 //! runtime key it links against, the `rustc -vV` identity, the target and the flags.
 use sha2::{Digest, Sha256};
 use std::{
+    borrow::Cow,
     fs,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -335,15 +336,119 @@ pub fn build_owned(
     )
 }
 
+/// A trusted generated Rust unit stored on disk. Its SHA-256 is checked before
+/// cache creation and again when a worker acquires it; cache identity is identical
+/// to the in-memory builder. Callers keep source files immutable during the build.
+#[derive(Clone, Debug)]
+pub struct UnitFile {
+    pub name: String,
+    pub path: PathBuf,
+    pub sha256: String,
+}
+/// Bound each generated source acquisition independently of total program size.
+pub const MAX_SOURCE_FILE_BYTES: u64 = 64 * 1024 * 1024;
+/// Digest of the exact generated UTF-8 source bytes, independent of its path.
+pub fn source_sha256(source: &str) -> String {
+    format!("{:x}", Sha256::digest(source.as_bytes()))
+}
+fn checked_file(path: &Path, expected: &str) -> Result<String> {
+    if expected.len() != 64 || !expected.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("invalid generated source SHA-256".into());
+    }
+    let file = fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if file.metadata().map_err(|e| e.to_string())?.len() > MAX_SOURCE_FILE_BYTES {
+        return Err(format!(
+            "generated source exceeds file budget: {}",
+            path.display()
+        ));
+    }
+    let mut source = String::new();
+    file.take(MAX_SOURCE_FILE_BYTES + 1)
+        .read_to_string(&mut source)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if source.len() as u64 > MAX_SOURCE_FILE_BYTES {
+        return Err(format!(
+            "generated source exceeds file budget: {}",
+            path.display()
+        ));
+    }
+    let actual = source_sha256(&source);
+    if actual != expected.to_ascii_lowercase() {
+        return Err(format!(
+            "generated source digest mismatch: {}",
+            path.display()
+        ));
+    }
+    Ok(source)
+}
+/// Compiles previously published sources without retaining every unit's text.
+/// At most `jobs` unit source strings are held during compilation. Source text,
+/// runtime, target and compiler flags retain the existing cache-key semantics.
+pub fn build_files(
+    files: Vec<UnitFile>,
+    main_source: &Path,
+    main_sha256: &str,
+    output: &Path,
+    cfg: &BuildConfig,
+    gpu_workspace: Option<&Path>,
+) -> Result<BuildReport> {
+    let mut names = std::collections::BTreeSet::new();
+    for file in &files {
+        let address = file
+            .name
+            .strip_prefix("wlu_")
+            .and_then(|v| u64::from_str_radix(v, 16).ok());
+        if address.is_none_or(|v| format!("wlu_{v:x}") != file.name) || !names.insert(&file.name) {
+            return Err("invalid or duplicate generated unit name".into());
+        }
+    }
+    let main = checked_file(main_source, main_sha256)?;
+    build_inner(
+        BuildInput::Files {
+            main,
+            files,
+            main_sha256: main_sha256.into(),
+        },
+        main_source,
+        output,
+        cfg,
+        gpu_workspace,
+    )
+}
+#[derive(Clone, Copy)]
+enum UnitInput<'a> {
+    Inline(&'a crate::Unit),
+    File(&'a UnitFile),
+}
+impl UnitInput<'_> {
+    fn name(&self) -> &str {
+        match self {
+            Self::Inline(u) => &u.name,
+            Self::File(u) => &u.name,
+        }
+    }
+    fn source(&self) -> Result<Cow<'_, str>> {
+        match self {
+            Self::Inline(u) => Ok(Cow::Borrowed(&u.source)),
+            Self::File(u) => checked_file(&u.path, &u.sha256).map(Cow::Owned),
+        }
+    }
+}
 enum BuildInput<'a> {
     Borrowed(&'a Emitted),
     Owned(Emitted),
+    Files {
+        main: String,
+        files: Vec<UnitFile>,
+        main_sha256: String,
+    },
 }
 impl BuildInput<'_> {
-    fn emitted(&self) -> &Emitted {
+    fn sources(&self) -> (&str, Vec<UnitInput<'_>>) {
         match self {
-            Self::Borrowed(e) => e,
-            Self::Owned(e) => e,
+            Self::Borrowed(e) => (&e.main, e.units.iter().map(UnitInput::Inline).collect()),
+            Self::Owned(e) => (&e.main, e.units.iter().map(UnitInput::Inline).collect()),
+            Self::Files { main, files, .. } => (main, files.iter().map(UnitInput::File).collect()),
         }
     }
 }
@@ -355,21 +460,23 @@ fn build_inner(
     cfg: &BuildConfig,
     gpu_workspace: Option<&Path>,
 ) -> Result<BuildReport> {
-    let emitted = input.emitted();
+    let (main, sources) = input.sources();
     // A truncated diagnostic source is not an empty guest program. Reject it
     // before rebuilding dependencies or populating an apparently valid rlib.
-    if emitted.main.trim().is_empty() {
+    if main.trim().is_empty() {
         return Err("empty emitted executable source".into());
     }
-    if let Some(unit) = emitted.units.iter().find(|u| u.source.trim().is_empty()) {
-        return Err(format!("empty emitted source for unit {}", unit.name));
+    // Validate all file descriptors before cache population, releasing each
+    // temporary acquisition before reading the next source.
+    for unit in &sources {
+        if unit.source()?.trim().is_empty() {
+            return Err(format!("empty emitted source for unit {}", unit.name()));
+        }
     }
     if gpu_workspace.is_some() {
         let module = "pub mod native_gpu {\n";
-        if emitted.main.contains(module)
-            && !emitted
-                .main
-                .contains(&format!("{module}{}\n}}\n", native_gpu::ADAPTER))
+        if main.contains(module)
+            && !main.contains(&format!("{module}{}\n}}\n", native_gpu::ADAPTER))
         {
             return Err("emitted NVIDIA host adapter is stale; refresh the host entry before compiling guest units".into());
         }
@@ -408,40 +515,40 @@ fn build_inner(
         seconds: runtime_seconds,
         source_bytes: RUNTIME_SOURCES.iter().map(|s| s.1.len()).sum(),
     };
-    // Units: keyed, then compiled in parallel by `jobs` workers.
-    let keys: Vec<String> = emitted
-        .units
-        .iter()
-        .map(|u| {
-            hash(&[
-                u.name.as_bytes(),
-                u.source.as_bytes(),
-                runtime_key.as_bytes(),
-                toolchain.as_bytes(),
-                flags.as_bytes(),
-            ])
-        })
-        .collect();
-    let results: Mutex<Vec<Option<Built>>> =
-        Mutex::new((0..emitted.units.len()).map(|_| None).collect());
+    // File sources are acquired and released by each worker, rather than
+    // loading the entire generated program into the compiler parent's heap.
+    type UnitBuilt = Result<(PathBuf, bool, f64, String, usize)>;
+    let results: Mutex<Vec<Option<UnitBuilt>>> =
+        Mutex::new((0..sources.len()).map(|_| None).collect());
     let next = AtomicUsize::new(0);
     let jobs = cfg.jobs.max(1);
     let started = Instant::now();
     std::thread::scope(|scope| {
-        for _ in 0..jobs.min(emitted.units.len().max(1)) {
+        for _ in 0..jobs.min(sources.len().max(1)) {
             scope.spawn(|| {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
-                    let Some(unit) = emitted.units.get(i) else {
+                    let Some(unit) = sources.get(i) else {
                         break;
                     };
-                    let result = cached_rlib(
-                        cfg,
-                        &unit.name,
-                        &keys[i],
-                        &[("unit.rs", unit.source.as_str())],
-                        Some(&runtime_rlib),
-                    );
+                    let result = (|| {
+                        let source = unit.source()?;
+                        let key = hash(&[
+                            unit.name().as_bytes(),
+                            source.as_bytes(),
+                            runtime_key.as_bytes(),
+                            toolchain.as_bytes(),
+                            flags.as_bytes(),
+                        ]);
+                        let (archive, cached, seconds) = cached_rlib(
+                            cfg,
+                            unit.name(),
+                            &key,
+                            &[("unit.rs", source.as_ref())],
+                            Some(&runtime_rlib),
+                        )?;
+                        Ok((archive, cached, seconds, key, source.len()))
+                    })();
                     let failed = result.is_err();
                     results.lock().map(|mut r| r[i] = Some(result)).ok();
                     if failed {
@@ -461,17 +568,22 @@ fn build_inner(
         .into_iter()
         .enumerate()
     {
-        let (rlib, cached, seconds) = result.ok_or("unit compilation did not run")??;
+        let (rlib, cached, seconds, key, source_bytes) =
+            result.ok_or("unit compilation did not run")??;
         rlibs.push(rlib);
         units.push(CrateReport {
-            name: emitted.units[i].name.clone(),
-            key: keys[i].clone(),
+            name: sources[i].name().into(),
+            key,
             cached,
             seconds,
-            source_bytes: emitted.units[i].source.len(),
+            source_bytes,
         });
     }
     let unit_count = units.len();
+    if let BuildInput::Files { main_sha256, .. } = &input {
+        checked_file(main_source, main_sha256)?;
+    }
+    drop(sources);
     drop(input);
     // One dependency directory per executable keeps the rustc command line short.
     let mut deps = output.as_os_str().to_owned();
@@ -539,6 +651,175 @@ fn build_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn file_test_directory(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "wanderlust-file-build-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn file_units_execute_and_reuse_identical_inline_cache_keys() {
+        let directory = file_test_directory("cache");
+        fs::create_dir_all(&directory).unwrap();
+        let main = "extern crate wlu_10000; fn main(){assert_eq!(wlu_10000::value(),47);println!(\"47\");}\n";
+        let unit = "pub fn value()->u32{47}\n";
+        let source = directory.join("main.rs");
+        let unit_source = directory.join("unit.rs");
+        fs::write(&source, main).unwrap();
+        fs::write(&unit_source, unit).unwrap();
+        let cfg = BuildConfig {
+            target: None,
+            cache_dir: directory.join("cache"),
+            jobs: 2,
+            opt_level: 0,
+        };
+        let inline_output = directory.join("inline");
+        let inline = build_owned(
+            Emitted {
+                main: main.into(),
+                units: vec![crate::Unit {
+                    name: "wlu_10000".into(),
+                    start: 0x10000,
+                    source: unit.into(),
+                    blocks: 0,
+                    instructions: 0,
+                }],
+                blobs: vec![],
+            },
+            &source,
+            &inline_output,
+            &cfg,
+            None,
+        )
+        .unwrap();
+        let file_output = directory.join("files");
+        let files = build_files(
+            vec![UnitFile {
+                name: "wlu_10000".into(),
+                path: unit_source,
+                sha256: source_sha256(unit),
+            }],
+            &source,
+            &source_sha256(main),
+            &file_output,
+            &cfg,
+            None,
+        )
+        .unwrap();
+        assert_eq!(inline.runtime.key, files.runtime.key);
+        assert_eq!(inline.units[0].key, files.units[0].key);
+        assert_eq!(files.cache_hits, 2);
+        assert_eq!(files.cache_misses, 0);
+        for path in [inline_output, file_output] {
+            let run = Command::new(path).output().unwrap();
+            assert!(run.status.success());
+            assert_eq!(run.stdout, b"47\n");
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn file_sources_reject_mutation_truncation_and_oversize_before_cache_creation() {
+        let directory = file_test_directory("invalid");
+        fs::create_dir_all(&directory).unwrap();
+        let main = "fn main() {}\n";
+        let unit = "pub fn value()->u32{47}\n";
+        let source = directory.join("main.rs");
+        let unit_source = directory.join("unit.rs");
+        fs::write(&source, main).unwrap();
+        fs::write(&unit_source, unit).unwrap();
+        let descriptor = UnitFile {
+            name: "wlu_10000".into(),
+            path: unit_source.clone(),
+            sha256: source_sha256(unit),
+        };
+        assert_eq!(UnitInput::File(&descriptor).source().unwrap(), unit);
+        let cfg = BuildConfig {
+            target: None,
+            cache_dir: directory.join("must-not-exist"),
+            jobs: 2,
+            opt_level: 0,
+        };
+        for bytes in [b"pub fn value()->u32{99}\n".as_slice(), b""] {
+            fs::write(&unit_source, bytes).unwrap();
+            // A second acquisition must reject stale content, even after a valid preflight.
+            assert!(
+                UnitInput::File(&descriptor)
+                    .source()
+                    .unwrap_err()
+                    .contains("digest mismatch")
+            );
+            assert!(
+                build_files(
+                    vec![descriptor.clone()],
+                    &source,
+                    &source_sha256(main),
+                    &directory.join("no-output"),
+                    &cfg,
+                    None
+                )
+                .is_err()
+            );
+            assert!(!cfg.cache_dir.exists());
+        }
+        fs::write(&unit_source, []).unwrap();
+        let empty = UnitFile {
+            sha256: source_sha256(""),
+            ..descriptor.clone()
+        };
+        assert!(
+            build_files(
+                vec![empty],
+                &source,
+                &source_sha256(main),
+                &directory.join("no-output"),
+                &cfg,
+                None
+            )
+            .unwrap_err()
+            .contains("empty emitted source")
+        );
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&unit_source)
+            .unwrap()
+            .set_len(MAX_SOURCE_FILE_BYTES + 1)
+            .unwrap();
+        assert!(
+            UnitInput::File(&descriptor)
+                .source()
+                .unwrap_err()
+                .contains("file budget")
+        );
+        for files in [
+            vec![descriptor.clone(), descriptor.clone()],
+            vec![UnitFile {
+                name: "../escape".into(),
+                ..descriptor
+            }],
+        ] {
+            assert!(
+                build_files(
+                    files,
+                    &source,
+                    &source_sha256(main),
+                    &directory.join("no-output"),
+                    &cfg,
+                    None
+                )
+                .unwrap_err()
+                .contains("unit name")
+            );
+        }
+        assert!(!cfg.cache_dir.exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn empty_emitted_crates_fail_before_creating_cache_or_launching_compilers() {
