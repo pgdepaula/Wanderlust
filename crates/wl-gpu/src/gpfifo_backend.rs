@@ -35,6 +35,10 @@ impl Renderer {
             }
             let submission =
                 Submission::new_counted(entries, &mut self.counters.gpfifo_entry_decodes)?;
+            channel
+                .engine
+                .begin_submission()
+                .map_err(|e| crate::Error(e.to_string()))?;
             self.counters.gpfifo_submissions += 1;
             for entry in submission.entries() {
                 self.counters.gpfifo_entry_decodes += 1;

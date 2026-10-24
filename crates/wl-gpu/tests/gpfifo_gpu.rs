@@ -1962,3 +1962,203 @@ fn gpfifo_mme_clear_preserves_deferred_visibility_without_inventing_a_draw() {
     assert_eq!(&data[RT..RT + SIZE], &frame.rgba);
     assert_eq!(renderer.counters.readback_operations, 1);
 }
+
+#[test]
+#[ignore = "requires actual GPU; a finite 517-instruction MME loop initializes the sampled CB"]
+fn gpfifo_mme_finite_constant_fill_exceeds_64_steps_and_produces_real_pixels() {
+    let (mut data, mut map, mut words, image) = fixture();
+    let draw = words.split_off(words.len() - 8);
+    map.map(GpuAddress(0xd0000), GuestAddress(0x12000), 0x1000)
+        .unwrap();
+    data[0x11ff0..0x12210].fill(0xc7);
+    data[0x12000..0x12200].fill(0x6d);
+    for (m, v) in [(0x2380, 512), (0x2384, 0), (0x2388, 0xd0000), (0x2490, 1)] {
+        method(&mut words, m, v);
+    }
+    upload_macro(
+        &mut words,
+        &macro_code(include_str!("fixtures/mme/constant-fill.words")),
+    );
+    method(&mut words, 0x3800, 128);
+    words.extend_from_slice(&draw);
+    put(&mut data, 0x10000, &words);
+    let mut renderer = Renderer::new().unwrap();
+    let mut channel = Channel::default();
+    let mut changes = TextureChanges::new(1);
+    let report = submit(
+        &mut renderer,
+        &mut channel,
+        &entry(0xb0000, words.len()),
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap();
+    assert_eq!(report.draws_submitted, 1);
+    assert!(data[0x12000..0x12200].iter().all(|&b| b == 0));
+    assert!(data[0x11ff0..0x12000].iter().all(|&b| b == 0xc7));
+    assert!(data[0x12200..0x12210].iter().all(|&b| b == 0xc7));
+    assert_eq!(renderer.counters.constant_buffer_write_bytes, 512);
+    assert_eq!(renderer.counters.readback_operations, 0);
+    assert_eq!(renderer.counters.synchronization_points, 0);
+    check(
+        &sync(&mut renderer, &mut data, &mut changes).rgba,
+        &image,
+        None,
+        BG,
+    );
+}
+
+fn full_mme_work_request(extra_launch: bool) -> (Vec<u32>, usize) {
+    use wl_gpu::mme::{MAX_INSTRUCTIONS_PER_INVOCATION, MAX_INSTRUCTIONS_PER_SUBMISSION};
+    let mut words = Vec::new();
+    for (m, v) in [(0x11c, 0), (0x120, 0), (0x114, 0)] {
+        method(&mut words, m, v);
+    }
+    let mut code = vec![0x11; MAX_INSTRUCTIONS_PER_INVOCATION];
+    code[MAX_INSTRUCTIONS_PER_INVOCATION - 2] = 0x91;
+    // Literal nonincrementing CODE data packet, so command acquisition stays
+    // inside the existing bounded mapping without a permanent payload copy.
+    words.push(0x60000046 | ((code.len() as u32) << 16));
+    words.extend_from_slice(&code);
+    assert_eq!(
+        MAX_INSTRUCTIONS_PER_SUBMISSION % MAX_INSTRUCTIONS_PER_INVOCATION,
+        0
+    );
+    for _ in 0..MAX_INSTRUCTIONS_PER_SUBMISSION / MAX_INSTRUCTIONS_PER_INVOCATION {
+        method(&mut words, 0x3800, 0);
+    }
+    let cut = words.len();
+    if extra_launch {
+        method(&mut words, 0x3800, 0);
+    }
+    (words, cut)
+}
+
+#[test]
+#[ignore = "requires actual GPU; work exhaustion across entries retains earlier draw without replay"]
+fn gpfifo_mme_submission_work_is_bounded_across_all_invocations_and_entries() {
+    let (mut data, map, words, image) = fixture();
+    put(&mut data, 0x10000, &words);
+    let mut renderer = Renderer::new().unwrap();
+    let mut channel = Channel::default();
+    let mut changes = TextureChanges::new(1);
+    submit(
+        &mut renderer,
+        &mut channel,
+        &entry(0xb0000, words.len()),
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap();
+    let before = renderer.counters;
+    let (work, cut) = full_mme_work_request(true);
+    put(&mut data, 0x10000, &work);
+    let entries = [
+        entry(0xb0000, cut),
+        entry(0xc0000 + cut as u64 * 4, work.len() - cut),
+    ]
+    .concat();
+    let error = submit(
+        &mut renderer,
+        &mut channel,
+        &entries,
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap_err();
+    assert_eq!(error.phase, FaultPhase::Execute);
+    assert_eq!(error.progress.entries_completed, 1);
+    assert!(
+        error
+            .cause
+            .to_string()
+            .contains("SubmissionWorkBudgetExceeded")
+    );
+    assert_eq!(renderer.counters.draw_commands, before.draw_commands);
+    assert_eq!(renderer.counters.readback_operations, 0);
+    assert_eq!(renderer.counters.synchronization_points, 0);
+    assert!(
+        submit(
+            &mut renderer,
+            &mut channel,
+            &entries,
+            &map,
+            &mut data,
+            &mut changes
+        )
+        .is_err()
+    );
+    check(
+        &sync(&mut renderer, &mut data, &mut changes).rgba,
+        &image,
+        None,
+        BG,
+    );
+    assert_eq!(renderer.counters.draw_commands, before.draw_commands);
+}
+
+#[test]
+#[ignore = "requires actual GPU; a valid request exhausts its allowance without poisoning the next"]
+fn gpfifo_mme_work_budget_resets_at_the_next_valid_submission_only() {
+    let (mut data, map, words, image) = fixture();
+    put(&mut data, 0x10000, &words);
+    let mut renderer = Renderer::new().unwrap();
+    let mut channel = Channel::default();
+    let mut changes = TextureChanges::new(1);
+    submit(
+        &mut renderer,
+        &mut channel,
+        &entry(0xb0000, words.len()),
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap();
+    let (work, _) = full_mme_work_request(false);
+    put(&mut data, 0x10000, &work);
+    assert_eq!(
+        submit(
+            &mut renderer,
+            &mut channel,
+            &entry(0xb0000, work.len()),
+            &map,
+            &mut data,
+            &mut changes
+        )
+        .unwrap()
+        .draws_submitted,
+        0
+    );
+    let mut next = Vec::new();
+    upload_macro(
+        &mut next,
+        &macro_code(include_str!("fixtures/mme/indexed-draw.words")),
+    );
+    method(&mut next, 0x3800, 0);
+    put(&mut data, 0x10000, &next);
+    assert_eq!(
+        submit(
+            &mut renderer,
+            &mut channel,
+            &entry(0xb0000, next.len()),
+            &map,
+            &mut data,
+            &mut changes
+        )
+        .unwrap()
+        .draws_submitted,
+        1
+    );
+    assert_eq!(renderer.counters.readback_operations, 0);
+    assert_eq!(renderer.counters.synchronization_points, 0);
+    check(
+        &sync(&mut renderer, &mut data, &mut changes).rgba,
+        &image,
+        None,
+        BG,
+    );
+    assert_eq!(renderer.counters.draw_commands, 2);
+}

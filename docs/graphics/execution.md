@@ -228,7 +228,7 @@ Entry launch methods `0x3800 + slot*8` execute a bounded subset:
 method-address assignment, SEND and MADDRSEND with bounded method increments. R0 remains zero,
 R1 receives the launch argument, and other registers require prior initialization.
 EXIT executes its following delay slot. A resumable invocation executes at most
-64 instructions in total across all yields. Emissions reuse the strict B197
+1024 instructions in total across all yields. Emissions reuse the strict B197
 method dispatcher, with rebinding, running-program mutation and recursive
 launches excluded. The backend
 executes each effect before resuming the invocation; state/register writes and
@@ -2318,7 +2318,7 @@ submission. Waiting for an argument at the end of an API submission is explicitl
 unsupported and faults that channel; it does not return a completed/fake fence.
 This restriction is distinct from ordinary B06F packet continuation across calls.
 Failures retain earlier GPU work for publication and prevent submission replay.
-The 64-instruction budget persists across all parameter and backend resumptions.
+The 1024-instruction budget persists across all parameter and backend resumptions.
 
 ### Bounded MME conditional branches
 
@@ -2333,7 +2333,7 @@ Branch targets are checked against uploaded-RAM capacity; an unuploaded target
 does not become an implicit NOP. A branch in any delay slot is rejected. EXIT in
 a branch delay slot is also explicitly unsupported. Delayed targets survive
 both parameter waits and backend yields without retaining guest borrows.
-Backward branches share the existing total 64-instruction invocation budget;
+Backward branches share the existing total 1024-instruction invocation budget;
 neither a jump nor a backend resumption resets it. Budget failure faults the
 channel while preserving already submitted GPU output for explicit publication.
 Branch execution itself does not acknowledge privileged requests; only the
@@ -2430,3 +2430,23 @@ ports and failure latching still apply. An error after earlier GPU work does not
 roll back or replay that work. Two unchanged macro-driven draws can retain the
 resident target until one explicit publication, without a per-draw readback or
 wait; each draw still has its own host queue submission.
+
+
+### MME invocation and submission work bounds
+
+The invocation limit is 1024 instructions, including EXIT and delay slots; the
+instruction-RAM capacity remains a separate 2048-word limit. A valid long loop
+can therefore execute more instructions than an early 64-step implementation
+budget without accepting unbounded execution. Each direct or GPFIFO submission
+also has one 1,048,576-instruction MME budget shared by every invocation, entry,
+parameter wait and backend resumption. An instruction reserves work when it
+starts; completing a reserved parameter operation does not charge it again.
+Missing parameters and repeated readiness polling do not invent work/completion.
+
+The submission budget resets once at the validated API boundary, not on entry
+changes, launches or yields. Faulted channels cannot use a new request to reset
+their fault. B06F packet and B197 state still persist across legitimate requests.
+The direct pushbuffer API also shares the existing 1,048,576-word input bound.
+These are software resource limits, not hardware fault rules or physical RAM
+claims. Exceeding either work bound preserves already executed writes/draws and
+prevents command replay; completion/publication remains explicit.

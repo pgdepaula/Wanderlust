@@ -1980,3 +1980,15 @@ fixture removes every caller-side draw method. The write fixture supplies raw
 u32 color data through guest DATA arguments and the real checked CB upload ports;
 translated LDC reads those mapped bytes. Separate literal assembled programs
 validate color clear dispatch and rejected attempts to rewrite running MME RAM.
+
+
+### Finite MME loops and software work limits
+
+The pinned envytools ISA defines delayed backward branches and parameter waits;
+neither its code-RAM size nor an arbitrary straight-line decoder budget limits
+the number of valid loop iterations. The independent `constant-fill.asm` corpus
+executes 128 iterations (517 instructions) and writes 128 zero words through the
+supported CB data port. Its 36-byte little-endian binary SHA-256 is
+`8a63c2d2f625aa92b812139fa386410c64f82fc0f6affb71a3993c19f0bb74c7`.
+The new 1024-step invocation and 1,048,576-step submission bounds are explicit
+implementation budgets; no NVIDIA hardware maximum is inferred from them.

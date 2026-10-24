@@ -3,7 +3,34 @@
 //! These are implementation budgets, not claims about every Maxwell RAM size.
 pub const CODE_WORDS: usize = 2048;
 pub const ENTRIES: usize = 128;
-const MAX_STEPS: usize = 64;
+/// Software work limits, independent of the physical instruction-RAM size.
+pub const MAX_INSTRUCTIONS_PER_INVOCATION: usize = 1024;
+pub const MAX_INSTRUCTIONS_PER_SUBMISSION: usize = 1_048_576;
+const MAX_STEPS: usize = MAX_INSTRUCTIONS_PER_INVOCATION;
+
+#[derive(Debug)]
+pub(crate) struct WorkBudget {
+    remaining: usize,
+}
+impl Default for WorkBudget {
+    fn default() -> Self {
+        Self {
+            remaining: MAX_INSTRUCTIONS_PER_SUBMISSION,
+        }
+    }
+}
+impl WorkBudget {
+    pub(crate) fn reset(&mut self) {
+        *self = Self::default();
+    }
+    fn charge(&mut self) -> Result<(), MacroError> {
+        self.remaining = self
+            .remaining
+            .checked_sub(1)
+            .ok_or(MacroError::SubmissionWorkBudgetExceeded)?;
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MacroError {
@@ -29,6 +56,7 @@ pub enum MacroError {
     InvalidFirmwareRequest(u32),
     UnsupportedPrivilegedWrite { address: u32, value: u32, mask: u32 },
     UnsupportedBitfieldShift(u32),
+    SubmissionWorkBudgetExceeded,
 }
 
 /// Only known bits are represented; unknown reset values are never invented.
@@ -260,6 +288,13 @@ impl MacroEngine {
         &self,
         invocation: &mut Invocation,
     ) -> Result<Option<(u16, u32)>, MacroError> {
+        self.next_output_budgeted(invocation, &mut WorkBudget::default())
+    }
+    pub(crate) fn next_output_budgeted(
+        &self,
+        invocation: &mut Invocation,
+        budget: &mut WorkBudget,
+    ) -> Result<Option<(u16, u32)>, MacroError> {
         while !invocation.finished {
             if let Some(pending) = invocation.pending_parameter.take() {
                 let Some(parameter) = invocation.parameter.take() else {
@@ -284,6 +319,9 @@ impl MacroEngine {
             if invocation.steps == MAX_STEPS {
                 return Err(MacroError::MissingExit);
             }
+            // Reserve one instruction when it starts. A parameter pause or a
+            // SEND-before-fetch resumes that reservation without charging twice.
+            budget.charge()?;
             let pc = invocation.pc;
             let delay_slot = invocation.delay_slot;
             let branch_delay_slot = invocation.branch_target.is_some();
@@ -470,6 +508,83 @@ mod streaming_tests {
             engine.upload(0x118, word).unwrap();
         }
         engine
+    }
+    #[test]
+    fn independent_finite_fill_exceeds_the_old_limit_and_debits_every_instruction() {
+        let words: Vec<u32> = include_str!("../tests/fixtures/mme/constant-fill.words")
+            .split_whitespace()
+            .map(|w| u32::from_str_radix(w, 16).unwrap())
+            .collect();
+        assert_eq!(
+            words,
+            [
+                0x0238c021, 0x40, 0x02390021, 0x40, 0xffffc911, 0xffff8817, 0x11, 0x91, 0x11
+            ]
+        );
+        let engine = loaded(&words);
+        let mut run = engine.begin(0, 128).unwrap();
+        let mut budget = WorkBudget { remaining: 600 };
+        assert_eq!(
+            engine.next_output_budgeted(&mut run, &mut budget),
+            Ok(Some((0x238c, 0)))
+        );
+        for _ in 0..128 {
+            assert_eq!(
+                engine.next_output_budgeted(&mut run, &mut budget),
+                Ok(Some((0x2390, 0)))
+            );
+        }
+        assert_eq!(engine.next_output_budgeted(&mut run, &mut budget), Ok(None));
+        assert!(run.finished);
+        // Three setup instructions, four per iteration, EXIT and its slot.
+        assert_eq!(run.steps, 3 + 128 * 4 + 2);
+        assert_eq!(budget.remaining, 600 - 517);
+    }
+    #[test]
+    fn submission_work_budget_survives_invocations_yields_and_parameter_pauses() {
+        let engine = loaded(&[0x91, 0x11]);
+        let mut budget = WorkBudget { remaining: 4 };
+        for _ in 0..2 {
+            let mut run = engine.begin(0, 0).unwrap();
+            assert_eq!(engine.next_output_budgeted(&mut run, &mut budget), Ok(None));
+            assert!(run.finished);
+        }
+        let mut run = engine.begin(0, 0).unwrap();
+        assert_eq!(
+            engine.next_output_budgeted(&mut run, &mut budget),
+            Err(MacroError::SubmissionWorkBudgetExceeded)
+        );
+        assert_eq!(run.steps, 0);
+        let engine = loaded(&[0x03400021, 0x201, 0x10c0, 0x11]);
+        let mut run = engine.begin(0, 0).unwrap();
+        let mut budget = WorkBudget { remaining: 4 };
+        assert_eq!(engine.next_output_budgeted(&mut run, &mut budget), Ok(None));
+        assert_eq!(budget.remaining, 2); // Parameter instruction is already reserved.
+        for _ in 0..8 {
+            assert_eq!(engine.next_output_budgeted(&mut run, &mut budget), Ok(None));
+            assert_eq!(budget.remaining, 2);
+        }
+        run.provide_parameter(0x89abcdef).unwrap();
+        assert_eq!(
+            engine.next_output_budgeted(&mut run, &mut budget),
+            Ok(Some((0x3400, 0x89abcdef)))
+        );
+        assert_eq!(budget.remaining, 1);
+        assert_eq!(engine.next_output_budgeted(&mut run, &mut budget), Ok(None));
+        assert_eq!(budget.remaining, 0);
+        assert_eq!(run.steps, 4);
+    }
+    #[test]
+    fn submission_budget_also_bounds_nonemitting_loops() {
+        let engine = loaded(&[0x27]);
+        let mut run = engine.begin(0, 0).unwrap();
+        let mut budget = WorkBudget { remaining: 5 };
+        assert_eq!(
+            engine.next_output_budgeted(&mut run, &mut budget),
+            Err(MacroError::SubmissionWorkBudgetExceeded)
+        );
+        assert_eq!(run.steps, 5);
+        assert_eq!(budget.remaining, 0);
     }
     fn request(engine: &mut MacroEngine, value: u32, mask: u32) {
         for (method, data) in [(0x3400, 0), (0x3404, value), (0x3408, mask)] {
@@ -808,7 +923,7 @@ mod streaming_tests {
         // SEND in a backward branch's delay slot yields on each iteration.
         let engine = loaded(&[0x01a00021, 0x7, 0x840]);
         let mut run = engine.begin(0, 1).unwrap();
-        for _ in 0..31 {
+        for _ in 0..(MAX_STEPS - 1) / 2 {
             assert_eq!(engine.next_output(&mut run), Ok(Some((0x1a00, 1))));
         }
         assert_eq!(engine.next_output(&mut run), Err(MacroError::MissingExit));
@@ -843,10 +958,10 @@ mod streaming_tests {
     #[test]
     fn resumption_does_not_reset_the_instruction_budget() {
         let mut words = vec![0x01a00021];
-        words.extend([0x840; 63]);
+        words.extend(vec![0x840; MAX_STEPS - 1]);
         let engine = loaded(&words);
         let mut run = engine.begin(0, 7).unwrap();
-        for _ in 0..63 {
+        for _ in 0..MAX_STEPS - 1 {
             assert_eq!(engine.next_output(&mut run), Ok(Some((0x1a00, 7))));
         }
         assert_eq!(engine.next_output(&mut run), Err(MacroError::MissingExit));
@@ -948,22 +1063,22 @@ mod streaming_tests {
     }
     #[test]
     fn parameter_pauses_do_not_reset_the_total_instruction_budget() {
-        let engine = loaded(&[0x201; 64]);
+        let engine = loaded(&[0x201; MAX_STEPS]);
         let mut run = engine.begin(0, 0).unwrap();
         assert_eq!(
             run.provide_parameter(1),
             Err(MacroError::UnexpectedParameter)
         );
         assert_eq!(engine.next_output(&mut run), Ok(None));
-        for n in 0..63 {
-            run.provide_parameter(n).unwrap();
+        for n in 0..MAX_STEPS - 1 {
+            run.provide_parameter(n as u32).unwrap();
             assert_eq!(engine.next_output(&mut run), Ok(None));
             assert!(run.waiting_for_parameter());
-            assert_eq!(run.steps, n as usize + 1);
+            assert_eq!(run.steps, n + 1);
         }
         run.provide_parameter(0).unwrap();
         assert_eq!(engine.next_output(&mut run), Err(MacroError::MissingExit));
-        assert_eq!(run.steps, 64);
+        assert_eq!(run.steps, MAX_STEPS);
         assert_eq!(run.registers[2], 0);
         assert!(run.initialized[2]);
     }

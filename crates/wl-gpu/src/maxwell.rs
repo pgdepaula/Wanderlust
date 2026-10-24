@@ -235,6 +235,7 @@ pub struct Maxwell3d {
     indices: crate::index::IndexRegisters,
     bound: [Option<EngineClass>; 8],
     macros: crate::mme::MacroEngine,
+    macro_work: crate::mme::WorkBudget,
     active_macro: Option<ActiveMacro>,
     cache_policies: [Option<CacheEviction>; 6],
     two_d: TwoDConfiguration,
@@ -285,6 +286,13 @@ struct ActiveMacro {
     idle_completed: bool,
 }
 impl Maxwell3d {
+    pub(crate) fn begin_submission(&mut self) -> std::result::Result<(), MethodError> {
+        if self.active_macro.is_some() {
+            return Err(MethodError::Macro(crate::mme::MacroError::ActiveInvocation));
+        }
+        self.macro_work.reset();
+        Ok(())
+    }
     /// Retained source-verified initialization metadata, not profiling results.
     pub fn instrumentation_initialization(&self) -> (Option<u32>, Option<u32>) {
         (self.instrumentation_header, self.instrumentation_data)
@@ -304,7 +312,7 @@ impl Maxwell3d {
         loop {
             let Some((method, value)) = self
                 .macros
-                .next_output(&mut active.invocation)
+                .next_output_budgeted(&mut active.invocation, &mut self.macro_work)
                 .map_err(MethodError::Macro)?
             else {
                 if active.invocation.waiting_for_parameter() {

@@ -3619,3 +3619,30 @@ WSL OpenGL, native Windows D3D12 and native Windows Vulkan, without failures or
 skips. Native watchdog unit tests passed on both backends. These are synthetic
 conformance fixtures, not original-game frame evidence. Queue submission remains
 per draw; only the explicit final publication reads back the repeated-draw image.
+
+
+### Finite MME loops with a shared submission work allowance
+
+The independent constant-fill program completes 128 iterations and 517
+instructions, exceeding the earlier 64-step budget. CPU tests verify exact
+emissions and instruction debits, sharing across invocations, zero-budget
+failure, nonemitting loops, yields, and reservation across parameter pauses.
+Infinite invocations remain bounded at 1024 instructions. GPU tests initialize
+a previously invalid CB with 512 actual zero bytes, preserve adjacent canaries,
+and verify the resulting asymmetric indexed texture pixels through LDC/TEX.
+
+Literal nonincrementing upload packets and 1024 exact-budget macro launches
+consume one complete submission allowance. One extra launch through a second
+aliased GPFIFO entry fails with `SubmissionWorkBudgetExceeded`, preserves the
+prior pending GPU draw and cannot replay on retry. A separate request using the
+complete valid allowance leaves engine/shader state intact; the next submission
+can upload a draw macro and render, proving that reset occurs at the API boundary.
+No per-draw readback or completion wait is added.
+
+Strict package/workspace Clippy and formatting passed. Default GPU/NVIDIA CPU
+suites passed 429 tests (180 device tests separately ignored); GPU no-default
+passed 404 tests. Live-worktree workspace tests passed 789 tests with 181
+separately ignored tests, without failures. Explicit graphics execution passed
+45 scenarios each on WSL OpenGL, native Windows D3D12 and native Windows Vulkan;
+watchdog unit tests also passed natively. These synthetic results do not establish
+original-game frames or general unlimited MME execution.

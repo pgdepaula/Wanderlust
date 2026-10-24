@@ -107,6 +107,15 @@ impl Renderer {
             return Err(invalid("GPU channel fault is latched"));
         }
         let result = (|| {
+            if words.len() as u64 > crate::gpfifo::MAX_WORDS {
+                return Err(invalid(
+                    "pushbuffer submission exceeds supported word budget",
+                ));
+            }
+            channel
+                .engine
+                .begin_submission()
+                .map_err(|e| crate::Error(e.to_string()))?;
             let mut last = None;
             for word in words {
                 {

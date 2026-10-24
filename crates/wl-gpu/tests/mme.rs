@@ -57,7 +57,7 @@ fn incomplete_uninitialized_unbounded_and_multi_emit_programs_fail_explicitly() 
     mme.upload(0x118, 0x00001011).unwrap(); // ADDI reads uninitialized R2.
     assert_eq!(mme.execute(3, 1), Err(MacroError::UninitializedRegister(2)));
     mme.upload(0x114, 5).unwrap();
-    for _ in 0..64 {
+    for _ in 0..MAX_INSTRUCTIONS_PER_INVOCATION {
         mme.upload(0x118, 0x11).unwrap();
     }
     assert_eq!(mme.execute(3, 1), Err(MacroError::MissingExit));
