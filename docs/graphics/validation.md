@@ -3733,3 +3733,31 @@ All three scenes passed on WSL OpenGL, native Windows D3D12 and native Windows
 Vulkan; native completion-watchdog unit tests also passed. The toggle adds no
 shader/pipeline recreation or forced intermediate readback. This validates only
 FILL-mode invariance, not wireframe or per-vertex boundary-edge rendering.
+
+
+### Canonical negative-W clipping and independent viewport banks
+
+CPU tests cover explicit -W..W selection, matching one-half Z scale/bias,
+continued rejection of missing selectors and unsupported clip profiles, and
+independent storage of all sixteen viewport banks. Unaligned, reserved-word,
+nonfinite and incompatible swizzle/depth-bound writes cannot alter viewport zero.
+The source-verified unclamped `0x181d` profile is accepted alongside `0x1801`;
+no general depth-clamp or undocumented guardband implementation is claimed.
+
+The GpuDriver/GPFIFO clipping scene alternates 0..W and -W..W on one channel,
+with thirteen plane/endpoint/partial-clipping configurations, unequal positive W,
+textured NoPerspective varyings and indexed geometry. Independent screen-space
+barycentric and scalar-depth oracles validate covered/uncovered color, exact
+clipping and guest block-linear ZF32 storage/padding. Conventions are switched
+without changing guest program bytes: Maxwell decode counts remain unchanged,
+while each required host vertex specialization creates exactly one new shader
+module and pipeline. Unchanged repetitions reuse both. Failed selector writes
+preserve the preceding accepted image for explicit publication without replay.
+
+Default GPU/NVIDIA CPU suites passed 437 tests (188 device tests separately
+ignored); GPU no-default passed 412 tests. Strict package/workspace Clippy and
+formatting passed. Explicit graphics/device batches passed 54 scenarios on each
+of WSL OpenGL, native Windows D3D12 and native Windows Vulkan, plus watchdog unit
+tests natively. Device-only boundary tests are included in these totals; they
+must not be counted as rasterized original-game frames. Live-worktree workspace
+validation passed 797 tests, with 189 separately ignored device tests.

@@ -812,8 +812,9 @@ defines pixel depth range, clamp modes, geometric clipping and guardbands.
 Value1801 selects pixel zero-to-one and XYZ geometric clipping; its Z guardband
 uses the XY setting. These fields must not be conflated with the 0x0d7c range.
 Pinned Mesa [nvc0_state.c](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nvc0/nvc0_state.c)
-emits the clip-halfz-dependent selector separately. Nonidentity viewport depth
-transforms require further guardband interpretation and are not accepted here.
+emits the clip-halfz-dependent selector separately. The canonical -W..W depth
+mapping has scale/offset one-half/one-half; arbitrary depth transforms remain
+unsupported.
 
 [OpenGL4.6 section13.7.1](https://registry.khronos.org/OpenGL/specs/gl/glspec46.core.pdf)
 and [Vulkan clipping outputs](https://docs.vulkan.org/spec/latest/chapters/vertexpostproc.html#vertexpostproc-clipping-shader-outputs)
@@ -2064,3 +2065,28 @@ path requires FILL independently for both polygon faces, so either edge flag has
 the same filled-triangle raster result. The raw bit is retained per channel;
 reserved bits and POINT/LINE polygon modes remain explicit errors. No wireframe,
 edge-attribute shader input or per-vertex edge-marking execution is claimed.
+
+
+### Canonical negative-W depth and viewport banks
+
+The pinned NVIDIA B197 header specifies `SET_VIEWPORT_Z_CLIP` bit zero separately
+from viewport Z scale/offset and the clip-control profile. Homogeneous remapping
+`z_host = z_guest/2 + w_guest/2` maps -W..W to host 0..W, preserving W and screen
+coordinates. Scaling each term first avoids intermediate `z+w` overflow. This is
+a mathematical lowering, not a claim of bit-exact undocumented Tegra precision.
+
+Pinned deko3d [`gpu_3d_state.cpp`](https://github.com/devkitPro/deko3d/blob/373bfd43d8b2d805fa2eb7d406dbb823032df958/source/maxwell/gpu_3d_state.cpp)
+emits `ViewVolumeClipControl=0x181d` for depth-clamp-disabled rasterization,
+and `0x101a` when clamping is enabled. The latter remains rejected. NVIDIA's
+XYZ geometry-clip fields and the MIT [StateUpdater reference](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Gpu/Engine/Threed/StateUpdater.cs)
+corroborate unclamped geometry for the two accepted profiles. Unnamed control
+bits are retained as an exact supported profile; no standalone meaning is
+invented for them. The reference implementation's viewport-based depth-mode
+heuristic is not used: Wanderlust requires the actual B197 selector explicitly.
+
+NVIDIA viewport methods use stride32 for scale/offset/swizzle (`0xa00` onward)
+and stride16 for clip/depth bounds (`0xc00` onward). Sixteen banks are retained;
+only bank zero is executed by the current stage-interface subset. Reserved
+words, nonfinite transforms, nonidentity swizzles and noncanonical depth bounds
+are rejected rather than aliasing another viewport. These storage limits do not
+claim general multiple-viewport rasterization.

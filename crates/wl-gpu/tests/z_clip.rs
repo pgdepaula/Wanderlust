@@ -2,7 +2,7 @@ mod common;
 use wl_gpu::{
     fifo::{Decoder, MethodWrite},
     maxwell::{Channel, Maxwell3d, MethodEffect, MethodError},
-    raster::{ColorLayout, FIXED_RASTER_STATE},
+    raster::{ColorLayout, DepthClipRange, FIXED_RASTER_STATE},
 };
 
 fn set(engine: &mut Maxwell3d, method: u16, value: u32) -> Result<MethodEffect, MethodError> {
@@ -45,14 +45,16 @@ fn homogeneous_z_interval_requires_its_own_explicit_selector() {
     // A parsed draw effect does not authorize backend rasterization or fill a
     // missing selector. Actual host execution is covered by separate GPU tests.
     assert!(engine.rasterization().is_err());
+    set(&mut engine, 0x0d7c, 0).unwrap();
+    assert!(engine.rasterization().is_err()); // Must also program the matching Z scale/bias.
+    set(&mut engine, 0xa08, 0.5f32.to_bits()).unwrap();
+    set(&mut engine, 0xa14, 0.5f32.to_bits()).unwrap();
     assert_eq!(
-        set(&mut engine, 0x0d7c, 0),
-        Err(MethodError::UnsupportedValue {
-            method: 0x0d7c,
-            value: 0
-        })
+        engine.rasterization().unwrap().1.depth_clip,
+        DepthClipRange::NegativeOneToOne
     );
-    assert!(engine.rasterization().is_err());
+    set(&mut engine, 0xa08, 1f32.to_bits()).unwrap();
+    set(&mut engine, 0xa14, 0).unwrap();
     set(&mut engine, 0x0d7c, 1).unwrap();
     assert_eq!(
         engine.rasterization().unwrap(),
@@ -76,10 +78,10 @@ fn complete_thirty_two_state_mask_requires_both_high_and_low_bits() {
 }
 
 #[test]
-fn negative_w_reserved_modes_and_unaligned_offsets_cannot_mutate_valid_state() {
+fn reserved_modes_and_unaligned_offsets_cannot_mutate_valid_state() {
     let mut engine = without(&[]);
     let before = engine.rasterization().unwrap();
-    for value in [0, 2, 3, 0x100, 0x80000000, u32::MAX] {
+    for value in [2, 3, 0x100, 0x80000000, u32::MAX] {
         assert_eq!(
             set(&mut engine, 0x0d7c, value),
             Err(MethodError::UnsupportedValue {
@@ -193,7 +195,7 @@ fn unsupported_channel_clip_mode_keeps_prefix_and_never_consumes_suffix_draw() {
     for word in [0x20010381, (43 << 16) | 5, 0x2001035f] {
         channel.push_word(word).unwrap();
     }
-    assert!(channel.push_word(0).is_err());
+    assert!(channel.push_word(2).is_err());
     assert!(channel.is_faulted());
     let before = channel.engine.rasterization().unwrap();
     assert_eq!(before.1.scissor, [5, 0, 38, 29]);
@@ -204,4 +206,52 @@ fn unsupported_channel_clip_mode_keeps_prefix_and_never_consumes_suffix_draw() {
     }
     assert!(channel.finish().is_err());
     assert_eq!(channel.engine.rasterization().unwrap(), before);
+}
+
+#[test]
+fn negative_depth_profile_requires_an_explicit_interval_and_matching_viewport() {
+    let mut e = without(&[0xd7c]);
+    set(&mut e, 0x193c, 0x181d).unwrap();
+    set(&mut e, 0xa08, 0.5f32.to_bits()).unwrap();
+    set(&mut e, 0xa14, 0.5f32.to_bits()).unwrap();
+    assert!(e.rasterization().is_err());
+    set(&mut e, 0xd7c, 0).unwrap();
+    let before = e.rasterization().unwrap();
+    assert_eq!(before.1.depth_clip, DepthClipRange::NegativeOneToOne);
+    for value in [0, 0x101a, 0x181c, 0x181f, u32::MAX] {
+        assert!(set(&mut e, 0x193c, value).is_err());
+        assert_eq!(e.rasterization().unwrap(), before);
+    }
+    set(&mut e, 0x193c, 0x1801).unwrap();
+    assert_eq!(e.rasterization().unwrap(), before);
+}
+
+#[test]
+fn inactive_viewport_banks_retain_independent_scale_clip_and_depth_state() {
+    let mut e = without(&[]);
+    let before = e.rasterization().unwrap();
+    for slot in 1..16 {
+        for (field, value) in [2f32, -3., 0.5, 4., 5., 0.5].into_iter().enumerate() {
+            set(
+                &mut e,
+                0xa00 + slot * 32 + field as u16 * 4,
+                value.to_bits(),
+            )
+            .unwrap();
+        }
+        set(&mut e, 0xa18 + slot * 32, 0x6420).unwrap();
+        for (field, value) in [(0, 17 << 16), (4, 19 << 16), (8, 0), (12, 1f32.to_bits())] {
+            set(&mut e, 0xc00 + slot * 16 + field, value).unwrap();
+        }
+        assert_eq!(e.rasterization().unwrap(), before);
+        for (method, value) in [
+            (0xa1c + slot * 32, 0),
+            (0xa00 + slot * 32, f32::NAN.to_bits()),
+            (0xa18 + slot * 32, 0),
+            (0xc08 + slot * 16, 1f32.to_bits()),
+        ] {
+            assert!(set(&mut e, method, value).is_err());
+            assert_eq!(e.rasterization().unwrap(), before);
+        }
+    }
 }

@@ -60,6 +60,7 @@ pub(crate) struct ResidentVertex {
     position_format: PositionFormat,
     stamp: Option<BackingStamp>,
     flip_y: bool,
+    depth_clip: crate::raster::DepthClipRange,
     color: crate::raster::ColorState,
     depth: Option<crate::raster::DepthState>,
     cull: crate::raster::Culling,
@@ -85,6 +86,7 @@ impl Renderer {
         raster: Option<crate::raster::Rasterization>,
     ) -> Result<()> {
         let flip_y = raster.is_some_and(|r| r.flip_y);
+        let depth_clip = raster.map_or_else(Default::default, |r| r.depth_clip);
         let color = raster.map_or_else(Default::default, |r| r.color);
         let depth = raster.and_then(|r| r.depth);
         let cull = raster.map_or_else(Default::default, |r| r.cull);
@@ -121,6 +123,7 @@ impl Renderer {
                 && v.offsets == offsets
                 && v.position_format == position_format
                 && v.flip_y == flip_y
+                && v.depth_clip == depth_clip
                 && v.color == color
                 && v.depth == depth
                 && v.cull == cull
@@ -136,6 +139,7 @@ impl Renderer {
             .filter(|v| {
                 v.program == *program
                     && v.flip_y == flip_y
+                    && v.depth_clip == depth_clip
                     && v.fragment.perspective() == fragment.program.perspective()
             })
             .map(|v| v.shader.clone());
@@ -146,7 +150,7 @@ impl Renderer {
                     label: Some("translated Maxwell vertex"),
                     source: wgpu::ShaderSource::Wgsl(
                         program
-                            .wgsl_for_raster(flip_y, fragment.program.perspective())
+                            .wgsl_for_raster(flip_y, fragment.program.perspective(), depth_clip)
                             .into(),
                     ),
                 })
@@ -226,6 +230,7 @@ impl Renderer {
             offsets,
             position_format,
             flip_y,
+            depth_clip,
             color,
             depth,
             cull,
@@ -349,6 +354,9 @@ impl Renderer {
         let stride = u64::from(array.stride);
         let offsets = array.offsets.map(u64::from);
         let flip_y = self.hardware_raster.is_some_and(|r| r.flip_y);
+        let depth_clip = self
+            .hardware_raster
+            .map_or_else(Default::default, |r| r.depth_clip);
         let color = self
             .hardware_raster
             .map_or_else(Default::default, |r| r.color);
@@ -361,6 +369,7 @@ impl Renderer {
                 || v.cull != cull
                 || v.color != color
                 || v.flip_y != flip_y
+                || v.depth_clip != depth_clip
                 || v.program != selected.program
                 || v.fragment != fragment.program
                 || v.stride != stride

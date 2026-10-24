@@ -767,7 +767,24 @@ fn verify_clip_depth(data: &[u8], initial: &[u8], z: [f32; 3], textured: bool) {
 #[test]
 #[ignore = "requires actual GPU; explicit homogeneous zero-to-W clipping and depth publication"]
 fn driver_explicit_z_clip_planes_partial_geometry_and_unequal_w() {
+    clip_scene(false);
+}
+#[test]
+#[ignore = "requires actual GPU; negative-W clip convention, unequal W and guest depth publication"]
+fn driver_negative_w_z_clip_planes_partial_geometry_and_unequal_w() {
+    clip_scene(true);
+}
+fn clip_scene(negative: bool) {
     let (mut data, mut setup, _) = fixture();
+    if negative {
+        let at = setup.iter().position(|w| *w == 0x2001035f).unwrap();
+        setup[at + 1] = 0;
+        let at = setup.iter().position(|w| *w == 0x2001064f).unwrap();
+        setup[at + 1] = 0x181d;
+        let at = setup.iter().position(|w| *w == 0x20060280).unwrap();
+        setup[at + 3] = 0.5f32.to_bits();
+        setup[at + 6] = 0.5f32.to_bits();
+    }
     let (mut d, c, space, backing, _) = driver();
     let initial = initial_depth();
     data[Z..Z + initial.len()].copy_from_slice(&initial);
@@ -792,7 +809,7 @@ fn driver_explicit_z_clip_planes_partial_geometry_and_unequal_w() {
     depth_setup(&mut setup, 0x207, true); // ALWAYS must not bypass homogeneous clipping.
     let mut missing = setup.clone();
     let at = missing.iter().position(|w| *w == 0x2001035f).unwrap();
-    assert_eq!(missing[at + 1], 1);
+    assert_eq!(missing[at + 1], u32::from(!negative));
     missing.drain(at..at + 2);
     let r = submit(&mut d, c, backing, &mut data, &missing);
     assert!(
@@ -825,13 +842,37 @@ fn driver_explicit_z_clip_planes_partial_geometry_and_unequal_w() {
     let mut program_identity = None;
     for (case, (z, w)) in cases.into_iter().enumerate() {
         let textured = case >= 11;
+        let active_negative = negative && (case % 2 == 0 || case >= 11);
         d.write_backing(backing, RT as u64, &BG.repeat(W * H), &mut mem(&mut data))
             .unwrap();
         d.write_backing(backing, Z as u64, &initial, &mut mem(&mut data))
             .unwrap();
-        d.write_backing(backing, 0x3000, &clip_vertices(z, w), &mut mem(&mut data))
-            .unwrap();
+        d.write_backing(
+            backing,
+            0x3000,
+            &clip_vertices(
+                if active_negative {
+                    z.map(|v| v * 2. - 1.)
+                } else {
+                    z
+                },
+                w,
+            ),
+            &mut mem(&mut data),
+        )
+        .unwrap();
         let mut commands = setup.clone();
+        if negative {
+            let end = commands.split_off(commands.len() - 8);
+            for (m, v) in [
+                (0xd7c, u32::from(!active_negative)),
+                (0xa08, if active_negative { 0.5f32 } else { 1. }.to_bits()),
+                (0xa14, if active_negative { 0.5f32 } else { 0. }.to_bits()),
+            ] {
+                method(&mut commands, m, v);
+            }
+            commands.extend(end);
+        }
         if textured {
             let end = commands.split_off(commands.len() - 8);
             method(&mut commands, 0x2144, 0); // Real guest TEX/IPA pixel program.
@@ -851,12 +892,17 @@ fn driver_explicit_z_clip_planes_partial_geometry_and_unequal_w() {
             n.shader_module_allocations,
             n.pipeline_allocations,
         );
-        if let Some((old_mode, old)) = program_identity {
-            if old_mode == textured {
+        if let Some(((old_textured, old_negative), old)) = program_identity {
+            if (old_textured, old_negative) == (textured, active_negative) {
                 assert_eq!(identity, old);
+            } else if old_textured == textured && old_negative != active_negative {
+                assert_eq!(identity.0, old.0); // Original Maxwell code stays cached.
+                assert_eq!(identity.1, old.1);
+                assert_eq!(identity.2, old.2 + 1); // A different host Z specialization.
+                assert_eq!(identity.3, old.3 + 1);
             }
         }
-        program_identity = Some((textured, identity));
+        program_identity = Some(((textured, active_negative), identity));
     }
     // Changing to an unsupported clip interval faults without replay or an
     // implicit publication of the already accepted last image.
@@ -867,7 +913,7 @@ fn driver_explicit_z_clip_planes_partial_geometry_and_unequal_w() {
     d.write_backing(
         backing,
         0x3000,
-        &clip_vertices([0.5; 3], [1.; 3]),
+        &clip_vertices([if negative { 0. } else { 0.5 }; 3], [1.; 3]),
         &mut mem(&mut data),
     )
     .unwrap();
@@ -880,11 +926,11 @@ fn driver_explicit_z_clip_planes_partial_geometry_and_unequal_w() {
             .is_none()
     );
     let before = d.graphics_counters();
-    let r = submit(&mut d, c, backing, &mut data, &[0x2001035f, 0]);
+    let r = submit(&mut d, c, backing, &mut data, &[0x2001035f, 2]);
     assert!(
         r.fault.as_ref().is_some_and(|e| e
             .to_string()
-            .contains("UnsupportedValue { method: 3452, value: 0 }")),
+            .contains("UnsupportedValue { method: 3452, value: 2 }")),
         "{:?}",
         r.fault
     );

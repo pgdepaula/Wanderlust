@@ -248,11 +248,19 @@ pub enum Culling {
         front: FrontFace,
     },
 }
+/// Homogeneous Z clip planes, independent of host API conventions.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum DepthClipRange {
+    #[default]
+    ZeroToOne,
+    NegativeOneToOne,
+}
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rasterization {
     pub viewport: [f32; 6],
     pub scissor: [u32; 4],
     pub flip_y: bool,
+    pub depth_clip: DepthClipRange,
     pub color: ColorState,
     pub depth: Option<DepthState>,
     pub cull: Culling,
@@ -342,9 +350,13 @@ fn depth_compare(value: u32) -> Option<DepthCompare> {
 #[derive(Debug, Default)]
 pub(crate) struct RasterRegisters {
     color: [Option<u32>; 9],
-    viewport: [Option<u32>; 6],
+    viewports: [[Option<u32>; 6]; 16],
+    viewport_swizzles: [Option<u32>; 16],
+    viewport_depth: [[Option<u32>; 2]; 16],
+    depth_clip: DepthClipRange,
+    clip_profile: Option<u32>,
     surface: [Option<u32>; 2],
-    clip: [Option<u32>; 2],
+    clips: [[Option<u32>; 2]; 16],
     scissor: [[Option<u32>; 2]; 16],
     scissor_enable: [Option<u32>; 16],
     fixed: u64,
@@ -461,6 +473,29 @@ impl RasterRegisters {
                     return Err(bad());
                 }
                 self.cull_enabled = value != 0;
+            } else if method == 0x0d7c {
+                self.depth_clip = match value {
+                    0 => DepthClipRange::NegativeOneToOne,
+                    1 => DepthClipRange::ZeroToOne,
+                    _ => return Err(bad()),
+                };
+            } else if method == 0x193c {
+                // Two source-verified unclamped XYZ-frustum profiles. Do not
+                // extrapolate the unnamed guard/control bits to other modes.
+                if !matches!(value, 0x1801 | 0x181d) {
+                    return Err(bad());
+                }
+                self.clip_profile = Some(value);
+            } else if method == 0x0a18 {
+                if value != *expected {
+                    return Err(bad());
+                }
+                self.viewport_swizzles[0] = Some(value);
+            } else if matches!(method, 0x0c08 | 0x0c0c) {
+                if value != *expected {
+                    return Err(bad());
+                }
+                self.viewport_depth[0][usize::from((method - 0xc08) / 4)] = Some(value);
             } else if method == 0x12e4 {
                 if value > 1 {
                     return Err(bad());
@@ -625,14 +660,32 @@ impl RasterRegisters {
                 }
                 self.color[n] = Some(value);
             }
-            0x0a00..=0x0a14 => {
-                if !f32::from_bits(value).is_finite() {
-                    return Err(bad());
+            0x0a00..=0x0bfc => {
+                let slot = usize::from((method - 0xa00) / 32);
+                let field = usize::from((method - 0xa00) % 32 / 4);
+                match field {
+                    0..=5 => {
+                        if !f32::from_bits(value).is_finite() {
+                            return Err(bad());
+                        }
+                        self.viewports[slot][field] = Some(value);
+                    }
+                    6 if value == 0x6420 => self.viewport_swizzles[slot] = Some(value),
+                    6 => return Err(bad()),
+                    _ => return Ok(false),
                 }
-                self.viewport[((method - 0xa00) / 4) as usize] = Some(value);
             }
             0x0ff4 | 0x0ff8 => self.surface[((method - 0xff4) / 4) as usize] = Some(value),
-            0x0c00 | 0x0c04 => self.clip[((method - 0xc00) / 4) as usize] = Some(value),
+            0x0c00..=0x0cfc => {
+                let slot = usize::from((method - 0xc00) / 16);
+                let field = usize::from((method - 0xc00) % 16 / 4);
+                match field {
+                    0 | 1 => self.clips[slot][field] = Some(value),
+                    2 if value == 0 => self.viewport_depth[slot][0] = Some(value),
+                    3 if value == 0x3f800000 => self.viewport_depth[slot][1] = Some(value),
+                    _ => return Err(bad()),
+                }
+            }
             0x0e00..=0x0ef8 => {
                 let slot = usize::from((method - 0xe00) / 16);
                 match method % 16 {
@@ -724,6 +777,9 @@ impl RasterRegisters {
         {
             return Err(invalid("incomplete or unsupported fixed raster state"));
         }
+        if !matches!(self.clip_profile, Some(0x1801 | 0x181d)) {
+            return Err(invalid("missing supported unclamped clip profile"));
+        }
         let blend = self.resolve_blend()?;
         let color = ColorState {
             blend,
@@ -731,15 +787,18 @@ impl RasterRegisters {
         };
         let target = self.color_target()?;
         let mut v = [0f32; 6];
-        for (out, word) in v.iter_mut().zip(self.viewport) {
+        for (out, word) in v.iter_mut().zip(self.viewports[0]) {
             *out = f32::from_bits(word.ok_or_else(|| invalid("incomplete viewport"))?);
         }
         let [sx, sy, sz, tx, ty, tz] = v;
+        let canonical_depth = match self.depth_clip {
+            DepthClipRange::ZeroToOne => sz == 1. && tz == 0.,
+            DepthClipRange::NegativeOneToOne => sz == 0.5 && tz == 0.5,
+        };
         let vp = [tx - sx, ty - sy.abs(), 2. * sx, 2. * sy.abs(), 0., 1.];
         if sx <= 0.
             || sy == 0.
-            || sz != 1.
-            || tz != 0.
+            || !canonical_depth
             || vp.iter().any(|v| !v.is_finite())
             || vp[..4].iter().any(|v| v.fract() != 0.)
             || vp[0] < 0.
@@ -754,7 +813,7 @@ impl RasterRegisters {
         for axis in 0..2 {
             for (word, extent) in [
                 (self.surface[axis], true),
-                (self.clip[axis], true),
+                (self.clips[0][axis], true),
                 (self.scissor[0][axis], false),
             ] {
                 let word =
@@ -777,6 +836,7 @@ impl RasterRegisters {
                 viewport: vp,
                 scissor: [lo[0], lo[1], hi[0] - lo[0], hi[1] - lo[1]],
                 flip_y: sy > 0.,
+                depth_clip: self.depth_clip,
                 color,
                 depth: self.depth_state()?,
                 cull: if self.cull_enabled {
@@ -1017,6 +1077,6 @@ mod tests {
         }
         assert_eq!(r.blend, [None; 6]);
         assert_eq!(r.color, [None; 9]);
-        assert_eq!(r.viewport, [None; 6]);
+        assert_eq!(r.viewports, [[None; 6]; 16]);
     }
 }

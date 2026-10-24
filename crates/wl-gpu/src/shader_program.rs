@@ -1771,9 +1771,14 @@ impl VertexProgram {
         self.0.operations()
     }
     pub fn wgsl(&self) -> String {
-        self.wgsl_for_raster(false, false)
+        self.wgsl_for_raster(false, false, crate::raster::DepthClipRange::ZeroToOne)
     }
-    pub(crate) fn wgsl_for_raster(&self, flip_y: bool, perspective: bool) -> String {
+    pub(crate) fn wgsl_for_raster(
+        &self,
+        flip_y: bool,
+        perspective: bool,
+        depth_clip: crate::raster::DepthClipRange,
+    ) -> String {
         use std::fmt::Write;
         let mut s = stage_source(
             self.operations(),
@@ -2005,6 +2010,11 @@ impl VertexProgram {
         }
         if flip_y {
             s.push_str("v.position.y = -v.position.y;\n");
+        }
+        if depth_clip == crate::raster::DepthClipRange::NegativeOneToOne {
+            // Homogeneous remapping preserves W and clips at z=-W/+W. Half
+            // each operand first to avoid overflow in z+w for large finite W.
+            s.push_str("v.position.z = v.position.z * 0.5 + v.position.w * 0.5;\n");
         }
         s.push_str("return v;}");
         if perspective {

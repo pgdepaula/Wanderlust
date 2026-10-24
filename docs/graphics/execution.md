@@ -505,8 +505,9 @@ Block-linear RGBA8 target conversion is implemented separately from sampled text
 Viewport zero uses scale/offset 0x0a00..0x0a14, identity coordinate swizzle at
 0x0a18, clip rectangle/depth at 0x0c00..0x0c0c, surface clips 0x0ff4/0x0ff8 and
 enabled scissor 0x0e00..0x0e08. The subset requires positive X scale, nonzero Y scale,
-Z scale one/offset zero, upper-left origin, zero window offsets, half-integer pixel
-centers and zero-to-one depth clipping. Wgpu viewport/scissor are derived from
+canonical Z scale/offset (one/zero for 0..W clipping, one-half/one-half for
+-W..W clipping), upper-left origin, zero window offsets and half-integer pixel
+centers. Wgpu viewport/scissor are derived from
 those fields. Positive Maxwell Y scale negates translated clip Y to implement
 `window_y = offset_y + scale_y * clip_y/clip_w`; negative scale needs no negation.
 The flip flag participates in paired-pipeline identity; viewport dimensions remain
@@ -871,9 +872,9 @@ A bounded single-layer ZF32 attachment is selected entirely by B197 ZT state.
 Block heights 1–32 GOBs use the same checked four-byte Tegra geometry as color
 storage, with complete padded mapping coverage. Color/depth dimensions must
 match; overlapping canonical attachment spans are rejected. Arrays, stencil,
-other depth formats, depth bounds/bias and alternate depth transforms remain
-unsupported. The implemented viewport has zero-to-one clip depth, scale Z one
-and offset Z zero. All eight comparisons and depth-write enable are supported;
+formats outside the ZF32/Z16 subsets, depth bounds/bias and arbitrary depth
+transforms remain unsupported. The implemented viewport uses canonical 0..W
+or -W..W clipping and the corresponding Z scale/offset. All eight comparisons and depth-write enable are supported;
 active depth requires explicit target selection, test enable, comparison and
 complete descriptor state. Initial samples must be finite normalized f32 in
 [0,1]; subnormals and negative zero are explicitly outside this transfer subset.
@@ -1287,21 +1288,32 @@ completion and publication APIs are unchanged.
 
 ## Explicit homogeneous depth clipping
 
-Draws require B197 SET_VIEWPORT_Z_CLIP at byte method 0x0d7c with range value1
-(zero through positive W). Missing state and negative-W-to-positive-W value0
-fail explicitly. This selector is independent of the existing 0x193c=0x1801
-viewport clip control; the latter does not select the homogeneous Z interval.
-No undocumented reset value is inferred. The fixed-state presence mask is u64
-to represent all 32 required entries safely. Clear operations retain their own
-state requirements and do not require draw-only homogeneous clipping state.
+Draws require explicit B197 SET_VIEWPORT_Z_CLIP at byte method `0x0d7c`:
+range one clips at zero through positive W; range zero clips at negative W
+through positive W. Missing state is an error. The selector remains independent
+of viewport clip control (`0x193c`). Two exact unclamped XYZ-frustum profiles are
+supported: `0x1801` and the source-verified `0x181d` initialization profile.
+Other profiles, including depth-clamp enable, remain unsupported; unnamed
+control bits are not generalized. Clear operations retain their own state
+requirements and do not infer draw clipping state.
 
-The bounded draw path retains identity viewport depth scale/offset, no depth
-bias/clamping, and the supported shaders without fragment-depth export. Host
-fixed-function clipping rejects primitives outside zero through W, even when
-the depth comparison is ALWAYS. Mixed-depth primitives are clipped before
-rasterization; unequal positive W and screen-linear varyings remain supported.
-Alternate homogeneous ranges, nonidentity viewport Z transforms and other
-guardband configurations remain unsupported. Submission, completion and
+Viewport Z scale/offset must be one/zero for 0..W, or one-half/one-half for -W..W.
+For negative-W clipping the translated Maxwell vertex output is remapped to
+host Z as `z_host = z_guest/2 + w_guest/2`, preserving W and the original
+homogeneous clipping planes. The depth convention participates in vertex
+shader/pipeline specialization identity, separately from decoded Maxwell code.
+Changing conventions recompiles the host specialization without rereading or
+redecoding unchanged guest programs. Host fixed-function clipping rejects
+out-of-frustum geometry even with ALWAYS depth comparison. Partial primitives,
+unequal positive W and screen-linear varyings retain the same screen-space
+interpolation plane.
+
+All sixteen viewport scale/offset, identity-swizzle and clip/depth-bound banks
+are retained independently. Supported shaders cannot export a viewport index;
+only bank zero is rasterized. Inactive bank writes never alias zero or change
+its effective pipeline state. Canonical zero/one depth bounds are supported;
+arbitrary depth transforms, nonidentity swizzles, depth bias/clamping and
+fragment-depth export remain unsupported. Submission, completion and
 publication interfaces are unchanged.
 
 
