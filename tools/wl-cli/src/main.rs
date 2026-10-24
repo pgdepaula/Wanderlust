@@ -20,7 +20,7 @@ USAGE:
   wanderlust survey INPUT [--raw] [--base ADDRESS] [--examples N]
   wanderlust analyze INPUT [--raw] [--base ADDRESS] [--entry ADDRESS] [--seed ADDRESS]...
                      [--link host|guest] [--no-pointer-seeds] [--allow-unsupported]
-                     [--roots-file FILE] [--instruction-limit COUNT] [--summary]
+                     [--roots-file FILE] [--preserve-dispatch FILE] [--instruction-limit COUNT] [--summary]
                      [--expect-code ADDRESS]... [--startup-roots]
   wanderlust recompile INPUT [analyze options] --out EXECUTABLE [--target TRIPLE] [--emit-only]
                        [--jobs N] [--cache-dir DIR] [--unit-shift BITS] [--opt-level 0..3]
@@ -40,6 +40,9 @@ Relocated code pointers and dynamic function symbols become speculative analysis
 unless --no-pointer-seeds is given. --allow-unsupported compiles unsupported reachable
 instructions as precise runtime faults instead of rejecting the program. --roots-file
 adds speculative roots (one address per line), e.g. from symbols, metadata or traces.
+--preserve-dispatch adds a bounded file of previously observed PC entries as candidate
+roots and requires each to remain a dispatchable block entry before emitting code.
+With --allow-unsupported, explicit instruction-fault entries can also be retained.
 --startup-roots requires ExeFS and adds validated DT_INIT/DT_INIT_ARRAY targets as
 required roots, independently of --no-pointer-seeds. It does not execute constructors
 or include finalizers. An insufficient instruction budget fails before compilation.
@@ -96,6 +99,7 @@ struct Options {
     summary: bool,
     verify_content: bool,
     roots_file: Option<PathBuf>,
+    preserve_dispatch: Option<PathBuf>,
     instruction_limit: usize,
     examples: usize,
     jobs: Option<usize>,
@@ -144,6 +148,7 @@ fn options(args: &[OsString]) -> Result<Options> {
         summary: false,
         verify_content: false,
         roots_file: None,
+        preserve_dispatch: None,
         instruction_limit: wl_analysis::MAX_INSTRUCTIONS,
         examples: 32,
         jobs: None,
@@ -178,6 +183,7 @@ fn options(args: &[OsString]) -> Result<Options> {
             | "--target"
             | "--link"
             | "--roots-file"
+            | "--preserve-dispatch"
             | "--examples"
             | "--jobs"
             | "--cache-dir"
@@ -205,6 +211,7 @@ fn options(args: &[OsString]) -> Result<Options> {
                     }
                     "--out" => o.out = Some(value.into()),
                     "--roots-file" => o.roots_file = Some(value.into()),
+                    "--preserve-dispatch" => o.preserve_dispatch = Some(value.into()),
                     "--instruction-limit" => {
                         let limit = number(utf8(value)?)?;
                         if !(1..=16_777_216).contains(&limit) {
@@ -256,6 +263,7 @@ fn options(args: &[OsString]) -> Result<Options> {
             "--startup-roots",
             "--allow-unsupported",
             "--roots-file",
+            "--preserve-dispatch",
             "--summary",
             "--instruction-limit",
         ],
@@ -270,6 +278,7 @@ fn options(args: &[OsString]) -> Result<Options> {
             "--startup-roots",
             "--allow-unsupported",
             "--roots-file",
+            "--preserve-dispatch",
             "--out",
             "--target",
             "--emit-only",
@@ -571,6 +580,54 @@ fn inspect(module: &Module, as_json: bool) -> Result<()> {
     println!("{}", module.constraints);
     Ok(())
 }
+/// Retain previously observed dispatch entries, not merely instructions inside
+/// another block. Explicit unsupported-instruction entries retain their fault.
+fn check_preserved_dispatch(program: &Program, targets: &[GuestAddr]) -> Result<()> {
+    for target in targets {
+        if program
+            .blocks
+            .binary_search_by_key(target, |b| b.start)
+            .is_err()
+        {
+            return Err(format!(
+                "preflight: preserved dispatch target {:#x} has no block entry",
+                target.0
+            ));
+        }
+    }
+    Ok(())
+}
+fn preserved_addresses(text: &str) -> Result<Vec<GuestAddr>> {
+    let mut addresses = std::collections::BTreeSet::new();
+    for line in text
+        .lines()
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && !v.starts_with('#'))
+    {
+        let address = number(line)?;
+        if address % 4 != 0 {
+            return Err("preserved dispatch targets must be word aligned".into());
+        }
+        addresses.insert(GuestAddr(address));
+        if addresses.len() > 1_048_576 {
+            return Err("preserved dispatch targets exceed the supported entry budget".into());
+        }
+    }
+    Ok(addresses.into_iter().collect())
+}
+fn read_preserved_dispatch(path: &std::path::Path) -> Result<Vec<GuestAddr>> {
+    use std::io::Read;
+    const MAX_BYTES: u64 = 16 * 1024 * 1024;
+    let mut text = String::new();
+    fs::File::open(path)
+        .and_then(|f| f.take(MAX_BYTES + 1).read_to_string(&mut text))
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if text.len() as u64 > MAX_BYTES {
+        return Err("preserved dispatch file exceeds the 16 MiB tool budget".into());
+    }
+    preserved_addresses(&text)
+}
+
 /// Check known dispatch destinations without changing discovery or accepting an
 /// unsupported site. Blocks and their instructions are ordered by guest PC.
 fn check_expected_code(program: &Program, targets: &[GuestAddr]) -> Result<()> {
@@ -674,6 +731,13 @@ fn run(args: &[OsString]) -> Result<()> {
     let mut required: Vec<_> = std::iter::once(entry)
         .chain(o.seeds.iter().copied())
         .collect();
+    let preserved = o
+        .preserve_dispatch
+        .as_deref()
+        .map(read_preserved_dispatch)
+        .transpose()?
+        .unwrap_or_default();
+    speculative.extend_from_slice(&preserved);
     let mut startup_roots_added = 0usize;
     if o.startup_roots {
         let p = process
@@ -698,6 +762,7 @@ fn run(args: &[OsString]) -> Result<()> {
     let started = Instant::now();
     let program = discover_roots(&image, &roots)?;
     let analysis_seconds = started.elapsed().as_secs_f64();
+    check_preserved_dispatch(&program, &preserved)?;
     check_expected_code(&program, &o.expected_code)?;
     if o.command == "analyze" {
         return if o.summary {
@@ -705,6 +770,7 @@ fn run(args: &[OsString]) -> Result<()> {
             s["analysis_seconds"] = analysis_seconds.into();
             s["instruction_limit"] = o.instruction_limit.into();
             s["checked_code_targets"] = o.expected_code.len().into();
+            s["preserved_dispatch_targets"] = preserved.len().into();
             s["startup_roots_added"] = startup_roots_added.into();
             json(&s)
         } else {
@@ -778,6 +844,7 @@ fn run(args: &[OsString]) -> Result<()> {
     let program_report = serde_json::json!({
         "instructions": program.instruction_count,
         "checked_code_targets": o.expected_code.len(),
+        "preserved_dispatch_targets": preserved.len(),
         "startup_roots_added": startup_roots_added,
         "unsupported_sites": program.unsupported_count,
         "blocks": program.blocks.len(),
@@ -870,6 +937,7 @@ fn run(args: &[OsString]) -> Result<()> {
         "entry": entry,
         "instructions": program_report["instructions"],
         "checked_code_targets": program_report["checked_code_targets"],
+        "preserved_dispatch_targets": program_report["preserved_dispatch_targets"],
         "startup_roots_added": program_report["startup_roots_added"],
         "unsupported_sites": program_report["unsupported_sites"],
         "blocks": program_report["blocks"],
@@ -1024,5 +1092,93 @@ mod tests {
             assert!(config.is_application);
             assert_eq!(config.memory_limit, expected);
         }
+    }
+    #[test]
+    fn preserved_dispatch_is_a_candidate_and_a_checked_entry_not_just_code() {
+        let words = [
+            0x10000108u32,
+            0x14000003,
+            0xd503201f,
+            0xd503201f,
+            0xd61f0100,
+            0xd503201f,
+            0xd503201f,
+            0xd503201f,
+            0xd2800540,
+            0xd65f03c0,
+        ];
+        let image = Image::raw(
+            words.into_iter().flat_map(u32::to_le_bytes).collect(),
+            GuestAddr(0x10000),
+        )
+        .unwrap();
+        let mut roots = Roots {
+            required: vec![GuestAddr(0x10000), GuestAddr(0x10010)],
+            speculative: vec![],
+            allow_unsupported: false,
+            instruction_limit: Some(100),
+        };
+        let target = GuestAddr(0x10020);
+        let before_extra_entry = discover_roots(
+            &image,
+            &Roots {
+                required: vec![GuestAddr(0x10000)],
+                ..roots.clone()
+            },
+        )
+        .unwrap();
+        check_preserved_dispatch(&before_extra_entry, &[target]).unwrap();
+        let ordinary = discover_roots(&image, &roots).unwrap();
+        assert!(check_preserved_dispatch(&ordinary, &[target]).is_err());
+        roots.speculative.push(target);
+        let retained = discover_roots(&image, &roots).unwrap();
+        check_preserved_dispatch(&retained, &[target]).unwrap();
+        check_expected_code(&retained, &[target]).unwrap();
+        // A valid instruction inside an existing block is not a dispatch entry.
+        check_expected_code(&retained, &[GuestAddr(0x10004)]).unwrap();
+        assert!(check_preserved_dispatch(&retained, &[GuestAddr(0x10004)]).is_err());
+    }
+    #[test]
+    fn preserved_dispatch_keeps_explicit_traps_without_weakening_supported_code_checks() {
+        let image = Image::raw(
+            [0xd65f03c0u32, 0xe7ffdefe]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect(),
+            GuestAddr(0x10000),
+        )
+        .unwrap();
+        let program = discover_roots(
+            &image,
+            &Roots {
+                required: vec![GuestAddr(0x10000)],
+                speculative: vec![GuestAddr(0x10004)],
+                allow_unsupported: true,
+                instruction_limit: Some(10),
+            },
+        )
+        .unwrap();
+        check_preserved_dispatch(&program, &[GuestAddr(0x10004)]).unwrap();
+        assert!(check_expected_code(&program, &[GuestAddr(0x10004)]).is_err());
+        assert_eq!(
+            preserved_addresses("# known callbacks\n0x10004\n65536\n0x10004\n").unwrap(),
+            vec![GuestAddr(0x10000), GuestAddr(0x10004)]
+        );
+        assert!(preserved_addresses("0x10001").is_err());
+        assert!(preserved_addresses("18446744073709551616").is_err());
+    }
+    #[test]
+    fn preserve_dispatch_cli_is_explicit_and_analysis_only() {
+        let parse = |args: &[&str]| options(&args.iter().map(OsString::from).collect::<Vec<_>>());
+        for command in ["analyze", "recompile"] {
+            assert_eq!(
+                parse(&[command, "input", "--preserve-dispatch", "known.txt"])
+                    .unwrap()
+                    .preserve_dispatch,
+                Some(PathBuf::from("known.txt"))
+            );
+        }
+        assert!(parse(&["analyze", "input", "--preserve-dispatch"]).is_err());
+        assert!(parse(&["inspect", "input", "--preserve-dispatch", "known.txt"]).is_err());
     }
 }
