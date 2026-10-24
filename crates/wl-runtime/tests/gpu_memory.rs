@@ -50,6 +50,7 @@ fn process() -> (Process, Cpu) {
         core_mask: 1,
         priority_mask: u64::MAX,
         memory_limit: 0x2000_0000,
+        system_resource_size: 0,
         handle_table_size: 1023,
         thread_limit: 32,
         is_application: true,

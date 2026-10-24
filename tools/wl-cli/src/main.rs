@@ -434,6 +434,7 @@ fn horizon_options(
         svc_permissions: [u64::MAX; 3],
         service_access: vec![(false, "*".into()), (true, "*".into())],
         memory_limit: o.memory_limit.unwrap_or(0x2000_0000),
+        system_resource_size: 0,
         source: "defaults (no main.npdm)",
         homebrew,
     };
@@ -465,6 +466,7 @@ fn horizon_options(
             svc_permissions[usize::from(id / 64)] |= 1 << (id % 64);
         }
     }
+    options.system_resource_size = md.system_resource_size;
     options.program_id = md.program_id;
     options.main_thread_stack_size = md.main_thread_stack_size;
     options.main_thread_priority = md.main_thread_priority;

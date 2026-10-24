@@ -58,6 +58,7 @@ fn system_counter_follows_the_virtual_clock() {
         core_mask: 1,
         priority_mask: u64::MAX,
         memory_limit: 0x100_0000,
+        system_resource_size: 0,
         handle_table_size: 0,
         thread_limit: 4,
         is_application: true,

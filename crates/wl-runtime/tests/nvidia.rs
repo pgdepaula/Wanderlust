@@ -157,6 +157,7 @@ impl Harness {
                 core_mask: 3,
                 priority_mask: u64::MAX,
                 memory_limit: 0x2000_0000,
+                system_resource_size: 0,
                 handle_table_size: 64,
                 thread_limit: 8,
                 is_application: true,

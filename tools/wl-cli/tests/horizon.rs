@@ -369,3 +369,32 @@ fn horizon_mode_requires_an_exefs_directory_or_nro() {
         .unwrap();
     assert!(!o.status.success());
 }
+
+/// An independent literal META field must reach generated host process configuration.
+#[test]
+fn npdm_system_resource_reservation_reaches_emitted_process() {
+    let t = Temp::new();
+    let input = t.0.join("exefs");
+    fs::create_dir(&input).unwrap();
+    let fixture = root().join("tests/horizon/probe");
+    fs::copy(fixture.join("main"), input.join("main")).unwrap();
+    let mut npdm = fs::read(fixture.join("main.npdm")).unwrap();
+    npdm[0x14..0x18].copy_from_slice(&0x20_0000u32.to_le_bytes());
+    fs::write(input.join("main.npdm"), npdm).unwrap();
+    let out = t.0.join("reserved");
+    let result = cli()
+        .arg("recompile")
+        .arg(input)
+        .args(["--horizon", "--allow-unsupported", "--emit-only", "--out"])
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+    let source = fs::read_to_string(report["source"].as_str().unwrap()).unwrap();
+    assert!(source.contains("system_resource_size: 0x200000,"));
+}

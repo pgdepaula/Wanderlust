@@ -16,6 +16,7 @@ fn config() -> ProcessConfig {
         core_mask: 1,
         priority_mask: u64::MAX,
         memory_limit: 0x2000_0000,
+        system_resource_size: 0,
         handle_table_size: 1023,
         thread_limit: 32,
         is_application: true,
@@ -727,5 +728,131 @@ fn memory_mapping_permissions_and_failures_do_not_depend_on_program_id() {
         assert_eq!(p.load(dst, 1).unwrap(), 0x7b);
         assert_eq!(p.load(src + 7, 1).unwrap(), 0x91);
         assert!(p.kernel.as_ref().unwrap().aliases.is_empty());
+    }
+}
+
+#[test]
+fn physical_alias_memory_preserves_existing_pages_and_unmaps_holes() {
+    let (mut p, mut c) = process();
+    p.kernel.as_mut().unwrap().config.system_resource_size = 0x20_0000;
+    let a = p.kernel.as_ref().unwrap().layout.alias.start;
+    assert_eq!(
+        svc(&mut p, &mut c, 0x2c, &[a + PAGE, PAGE]),
+        result::SUCCESS
+    );
+    p.store(a + PAGE, 8, 0x0123_4567_89ab_cdef).unwrap();
+    assert_eq!(svc(&mut p, &mut c, 0x2c, &[a, 3 * PAGE]), result::SUCCESS);
+    assert_eq!(p.load(a, 8).unwrap(), 0);
+    assert_eq!(p.load(a + PAGE, 8).unwrap(), 0x0123_4567_89ab_cdef);
+    assert_eq!(p.load(a + 2 * PAGE, 8).unwrap(), 0);
+    assert_eq!(info(&p, a).state, state::NORMAL);
+    assert_eq!(info(&p, a).permission, 3);
+    let before = used_memory(&p);
+    assert_eq!(svc(&mut p, &mut c, 0x2c, &[a, 3 * PAGE]), result::SUCCESS);
+    assert_eq!(used_memory(&p), before);
+    assert_eq!(
+        svc(&mut p, &mut c, 0x2d, &[a + PAGE, PAGE]),
+        result::SUCCESS
+    );
+    assert!(p.load(a + PAGE, 1).is_err());
+    assert_eq!(svc(&mut p, &mut c, 0x2d, &[a, 4 * PAGE]), result::SUCCESS);
+    assert_eq!(used_memory(&p), before - 3 * PAGE);
+    assert_eq!(svc(&mut p, &mut c, 0x2d, &[a, 4 * PAGE]), result::SUCCESS);
+}
+
+#[test]
+fn physical_alias_memory_checks_state_quota_and_range_before_mutation() {
+    let (mut p, mut c) = process();
+    let a = p.kernel.as_ref().unwrap().layout.alias.start;
+    assert_eq!(svc(&mut p, &mut c, 0x2c, &[a, PAGE]), result::INVALID_STATE);
+    p.kernel.as_mut().unwrap().config.system_resource_size = PAGE;
+    for (address, size, error) in [
+        (a + 1, PAGE, result::INVALID_ADDRESS),
+        (a, 0, result::INVALID_SIZE),
+        (a, PAGE + 1, result::INVALID_SIZE),
+        (u64::MAX - PAGE + 1, PAGE, result::INVALID_MEMORY_REGION),
+        (a - PAGE, PAGE, result::INVALID_MEMORY_REGION),
+        (
+            p.kernel.as_ref().unwrap().layout.alias.end,
+            PAGE,
+            result::INVALID_MEMORY_REGION,
+        ),
+    ] {
+        for id in [0x2c, 0x2d] {
+            assert_eq!(svc(&mut p, &mut c, id, &[address, size]), error);
+            assert!(p.load(a, 1).is_err());
+        }
+    }
+    let used = used_memory(&p);
+    p.kernel.as_mut().unwrap().config.memory_limit = used + PAGE + PAGE;
+    assert_eq!(
+        svc(&mut p, &mut c, 0x2c, &[a, 2 * PAGE]),
+        result::LIMIT_REACHED
+    );
+    assert!(p.load(a, 1).is_err());
+    assert_eq!(svc(&mut p, &mut c, 0x2c, &[a, PAGE]), result::SUCCESS);
+    p.store(a, 8, 73).unwrap();
+    assert_eq!(
+        svc(&mut p, &mut c, 0x01, &[0, HEAP_ALIGNMENT]),
+        result::OUT_OF_MEMORY
+    );
+    let pin = p.pin_gpu_range(a, PAGE).unwrap();
+    assert_eq!(
+        svc(&mut p, &mut c, 0x2d, &[a, 2 * PAGE]),
+        result::INVALID_CURRENT_MEMORY
+    );
+    assert_eq!(p.load(a, 8).unwrap(), 73);
+    p.release_gpu_pin(pin).unwrap();
+    p.regions
+        .iter_mut()
+        .find(|r| r.base == a)
+        .unwrap()
+        .attribute = attribute::UNCACHED;
+    assert_eq!(
+        svc(&mut p, &mut c, 0x2d, &[a, 2 * PAGE]),
+        result::INVALID_CURRENT_MEMORY
+    );
+    assert_eq!(p.load(a, 8).unwrap(), 73);
+}
+
+#[test]
+fn system_resource_info_reserves_budget_and_validates_configuration() {
+    let (mut p, mut c) = process();
+    p.kernel.as_mut().unwrap().config.system_resource_size = 0x20_0000;
+    let used = used_memory(&p);
+    for (kind, expected) in [
+        (16, 0x20_0000),
+        (17, 0),
+        (6, 0x2000_0000),
+        (7, used + 0x20_0000),
+        (21, 0x1fe0_0000),
+        (22, used),
+    ] {
+        assert_eq!(
+            svc(
+                &mut p,
+                &mut c,
+                0x29,
+                &[0, kind, u64::from(CURRENT_PROCESS), 0]
+            ),
+            result::SUCCESS
+        );
+        assert_eq!(c.x[1], expected);
+    }
+    for size in [1, 0x1fe0_1000] {
+        let mut cfg = config();
+        cfg.system_resource_size = size;
+        assert!(
+            Process::horizon(
+                Memory::default(),
+                CODE,
+                Range {
+                    start: CODE,
+                    end: CODE + PAGE
+                },
+                cfg
+            )
+            .is_err()
+        );
     }
 }

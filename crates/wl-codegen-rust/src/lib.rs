@@ -1414,6 +1414,7 @@ pub struct HorizonOptions {
     /// ACI0 service access control: (may host, name or prefix ending in `*`).
     pub service_access: Vec<(bool, String)>,
     pub memory_limit: u64,
+    pub system_resource_size: u64,
     /// Origin of the values, reported by the launcher (e.g. "main.npdm").
     pub source: &'static str,
     /// Start with the homebrew (NRO) entry convention instead of the NSO one.
@@ -1639,7 +1640,7 @@ fn emit_inner(
         Some(h) => {
             writeln!(
                 out,
-                "Ok(m) }}\nstatic IMAGE: ProcessImage = ProcessImage {{ code_start: {:#x}, code_end: {:#x}, config_source: {:?}, homebrew: {}, config: horizon::ProcessConfig {{ program_id: {:#x}, process_id: 0x51, main_thread_id: 0x72, main_thread_stack_size: {:#x}, main_thread_priority: {}, ideal_core: {}, core_mask: {:#x}, priority_mask: {:#x}, memory_limit: {:#x}, handle_table_size: {}, thread_limit: 32, is_application: {}, svc_permissions: {:#x?}, service_access: &{:?} }} }};",
+                "Ok(m) }}\nstatic IMAGE: ProcessImage = ProcessImage {{ code_start: {:#x}, code_end: {:#x}, config_source: {:?}, homebrew: {}, config: horizon::ProcessConfig {{ program_id: {:#x}, process_id: 0x51, main_thread_id: 0x72, main_thread_stack_size: {:#x}, main_thread_priority: {}, ideal_core: {}, core_mask: {:#x}, priority_mask: {:#x}, memory_limit: {:#x}, system_resource_size: {:#x}, handle_table_size: {}, thread_limit: 32, is_application: {}, svc_permissions: {:#x?}, service_access: &{:?} }} }};",
                 h.code_start,
                 h.code_end,
                 h.source,
@@ -1651,6 +1652,7 @@ fn emit_inner(
                 h.core_mask,
                 h.priority_mask,
                 h.memory_limit,
+                h.system_resource_size,
                 h.handle_table_size,
                 h.is_application,
                 h.svc_permissions,

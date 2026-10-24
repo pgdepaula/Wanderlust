@@ -500,3 +500,25 @@ Live GPU backing registrations remain protected before either operation can
 change storage. Tests compare the same valid and invalid sequences under two
 program identities and verify source permissions, preserved bytes and rejection
 without destination mutation.
+
+## Physical alias allocation and system resources
+
+The NPDM META system-resource size is carried into the emitted process configuration.
+`GetInfo(16)` reports that reservation; `GetInfo(21)` excludes it from the user budget,
+and the heap and physical-alias allocators share that budget. `GetInfo(7)` includes
+reserved system storage while `GetInfo(22)` reports mapped user bytes. The runtime
+has no emulated secure page-table/slab allocator: its reported used system-resource
+bytes (`GetInfo(17)`) remain zero. This is not physical Switch page-table emulation.
+
+`MapPhysicalMemory` (SVC `0x2c`) creates zero-filled Normal RW pages in the alias
+region and retains any already mapped pages. Repeated maps preserve contents and
+consume no additional quota. `UnmapPhysicalMemory` (`0x2d`) accepts free holes and
+unattributed Normal pages; incompatible states, attributes and registered GPU pins
+reject the entire request before removal. Page alignment, overflow, region bounds,
+nonzero system resources and process quota are checked before mapping changes.
+Large new spans use bounded backing regions. These are process-owned synthetic
+physical allocations, not guest GPU virtual-address mappings.
+
+These rules are independently restated from the pinned Atmosphère
+`svc/kern_svc_physical_memory.cpp`, `svc/kern_svc_info.cpp`,
+`kern_k_page_table_base.cpp` and `kern_k_process.cpp`; no implementation code is copied.

@@ -18,6 +18,7 @@ fn config() -> ProcessConfig {
         core_mask: 0b111,
         priority_mask: 0xffff_ffff_f000_0000, // priorities 28..=63
         memory_limit: 0x2000_0000,
+        system_resource_size: 0,
         handle_table_size: 64,
         thread_limit: 8,
         is_application: true,

@@ -205,6 +205,8 @@ pub struct ProcessConfig {
     pub priority_mask: u64,
     /// Total user physical memory the process may use (`InfoType_TotalMemorySize`).
     pub memory_limit: u64,
+    /// NPDM META system-resource reservation; zero disables physical alias allocation.
+    pub system_resource_size: u64,
     pub handle_table_size: u16,
     pub thread_limit: u64,
     pub is_application: bool,
@@ -497,6 +499,12 @@ impl Process {
         code: Range,
         config: ProcessConfig,
     ) -> RuntimeResult<(Self, Cpu)> {
+        if config.system_resource_size % PAGE != 0
+            || config.system_resource_size > 0x1fe0_0000
+            || config.system_resource_size > config.memory_limit
+        {
+            return Err("invalid process system-resource reservation".into());
+        }
         let layout = Layout::new_39bit(code.start, code.size())?;
         if config.main_thread_stack_size % PAGE != 0 || config.main_thread_stack_size == 0 {
             return Err("main thread stack size must be a non-zero multiple of 0x1000".into());
@@ -1291,6 +1299,13 @@ pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<S
             }
             None
         }
+        0x2C | 0x2D => {
+            let code = physical_memory(memory, k, c.x[0], c.x[1], id == 0x2D)
+                .err()
+                .unwrap_or(result::SUCCESS);
+            set_result(c, code);
+            None
+        }
         0x34 => match threads::wait_for_address(memory, k, c) {
             Ok(None) => {
                 set_result(c, result::SUCCESS);
@@ -1651,6 +1666,96 @@ fn create_transfer_memory(
         .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
     k.create_transfer_memory(address, size, permission)
 }
+/// Normal RW pages allocated in the alias region by SVC 0x2c/0x2d. Existing mappings
+/// are retained on map; unmap accepts only un-attributed Normal pages or free holes.
+/// Checked preflight precedes mutations; GPU-pinned storage cannot be removed.
+fn physical_memory(
+    memory: &mut Memory,
+    k: &Kernel,
+    address: u64,
+    size: u64,
+    unmap: bool,
+) -> Result<(), u32> {
+    if address % PAGE != 0 {
+        return Err(result::INVALID_ADDRESS);
+    }
+    if size == 0 || size % PAGE != 0 {
+        return Err(result::INVALID_SIZE);
+    }
+    let end = address
+        .checked_add(size)
+        .filter(|&e| e > address)
+        .ok_or(result::INVALID_MEMORY_REGION)?;
+    if k.config.system_resource_size == 0 {
+        return Err(result::INVALID_STATE);
+    }
+    if address < k.layout.alias.start || end > k.layout.alias.end {
+        return Err(result::INVALID_MEMORY_REGION);
+    }
+    if unmap {
+        memory
+            .ensure_gpu_unpinned(address, size)
+            .map_err(|_| result::INVALID_CURRENT_MEMORY)?;
+        for r in &memory.regions {
+            if r.base < end && address < r.end() && (r.state != state::NORMAL || r.attribute != 0) {
+                return Err(result::INVALID_CURRENT_MEMORY);
+            }
+        }
+        let remove = isolate(memory, address, size);
+        let mut index = 0;
+        memory.regions.retain(|_| {
+            let keep = remove.binary_search(&index).is_err();
+            index += 1;
+            keep
+        });
+        return Ok(());
+    }
+    let mut gaps = Vec::new();
+    let mut cursor = address;
+    for r in &memory.regions {
+        if r.end() <= address || r.base >= end {
+            continue;
+        }
+        if cursor < r.base {
+            gaps.push((cursor, r.base));
+        }
+        cursor = cursor.max(r.end().min(end));
+    }
+    if cursor < end {
+        gaps.push((cursor, end));
+    }
+    if gaps.is_empty() {
+        return Ok(());
+    }
+    let required: u64 = gaps.iter().map(|&(a, b)| b - a).sum();
+    let budget = k.config.memory_limit - k.config.system_resource_size;
+    if used_memory(memory)
+        .checked_add(required)
+        .is_none_or(|n| n > budget)
+    {
+        return Err(result::LIMIT_REACHED);
+    }
+    // Split large allocations into bounded spans, retaining lazy zero-filled backing.
+    let mut additions = Vec::new();
+    for (mut at, end) in gaps {
+        while at < end {
+            let length = (end - at).min(HEAP_ALIGNMENT);
+            additions.push(crate::Region {
+                base: at,
+                bytes: zeroed(length),
+                read: true,
+                write: true,
+                execute: false,
+                state: state::NORMAL,
+                attribute: 0,
+            });
+            at += length;
+        }
+    }
+    memory.regions.extend(additions);
+    memory.regions.sort_by_key(|r| r.base);
+    Ok(())
+}
 /// `svcSetHeapSize`: grows or shrinks the Normal-state RW heap at the heap region start.
 /// Growth maps zeroed pages after the current heap; shrinking requires the released range to
 /// still be plain RW heap (no reprotected or attributed pages) and unmaps it.
@@ -1661,8 +1766,12 @@ fn set_heap_size(memory: &mut Memory, k: &mut Kernel, size: u64) -> Result<u64, 
         );
         return Err(result::INVALID_SIZE);
     }
-    let fixed = k.code.size() + k.threads[0].stack.size();
-    let max_heap = k.config.memory_limit.saturating_sub(fixed);
+    let fixed = used_memory(memory).saturating_sub(k.heap_size);
+    let max_heap = k
+        .config
+        .memory_limit
+        .saturating_sub(k.config.system_resource_size)
+        .saturating_sub(fixed);
     if size > k.layout.heap.size() || size > max_heap {
         eprintln!("[svc 0x01] set_heap_size OUT_OF_MEMORY: size={size:#x}, max_heap={max_heap:#x}");
         return Err(result::OUT_OF_MEMORY);
@@ -1729,13 +1838,17 @@ fn get_info(memory: &Memory, k: &Kernel, kind: u64, handle: u32, subtype: u64) -
             3 => k.layout.alias.size(),
             4 => k.layout.heap.start,
             5 => k.layout.heap.size(),
-            6 | 21 => k.config.memory_limit,
-            7 | 22 => used,
+            6 => k.config.memory_limit,
+            7 => used + k.config.system_resource_size,
+            21 => k.config.memory_limit - k.config.system_resource_size,
+            22 => used,
             12 => k.layout.code_region.start,
             13 => k.layout.code_region.size(),
             14 => k.layout.stack.start,
             15 => k.layout.stack.size(),
-            16 | 17 => 0,
+            16 => k.config.system_resource_size,
+            // Host-side mapping records consume no emulated secure page-table pages.
+            17 => 0,
             18 => k.config.program_id,
             20 => k.process_local_region,
             23 => u64::from(k.config.is_application),
