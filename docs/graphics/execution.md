@@ -2507,3 +2507,33 @@ B197 `SET_EDGE_FLAG` retains the literal one-bit edge mark in auxiliary channel
 state. Supported draws require polygon FILL for both faces, where edge marking
 has no coverage effect. Changing the bit therefore preserves filled geometry
 and compatible pipelines. Unsupported polygon POINT/LINE modes remain rejected.
+
+
+### Bounded MME shadow state
+
+Explicit B197 `0x124` programs TRACK, TRACK_WITH_FILTER, PASSTHROUGH or REPLAY.
+There is no assumed reset snapshot. TRACK captures only successfully validated
+writes in a bounded pure-raster subset while applying live state. PASSTHROUGH
+applies live state without changing captures. REPLAY applies a known captured
+argument through the same ordinary method validator, ignoring the incoming
+argument. This includes MME-emitted methods; it does not introduce a second
+method interpreter or repeat an already executed draw.
+
+Filtered mode executes supported live state and tags affected captures as
+unverified. The hardware filter's capture eligibility is not guessed: replay
+of filtered/unwritten words faults before live mutation. Unsupported replay
+methods, including attachment addresses and draw actions, also fault explicitly.
+Control methods below `0x200` and macro launch/data ports retain their existing
+routing. To draw after replaying raster state, explicitly select a live mode.
+No completion, guest-memory publication or queue submission is synthesized by
+shadow mode changes. Faults retain accepted output for ordinary publication.
+
+Shadow words use one lazily allocated bounded array, with no command-span or
+resource borrow retained. Capturing a field again in unfiltered mode repairs
+only that field's known snapshot; it does not invent unrelated history. Warm
+replay reuses unchanged decoded shaders and compatible pipelines.
+
+All sixteen A-stream addresses and inclusive bounds can be programmed without
+aliasing stream zero. Unsupported inactive stream formats/frequencies and
+attributes selecting other streams remain errors. Merely setting an unused,
+unmapped stream address or limit does not read guest memory or supply geometry.

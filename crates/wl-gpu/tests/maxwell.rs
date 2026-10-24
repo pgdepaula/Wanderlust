@@ -1097,3 +1097,143 @@ fn edge_flag_retains_only_one_bit_and_does_not_enable_wireframe() {
         None
     );
 }
+
+#[test]
+fn shadow_track_passthrough_replay_and_filtered_history_are_distinct() {
+    let mut c = Channel::default();
+    for word in common::hardware::setup() {
+        c.push_word(word).unwrap();
+    }
+    assert_eq!(c.engine.shadow_mode(), None);
+    assert_eq!(c.engine.shadow_value(0x1a00), Some(ShadowValue::Unwritten));
+    for (m, v) in [(0x124, 0), (0x1a00, 1), (0x124, 2), (0x1a00, 0x1111)] {
+        c.engine.apply(write(m, v)).unwrap();
+    }
+    assert_eq!(c.engine.shadow_value(0x1a00), Some(ShadowValue::Known(1)));
+    c.engine.apply(write(0x124, 3)).unwrap();
+    c.engine.apply(write(0x1a00, u32::MAX)).unwrap(); // Incoming value is not replayed.
+    assert_eq!(c.engine.rasterization().unwrap().1.color.write_mask, 1);
+    assert_eq!(c.engine.shadow_value(0x1a00), Some(ShadowValue::Known(1)));
+    for v in [4, 0x100, u32::MAX] {
+        assert!(c.engine.apply(write(0x124, v)).is_err());
+        assert_eq!(c.engine.shadow_mode(), Some(ShadowMode::Replay));
+    }
+    c.engine.apply(write(0x124, 1)).unwrap();
+    assert!(c.engine.apply(write(0x1a00, u32::MAX)).is_err());
+    assert_eq!(c.engine.shadow_value(0x1a00), Some(ShadowValue::Known(1)));
+    c.engine.apply(write(0x1a00, 0x1111)).unwrap();
+    assert_eq!(c.engine.rasterization().unwrap().1.color.write_mask, 15);
+    assert_eq!(
+        c.engine.shadow_value(0x1a00),
+        Some(ShadowValue::FilteredUnverified)
+    );
+    c.engine.apply(write(0x124, 3)).unwrap();
+    assert_eq!(
+        c.engine.apply(write(0x1a00, 0)),
+        Err(MethodError::FilteredShadowValue(0x1a00))
+    );
+    assert_eq!(c.engine.rasterization().unwrap().1.color.write_mask, 15);
+    for (m, v) in [
+        (0x124, 0),
+        (0x1a00, 0x101),
+        (0x124, 2),
+        (0x1a00, 0x1111),
+        (0x124, 3),
+        (0x1a00, 0),
+    ] {
+        c.engine.apply(write(m, v)).unwrap();
+    }
+    assert_eq!(c.engine.rasterization().unwrap().1.color.write_mask, 5);
+    assert_eq!(
+        c.engine.shadow_value(0x1a00),
+        Some(ShadowValue::Known(0x101))
+    );
+    assert_eq!(
+        c.engine.apply(write(0x1214, 0x40030000)),
+        Err(MethodError::UnsupportedShadowReplayMethod(0x1214))
+    );
+    assert_eq!(c.engine.shadow_value(0x1a01), None);
+    assert_eq!(c.engine.shadow_value(0x800), None); // Attachment addresses cannot be replayed.
+}
+
+#[test]
+fn shadow_missing_capture_channel_isolation_and_literal_fifo_fault_prefix() {
+    let mut c = Channel::default();
+    for word in [
+        0x20010000,
+        CLASS,
+        0x20010049,
+        0,
+        0x20010680,
+        1,
+        0x20010049,
+        2,
+        0x20010680,
+        0x1111,
+        0x20010049,
+        3,
+        0x20010680,
+        u32::MAX,
+    ] {
+        c.push_word(word).unwrap();
+    }
+    c.finish().unwrap();
+    assert_eq!(c.engine.shadow_value(0x1a00), Some(ShadowValue::Known(1)));
+    let independent = Maxwell3d::default();
+    assert_eq!(independent.shadow_mode(), None);
+    assert_eq!(
+        independent.shadow_value(0x1a00),
+        Some(ShadowValue::Unwritten)
+    );
+    let old = c.engine.shadow_value(0x1a00);
+    assert!(c.engine.apply(write(0x125, 0)).is_err());
+    assert_eq!(c.engine.shadow_value(0x1a00), old);
+    // Replay from an uninitialized bank fails, rather than inventing zeros.
+    for word in [0x20010049, 3, 0x200104d8] {
+        c.push_word(word).unwrap();
+    }
+    assert!(c.push_word(0).is_err()); // BLEND_ENABLE was never captured here.
+    assert!(c.is_faulted());
+    assert!(c.push_word(0x20010049).is_err());
+    assert_eq!(c.engine.shadow_value(0x1a00), old);
+}
+
+#[test]
+fn inactive_vertex_a_addresses_are_40_bit_independent_banks_without_fetch_defaults() {
+    let mut e = Maxwell3d::default();
+    e.apply(write(0, CLASS)).unwrap();
+    e.apply(write(0x1c04, 0x12)).unwrap();
+    e.apply(write(0x1c08, 0x34567890)).unwrap();
+    e.apply(write(0x1f00, 0x12)).unwrap();
+    e.apply(write(0x1f04, 0x3456ffff)).unwrap();
+    let limit_zero = Some(GpuAddress(0x123456ffff));
+    let zero = Some(GpuAddress(0x1234567890));
+    for slot in 1..16 {
+        let base = 0x1c00 + slot as u16 * 16;
+        assert_eq!(e.vertex_stream_address(slot), None);
+        e.apply(write(base + 4, 0xff)).unwrap();
+        assert_eq!(e.vertex_stream_address(slot), None);
+        e.apply(write(base + 8, u32::MAX - slot as u32)).unwrap();
+        let expected = Some(GpuAddress(0xff00000000 | u64::from(u32::MAX - slot as u32)));
+        assert_eq!(e.vertex_stream_address(slot), expected);
+        assert_eq!(e.vertex_stream_address(0), zero);
+        let limit_base = 0x1f00 + slot as u16 * 8;
+        e.apply(write(limit_base, 0xff)).unwrap();
+        assert_eq!(e.vertex_stream_limit(slot), None);
+        e.apply(write(limit_base + 4, u32::MAX)).unwrap();
+        assert_eq!(e.vertex_stream_limit(slot), Some(GpuAddress(0xffffffffff)));
+        assert!(e.apply(write(limit_base, 256)).is_err());
+        assert!(e.apply(write(limit_base + 1, 0)).is_err());
+        assert_eq!(e.vertex_stream_limit(slot), Some(GpuAddress(0xffffffffff)));
+        assert_eq!(e.vertex_stream_limit(0), limit_zero);
+
+        for (m, v) in [(base + 4, 0x100), (base + 5, 0)] {
+            assert!(e.apply(write(m, v)).is_err());
+            assert_eq!(e.vertex_stream_address(slot), expected);
+        }
+    }
+    assert_eq!(e.vertex_stream_address(16), None);
+    assert_eq!(e.vertex_stream_limit(16), None);
+    assert_eq!(Maxwell3d::default().vertex_stream_address(1), None);
+    assert!(e.vertex_array().is_err()); // Addresses do not supply a missing layout.
+}

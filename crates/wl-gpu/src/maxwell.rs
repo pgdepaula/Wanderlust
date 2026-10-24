@@ -74,6 +74,95 @@ impl EngineClass {
     }
 }
 
+/// Explicit B197 shadow mode; no unspecified reset mode is assumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShadowMode {
+    Track,
+    TrackWithFilter,
+    Passthrough,
+    Replay,
+}
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ShadowValue {
+    #[default]
+    Unwritten,
+    Known(u32),
+    /// Live state was applied, but hardware filter eligibility is unverified.
+    FilteredUnverified,
+}
+#[derive(Debug, Default)]
+struct ShadowRam {
+    mode: Option<ShadowMode>,
+    words: Vec<ShadowValue>,
+}
+impl ShadowRam {
+    // Bounded, side-effect-free raster register subset. Attachment addresses,
+    // resource selectors, actions, scratch and unknown methods are not replayed.
+    fn eligible(method: u16) -> bool {
+        method % 4 == 0
+            && (match method {
+                0xa00..=0xbfc => (method - 0xa00) % 32 < 28,
+                0xc00..=0xcfc => true,
+                0xe00..=0xef8 => (method - 0xe00) % 16 < 12,
+                0x1e00..=0x1efc => (method - 0x1e00) % 32 < 28,
+                _ => matches!(
+                    method,
+                    0xd7c
+                        | 0x12cc
+                        | 0x12e4
+                        | 0x12e8
+                        | 0x130c
+                        | 0x133c
+                        | 0x1340
+                        | 0x1344
+                        | 0x1348
+                        | 0x134c
+                        | 0x1350
+                        | 0x1358
+                        | 0x1360
+                        | 0x193c
+                        | 0x1a00
+                ),
+            })
+    }
+    fn value(&self, method: u16) -> ShadowValue {
+        self.words
+            .get(usize::from(method / 4))
+            .copied()
+            .unwrap_or_default()
+    }
+    fn prepare(&self, write: &mut MethodWrite) -> std::result::Result<(), MethodError> {
+        if self.mode != Some(ShadowMode::Replay) || write.method < 0x200 || write.method >= 0x3800 {
+            return Ok(());
+        }
+        if !Self::eligible(write.method) {
+            return Err(MethodError::UnsupportedShadowReplayMethod(write.method));
+        }
+        write.value = match self.value(write.method) {
+            ShadowValue::Known(value) => value,
+            ShadowValue::Unwritten => return Err(MethodError::MissingShadowValue(write.method)),
+            ShadowValue::FilteredUnverified => {
+                return Err(MethodError::FilteredShadowValue(write.method));
+            }
+        };
+        Ok(())
+    }
+    fn capture(&mut self, write: MethodWrite) {
+        if !Self::eligible(write.method) {
+            return;
+        }
+        let value = match self.mode {
+            Some(ShadowMode::Track) => ShadowValue::Known(write.value),
+            Some(ShadowMode::TrackWithFilter) => ShadowValue::FilteredUnverified,
+            _ => return,
+        };
+        if self.words.is_empty() {
+            // One bounded allocation on first successful capture, not per draw.
+            self.words.resize(0x800, ShadowValue::Unwritten);
+        }
+        self.words[usize::from(write.method / 4)] = value;
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MethodError {
     InvalidSubchannel(u8),
@@ -88,6 +177,9 @@ pub enum MethodError {
     IncompleteConstantBuffer,
     IncompleteInlineUpload,
     InlineUploadActive,
+    UnsupportedShadowReplayMethod(u16),
+    MissingShadowValue(u16),
+    FilteredShadowValue(u16),
     IncompletePrimitiveRestart,
 }
 impl std::fmt::Display for MethodError {
@@ -251,6 +343,7 @@ pub struct Maxwell3d {
     indices: crate::index::IndexRegisters,
     bound: [Option<EngineClass>; 8],
     macros: crate::mme::MacroEngine,
+    shadow: ShadowRam,
     macro_work: crate::mme::WorkBudget,
     active_macro: Option<ActiveMacro>,
     cache_policies: [Option<CacheEviction>; 6],
@@ -278,6 +371,8 @@ pub struct Maxwell3d {
     vertex_lower: Option<u32>,
     vertex_limit_upper: Option<u32>,
     vertex_limit_lower: Option<u32>,
+    inactive_vertex_addresses: [[Option<u32>; 2]; 15],
+    inactive_vertex_limits: [[Option<u32>; 2]; 15],
     vertex_substitute_upper: Option<u8>,
     vertex_substitute_lower: Option<u32>,
     vertex_frequency: Option<u32>,
@@ -305,6 +400,27 @@ struct ActiveMacro {
     idle_completed: bool,
 }
 impl Maxwell3d {
+    /// Configured A-stream address. Only stream zero can supply vertex fetches
+    /// in the supported attribute subset; inactive addresses are not read.
+    pub fn vertex_stream_address(&self, slot: usize) -> Option<GpuAddress> {
+        let (hi, lo) = if slot == 0 {
+            (self.vertex_upper?, self.vertex_lower?)
+        } else {
+            let address = self.inactive_vertex_addresses.get(slot.checked_sub(1)?)?;
+            (address[0]?, address[1]?)
+        };
+        Some(GpuAddress((u64::from(hi) << 32) | u64::from(lo)))
+    }
+    /// Inclusive bound; inactive stream bounds do not authorize extra fetches.
+    pub fn vertex_stream_limit(&self, slot: usize) -> Option<GpuAddress> {
+        let (hi, lo) = if slot == 0 {
+            (self.vertex_limit_upper?, self.vertex_limit_lower?)
+        } else {
+            let limit = self.inactive_vertex_limits.get(slot.checked_sub(1)?)?;
+            (limit[0]?, limit[1]?)
+        };
+        Some(GpuAddress((u64::from(hi) << 32) | u64::from(lo)))
+    }
     /// Configured runout address. Supported fetches still require in-bounds
     /// geometry; no substitute data or host default is silently read.
     pub fn vertex_stream_substitute_address(&self) -> Option<GpuAddress> {
@@ -427,7 +543,34 @@ impl Maxwell3d {
     }
     /// Ordinary register writes allocate nothing. First MME code upload owns a
     /// bounded RAM allocation; subsequent updates reuse it. Stop on a fault.
-    pub fn apply(&mut self, write: MethodWrite) -> std::result::Result<MethodEffect, MethodError> {
+    pub fn shadow_mode(&self) -> Option<ShadowMode> {
+        self.shadow.mode
+    }
+    /// Known or explicitly unverified capture for the bounded raster subset.
+    /// This is not a guest-memory address or a general MME register READ API.
+    pub fn shadow_value(&self, method: u16) -> Option<ShadowValue> {
+        ShadowRam::eligible(method).then(|| self.shadow.value(method))
+    }
+    pub fn apply(
+        &mut self,
+        mut write: MethodWrite,
+    ) -> std::result::Result<MethodEffect, MethodError> {
+        let routed = self.active_macro.is_none()
+            && write.method % 4 == 0
+            && self.bound_class(write.subchannel) == Some(EngineClass::ThreeD);
+        if routed {
+            self.shadow.prepare(&mut write)?;
+        }
+        let effect = self.apply_inner(write)?;
+        if routed && effect == MethodEffect::State {
+            self.shadow.capture(write);
+        }
+        Ok(effect)
+    }
+    fn apply_inner(
+        &mut self,
+        write: MethodWrite,
+    ) -> std::result::Result<MethodEffect, MethodError> {
         self.method_writes = self.method_writes.saturating_add(1);
         let MethodWrite {
             subchannel,
@@ -540,6 +683,15 @@ impl Maxwell3d {
             return Ok(MethodEffect::State);
         }
         match method {
+            0x0124 => {
+                self.shadow.mode = Some(match value {
+                    0 => ShadowMode::Track,
+                    1 => ShadowMode::TrackWithFilter,
+                    2 => ShadowMode::Passthrough,
+                    3 => ShadowMode::Replay,
+                    _ => return Err(bad()),
+                });
+            }
             0x0180..=0x018c => {
                 if self.inline_upload.active.is_some() {
                     return Err(MethodError::InlineUploadActive);
@@ -858,6 +1010,22 @@ impl Maxwell3d {
                     return Err(bad());
                 }
                 self.vertex_group = Some(value as u8);
+            }
+            0x1c14..=0x1cf8 if matches!(method % 16, 4 | 8) => {
+                let slot = usize::from((method - 0x1c00) / 16 - 1);
+                let half = usize::from((method % 16 - 4) / 4);
+                if half == 0 && value > 255 {
+                    return Err(bad());
+                }
+                self.inactive_vertex_addresses[slot][half] = Some(value);
+            }
+            0x1f08..=0x1f7c => {
+                let slot = usize::from((method - 0x1f00) / 8 - 1);
+                let half = usize::from((method % 8) / 4);
+                if half == 0 && value > 255 {
+                    return Err(bad());
+                }
+                self.inactive_vertex_limits[slot][half] = Some(value);
             }
             0x1c00 => {
                 if value & !0x1fff != 0 {

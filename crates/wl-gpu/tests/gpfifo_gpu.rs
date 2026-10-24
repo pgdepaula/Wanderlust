@@ -2330,3 +2330,196 @@ fn gpfifo_inline_dma_empty_range_failure_and_ordered_continuation() {
     assert_eq!(renderer.counters.synchronization_points, 0);
     assert_eq!(renderer.counters.submissions, 0);
 }
+
+#[test]
+#[ignore = "requires actual GPU; direct and MME replay use captured raster bits for real pixels"]
+fn gpfifo_shadow_track_passthrough_and_mme_replay_control_pixels() {
+    use wl_gpu::maxwell::{ShadowMode, ShadowValue};
+    let (mut data, map, mut words, image) = fixture();
+    let draw = words.split_off(words.len() - 8);
+    for slot in 1..16 {
+        // Valid inactive stream fields with deliberately unmapped addresses.
+        method(&mut words, 0x1c04 + slot * 16, 0xa5);
+        method(&mut words, 0x1c08 + slot * 16, 0xabc000 + slot * 4);
+        method(&mut words, 0x1f00 + slot * 8, 0xff);
+        method(&mut words, 0x1f04 + slot * 8, u32::MAX);
+    }
+
+    // SET_OBJECT then METHOD_TRACK before the independently authored setup.
+    words.splice(2..2, [0x20010049, 0]);
+    upload_macro(
+        &mut words,
+        &include_bytes!("fixtures/mme/state-mask.bin")
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect::<Vec<_>>(),
+    );
+    let mut renderer = Renderer::new().unwrap();
+    let mut channel = Channel::default();
+    let mut changes = TextureChanges::new(1);
+    let mut previous = None;
+    for phase in 0..4 {
+        let before = renderer.counters;
+        if phase != 0 {
+            for p in data[RT..RT + SIZE].chunks_exact_mut(4) {
+                p.copy_from_slice(&BG);
+            }
+            changes.mark_write(GuestAddress(RT as u64), SIZE).unwrap();
+        }
+        let mut commands = if phase == 0 {
+            words.clone()
+        } else {
+            Vec::new()
+        };
+        match phase {
+            0 => method(&mut commands, 0x1a00, 1),
+            1 => {
+                method(&mut commands, 0x124, 2);
+                method(&mut commands, 0x1a00, 0x1111);
+            }
+            _ => {
+                method(&mut commands, 0x124, 3);
+                method(&mut commands, 0x3800, if phase == 2 { u32::MAX } else { 0 });
+                method(&mut commands, 0x124, 2); // Draw triggers are outside replay subset.
+            }
+        }
+        commands.extend_from_slice(&draw);
+        put(&mut data, 0x10000, &commands);
+        assert_eq!(
+            submit(
+                &mut renderer,
+                &mut channel,
+                &entry(0xb0000, commands.len()),
+                &map,
+                &mut data,
+                &mut changes
+            )
+            .unwrap()
+            .draws_submitted,
+            1
+        );
+        let frame = sync(&mut renderer, &mut data, &mut changes);
+        let mut expected = image.clone();
+        if phase != 1 {
+            for pixel in expected.chunks_exact_mut(4) {
+                pixel[1..].copy_from_slice(&BG[1..]);
+            }
+        }
+        check(&frame.rgba, &expected, None, BG);
+        assert_eq!(
+            channel.engine.vertex_stream_address(0),
+            Some(GpuAddress(0x70000))
+        );
+        for slot in 1..16 {
+            assert_eq!(
+                channel.engine.vertex_stream_address(slot),
+                Some(GpuAddress(0xa500abc000 + slot as u64 * 4))
+            );
+        }
+        assert_eq!(
+            channel.engine.shadow_value(0x1a00),
+            Some(ShadowValue::Known(1))
+        );
+        assert_eq!(
+            channel.engine.shadow_mode(),
+            Some(if phase == 0 {
+                ShadowMode::Track
+            } else {
+                ShadowMode::Passthrough
+            })
+        );
+        if let Some((decodes, modules)) = previous {
+            assert_eq!(renderer.counters.shader_decodes, decodes);
+            assert_eq!(renderer.counters.shader_module_allocations, modules);
+        }
+        if phase == 3 {
+            assert_eq!(
+                renderer.counters.pipeline_allocations,
+                before.pipeline_allocations
+            );
+        }
+        previous = Some((
+            renderer.counters.shader_decodes,
+            renderer.counters.shader_module_allocations,
+        ));
+    }
+}
+
+#[test]
+#[ignore = "requires actual GPU; unknown shadow history never corrupts or replays prior draw"]
+fn gpfifo_shadow_unknown_replay_preserves_pending_draw_and_latches_fault() {
+    for (capture, writes, expected_error) in [
+        (
+            true,
+            vec![(0x124, 1), (0x1a00, 1), (0x124, 3), (0x1a00, 0)],
+            "FilteredShadowValue",
+        ),
+        (false, vec![(0x124, 3), (0x1a00, 0)], "MissingShadowValue"),
+        (
+            true,
+            vec![(0x124, 3), (0x1214, 0x40030000)],
+            "UnsupportedShadowReplayMethod",
+        ),
+    ] {
+        let (mut data, map, mut words, image) = fixture();
+        if capture {
+            words.splice(2..2, [0x20010049, 0]);
+        }
+        put(&mut data, 0x10000, &words);
+        let mut renderer = Renderer::new().unwrap();
+        let mut channel = Channel::default();
+        let mut changes = TextureChanges::new(1);
+        submit(
+            &mut renderer,
+            &mut channel,
+            &entry(0xb0000, words.len()),
+            &map,
+            &mut data,
+            &mut changes,
+        )
+        .unwrap();
+        let before = renderer.counters;
+        let mut commands = Vec::new();
+        for (m, v) in writes {
+            method(&mut commands, m, v);
+        }
+        put(&mut data, 0x10000, &commands);
+        let fault = submit(
+            &mut renderer,
+            &mut channel,
+            &entry(0xb0000, commands.len()),
+            &map,
+            &mut data,
+            &mut changes,
+        )
+        .unwrap_err();
+        assert!(
+            fault.cause.to_string().contains(expected_error),
+            "{fault:?}"
+        );
+        assert!(channel.is_faulted());
+        assert_eq!(fault.progress.draws_submitted, 0);
+        assert_eq!(renderer.counters.draw_commands, before.draw_commands);
+        assert_eq!(renderer.counters.submissions, before.submissions);
+        assert_eq!(renderer.counters.readback_operations, 0);
+        assert!(data[RT..RT + SIZE].chunks_exact(4).all(|p| p == BG));
+        check(
+            &sync(&mut renderer, &mut data, &mut changes).rgba,
+            &image,
+            None,
+            BG,
+        );
+        assert!(
+            submit(
+                &mut renderer,
+                &mut channel,
+                &entry(0xb0000, commands.len()),
+                &map,
+                &mut data,
+                &mut changes
+            )
+            .is_err()
+        );
+        assert_eq!(renderer.counters.draw_commands, before.draw_commands);
+    }
+}

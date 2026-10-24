@@ -3761,3 +3761,36 @@ of WSL OpenGL, native Windows D3D12 and native Windows Vulkan, plus watchdog uni
 tests natively. Device-only boundary tests are included in these totals; they
 must not be counted as rasterized original-game frames. Live-worktree workspace
 validation passed 797 tests, with 189 separately ignored device tests.
+
+
+### Guarded MME shadow state and inactive vertex ranges
+
+CPU tests distinguish unknown reset history, unfiltered capture, passthrough,
+known replay and unverified filtered captures. Failed writes preserve snapshots;
+filtered/unwritten replay and unsupported replay actions fail before live state
+mutation. Literal FIFO packets verify byte/word method addressing, channel-local
+capture and fault latching. All fifteen inactive vertex address/limit pairs have
+independent 40-bit field validation; they never provide missing stream-zero
+layout or authorize a larger fetch.
+
+An indexed textured GPFIFO scene captures a red-only mask, changes live state in
+passthrough, then replays the captured mask through an independently assembled
+MME. Incoming replay data is deliberately invalid as a normal mask. Scalar
+pixel checks prove that the known captured argument controls actual rendering.
+All inactive vertex ranges are deliberately unmapped and remain unread. Warm
+replay retains decoded programs and shader modules; an unchanged effective mask
+also reuses its pipeline. Explicit publication/reset between assertions is test
+policy, not a new per-draw synchronization requirement.
+
+Three fault injections retain a prior actual draw pending: filtered capture,
+missing capture and unsupported draw replay. Each preserves old output, adds no
+queue submission/readback, publishes the independently expected earlier image,
+and refuses whole-channel retry without duplicating accepted work.
+
+Default GPU/NVIDIA CPU suites passed 440 tests (190 device tests separately
+ignored); GPU no-default passed 415 tests. Strict package/workspace Clippy and
+formatting passed. Live-worktree workspace tests passed 800 cases, with 191
+separately ignored device tests. Explicit graphics/device batches passed 56
+scenarios on each of WSL OpenGL, native Windows D3D12 and native Windows Vulkan;
+native watchdog unit tests also passed. Hardware filtering, general resource
+replay and original-game frame rendering are not established by these fixtures.

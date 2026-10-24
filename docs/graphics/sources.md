@@ -2090,3 +2090,31 @@ only bank zero is executed by the current stage-interface subset. Reserved
 words, nonfinite transforms, nonidentity swizzles and noncanonical depth bounds
 are rejected rather than aliasing another viewport. These storage limits do not
 claim general multiple-viewport rasterization.
+
+
+### Bounded MME shadow capture/replay and inactive stream addresses
+
+The pinned NVIDIA B197 header defines `SET_MME_SHADOW_RAM_CONTROL` (`0x124`)
+with two-bit modes TRACK=0, TRACK_WITH_FILTER=1, PASSTHROUGH=2 and REPLAY=3.
+The MIT [DeviceStateWithShadow reference](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Gpu/Engine/DeviceStateWithShadow.cs)
+corroborates capture plus live forwarding, passthrough without capture, replay
+from the shadow bank, and bypass of control methods below `0x200`. Its MME
+register read uses current state rather than a separate invented shadow read.
+
+This reference treats filtered capture like ordinary capture. Wanderlust does
+not assume that equivalence: successful live writes in filtered mode mark the
+eligible shadow word `FilteredUnverified`. Attempting to replay such a word
+fails before live mutation. Unfiltered capture can establish a known word again;
+passthrough never changes it. No unspecified power-on shadow value is inferred.
+
+Replay is restricted to side-effect-free viewport/scissor, depth-selection and
+blend/color-mask register subsets. Attachment/resource addresses, actions,
+scratch and unknown methods are explicitly not replayed. MME-emitted methods
+use the same capture/replay validation. This is bounded shadow support, not a
+complete hardware filter or general B197 shadow implementation.
+
+NVIDIA also defines sixteen A-stream address pairs at `0x1c04/0x1c08 + j*16`
+and inclusive limit pairs at `0x1f00/0x1f04 + j*8`: upper fields are eight bits,
+lower fields are 32 bits. Inactive pairs are retained independently. The accepted
+vertex attribute subset still selects stream zero exclusively; no new vertex
+format, multi-stream fetch or B-stream support is implied by these state fields.
