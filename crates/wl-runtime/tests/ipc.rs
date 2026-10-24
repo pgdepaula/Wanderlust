@@ -1281,3 +1281,56 @@ fn vi_service_startup() {
     assert_eq!(send(&mut p, &mut c, binder), (result::SUCCESS, None));
     assert_eq!(reply_result(&p), result::SUCCESS);
 }
+
+#[test]
+fn binder_auto_select_reply_skips_empty_b_descriptor_and_uses_c_buffer() {
+    let (mut p, mut c) = process(&[(false, "*")]);
+    let sm = connect(&mut p, &mut c);
+    tipc_register_client(&mut p, &mut c, sm);
+    let vi = service(&mut p, &mut c, sm, "vi:u");
+    request(&mut p, 0, false, &[0; 4]);
+    send(&mut p, &mut c, vi);
+    let display = reply_handle(&p);
+    request(&mut p, 100, false, &[]);
+    send(&mut p, &mut c, display);
+    let binder = reply_handle(&p);
+    // Literal libnx feebd026 AutoSelect layout: empty X and B, active A and C.
+    // Public IGraphicBufferProducer::connect payload, not a game-data fixture.
+    let mut parcel = Vec::new();
+    for word in [92u32, 16, 0, 108, 0x100, 34] {
+        parcel.extend_from_slice(&word.to_le_bytes());
+    }
+    for ch in "android.gui.IGraphicBufferProducer".encode_utf16() {
+        parcel.extend_from_slice(&ch.to_le_bytes());
+    }
+    parcel.extend_from_slice(&[0; 4]); // UTF-16 NUL and four-byte alignment.
+    for word in [0u32, 1, 0] {
+        parcel.extend_from_slice(&word.to_le_bytes());
+    }
+    assert_eq!(parcel.len(), 108);
+    let input = CODE + 0x1000;
+    let output = CODE + 0x2000;
+    p.write_bytes(input, &parcel).unwrap();
+    p.write_bytes(output, &[0xa5; 64]).unwrap();
+    let mut wire = [0u8; 256];
+    wire[0..4].copy_from_slice(&0x01110004u32.to_le_bytes());
+    wire[4..8].copy_from_slice(&(12u32 | (2 << 10)).to_le_bytes());
+    // Empty X occupies 8..16; A occupies 16..28; empty B occupies 28..40.
+    wire[16..20].copy_from_slice(&108u32.to_le_bytes());
+    wire[20..24].copy_from_slice(&(input as u32).to_le_bytes());
+    wire[0x30..0x34].copy_from_slice(b"SFCI");
+    wire[0x38..0x3c].copy_from_slice(&3u32.to_le_bytes()); // TransactParcelAuto.
+    wire[0x40..0x44].copy_from_slice(&0x20u32.to_le_bytes());
+    wire[0x44..0x48].copy_from_slice(&10u32.to_le_bytes()); // Connect.
+    wire[0x58..0x5c].copy_from_slice(&(output as u32).to_le_bytes());
+    wire[0x5c..0x60].copy_from_slice(&(64u32 << 16).to_le_bytes());
+    let address = tls(&p);
+    p.write_bytes(address, &wire).unwrap();
+    assert_eq!(send(&mut p, &mut c, binder), (result::SUCCESS, None));
+    assert_eq!(reply_result(&p), result::SUCCESS);
+    let expected: [u32; 9] = [20, 16, 0, 36, 1280, 720, 0, 0, 0];
+    let bytes: Vec<u8> = expected.into_iter().flat_map(u32::to_le_bytes).collect();
+    assert_eq!(p.read_bytes(output, 36).unwrap(), bytes);
+    assert_eq!(p.read_bytes(output + 36, 28).unwrap(), [0xa5; 28]);
+    assert_eq!(p.read_bytes(input, 108).unwrap(), parcel);
+}
