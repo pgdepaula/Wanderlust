@@ -423,6 +423,17 @@ fn transfer(image: &Image, state: &mut State, op: &Op) {
             // This also bounds alignment-dispatch tables without a CMP branch.
             let value = match state.get(lhs) {
                 Some(Val::Const(c)) => Val::Const(mask(c & imm, width)),
+                Some(Val::Bounded { max, full })
+                    if full || mask(imm, width) <= u64::from(u32::MAX) =>
+                {
+                    // A low-word mask removes unknown upper bits after a W
+                    // comparison. Keep its tighter bound instead of widening
+                    // a small switch index back to the entire mask range.
+                    Val::Bounded {
+                        max: max.min(mask(imm, width)),
+                        full: true,
+                    }
+                }
                 _ => Val::Bounded {
                     max: mask(imm, width),
                     full: true,

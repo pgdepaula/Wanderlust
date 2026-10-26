@@ -263,6 +263,47 @@ fn narrow_move_promotes_a_low_half_bound_to_a_full_index_bound() {
 }
 
 #[test]
+fn immediate_masks_preserve_a_tighter_dominating_switch_bound() {
+    // GNU as 2.46.0.20260210: AND X8,X0,#0xffffffff; ANDS X8,X0,#0xffffffff;
+    // AND W8,W0,#0xff; AND X8,X0,#7, replacing the independent MOV fixture.
+    for word in [0x92407c08, 0xf2407c08, 0x12001c08, 0x92400808] {
+        let mut words = MOVED_BOUND_SWITCH;
+        words[2] = word;
+        let p = discover(&image(&words), GuestAddr(0x10000), &[]).unwrap();
+        assert_eq!(
+            p.jump_tables.get(&GuestAddr(0x1001c)),
+            Some(&4),
+            "{word:#x}"
+        );
+        assert_eq!(p.instruction_count, 18);
+        for target in [0x10020, 0x10028, 0x10030, 0x10038, 0x10040] {
+            assert!(starts(&p).contains(&target));
+        }
+        assert!(!starts(&p).contains(&0x10048));
+    }
+    // The mask can also tighten the comparison: only indices zero and one.
+    let mut words = MOVED_BOUND_SWITCH;
+    words[2] = 0x92400008; // AND X8,X0,#1.
+    let p = discover(&image(&words), GuestAddr(0x10000), &[]).unwrap();
+    assert_eq!(p.jump_tables.get(&GuestAddr(0x1001c)), Some(&2));
+    assert!(!starts(&p).contains(&0x10030));
+    assert!(!starts(&p).contains(&0x10038));
+}
+
+#[test]
+fn mask_retaining_unknown_upper_bits_cannot_promote_a_low_word_bound() {
+    let mut words = MOVED_BOUND_SWITCH;
+    words[2] = 0x92408008; // GNU as: AND X8,X0,#0x1ffffffff.
+    let p = discover(&image(&words), GuestAddr(0x10000), &[]).unwrap();
+    assert!(p.jump_tables.is_empty());
+    assert!(!starts(&p).contains(&0x10020));
+    // A dominating X comparison proves the full value and permits this mask.
+    words[0] = 0xf1000c1f; // GNU as: CMP X0,#3.
+    let p = discover(&image(&words), GuestAddr(0x10000), &[]).unwrap();
+    assert_eq!(p.jump_tables.get(&GuestAddr(0x1001c)), Some(&4));
+}
+
+#[test]
 fn wide_move_does_not_zero_unknown_upper_bits_after_a_narrow_compare() {
     let mut words = MOVED_BOUND_SWITCH;
     words[2] = 0xaa0003e8; // MOV X8,X0: the CMP W0 bounds only the low half.
