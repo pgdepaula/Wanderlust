@@ -241,27 +241,36 @@ fn incompatible_adjacent_gpu_storage_fails_before_restructuring_memory() {
 
 #[test]
 fn capacity_failure_and_stale_reused_slot_do_not_drop_live_registrations() {
+    let capacity = wl_runtime::gpu_memory::MAX_GPU_PINS;
+    assert_eq!(capacity, 1024);
     let mut memory = Memory::default();
-    normal(&mut memory, BASE, 65 * 4096);
+    normal(&mut memory, BASE, (capacity + 1) * 4096);
     let mut pins = Vec::new();
-    for page in 0..64 {
-        pins.push(memory.pin_gpu_range(BASE + page * PAGE, PAGE).unwrap());
+    for page in 0..capacity {
+        pins.push(
+            memory
+                .pin_gpu_range(BASE + page as u64 * PAGE, PAGE)
+                .unwrap(),
+        );
     }
     let before = snapshot(&memory);
-    assert!(memory.pin_gpu_range(BASE + 64 * PAGE, PAGE).is_err());
+    let last = BASE + capacity as u64 * PAGE;
+    assert!(memory.pin_gpu_range(last, PAGE).is_err());
     assert_eq!(snapshot(&memory), before);
     let stale = pins.remove(17);
     memory.release_gpu_pin(stale).unwrap();
-    let replacement = memory.pin_gpu_range(BASE + 64 * PAGE, PAGE).unwrap();
+    let replacement = memory.pin_gpu_range(last, PAGE).unwrap();
     assert!(memory.release_gpu_pin(stale).is_err());
-    assert!(memory.pin_gpu_range(BASE + 64 * PAGE, PAGE).is_err());
-    assert!(memory.pin_gpu_range(BASE + 17 * PAGE, PAGE).is_err()); // Capacity still 64.
+    assert!(memory.pin_gpu_range(last, PAGE).is_err());
+    assert!(memory.pin_gpu_range(BASE + 17 * PAGE, PAGE).is_err());
     for pin in pins {
         memory.release_gpu_pin(pin).unwrap();
     }
     memory.release_gpu_pin(replacement).unwrap();
     // Capacity fully recovered, and pin teardown never erased stored contents.
-    let again = memory.pin_gpu_range(BASE, 65 * PAGE).unwrap();
+    let again = memory
+        .pin_gpu_range(BASE, (capacity as u64 + 1) * PAGE)
+        .unwrap();
     memory.release_gpu_pin(again).unwrap();
     assert_eq!(snapshot(&memory), before);
 }

@@ -10,7 +10,9 @@ use crate::{
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_PIN: AtomicU64 = AtomicU64::new(1);
-pub const MAX_GPU_PINS: usize = 64;
+/// Process-owned registration budget, independent of address-space aliases.
+/// One canonical allocation consumes one pin even when GPU VAs alias it.
+pub const MAX_GPU_PINS: usize = 1024;
 /// Upper bound for an exceptional consolidation copy, not single-region pins.
 pub const MAX_GPU_JOIN_BYTES: u64 = 256 * 1024 * 1024;
 /// Opaque process-owned registration; a foreign or released token is invalid.

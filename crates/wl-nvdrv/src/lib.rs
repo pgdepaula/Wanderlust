@@ -409,9 +409,12 @@ impl<P: Copy> Driver<P> {
                 let size = self.allocations[index].size;
                 let selected = nvmap::user_backing(r.input, size)?;
                 let address = selected.address;
-                let pin = memory
-                    .pin(address, size)
-                    .map_err(|_| NvError::InvalidAddress)?;
+                let pin = memory.pin(address, size).map_err(|error| {
+                    if std::env::var("WL_NVDRV_TRACE").as_deref() == Ok("1") {
+                        eprintln!("NVIDIA runtime pin rejected: {error}");
+                    }
+                    NvError::InvalidAddress
+                })?;
                 let backing = match self.gpu.register_backing(address, size) {
                     Ok(id) => id,
                     Err(_) => {
