@@ -18,6 +18,7 @@ USAGE:
   wanderlust inspect INPUT [--json]
   wanderlust link EXEFS [--link host|guest] [--base ADDRESS]
   wanderlust survey INPUT [--raw] [--base ADDRESS] [--examples N]
+  wanderlust dispatch-scan INPUT [--raw] [--base ADDRESS] [--link host|guest]
   wanderlust analyze INPUT [--raw] [--base ADDRESS] [--entry ADDRESS] [--seed ADDRESS]...
                      [--link host|guest] [--no-pointer-seeds] [--allow-unsupported]
                      [--roots-file FILE] [--preserve-dispatch FILE] [--instruction-limit COUNT] [--summary]
@@ -29,6 +30,10 @@ USAGE:
 intake identifies NSP/PFS0 packages, NCA headers, tickets, CNMT XML, extracted ExeFS
 directories and NSO files without modifying them; --verify-content streams SHA-256 over
 every packaged NCA and compares it with its content ID.
+
+dispatch-scan inventories BR/BLR sites throughout executable mappings and reports bounded
+local-flow candidates and unresolved sites as JSON. Candidates remain speculative roots;
+the scan does not replace guest instructions or prove dynamically created pointers.
 
 INPUT is an extracted, decrypted NSO0, raw little-endian A64 words (--raw), or an ExeFS
 directory holding NSO modules named rtld, main, subsdk0-9, sdk (optional .nso suffix).
@@ -115,11 +120,12 @@ fn utf8(value: &OsString) -> Result<&str> {
         .to_str()
         .ok_or_else(|| "option/address must be valid UTF-8".into())
 }
-const COMMANDS: [&str; 6] = [
+const COMMANDS: [&str; 7] = [
     "intake",
     "inspect",
     "link",
     "survey",
+    "dispatch-scan",
     "analyze",
     "recompile",
 ];
@@ -252,6 +258,7 @@ fn options(args: &[OsString]) -> Result<Options> {
         "inspect" => &["--json"],
         "link" => &["--link", "--base"],
         "survey" => &["--raw", "--base", "--link", "--examples"],
+        "dispatch-scan" => &["--raw", "--base", "--link"],
         "analyze" => &[
             "--raw",
             "--base",
@@ -709,6 +716,9 @@ fn run(args: &[OsString]) -> Result<()> {
     if o.command == "survey" {
         return json(&survey(&image, o.examples)?);
     }
+    if o.command == "dispatch-scan" {
+        return json(&wl_analysis::flow::scan_indirect_candidates(&image)?);
+    }
     let entry = match (&process, o.entry) {
         (_, Some(e)) => e,
         (Some(p), None) => p.entry,
@@ -1040,6 +1050,22 @@ mod tests {
         }
         assert!(parse(&["analyze", "input", "--instruction-limit"]).is_err());
         assert!(parse(&["survey", "input", "--instruction-limit", "1"]).is_err());
+    }
+    #[test]
+    fn dispatch_scan_accepts_image_options_without_analysis_or_build_options() {
+        let parse = |args: &[&str]| options(&args.iter().map(OsString::from).collect::<Vec<_>>());
+        assert!(parse(&["dispatch-scan", "input"]).is_ok());
+        assert!(parse(&["dispatch-scan", "input", "--raw", "--base", "0x10000"]).is_ok());
+        for arguments in [
+            vec!["--entry", "0x10000"],
+            vec!["--seed", "0x10000"],
+            vec!["--instruction-limit", "1"],
+            vec!["--out", "unused"],
+        ] {
+            let mut args = vec!["dispatch-scan", "input"];
+            args.extend(arguments);
+            assert!(parse(&args).is_err());
+        }
     }
     #[test]
     fn optimization_levels_are_bounded_and_recompile_only() {

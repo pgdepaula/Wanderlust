@@ -25,6 +25,107 @@ pub const MAX_TABLE_ENTRIES: u64 = 65_536;
 /// Conservative discovery budgets, not ELF or CPU limits.
 pub const MAX_POINTER_TABLES: usize = 1024;
 pub const MAX_POINTER_TABLE_ENTRIES: u64 = 256;
+pub const MAX_DISPATCH_SITES: usize = 262_144;
+pub const MAX_DISPATCH_TARGETS: usize = 262_144;
+
+/// Advisory whole-image inventory. Candidate roots still require ordinary
+/// traversal; unknown branches and the original instructions are retained.
+#[derive(Debug, serde::Serialize)]
+pub struct DispatchScan {
+    pub executable_words: usize,
+    pub indirect_sites: usize,
+    pub complete_local_tables: usize,
+    pub candidates: BTreeSet<GuestAddr>,
+    pub unresolved_sites: Vec<GuestAddr>,
+}
+
+/// Examine every BR/BLR in executable mappings using at most 64 preceding
+/// instructions and their local conditional edges. This supplements recursive discovery without
+/// guessing function boundaries or assuming arbitrary data are code pointers.
+pub fn scan_indirect_candidates(image: &Image) -> wl_common::Result<DispatchScan> {
+    let mut result = DispatchScan {
+        executable_words: 0,
+        indirect_sites: 0,
+        complete_local_tables: 0,
+        candidates: BTreeSet::new(),
+        unresolved_sites: Vec::new(),
+    };
+    for mapping in image.mappings.iter().filter(|m| m.execute) {
+        if mapping.base.0 % 4 != 0 || mapping.bytes.len() % 4 != 0 {
+            return Err("unaligned executable dispatch-scan mapping".into());
+        }
+        mapping
+            .base
+            .0
+            .checked_add(mapping.bytes.len() as u64)
+            .ok_or("dispatch-scan mapping address overflow")?;
+        result.executable_words = result
+            .executable_words
+            .checked_add(mapping.bytes.len() / 4)
+            .ok_or("dispatch-scan work overflow")?;
+        if result.executable_words > super::MAX_SURVEY_WORDS {
+            return Err("dispatch-scan executable-word budget exceeded".into());
+        }
+        for (n, word) in mapping.bytes.chunks_exact(4).enumerate() {
+            let word = u32::from_le_bytes(word.try_into().unwrap());
+            if !matches!(word & 0xffff_fc1f, 0xd61f_0000 | 0xd63f_0000) {
+                continue;
+            }
+            result.indirect_sites += 1;
+            if result.indirect_sites > MAX_DISPATCH_SITES {
+                return Err("dispatch-scan indirect-site budget exceeded".into());
+            }
+            let pc = GuestAddr(mapping.base.0 + n as u64 * 4);
+            let mut instructions = Vec::new();
+            let mut first = n;
+            for i in (n.saturating_sub(63)..=n).rev() {
+                let at = GuestAddr(mapping.base.0 + i as u64 * 4);
+                let bytes = &mapping.bytes[i * 4..i * 4 + 4];
+                let Ok(instruction) =
+                    wl_aarch64::decode(u32::from_le_bytes(bytes.try_into().unwrap()), at)
+                else {
+                    break;
+                };
+                if i != n
+                    && matches!(
+                        instruction.op,
+                        Op::Branch { link: false, .. }
+                            | Op::Indirect { .. }
+                            | Op::Trap { .. }
+                            | Op::Svc { .. }
+                    )
+                {
+                    break;
+                }
+                first = i;
+                instructions.push(instruction);
+            }
+            instructions.reverse();
+            let start = GuestAddr(mapping.base.0 + first as u64 * 4);
+            let decoded = instructions
+                .into_iter()
+                .map(|i| (i.pc, super::Site::Instruction(i)))
+                .collect();
+            let entries = BTreeSet::from([start]);
+            let leaders = super::leaders(&decoded, &entries, &BTreeMap::new())?;
+            let blocks = super::build_blocks(&decoded, &leaders)?;
+            let found = propagate(image, &blocks, &entries, &BTreeMap::new());
+            if found.tables.contains_key(&pc) {
+                result.complete_local_tables += 1;
+            } else {
+                result.unresolved_sites.push(pc);
+            }
+            result.candidates.extend(found.pointers);
+            result
+                .candidates
+                .extend(found.tables.into_values().flatten());
+            if result.candidates.len() > MAX_DISPATCH_TARGETS {
+                return Err("dispatch-scan candidate budget exceeded".into());
+            }
+        }
+    }
+    Ok(result)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Val {
@@ -34,6 +135,13 @@ enum Val {
     Bounded {
         max: u64,
         full: bool,
+    },
+    /// A bounded modular interval, including wraparound after W-register arithmetic.
+    /// This is a set of candidates, not permission to omit an unresolved branch.
+    Span {
+        first: u64,
+        count: u64,
+        width: Width,
     },
     /// `table[i]` for `i` in `0..count`, entries `bytes` wide at `table + (i << stride)`,
     /// sign-extended when `signed` (to 32 bits when `narrow`, else 64).
@@ -74,6 +182,9 @@ impl Val {
 struct Table {
     address: u64,
     count: u64,
+    first: u64,
+    index_width: Option<Width>,
+    index_extend: u8,
     bytes: u8,
     stride: u8,
     signed: bool,
@@ -336,6 +447,32 @@ fn bounded_index(s: &State, index: Index) -> Option<u64> {
     (ok && max < MAX_TABLE_ENTRIES).then_some(max)
 }
 
+fn index_span(s: &State, index: Index) -> Option<(u64, u64, Option<Width>)> {
+    if let Some(max) = bounded_index(s, index) {
+        return Some((0, max + 1, None));
+    }
+    match s.get(index.reg)? {
+        Val::Span {
+            first,
+            count,
+            width,
+        } if count <= MAX_TABLE_ENTRIES && matches!(index.extend, 2 | 3 | 6 | 7) => {
+            Some((first, count, Some(width)))
+        }
+        _ => None,
+    }
+}
+
+fn unsigned_max(value: Option<Val>, width: Width) -> Option<u64> {
+    match value? {
+        Val::Const(c) => Some(mask(c, width)),
+        Val::Bounded { max, full } if full || width == Width::W32 => {
+            Some(max.min(mask(u64::MAX, width)))
+        }
+        _ => None,
+    }
+}
+
 fn transfer(image: &Image, state: &mut State, op: &Op) {
     let flags_kept = preserves_flags(op);
     let mut result: Option<(Reg, Option<Val>, Width)> = None;
@@ -407,6 +544,34 @@ fn transfer(image: &Image, state: &mut State, op: &Op) {
                     },
                     width,
                 ))),
+                (Some(Val::Bounded { max, full }), Operand::Imm(i))
+                    if (full || width == Width::W32) && max < MAX_TABLE_ENTRIES =>
+                {
+                    Some(Val::Span {
+                        first: mask(if sub { 0u64.wrapping_sub(i) } else { i }, width),
+                        count: max + 1,
+                        width,
+                    })
+                }
+                (
+                    Some(Val::Span {
+                        first,
+                        count,
+                        width: original,
+                    }),
+                    Operand::Imm(i),
+                ) if width == original => Some(Val::Span {
+                    first: mask(
+                        if sub {
+                            first.wrapping_sub(i)
+                        } else {
+                            first.wrapping_add(i)
+                        },
+                        width,
+                    ),
+                    count,
+                    width,
+                }),
                 (Some(Val::Const(base)), rhs) if !sub && width == Width::X64 => {
                     table_offset(state, rhs).map(|(table, extend, shift)| Val::Target {
                         base,
@@ -438,6 +603,35 @@ fn transfer(image: &Image, state: &mut State, op: &Op) {
                     compare = Some(Compare { reg, imm, width });
                 }
             }
+            result = Some((dst, value, width));
+        }
+        Op::MultiplyAdd {
+            width,
+            dst,
+            lhs,
+            rhs,
+            acc,
+            sub,
+        } => {
+            let value = match (state.get(lhs), state.get(rhs), state.get(acc)) {
+                (Some(Val::Const(a)), Some(Val::Const(b)), Some(Val::Const(c))) => {
+                    let product = a.wrapping_mul(b);
+                    Some(Val::Const(mask(
+                        if sub {
+                            c.wrapping_sub(product)
+                        } else {
+                            c.wrapping_add(product)
+                        },
+                        width,
+                    )))
+                }
+                (a, b, Some(Val::Const(c))) if !sub => unsigned_max(a, width)
+                    .zip(unsigned_max(b, width))
+                    .and_then(|(a, b)| a.checked_mul(b)?.checked_add(mask(c, width)))
+                    .filter(|max| *max <= mask(u64::MAX, width))
+                    .map(|max| Val::Bounded { max, full: true }),
+                _ => None,
+            };
             result = Some((dst, value, width));
         }
         Op::Logical {
@@ -528,13 +722,16 @@ fn transfer(image: &Image, state: &mut State, op: &Op) {
             dst_width,
             index: Some(index),
         } => {
-            let value = match (state.get(base), bounded_index(state, index)) {
-                (Some(Val::Const(address)), Some(max))
+            let value = match (state.get(base), index_span(state, index)) {
+                (Some(Val::Const(address)), Some((first, count, index_width)))
                     if index.shift == 0 || 1u8 << index.shift == bytes =>
                 {
                     Some(Val::Element(Table {
                         address,
-                        count: max + 1,
+                        count,
+                        first,
+                        index_width,
+                        index_extend: index.extend,
                         bytes,
                         stride: index.shift,
                         signed,
@@ -642,10 +839,18 @@ fn record_pointer(
     }
 }
 
-fn table_targets(image: &Image, base: u64, t: Table, ext: u8, shift: u8) -> Option<Vec<GuestAddr>> {
+fn table_targets(image: &Image, base: u64, t: Table, ext: u8, shift: u8) -> (Vec<GuestAddr>, bool) {
     let mut out = Vec::with_capacity(t.count as usize);
+    let mut complete = true;
     for i in 0..t.count {
-        let raw = image.read_data(t.address.checked_add(i << t.stride)?, t.bytes)?;
+        let index = t.first.wrapping_add(i);
+        let index = t.index_width.map_or(index, |width| mask(index, width));
+        let index = extend(index, t.index_extend);
+        let address = t.address.wrapping_add(index << t.stride);
+        let Some(raw) = image.read_data(address, t.bytes) else {
+            complete = false;
+            continue;
+        };
         let mut v = if t.signed {
             sign_extend(raw, u32::from(t.bytes) * 8)
         } else {
@@ -656,11 +861,12 @@ fn table_targets(image: &Image, base: u64, t: Table, ext: u8, shift: u8) -> Opti
         }
         let target = base.wrapping_add(extend(v, ext) << shift);
         if !image.is_code(target) {
-            return None;
+            complete = false;
+            continue;
         }
         out.push(GuestAddr(target));
     }
-    Some(out)
+    (out, complete)
 }
 
 /// Propagates over `blocks` from `entries` (roots and call targets start with no knowledge),
@@ -808,8 +1014,14 @@ pub fn propagate(
                         shift,
                     }) = state.get(src)
                     {
-                        if let Some(targets) = table_targets(image, base, table, extend, shift) {
+                        let (targets, complete) = table_targets(image, base, table, extend, shift);
+                        if complete {
                             found.tables.insert(instruction.pc, targets);
+                        } else {
+                            // Valid initial-image targets remain useful candidates even
+                            // when another index is unmapped or dynamic. They do not
+                            // establish a complete table or replace the guest load/BR.
+                            found.pointers.extend(targets);
                         }
                     }
                 }
@@ -984,6 +1196,89 @@ mod tests {
             for taken in [false, true] {
                 assert!(refine(&mut s, condition, taken));
             }
+        }
+    }
+    #[test]
+    fn modular_product_intervals_cover_exhaustive_small_operands() {
+        let image = Image::raw(vec![0x1f, 0x20, 0x03, 0xd5], GuestAddr(0x10000)).unwrap();
+        for width in [Width::W32, Width::X64] {
+            for a in 0..8u64 {
+                for b in 0..8u64 {
+                    for immediate in [0, 1, 7, 4096] {
+                        let mut state = State::default();
+                        state.regs.insert(0, Val::Bounded { max: a, full: true });
+                        state.regs.insert(1, Val::Bounded { max: b, full: true });
+                        transfer(
+                            &image,
+                            &mut state,
+                            &Op::MultiplyAdd {
+                                width,
+                                dst: Reg::Gpr(8),
+                                lhs: Reg::Gpr(0),
+                                rhs: Reg::Gpr(1),
+                                acc: Reg::Zero,
+                                sub: false,
+                            },
+                        );
+                        transfer(
+                            &image,
+                            &mut state,
+                            &Op::Arithmetic {
+                                width,
+                                dst: Reg::Gpr(8),
+                                lhs: Reg::Gpr(8),
+                                rhs: Operand::Imm(immediate),
+                                sub: true,
+                                flags: false,
+                            },
+                        );
+                        let Some(Val::Span { first, count, .. }) = state.get(Reg::Gpr(8)) else {
+                            panic!("bounded product lost");
+                        };
+                        for x in 0..=a {
+                            for y in 0..=b {
+                                let actual = if width == Width::W32 {
+                                    u64::from(
+                                        (x as u32)
+                                            .wrapping_mul(y as u32)
+                                            .wrapping_sub(immediate as u32),
+                                    )
+                                } else {
+                                    x.wrapping_mul(y).wrapping_sub(immediate)
+                                };
+                                assert!(mask(actual.wrapping_sub(first), width) < count);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn overflowing_products_and_unknown_upper_bits_do_not_create_bounds() {
+        let image = Image::raw(vec![0x1f, 0x20, 0x03, 0xd5], GuestAddr(0x10000)).unwrap();
+        for (width, max, full, multiplier) in [
+            (Width::W32, u64::from(u32::MAX), true, 2),
+            (Width::X64, u64::MAX, true, 2),
+            (Width::X64, 3, false, 1),
+        ] {
+            let mut state = State::default();
+            state.regs.insert(0, Val::Bounded { max, full });
+            state.regs.insert(1, Val::Const(multiplier));
+            transfer(
+                &image,
+                &mut state,
+                &Op::MultiplyAdd {
+                    width,
+                    dst: Reg::Gpr(8),
+                    lhs: Reg::Gpr(0),
+                    rhs: Reg::Gpr(1),
+                    acc: Reg::Zero,
+                    sub: false,
+                },
+            );
+            assert!(state.get(Reg::Gpr(8)).is_none());
         }
     }
 }
