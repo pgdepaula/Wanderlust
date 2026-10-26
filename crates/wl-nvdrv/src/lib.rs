@@ -44,6 +44,7 @@ fn fatal<T>(r: wl_gpu::Result<T>) -> Result<T> {
 pub trait Memory: GuestMemoryWrite {
     type Pin: Copy;
     fn pin(&mut self, base: GuestAddress, size: u64) -> wl_gpu::Result<Self::Pin>;
+    /// Success consumes the pin; failure retains it for a checked retry.
     fn unpin(&mut self, pin: Self::Pin) -> wl_gpu::Result<()>;
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -309,6 +310,39 @@ impl<P: Copy> Driver<P> {
     }
     fn nvmap(&mut self, r: Ioctl<'_>, memory: &mut impl Memory<Pin = P>) -> Result<()> {
         match r.request {
+            0xc0180105 => {
+                let index = self.allocation(word(r.input, 0))?;
+                let allocation = &self.allocations[index];
+                let remaining = allocation
+                    .references
+                    .checked_sub(1)
+                    .ok_or(NvError::InvalidState)?;
+                let size = u32::try_from(allocation.size).map_err(|_| NvError::InvalidSize)?;
+                if remaining == 0 {
+                    if let Some(storage) = allocation.storage {
+                        checked(self.gpu.validate_release_backing(storage.backing))?;
+                        memory
+                            .unpin(storage.pin)
+                            .map_err(|_| NvError::InvalidState)?;
+                        // Exclusive ownership prevents a mapping/submission
+                        // between the release preflight and this mutation.
+                        if let Err(error) = self.gpu.release_backing(storage.backing) {
+                            let message =
+                                format!("backing release changed after preflight: {error}");
+                            self.fatal = Some(message.clone());
+                            return Err(Error::Fatal(message));
+                        }
+                    }
+                    self.allocations.remove(index);
+                } else {
+                    self.allocations[index].references = remaining;
+                }
+                r.output.copy_from_slice(r.input);
+                out64(r.output, 8, u64::from(remaining));
+                out32(r.output, 16, size);
+                out32(r.output, 20, u32::from(remaining != 0));
+                Ok(())
+            }
             0xc008010e => {
                 // GetId's input handle is the SECOND word, unlike FromId.
                 // IDs are opaque and scoped to this process-local session.
@@ -555,9 +589,11 @@ impl<P: Copy> Driver<P> {
                     .find(|a| a.handle == handle)
                     .ok_or(NvError::BadParameter)?;
                 let storage = allocation.storage.as_ref().ok_or(NvError::InvalidState)?;
-                let size = request.size(allocation.size)?;
+                let extent = request.extent(allocation.size)?;
+                let size = extent.resident;
+                let span = extent.span;
                 let offset = request.offset;
-                // request.size checked the entire canonical allocation extent;
+                // request.extent checked the entire canonical allocation extent;
                 // the existing driver remains authoritative for mapping identity.
                 if !request.fixed {
                     let alignment = request.alignment(storage.alignment)?;
@@ -595,7 +631,7 @@ impl<P: Copy> Driver<P> {
                     return Ok(());
                 }
                 let address = request.address;
-                let end = address.checked_add(size).ok_or(NvError::InvalidSize)?;
+                let end = address.checked_add(span).ok_or(NvError::InvalidSize)?;
                 let reservation = space
                     .reservations
                     .iter_mut()
@@ -608,7 +644,7 @@ impl<P: Copy> Driver<P> {
                 {
                     return Err(NvError::AlreadyAllocated.into());
                 }
-                configuration.validate_range(address, size, reservation.page_size)?;
+                configuration.validate_range(address, span, reservation.page_size)?;
                 let mapping = checked(self.gpu.map_subrange(
                     space.id,
                     reservation.id,
@@ -619,7 +655,7 @@ impl<P: Copy> Driver<P> {
                 ))?;
                 reservation.mappings.push(BufferMapping {
                     address,
-                    size,
+                    size: span,
                     id: mapping,
                 });
                 r.output.copy_from_slice(r.input);

@@ -6,6 +6,7 @@ struct Backing {
     bytes: [u8; 4096],
     pins: usize,
     unpins: usize,
+    fail_unpin: bool,
 }
 impl Default for Backing {
     fn default() -> Self {
@@ -13,6 +14,7 @@ impl Default for Backing {
             bytes: [0; 4096],
             pins: 0,
             unpins: 0,
+            fail_unpin: false,
         }
     }
 }
@@ -48,9 +50,143 @@ impl Memory for Backing {
     }
     fn unpin(&mut self, pin: u32) -> wl_gpu::Result<()> {
         assert_eq!(pin, 37);
+        if self.fail_unpin {
+            return Err(wl_gpu::Error("injected pin release failure".into()));
+        }
         self.unpins += 1;
         Ok(())
     }
+}
+
+#[test]
+#[ignore = "checks actual GPU registration and runtime pin lifetime"]
+fn nvmap_free_retains_imports_and_retries_without_losing_backing() {
+    let mut d = Driver::new().unwrap();
+    let mut m = Backing::default();
+    let fd = d.open("/dev/nvmap").unwrap();
+    let counters = d.graphics_counters();
+    let mut created = [0; 8];
+    call(
+        &mut d,
+        &mut m,
+        fd,
+        0xc0080101,
+        &words(&[4096, 0]),
+        &mut created,
+    )
+    .unwrap();
+    let handle = u32::from_le_bytes(created[4..].try_into().unwrap());
+    let mut allocation = words(&[handle, 0, 0, 131072, 0, 0]);
+    allocation.extend(0x21000u64.to_le_bytes());
+    call(&mut d, &mut m, fd, 0xc0200104, &allocation, &mut [0; 32]).unwrap();
+    call(
+        &mut d,
+        &mut m,
+        fd,
+        0xc0080103,
+        &words(&[handle, 0]),
+        &mut [0; 8],
+    )
+    .unwrap();
+    let request = words(&[handle, 0x12345678, u32::MAX, u32::MAX, u32::MAX, u32::MAX]);
+    let mut result = [0xcc; 24];
+    call(&mut d, &mut m, fd, 0xc0180105, &request, &mut result).unwrap();
+    assert_eq!(&result[8..16], &1u64.to_le_bytes());
+    assert_eq!(&result[16..20], &4096u32.to_le_bytes());
+    assert_eq!(&result[20..], &1u32.to_le_bytes());
+    assert_eq!((m.pins, m.unpins), (1, 0));
+    let space = d.open("/dev/nvhost-as-gpu").unwrap();
+    let mut init = words(&[1, 0, 65536, 0]);
+    for address in [0x4000000u64, 0x2000000000, 0x400000000] {
+        init.extend(address.to_le_bytes());
+    }
+    call(&mut d, &mut m, space, 0x40284109, &init, &mut []).unwrap();
+    let mut reserve = words(&[1, 65536, 1, 0]);
+    reserve.extend(0x400000000u64.to_le_bytes());
+    call(&mut d, &mut m, space, 0xc0184102, &reserve, &mut [0; 24]).unwrap();
+    // Only 4 KiB can be borrowed from Backing. The padded 64 KiB VA window
+    // must not extend that backing registration or require an oversized pin.
+    let mut map = words(&[5, 0, handle, 65536]);
+    map.extend(0u64.to_le_bytes());
+    map.extend(65536u64.to_le_bytes());
+    map.extend(0x400000000u64.to_le_bytes());
+    call(&mut d, &mut m, space, 0xc0284106, &map, &mut [0; 40]).unwrap();
+    result.fill(0xcc);
+    error(
+        call(&mut d, &mut m, fd, 0xc0180105, &request, &mut result),
+        NvError::InvalidState,
+    );
+    assert_eq!(result, [0xcc; 24]);
+    assert_eq!((m.pins, m.unpins), (1, 0));
+    call(
+        &mut d,
+        &mut m,
+        space,
+        0xc0084105,
+        &0x400000000u64.to_le_bytes(),
+        &mut [0; 8],
+    )
+    .unwrap();
+    let mut free = 0x400000000u64.to_le_bytes().to_vec();
+    free.extend(words(&[1, 65536]));
+    call(&mut d, &mut m, space, 0xc0104103, &free, &mut [0; 16]).unwrap();
+    d.close(space, &mut m).unwrap();
+    m.fail_unpin = true;
+    result.fill(0xcc);
+    error(
+        call(&mut d, &mut m, fd, 0xc0180105, &request, &mut result),
+        NvError::InvalidState,
+    );
+    assert_eq!(result, [0xcc; 24]);
+    assert_eq!((m.pins, m.unpins), (1, 0));
+    call(
+        &mut d,
+        &mut m,
+        fd,
+        0xc008010e,
+        &words(&[0, handle]),
+        &mut [0; 8],
+    )
+    .unwrap();
+    m.fail_unpin = false;
+    call(&mut d, &mut m, fd, 0xc0180105, &request, &mut result).unwrap();
+    assert_eq!(&result[8..16], &[0; 8]);
+    assert_eq!(&result[16..20], &4096u32.to_le_bytes());
+    assert_eq!(&result[20..], &[0; 4]);
+    assert_eq!((m.pins, m.unpins), (1, 1));
+    result.fill(0xcc);
+    error(
+        call(&mut d, &mut m, fd, 0xc0180105, &request, &mut result),
+        NvError::BadParameter,
+    );
+    assert_eq!(result, [0xcc; 24]);
+    // Free unallocated objects repeatedly: released slots cannot exhaust the
+    // bounded allocation registry or reissue a stale handle.
+    for _ in 0..128 {
+        call(
+            &mut d,
+            &mut m,
+            fd,
+            0xc0080101,
+            &words(&[4096, 0]),
+            &mut created,
+        )
+        .unwrap();
+        let next = u32::from_le_bytes(created[4..].try_into().unwrap());
+        assert!(next > handle);
+        call(
+            &mut d,
+            &mut m,
+            fd,
+            0xc0180105,
+            &words(&[next, 0, 0, 0, 0, 0]),
+            &mut result,
+        )
+        .unwrap();
+    }
+    d.close(fd, &mut m).unwrap();
+    assert_eq!((m.pins, m.unpins), (1, 1));
+    assert_eq!(d.graphics_counters(), counters);
 }
 fn call(
     d: &mut Driver<u32>,

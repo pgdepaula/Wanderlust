@@ -12,6 +12,12 @@ pub(super) struct Request {
     hint: u32,
     length: u64,
 }
+pub(super) struct Extent {
+    /// Only these bytes have canonical backing and can be fetched by the GPU.
+    pub resident: u64,
+    /// Requested VA window, including inaccessible final-page padding.
+    pub span: u64,
+}
 impl Request {
     pub fn decode(input: &[u8]) -> Result<Self> {
         if input.len() != 40 {
@@ -41,19 +47,26 @@ impl Request {
             length: long(input, 24),
         })
     }
-    pub fn size(&self, backing: u64) -> Result<u64> {
+    pub fn extent(&self, backing: u64) -> Result<Extent> {
         let available = backing
             .checked_sub(self.offset)
             .ok_or(NvError::InvalidSize)?;
-        let size = if self.length == 0 {
+        let span = if self.length == 0 {
             available
         } else {
             self.length
         };
-        if size == 0 || size > available || size % 4096 != 0 || self.offset % 4096 != 0 {
+        if span > available {
+            let rounded = available.checked_add(65535).ok_or(NvError::InvalidSize)? & !65535;
+            if !self.fixed || self.hint != 65536 || self.offset % 65536 != 0 || span != rounded {
+                return Err(NvError::InvalidSize.into());
+            }
+        }
+        let resident = span.min(available);
+        if resident == 0 || resident % 4096 != 0 || span % 4096 != 0 || self.offset % 4096 != 0 {
             return Err(NvError::InvalidSize.into());
         }
-        Ok(size)
+        Ok(Extent { resident, span })
     }
     pub fn alignment(&self, allocation: u32) -> Result<u64> {
         let value = if self.hint == 0 {
@@ -78,10 +91,17 @@ mod tests {
         input[12..16].copy_from_slice(&65536u32.to_le_bytes());
         let request = Request::decode(&input).unwrap();
         assert!(!request.fixed);
-        assert_eq!(request.size(4096).unwrap(), 4096);
+        assert_eq!(request.extent(4096).unwrap().resident, 4096);
         assert_eq!(request.alignment(131072).unwrap(), 65536);
         input[4] = 0xfe; // libnx NvKind_Generic_16BX2, uncompressed.
-        assert_eq!(Request::decode(&input).unwrap().size(4096).unwrap(), 4096);
+        assert_eq!(
+            Request::decode(&input)
+                .unwrap()
+                .extent(4096)
+                .unwrap()
+                .resident,
+            4096
+        );
         for (at, value) in [(0, 2u32), (4, 1), (12, 8192)] {
             let mut invalid = input;
             invalid[at..at + 4].copy_from_slice(&value.to_le_bytes());
@@ -97,8 +117,22 @@ mod tests {
             let mut invalid = input;
             invalid[16..24].copy_from_slice(&offset.to_le_bytes());
             invalid[24..32].copy_from_slice(&length.to_le_bytes());
-            assert!(Request::decode(&invalid).unwrap().size(4096).is_err());
+            assert!(Request::decode(&invalid).unwrap().extent(4096).is_err());
         }
         assert!(Request::decode(&input[..39]).is_err());
+    }
+    #[test]
+    fn fixed_page_window_does_not_make_padding_canonical_backing() {
+        let mut input = [0; 40];
+        input[0] = 5;
+        input[12..16].copy_from_slice(&65536u32.to_le_bytes());
+        input[24..32].copy_from_slice(&0x30000u64.to_le_bytes());
+        input[32..40].copy_from_slice(&0x400000000u64.to_le_bytes());
+        let e = Request::decode(&input).unwrap().extent(0x26000).unwrap();
+        assert_eq!((e.resident, e.span), (0x26000, 0x30000));
+        for (backing, span) in [(0x26000, 0x40000u64), (0x26001, 0x30000), (0, 0x10000)] {
+            input[24..32].copy_from_slice(&span.to_le_bytes());
+            assert!(Request::decode(&input).unwrap().extent(backing).is_err());
+        }
     }
 }

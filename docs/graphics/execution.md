@@ -2596,6 +2596,19 @@ Nvmap GetId and FromId preserve the identity of an existing process-local
 allocation. Import requires allocated user storage and increments a checked
 reference count on the same handle; it does not pin memory or register backing
 again. Unknown and closed-session IDs are rejected before output mutation.
-IDs are session-local; cross-process allocation sharing and individual-reference
-Free are unsupported. The ordinary close guards and one-release-per-backing
-policy remain in effect.
+IDs are session-local; cross-process allocation sharing is unsupported.
+`Free` (`0xc0180105`) decrements one reference. Nonfinal release returns the
+remaining count with NOT_FREED_YET set; final release removes the allocation
+only after its backing has no mappings/pending GPU writes and its runtime pin
+has been released. Failed unpin leaves the registration and handle valid for
+retry. Size, count and flags are returned explicitly; stale handles reject
+without mutating output. Final release while mapped is explicitly rejected;
+automatic deferred destruction of mapped allocations remains unsupported.
+
+Fixed `MapBufferEx` accepts a 64 KiB-rounded VA window whose canonical backing
+ends within the last page. The entire window participates in reservation and
+overlap checks, while only the actual page-aligned backing prefix is mapped.
+The remaining padding cannot be fetched or published and faults on access.
+This does not pin adjacent CPU memory, fabricate padding bytes or expose a
+fragmented guest borrow. Larger excess, unsupported alignment and out-of-range
+offsets still reject. Automatic mappings retain their exact backing extent.

@@ -2186,8 +2186,23 @@ The process-local adapter uses opaque monotonically assigned handles as IDs,
 checks reference-count overflow, and retains one canonical backing and runtime
 pin per allocation. Closing the nvmap session releases each backing once,
 subject to existing channel/mapping lifetime guards. Cross-process ID exchange
-and per-reference Free remain unsupported; this does not implement a global
+remains unsupported; this does not implement a global
 NVIDIA allocation registry.
+
+The same libnx revision defines the custom Switch Free ioctl `0xc0180105`:
+handle at byte 0, output reference count at byte 8, size at byte 16 and
+NOT_FREED_YET flags at byte 20. This is not Linux's raw-handle Free ioctl.
+The adapter decrements imported references, releases an unmapped final backing
+and runtime pin once, and rejects final release while mappings or GPU output
+still depend on that backing. A failed pin release retains the allocation for
+retry; a stale handle cannot release another allocation.
+
+The pinned nvgpu mapping implementation distinguishes `mapping_size` from
+`dmabuf->size`. The supported adapter retains this distinction for fixed
+64 KiB-rounded VA windows: only the canonical allocation prefix is resident.
+Final-page padding is kept inaccessible rather than borrowing beyond the
+registered guest backing. This preserves checked ownership without claiming
+the original driver's physical padding or GMMU page layout.
 
 ### Sparse VA reservations and resident Remap
 

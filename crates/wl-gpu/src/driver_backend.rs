@@ -128,6 +128,12 @@ impl GpuDriver {
         self.idle_mappings()?;
         self.memory.release_backing(backing)
     }
+    /// No mutation may intervene before release. This does not release runtime
+    /// memory or relax the pending-output and resident-mapping guards.
+    pub fn validate_release_backing(&self, backing: BackingId) -> Result<()> {
+        self.idle_mappings()?;
+        self.memory.validate_release_backing(backing)
+    }
     pub fn create_space(&mut self) -> Result<AddressSpaceId> {
         self.memory.create_space()
     }

@@ -243,7 +243,12 @@ impl MemoryManager {
         }
         Ok(GuestAddress(b.base.0 + offset))
     }
-    pub fn release_backing(&mut self, id: BackingId) -> Result<()> {
+    /// Check release without changing identity, for an exclusive owner that
+    /// must release its runtime pin before removing this registration.
+    pub fn validate_release_backing(&self, id: BackingId) -> Result<()> {
+        if !self.backings.iter().any(|b| b.id == id) {
+            return Err(invalid("unknown or stale backing"));
+        }
         if self
             .spaces
             .iter()
@@ -252,6 +257,10 @@ impl MemoryManager {
         {
             return Err(invalid("backing still mapped"));
         }
+        Ok(())
+    }
+    pub fn release_backing(&mut self, id: BackingId) -> Result<()> {
+        self.validate_release_backing(id)?;
         let n = self
             .backings
             .iter()
