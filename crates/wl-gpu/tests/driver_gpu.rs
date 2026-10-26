@@ -391,6 +391,18 @@ fn driver_completion_publication_and_mapping_lifetime() {
     let epoch = d.mapping_epoch(space).unwrap();
     let error = d.map_subrange(space, maps[7].0, b, 0, 0, 4096).unwrap_err();
     assert!(error.0.contains("publish pending output"));
+    let error = d
+        .apply_map_changes(
+            space,
+            &[MapChange {
+                reservation: maps[7].0,
+                address: GpuAddress(0x90000),
+                size: 4096,
+                backing: None,
+            }],
+        )
+        .unwrap_err();
+    assert!(error.0.contains("publish pending output"));
     assert_eq!(d.mapping_epoch(space).unwrap(), epoch);
     assert!(d.release_backing(b).is_err());
     let other = d.create_channel(space).unwrap();

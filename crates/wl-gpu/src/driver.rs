@@ -31,27 +31,27 @@ id!(ChannelId);
 pub const PAGE_SIZE: u64 = 4096;
 pub const MAX_OBJECTS: usize = 128;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Backing {
     id: BackingId,
     base: GuestAddress,
     size: u64,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Reservation {
     id: ReservationId,
     address: GpuAddress,
     size: u64,
     mappings: Vec<BufferMapping>,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct BufferMapping {
     id: MappingId,
     backing: BackingId,
     address: GpuAddress,
     size: u64,
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Space {
     id: AddressSpaceId,
     epoch: u64,
@@ -65,6 +65,22 @@ struct Space {
 pub struct MemoryManager {
     backings: Vec<Backing>,
     spaces: Vec<Space>,
+}
+/// A bounded replacement of resident pages within an existing reservation.
+/// `None` removes backing; it does not create readable zero-filled guest RAM.
+#[derive(Debug, Clone, Copy)]
+pub struct MapChange {
+    pub reservation: ReservationId,
+    pub address: GpuAddress,
+    pub size: u64,
+    pub backing: Option<(BackingId, u64)>,
+}
+/// Snapshot of a currently resident mapping, not an owning guest-memory borrow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MappingInfo {
+    pub id: MappingId,
+    pub address: GpuAddress,
+    pub size: u64,
 }
 fn aligned(value: u64) -> bool {
     value % PAGE_SIZE == 0
@@ -81,6 +97,123 @@ fn extent(start: u64, size: u64, gpu: bool) -> Result<u64> {
     Ok(end)
 }
 impl MemoryManager {
+    pub fn mappings(
+        &self,
+        space: AddressSpaceId,
+        reservation: ReservationId,
+    ) -> Result<Vec<MappingInfo>> {
+        let r = self
+            .space(space)?
+            .reservations
+            .iter()
+            .find(|r| r.id == reservation)
+            .ok_or_else(|| invalid("wrong reservation owner"))?;
+        Ok(r.mappings
+            .iter()
+            .map(|m| MappingInfo {
+                id: m.id,
+                address: m.address,
+                size: m.size,
+            })
+            .collect())
+    }
+    /// Transactional metadata replacement. No guest bytes are copied. Failed
+    /// validation retains every old mapping ID and mapping epoch. Newly issued
+    /// opaque IDs may be skipped by an unsuccessful trial.
+    pub fn apply_map_changes(
+        &mut self,
+        space: AddressSpaceId,
+        changes: &[MapChange],
+    ) -> Result<()> {
+        self.space(space)?;
+        if changes.len() > MAX_OBJECTS {
+            return Err(invalid("mapping transaction capacity"));
+        }
+        if changes.is_empty() {
+            return Ok(());
+        }
+        let mut trial = Self {
+            backings: self.backings.clone(),
+            spaces: self.spaces.clone(),
+        };
+        for change in changes {
+            trial.apply_map_change(space, *change)?;
+        }
+        *self = trial;
+        Ok(())
+    }
+    fn apply_map_change(&mut self, space: AddressSpaceId, change: MapChange) -> Result<()> {
+        let end = extent(change.address.0, change.size, true)?;
+        let r = self
+            .space(space)?
+            .reservations
+            .iter()
+            .find(|r| r.id == change.reservation)
+            .ok_or_else(|| invalid("wrong reservation owner"))?;
+        if change.address.0 < r.address.0 || end > r.address.0 + r.size {
+            return Err(invalid("replacement outside reservation"));
+        }
+        let reservation_start = r.address.0;
+        if let Some((backing, offset)) = change.backing {
+            if !aligned(offset) {
+                return Err(invalid("unaligned replacement backing"));
+            }
+            self.backing_range(
+                backing,
+                offset,
+                usize::try_from(change.size).map_err(|_| invalid("replacement exceeds host"))?,
+            )?;
+        }
+        let overlaps: Vec<_> = r
+            .mappings
+            .iter()
+            .filter(|m| m.address.0 < end && change.address.0 < m.address.0 + m.size)
+            .cloned()
+            .collect();
+        for old in overlaps {
+            let old_guest = self.address_map(space)?.resolve(old.address, 1)?;
+            let backing_base = self.backing_range(old.backing, 0, 1)?;
+            let backing_offset = old_guest
+                .0
+                .checked_sub(backing_base.0)
+                .ok_or_else(|| invalid("invalid canonical mapping offset"))?;
+            self.unmap(space, old.id)?;
+            if old.address.0 < change.address.0 {
+                self.map_subrange(
+                    space,
+                    change.reservation,
+                    old.backing,
+                    backing_offset,
+                    old.address.0 - reservation_start,
+                    change.address.0 - old.address.0,
+                )?;
+            }
+            let old_end = old.address.0 + old.size;
+            if end < old_end {
+                self.map_subrange(
+                    space,
+                    change.reservation,
+                    old.backing,
+                    backing_offset
+                        .checked_add(end - old.address.0)
+                        .ok_or_else(|| invalid("replacement backing overflow"))?,
+                    end - reservation_start,
+                    old_end - end,
+                )?;
+            }
+        }
+        if let Some((backing, offset)) = change.backing {
+            self.map_subrange(
+                space,
+                change.reservation,
+                backing,
+                offset,
+                change.address.0 - reservation_start,
+                change.size,
+            )?;
+        }
+        Ok(())
+    }
     pub fn register_backing(&mut self, base: GuestAddress, size: u64) -> Result<BackingId> {
         let end = extent(base.0, size, false)?;
         if self.backings.len() >= MAX_OBJECTS

@@ -2188,3 +2188,19 @@ pin per allocation. Closing the nvmap session releases each backing once,
 subject to existing channel/mapping lifetime guards. Cross-process ID exchange
 and per-reference Free remain unsupported; this does not implement a global
 NVIDIA allocation registry.
+
+### Sparse VA reservations and resident Remap
+
+[libnx nvhost-as-gpu at feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/ioctl/nvhost-as-gpu.c)
+defines AllocSpace fixed/sparse flag bits and page/count units. NVIDIA's
+[nvgpu UAPI at a35286a4b10fbcfb689aa77be42c201d2091dca2](https://github.com/LineageOS/android_kernel_nvidia_shield/blob/a35286a4b10fbcfb689aa77be42c201d2091dca2/include/uapi/linux/nvgpu.h)
+distinguishes sparse-allocation capability bit 2 from partial-map bit 1 and
+sync-fence-FD bit 3. These are semantic references, without implementation reuse.
+
+The [Switchbrew device ABI archive at
+12787d8d212a164c7d6f2dacb4e35ff6bff087e1](https://github.com/backupbrew/switchbrew/blob/12787d8d212a164c7d6f2dacb4e35ff6bff087e1/NV%20services.md)
+records the Switch-specific variable Remap ioctl and its five-word entries.
+Linux ioctl numbers are not substituted for this wire format. The implemented
+subset rejects a nonzero physical-offset word rather than guessing its meaning.
+Independent literal-wire tests and resident GPU destination replacement test
+field order, page units, mapping identity and shader-cache independence.

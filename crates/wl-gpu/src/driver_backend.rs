@@ -174,6 +174,21 @@ impl GpuDriver {
             size,
         )
     }
+    pub fn apply_map_changes(
+        &mut self,
+        space: AddressSpaceId,
+        changes: &[MapChange],
+    ) -> Result<()> {
+        self.idle_mappings()?;
+        self.memory.apply_map_changes(space, changes)
+    }
+    pub fn mappings(
+        &self,
+        space: AddressSpaceId,
+        reservation: ReservationId,
+    ) -> Result<Vec<MappingInfo>> {
+        self.memory.mappings(space, reservation)
+    }
     pub fn free_reservation(
         &mut self,
         space: AddressSpaceId,

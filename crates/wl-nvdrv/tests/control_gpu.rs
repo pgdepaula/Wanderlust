@@ -104,7 +104,7 @@ fn control_gpu_identity_and_fd_isolation_do_not_submit_work() {
         .unwrap();
         assert_eq!(&output[16..20], &[0x20, 1, 0, 0]);
         assert_eq!(&output[108..112], &[0x97, 0xb1, 0, 0]);
-        assert_eq!(&output[96..104], &[0; 8]);
+        assert_eq!(&output[96..104], &4u64.to_le_bytes());
         assert_eq!(&output[160..168], b"gm20b\0\0\0");
     }
     for (wrong_fd, kind, request, expected) in [

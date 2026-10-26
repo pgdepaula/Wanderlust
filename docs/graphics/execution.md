@@ -1932,7 +1932,7 @@ The existing GPU driver owns each reservation, mapping ID and mapping epoch.
 Automatic VA is acquired only after size/handle validation and is released if
 mapping fails. Unmapping an automatic mapping also releases its VA; fixed
 reservations retain their distinct `FreeSpace` lifecycle. Nonzero automatic
-offset/alignment unions, sparse mappings and kind-changing remaps remain
+offset/alignment unions and kind-changing remaps remain
 unsupported. Canonical backing pins survive unmapping until allocation/session
 teardown, and pending-output guards still prohibit mapping mutation.
 Pitch and generic-uncompressed aliases retain identical canonical storage.
@@ -1948,8 +1948,35 @@ mappings valid, advances the mapping epoch and keeps the reservation allocated.
 `FreeSpace` rejects while any child mapping remains. Overlap, crossing reservation
 boundaries, backing overflow and stale IDs fail without changing the epoch or
 existing mappings. There are at most 128 mappings per address space. This does
-not implement splitting or replacing an existing mapping, fragmented gathers,
-sparse PTEs or real hardware page tables.
+not implement fragmented gathers or real hardware page tables. Replacement and
+splitting use the distinct reservation-scoped Remap operation below.
+
+### Reserved virtual allocation remapping
+
+`AllocSpace` accepts the sparse flag (bit 1), optionally with fixed-address bit
+0, for 64 KiB pages. It reserves GPU VA without making absent pages readable.
+The GPU characteristics sparse-allocation capability is set; partial
+`MapBufferEx`, sync-fence FD and cycle-stat capabilities remain unset.
+
+The variable-size `0xc0??4114` Remap ioctl consumes 20-byte little-endian
+entries: 16-bit flags, 16-bit kind, nvmap handle, reserved physical-offset word,
+GPU page offset and page count. Supported flags are zero/cacheable (4), kinds
+are pitch (0) and generic uncompressed (0xfe), and physical offset must be zero.
+Page offsets and counts are in 64 KiB units. A zero handle removes resident
+backing; a nonzero handle binds the beginning of a checked allocated nvmap
+backing. Every range must fit one existing sparse reservation. Nonresident
+resource reads fault explicitly; this is not sparse-texture zero-fill support.
+
+At most 128 entries are applied in order to a bounded metadata transaction.
+Replacement splits surviving mapping intervals while retaining their canonical
+backing offsets. Failed validation preserves existing mapping IDs and epochs;
+successful replacement issues fresh IDs for changed intervals. Aliases outside
+the replaced interval remain valid. No command, texture or framebuffer bytes
+are copied by this transaction. Mapping mutation is rejected while GPU output
+is pending, so replacement cannot redirect an earlier framebuffer publication.
+After unmapping every resident interval, `FreeSpace` releases the reservation.
+Nonzero physical offsets, compression kinds and hardware sparse PTEs remain
+unsupported.
 
 ### Contiguous CPU backing across internal regions
 

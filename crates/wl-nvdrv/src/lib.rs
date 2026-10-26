@@ -7,6 +7,7 @@ mod channel;
 mod control;
 mod mapping;
 mod nvmap;
+mod remap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
@@ -83,6 +84,7 @@ struct Reservation {
     id: ReservationId,
     mappings: Vec<BufferMapping>,
     automatic: bool,
+    sparse: bool,
 }
 #[derive(Debug)]
 struct BufferMapping {
@@ -428,6 +430,63 @@ impl<P: Copy> Driver<P> {
             return Err(NvError::InvalidState.into());
         }
         let configuration = space.configuration.as_ref().ok_or(NvError::InvalidState)?;
+        if r.request & 0xc000ffff == 0xc0004114 {
+            let entries = remap::decode(r.input)?;
+            let mut changes = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let end = entry
+                    .address
+                    .checked_add(entry.size)
+                    .ok_or(NvError::InvalidSize)?;
+                let reservation = space
+                    .reservations
+                    .iter()
+                    .find(|v| v.sparse && entry.address >= v.address && end <= v.address + v.size)
+                    .ok_or(NvError::InvalidAddress)?;
+                configuration.validate_range(entry.address, entry.size, 65536)?;
+                let backing = if entry.handle == 0 {
+                    None
+                } else {
+                    let allocation = self
+                        .allocations
+                        .iter()
+                        .find(|a| a.handle == entry.handle)
+                        .ok_or(NvError::BadParameter)?;
+                    if entry.size > allocation.size {
+                        return Err(NvError::InvalidSize.into());
+                    }
+                    Some((
+                        allocation
+                            .storage
+                            .as_ref()
+                            .ok_or(NvError::InvalidState)?
+                            .backing,
+                        0,
+                    ))
+                };
+                changes.push(MapChange {
+                    reservation: reservation.id,
+                    address: GpuAddress(entry.address),
+                    size: entry.size,
+                    backing,
+                });
+            }
+            checked(self.gpu.apply_map_changes(space.id, &changes))?;
+            for reservation in &mut space.reservations {
+                if reservation.sparse {
+                    reservation.mappings = checked(self.gpu.mappings(space.id, reservation.id))?
+                        .into_iter()
+                        .map(|m| BufferMapping {
+                            address: m.address.0,
+                            size: m.size,
+                            id: m.id,
+                        })
+                        .collect();
+                }
+            }
+            r.output.copy_from_slice(r.input);
+            return Ok(());
+        }
         match r.request {
             0xc0404108 => {
                 if !matches!(word(r.input, 8), 0 | 48) || word(r.input, 12) != 0 {
@@ -451,14 +510,18 @@ impl<P: Copy> Driver<P> {
                 let pages = u64::from(word(r.input, 0));
                 let page_size = word(r.input, 4);
                 let flags = word(r.input, 8);
-                if flags > 1 || word(r.input, 12) != 0 {
+                if flags & !3 != 0 || word(r.input, 12) != 0 {
+                    return Err(NvError::NotSupported.into());
+                }
+                let sparse = flags & 2 != 0;
+                if sparse && page_size != 65536 {
                     return Err(NvError::NotSupported.into());
                 }
                 let size = pages
                     .checked_mul(u64::from(page_size))
                     .filter(|n| *n != 0)
                     .ok_or(NvError::InvalidSize)?;
-                let address = if flags == 1 {
+                let address = if flags & 1 != 0 {
                     long(r.input, 16)
                 } else {
                     configuration.allocate(
@@ -477,6 +540,7 @@ impl<P: Copy> Driver<P> {
                     id,
                     mappings: Vec::new(),
                     automatic: false,
+                    sparse,
                 });
                 r.output.copy_from_slice(r.input);
                 out64(r.output, 16, address);
@@ -524,6 +588,7 @@ impl<P: Copy> Driver<P> {
                             id: mapping,
                         }],
                         automatic: true,
+                        sparse: false,
                     });
                     r.output.copy_from_slice(r.input);
                     out64(r.output, 32, address);

@@ -910,7 +910,7 @@ fn runtime_service_ioctl3_characteristics_publishes_two_checked_outputs() {
     assert_eq!(&header[8..16], &[0; 8]);
     assert_eq!(&inline[..4], &[0x20, 1, 0, 0]);
     assert_eq!(&inline[92..96], &[0x97, 0xb1, 0, 0]);
-    assert_eq!(&inline[80..88], &[0; 8]);
+    assert_eq!(&inline[80..88], &4u64.to_le_bytes());
     assert_eq!(&inline[144..152], b"gm20b\0\0\0");
     h.p.memory.write_bytes(META + 0x3000, &[0xcc; 176]).unwrap();
     // Overlapping destinations fail before the host call or either write.
@@ -1044,4 +1044,92 @@ fn runtime_automatic_small_buffer_mapping_uses_checked_backing_and_releases_va()
     assert_eq!(counters.0.draw_commands, 0);
     assert_eq!(counters.0.submissions, 0);
     assert_eq!(counters.0.readback_operations, 0);
+}
+
+#[test]
+#[ignore = "executes indexed guest shaders into a sparse-reserved, remapped target"]
+fn runtime_service_remaps_resident_virtual_target_and_keeps_shader_cache() {
+    let (mut h, nvmap, space, channel, mut command, image) = configured();
+    let gpu = 0x200000u64;
+    let mut reserve = words(&[3, 65536, 3, 0]);
+    reserve.extend(gpu.to_le_bytes());
+    assert_eq!(
+        &h.ioctl(space, 0xc0184102, &reserve, None)[16..],
+        &gpu.to_le_bytes()
+    );
+    let mut handles = Vec::new();
+    for (index, bg) in [BG, [9, 13, 17, 255]].into_iter().enumerate() {
+        let cpu = DATA + 0x20000 + index as u64 * 0x10000;
+        let mut data = vec![0; 65536];
+        data[..SIZE].copy_from_slice(&bg.repeat(SIZE / 4));
+        h.p.memory
+            .map_state(cpu, data, true, true, false, state::NORMAL)
+            .unwrap();
+        let created = h.ioctl(nvmap, 0xc0080101, &words(&[65536, 0]), None);
+        let handle = u32::from_le_bytes(created[4..8].try_into().unwrap());
+        let mut alloc = words(&[handle, 0, 0, 65536, 0, 0]);
+        alloc.extend(cpu.to_le_bytes());
+        h.ioctl(nvmap, 0xc0200104, &alloc, None);
+        handles.push((handle, cpu));
+    }
+    let target = command
+        .windows(3)
+        .position(|v| v == [0x20090200, 0, 0x90000])
+        .unwrap();
+    command[target + 2] = gpu as u32;
+    let mut cold = None;
+    for (index, &(handle, cpu)) in handles.iter().enumerate() {
+        let remap = words(&[0x00fe0004, handle, 0, (gpu >> 16) as u32, 1]);
+        assert_eq!(h.ioctl(space, 0xc0144114, &remap, None), remap);
+        let draw = if index == 0 {
+            command.clone()
+        } else {
+            vec![0x20010586, 4, 0x200105f7, 0, 0x200105f8, 3, 0x20010585, 0]
+        };
+        h.p.memory
+            .write_bytes(DATA + 0x10000, &words(&draw))
+            .unwrap();
+        h.ioctl(
+            channel,
+            0xc018481b,
+            &words(&[0, 0, 1, 0x104, 0, 0]),
+            Some(&entry(0xb0000, draw.len())),
+        );
+        check(
+            h.p.memory.read_bytes(cpu, SIZE).unwrap(),
+            &image,
+            None,
+            if index == 0 { BG } else { [9, 13, 17, 255] },
+        );
+        let metrics = *h.metrics.borrow();
+        if let Some(previous) = cold {
+            let previous: wl_gpu::Counters = previous;
+            assert_eq!(
+                metrics.0.pipeline_allocations,
+                previous.pipeline_allocations
+            );
+            assert_eq!(
+                metrics.0.shader_module_allocations,
+                previous.shader_module_allocations
+            );
+            check(
+                h.p.memory.read_bytes(handles[0].1, SIZE).unwrap(),
+                &image,
+                None,
+                BG,
+            );
+        } else {
+            cold = Some(metrics.0);
+        }
+    }
+    // Restore all three pages to nonresident state before releasing the VA.
+    h.ioctl(
+        space,
+        0xc0144114,
+        &words(&[0, 0, 0, (gpu >> 16) as u32, 3]),
+        None,
+    );
+    let mut free = gpu.to_le_bytes().to_vec();
+    free.extend(words(&[3, 65536]));
+    h.ioctl(space, 0xc0104103, &free, None);
 }

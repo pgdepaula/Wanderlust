@@ -107,9 +107,13 @@ fn characteristics(input: &[u8], output: &mut [u8], require_legacy_address: bool
         out32(gc, offset, value);
     }
     out64(gc, 16, 0x40000);
+    // NVGPU_GPU_FLAGS_SUPPORT_SPARSE_ALLOCS: VA reservation and resident-page
+    // remapping are implemented by the address-space controller. This does not
+    // advertise host sparse textures or nonresident shader accesses.
+    out64(gc, 80, 1 << 2);
     out64(gc, 144, 0x6230326d67); // Little-endian "gm20b".
-    // Flags remain zero: do not advertise sparse mappings, cycle statistics,
-    // sync-fence FDs or general Host1x syncpoint operations we do not implement.
+    // Do not advertise cycle statistics, sync-fence FDs, MAP_BUFFER_EX partial
+    // remap flags or general Host1x syncpoint operations we do not implement.
     // Class identifiers describe the guest ISA, not universal opcode support.
     Ok(())
 }
@@ -287,7 +291,8 @@ mod tests {
         );
         assert_eq!(&out[32..40], &[0, 0, 4, 0, 0, 0, 0, 0]);
         assert_eq!(&out[88..92], &[40, 0, 0, 0]);
-        assert_eq!(&out[92..104], &[0; 12]); // reserved + flags
+        assert_eq!(&out[92..96], &[0; 4]); // reserved
+        assert_eq!(&out[96..104], &4u64.to_le_bytes()); // sparse allocation
         assert_eq!(&out[108..112], &[0x97, 0xb1, 0, 0]);
         assert_eq!(&out[116..120], &[0x6f, 0xb0, 0, 0]);
         assert_eq!(&out[160..168], b"gm20b\0\0\0");

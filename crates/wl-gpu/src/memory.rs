@@ -43,7 +43,7 @@ struct Mapping {
     gpu: Range<u64>,
     guest: GuestAddress,
 }
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct AddressMap {
     mappings: Vec<Mapping>,
 }
