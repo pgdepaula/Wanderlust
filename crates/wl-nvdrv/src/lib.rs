@@ -65,6 +65,7 @@ const MAX_ALLOCS: usize = 64;
 #[derive(Debug)]
 struct Allocation<P> {
     handle: u32,
+    references: u32,
     size: u64,
     storage: Option<Storage<P>>,
 }
@@ -306,6 +307,28 @@ impl<P: Copy> Driver<P> {
     }
     fn nvmap(&mut self, r: Ioctl<'_>, memory: &mut impl Memory<Pin = P>) -> Result<()> {
         match r.request {
+            0xc008010e => {
+                // GetId's input handle is the SECOND word, unlike FromId.
+                // IDs are opaque and scoped to this process-local session.
+                let allocation = &self.allocations[self.allocation(word(r.input, 4))?];
+                r.output.copy_from_slice(r.input);
+                out32(r.output, 0, allocation.handle);
+                Ok(())
+            }
+            0xc0080103 => {
+                let index = self.allocation(word(r.input, 0))?;
+                let allocation = &mut self.allocations[index];
+                let references = nvmap::imported_references(
+                    allocation.references,
+                    allocation.storage.is_some(),
+                )?;
+                // An existing client reference is retained, not a second
+                // allocation, backing registration or runtime pin.
+                allocation.references = references;
+                r.output.copy_from_slice(r.input);
+                out32(r.output, 4, allocation.handle);
+                Ok(())
+            }
             0xc00c0109 => {
                 let allocation = &self.allocations[self.allocation(word(r.input, 0))?];
                 let value = nvmap::parameter(
@@ -329,6 +352,7 @@ impl<P: Copy> Driver<P> {
                 self.next_handle += 1;
                 self.allocations.push(Allocation {
                     handle,
+                    references: 1,
                     size,
                     storage: None,
                 });

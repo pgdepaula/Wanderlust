@@ -3,6 +3,13 @@
 use crate::{NvError, Result, long, word};
 use wl_gpu::memory::GuestAddress;
 
+pub(super) fn imported_references(current: u32, allocated: bool) -> Result<u32> {
+    if !allocated {
+        return Err(NvError::InvalidState.into());
+    }
+    current.checked_add(1).ok_or(NvError::ResourceError.into())
+}
+
 #[derive(Debug)]
 pub(super) struct UserBacking {
     pub address: GuestAddress,
@@ -56,6 +63,23 @@ pub(super) fn parameter(parameter: u32, size: u64, alignment: Option<u32>) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn import_requires_storage_and_checked_reference_capacity() {
+        for references in [1, 2, 127, u32::MAX - 1] {
+            assert_eq!(
+                imported_references(references, true).unwrap(),
+                references + 1
+            );
+            assert!(matches!(
+                imported_references(references, false),
+                Err(crate::Error::Driver(NvError::InvalidState))
+            ));
+        }
+        assert!(matches!(
+            imported_references(u32::MAX, true),
+            Err(crate::Error::Driver(NvError::ResourceError))
+        ));
+    }
     fn request() -> [u8; 32] {
         let mut input = [0; 32];
         input[12..16].copy_from_slice(&0x20000u32.to_le_bytes());

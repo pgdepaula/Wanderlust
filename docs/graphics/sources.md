@@ -2163,3 +2163,28 @@ Statistics enables do not implement reports. Clip enables rely on the strict
 shader subset exporting no user clip distances; point controls rely on triangle
 assembly; stencil reference/masks rely on stencil remaining disabled. Enabling
 conservative raster, TIR, coverage-to-color, tile cache or ZBC remains unsupported.
+
+### Nvmap shared allocation identity
+
+The pinned [libnx nvmap ioctl wrappers at
+feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/ioctl/nvmap.c#L25)
+specify eight-byte little-endian FromId (`0xc0080103`) and GetId
+(`0xc008010e`) payloads. FromId consumes ID at byte zero and returns handle at
+byte four. GetId consumes handle at byte four and returns ID at byte zero.
+Output-only input words are ignored.
+
+[NVIDIA Tegra nvmap ioctl code at
+b445e5296764d18861a6450f6851f25b9ca59dee](https://android.googlesource.com/kernel/tegra/+/b445e5296764d18861a6450f6851f25b9ca59dee/drivers/video/tegra/nvmap/nvmap_ioctl.c)
+exports an existing object's identity, including before allocation.
+The [handle implementation at the same revision](https://android.googlesource.com/kernel/tegra/+/b445e5296764d18861a6450f6851f25b9ca59dee/drivers/video/tegra/nvmap/nvmap_handle.c)
+requires allocated storage for duplication and retains an existing client
+reference rather than duplicating its backing. Linux ioctl numbers and host
+pointer identities are not reused. These GPL sources supply semantic evidence;
+no implementation code is copied.
+
+The process-local adapter uses opaque monotonically assigned handles as IDs,
+checks reference-count overflow, and retains one canonical backing and runtime
+pin per allocation. Closing the nvmap session releases each backing once,
+subject to existing channel/mapping lifetime guards. Cross-process ID exchange
+and per-reference Free remain unsupported; this does not implement a global
+NVIDIA allocation registry.

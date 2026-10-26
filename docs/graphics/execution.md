@@ -2554,3 +2554,11 @@ B197 shader and whole texture-data NO_WFI invalidations release command borrows
 and run as ordered backend effects, including when emitted by MME. Shader code,
 constant words or texture bytes are reacquired on next use. Existing compatible
 GPU resources remain reusable; these invalidations do not imply completion.
+
+Nvmap GetId and FromId preserve the identity of an existing process-local
+allocation. Import requires allocated user storage and increments a checked
+reference count on the same handle; it does not pin memory or register backing
+again. Unknown and closed-session IDs are rejected before output mutation.
+IDs are session-local; cross-process allocation sharing and individual-reference
+Free are unsupported. The ordinary close guards and one-release-per-backing
+policy remain in effect.
