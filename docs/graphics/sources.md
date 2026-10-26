@@ -2204,3 +2204,13 @@ Linux ioctl numbers are not substituted for this wire format. The implemented
 subset rejects a nonzero physical-offset word rather than guessing its meaning.
 Independent literal-wire tests and resident GPU destination replacement test
 field order, page units, mapping identity and shader-cache independence.
+
+NVIDIA's [GM20B PTE kind definitions](https://github.com/LineageOS/android_kernel_nvidia_shield/blob/a35286a4b10fbcfb689aa77be42c201d2091dca2/drivers/gpu/nvgpu/gm20b/hw_gmmu_gm20b.h),
+[uncompressed kind mapping](https://github.com/LineageOS/android_kernel_nvidia_shield/blob/a35286a4b10fbcfb689aa77be42c201d2091dca2/drivers/gpu/nvgpu/gk20a/kind_gk20a.c),
+and [buffer kind/compression setup](https://github.com/LineageOS/android_kernel_nvidia_shield/blob/a35286a4b10fbcfb689aa77be42c201d2091dca2/drivers/gpu/nvgpu/gk20a/mm_gk20a.c)
+establish the bounded 64 KiB-page fallback. Compressible color aliases downgrade
+to generic storage; depth aliases downgrade to the corresponding depth kind.
+The page-size restriction, numerical kind identities and fallback relationships
+are semantic facts; implementation code is not copied. This is not a decoder
+for already-compressed guest memory or permission to accept unsupported B197
+attachment formats or sample counts.

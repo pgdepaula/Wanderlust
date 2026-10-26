@@ -1079,7 +1079,9 @@ fn runtime_service_remaps_resident_virtual_target_and_keeps_shader_cache() {
     command[target + 2] = gpu as u32;
     let mut cold = None;
     for (index, &(handle, cpu)) in handles.iter().enumerate() {
-        let remap = words(&[0x00fe0004, handle, 0, (gpu >> 16) as u32, 1]);
+        // C32_2CRA on 64 KiB pages uses NVIDIA's uncompressed fallback.
+        let kind = if index == 0 { 0x00fe0004 } else { 0x00db0004 };
+        let remap = words(&[kind, handle, 0, (gpu >> 16) as u32, 1]);
         assert_eq!(h.ioctl(space, 0xc0144114, &remap, None), remap);
         let draw = if index == 0 {
             command.clone()

@@ -1961,7 +1961,8 @@ The GPU characteristics sparse-allocation capability is set; partial
 The variable-size `0xc0??4114` Remap ioctl consumes 20-byte little-endian
 entries: 16-bit flags, 16-bit kind, nvmap handle, reserved physical-offset word,
 GPU page offset and page count. Supported flags are zero/cacheable (4), kinds
-are pitch (0) and generic uncompressed (0xfe), and physical offset must be zero.
+include pitch (0), generic uncompressed (0xfe), and the bounded small-page
+uncompressed fallbacks described below. Physical offset must be zero.
 Page offsets and counts are in 64 KiB units. A zero handle removes resident
 backing; a nonzero handle binds the beginning of a checked allocated nvmap
 backing. Every range must fit one existing sparse reservation. Nonresident
@@ -1975,8 +1976,17 @@ the replaced interval remain valid. No command, texture or framebuffer bytes
 are copied by this transaction. Mapping mutation is rejected while GPU output
 is pending, so replacement cannot redirect an earlier framebuffer publication.
 After unmapping every resident interval, `FreeSpace` releases the reservation.
-Nonzero physical offsets, compression kinds and hardware sparse PTEs remain
-unsupported.
+Nonzero physical offsets, compressed payloads/tags and hardware sparse PTEs
+remain unsupported.
+
+For these 64 KiB mappings, known C32/C64/C128 compression kinds resolve to
+generic uncompressed storage; Z16, Z24S8, ZF32 and ZF32_X24S8 aliases resolve to
+their corresponding uncompressed kind. This follows NVIDIA's downgrade when
+page size is below the 128 KiB compression granularity. The explicit subset is
+validated before changing mappings; unknown kinds still reject. Registration
+preserves canonical bytes and does not enable the corresponding raster format,
+multisampling, compression metadata or stencil behavior. B197/TIC descriptors
+continue to validate the actual resource interpretation at use time.
 
 ### Contiguous CPU backing across internal regions
 
