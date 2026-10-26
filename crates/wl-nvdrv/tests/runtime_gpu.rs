@@ -1078,6 +1078,26 @@ fn runtime_service_remaps_resident_virtual_target_and_keeps_shader_cache() {
         .unwrap();
     command[target + 2] = gpu as u32;
     let mut cold = None;
+    // Residency must exceed the former 128-mapping limit without relaxing the
+    // independently bounded 128-entry Remap transaction.
+    let aliases = 0x1000000u64;
+    let mut alias_reservation = words(&[129, 65536, 3, 0]);
+    alias_reservation.extend(aliases.to_le_bytes());
+    h.ioctl(space, 0xc0184102, &alias_reservation, None);
+    for (first, count) in [(0, 128), (128, 1)] {
+        let mut entries = Vec::new();
+        for n in first..first + count {
+            entries.extend(words(&[
+                0x00fe0004,
+                handles[0].0,
+                0,
+                (aliases >> 16) as u32 + n,
+                1,
+            ]));
+        }
+        let request = 0xc0004114 | ((entries.len() as u32) << 16);
+        assert_eq!(h.ioctl(space, request, &entries, None), entries);
+    }
     for (index, &(handle, cpu)) in handles.iter().enumerate() {
         // C32_2CRA on 64 KiB pages uses NVIDIA's uncompressed fallback.
         let kind = if index == 0 { 0x00fe0004 } else { 0x00db0004 };
@@ -1133,5 +1153,14 @@ fn runtime_service_remaps_resident_virtual_target_and_keeps_shader_cache() {
     );
     let mut free = gpu.to_le_bytes().to_vec();
     free.extend(words(&[3, 65536]));
+    h.ioctl(space, 0xc0104103, &free, None);
+    h.ioctl(
+        space,
+        0xc0144114,
+        &words(&[0, 0, 0, (aliases >> 16) as u32, 129]),
+        None,
+    );
+    let mut free = aliases.to_le_bytes().to_vec();
+    free.extend(words(&[129, 65536]));
     h.ioctl(space, 0xc0104103, &free, None);
 }

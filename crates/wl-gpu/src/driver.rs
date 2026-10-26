@@ -29,7 +29,10 @@ id!(MappingId);
 id!(ChannelId);
 /// Supported fixed-mapping granularity; not a complete Switch VA-region policy.
 pub const PAGE_SIZE: u64 = 4096;
-pub const MAX_OBJECTS: usize = 128;
+/// Defensive resident registry budget, not a Maxwell hardware limit.
+pub const MAX_OBJECTS: usize = 4096;
+/// Bound individual transactional work independently of resident capacity.
+pub const MAX_MAP_CHANGES: usize = 128;
 
 #[derive(Debug, Clone)]
 struct Backing {
@@ -126,7 +129,7 @@ impl MemoryManager {
         changes: &[MapChange],
     ) -> Result<()> {
         self.space(space)?;
-        if changes.len() > MAX_OBJECTS {
+        if changes.len() > MAX_MAP_CHANGES {
             return Err(invalid("mapping transaction capacity"));
         }
         if changes.is_empty() {

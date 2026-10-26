@@ -176,7 +176,7 @@ fn reservation_ownership_and_ordered_replacements_are_checked() {
     m.apply_map_changes(s, &[]).unwrap();
     assert_eq!(m.mapping_epoch(s).unwrap(), epoch);
     assert!(
-        m.apply_map_changes(s, &vec![change; MAX_OBJECTS + 1])
+        m.apply_map_changes(s, &vec![change; MAX_MAP_CHANGES + 1])
             .is_err()
     );
     assert_eq!(m.mapping_epoch(s).unwrap(), epoch);

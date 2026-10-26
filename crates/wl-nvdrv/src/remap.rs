@@ -37,7 +37,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<Vec<Entry>> {
     if bytes.is_empty() || bytes.len() % 20 != 0 {
         return Err(NvError::InvalidSize.into());
     }
-    if bytes.len() / 20 > wl_gpu::driver::MAX_OBJECTS {
+    if bytes.len() / 20 > wl_gpu::driver::MAX_MAP_CHANGES {
         return Err(NvError::ResourceError.into());
     }
     bytes
@@ -99,7 +99,7 @@ mod tests {
             b[at..at + 4].copy_from_slice(&value.to_le_bytes());
             assert!(decode(&b).is_err());
         }
-        assert!(decode(&wire().repeat(wl_gpu::driver::MAX_OBJECTS + 1)).is_err());
+        assert!(decode(&wire().repeat(wl_gpu::driver::MAX_MAP_CHANGES + 1)).is_err());
     }
     #[test]
     fn small_page_compression_fallback_is_an_explicit_kind_subset() {

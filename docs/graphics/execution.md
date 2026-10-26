@@ -1947,9 +1947,16 @@ Each complete mapping has its own identity, exact extent and canonical backing;
 mappings valid, advances the mapping epoch and keeps the reservation allocated.
 `FreeSpace` rejects while any child mapping remains. Overlap, crossing reservation
 boundaries, backing overflow and stale IDs fail without changing the epoch or
-existing mappings. There are at most 128 mappings per address space. This does
+existing mappings. There are at most 4096 mappings per address space. This does
 not implement fragmented gathers or real hardware page tables. Replacement and
 splitting use the distinct reservation-scoped Remap operation below.
+
+Resident backing/reservation registries are bounded to 4096 objects; the
+process-local nvmap registry permits 1024 live handles. These are implementation
+budgets, not hardware limits. Individual Remap transactions remain limited to
+128 entries, independently of resident capacity. Exhaustion preserves existing
+identities, mappings and guest bytes. Opt-in `WL_NVDRV_TRACE=1` reports GPU
+validation reasons before projecting them to the existing guest error code.
 
 ### Reserved virtual allocation remapping
 

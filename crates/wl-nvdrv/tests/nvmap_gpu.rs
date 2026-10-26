@@ -212,6 +212,75 @@ fn call(
 fn words(values: &[u32]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_le_bytes()).collect()
 }
+#[test]
+#[ignore = "initializes the GPU driver for bounded handle-registry validation"]
+fn live_allocation_capacity_rejects_without_replacing_existing_handles() {
+    let mut d = Driver::new().unwrap();
+    let mut m = Backing::default();
+    let fd = d.open("/dev/nvmap").unwrap();
+    let counters = d.graphics_counters();
+    let mut handles = Vec::new();
+    let mut created = [0; 8];
+    for _ in 0..1024 {
+        call(
+            &mut d,
+            &mut m,
+            fd,
+            0xc0080101,
+            &words(&[4096, 0]),
+            &mut created,
+        )
+        .unwrap();
+        handles.push(u32::from_le_bytes(created[4..].try_into().unwrap()));
+    }
+    created.fill(0xcc);
+    error(
+        call(
+            &mut d,
+            &mut m,
+            fd,
+            0xc0080101,
+            &words(&[4096, 0]),
+            &mut created,
+        ),
+        NvError::ResourceError,
+    );
+    assert_eq!(created, [0xcc; 8]);
+    call(
+        &mut d,
+        &mut m,
+        fd,
+        0xc0180105,
+        &words(&[handles[0], 0, 0, 0, 0, 0]),
+        &mut [0; 24],
+    )
+    .unwrap();
+    call(
+        &mut d,
+        &mut m,
+        fd,
+        0xc0080101,
+        &words(&[4096, 0]),
+        &mut created,
+    )
+    .unwrap();
+    assert!(u32::from_le_bytes(created[4..].try_into().unwrap()) > *handles.last().unwrap());
+    for handle in &handles[1..] {
+        call(
+            &mut d,
+            &mut m,
+            fd,
+            0xc008010e,
+            &words(&[0, *handle]),
+            &mut created,
+        )
+        .unwrap();
+        assert_eq!(&created[..4], &handle.to_le_bytes());
+    }
+    d.close(fd, &mut m).unwrap();
+    assert_eq!((m.pins, m.unpins), (0, 0));
+    assert_eq!(d.graphics_counters(), counters);
+}
 fn error(result: wl_nvdrv::Result<()>, expected: NvError) {
     assert!(matches!(result, Err(Error::Driver(e)) if e == expected));
 }

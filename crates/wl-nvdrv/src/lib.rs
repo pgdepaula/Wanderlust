@@ -33,7 +33,12 @@ impl From<NvError> for Error {
     }
 }
 fn checked<T>(r: wl_gpu::Result<T>) -> Result<T> {
-    r.map_err(|_| NvError::InvalidState.into())
+    r.map_err(|error| {
+        if std::env::var("WL_NVDRV_TRACE").as_deref() == Ok("1") {
+            eprintln!("NVIDIA GPU validation failed: {error}");
+        }
+        NvError::InvalidState.into()
+    })
 }
 fn fatal<T>(r: wl_gpu::Result<T>) -> Result<T> {
     r.map_err(|e| Error::Fatal(e.to_string()))
@@ -63,7 +68,7 @@ pub struct Ioctl<'a> {
     pub extra_output: &'a mut [u8],
 }
 const MAX_FILES: usize = 32;
-const MAX_ALLOCS: usize = 64;
+const MAX_ALLOCS: usize = 1024;
 #[derive(Debug)]
 struct Allocation<P> {
     handle: u32,
