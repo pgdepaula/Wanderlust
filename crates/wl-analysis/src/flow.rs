@@ -123,7 +123,9 @@ impl State {
         };
         if width == Width::W32 {
             self.narrow |= 1 << n;
-        } else if !matches!(value, Some(Val::Const(c)) if c >> 32 == 0) {
+        } else if !matches!(value, Some(Val::Const(c)) if c >> 32 == 0)
+            && !matches!(value, Some(Val::Bounded { max, full: true }) if max <= u64::from(u32::MAX))
+        {
             self.narrow &= !(1 << n);
         } else {
             self.narrow |= 1 << n;
@@ -359,6 +361,34 @@ fn transfer(image: &Image, state: &mut State, op: &Op) {
                 Some(Val::Const(mask(if invert { !imm } else { imm }, width)))
             };
             result = Some((dst, value, width));
+        }
+        Op::Bitfield {
+            width,
+            dst,
+            src,
+            kind: 2,
+            rotate,
+            wmask,
+            tmask,
+            ..
+        } => {
+            // UBFM zeroes everything outside the intersection of its masks;
+            // signed extraction and destination-preserving BFM do not.
+            let value = match state.get(src) {
+                Some(Val::Const(c)) => {
+                    let rotated = if width == Width::W32 {
+                        u64::from((c as u32).rotate_right(u32::from(rotate)))
+                    } else {
+                        c.rotate_right(u32::from(rotate))
+                    };
+                    Val::Const(mask(rotated & wmask & tmask, width))
+                }
+                _ => Val::Bounded {
+                    max: mask(wmask & tmask, width),
+                    full: true,
+                },
+            };
+            result = Some((dst, Some(value), width));
         }
         Op::Arithmetic {
             width,

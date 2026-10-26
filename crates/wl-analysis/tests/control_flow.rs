@@ -304,6 +304,38 @@ fn mask_retaining_unknown_upper_bits_cannot_promote_a_low_word_bound() {
 }
 
 #[test]
+fn unsigned_extraction_proves_zero_upper_bits_before_a_w_comparison() {
+    // GNU as 2.46.0.20260210: UBFX X8,X0,#56,#8; CMP W8,#3;
+    // B.HI default; MOV X8,X8, followed by the independent byte-table fixture.
+    let mut words = vec![0xd378fc08];
+    words.extend(MOVED_BOUND_SWITCH);
+    words[1] = 0x71000d1f;
+    words[3] = 0xaa0803e8;
+    let p = discover(&image(&words), GuestAddr(0x10000), &[]).unwrap();
+    assert_eq!(p.jump_tables.get(&GuestAddr(0x10020)), Some(&4));
+    assert_eq!(p.instruction_count, 19);
+    for target in [0x10024, 0x1002c, 0x10034, 0x1003c, 0x10044] {
+        assert!(starts(&p).contains(&target));
+    }
+    assert!(!starts(&p).contains(&0x1004c));
+}
+
+#[test]
+fn signed_inserted_or_wider_extraction_cannot_fabricate_narrow_index_bounds() {
+    for word in [0x9378fc08, 0xb3401c08, 0xd3409c08] {
+        // GNU as: SBFX X8,X0,#56,#8; BFI X8,X0,#0,#8;
+        // UBFX X8,X0,#0,#40. All can retain nonzero upper 32 bits.
+        let mut words = vec![word];
+        words.extend(MOVED_BOUND_SWITCH);
+        words[1] = 0x71000d1f;
+        words[3] = 0xaa0803e8;
+        let p = discover(&image(&words), GuestAddr(0x10000), &[]).unwrap();
+        assert!(p.jump_tables.is_empty(), "{word:#x}");
+        assert!(!starts(&p).contains(&0x10024));
+    }
+}
+
+#[test]
 fn wide_move_does_not_zero_unknown_upper_bits_after_a_narrow_compare() {
     let mut words = MOVED_BOUND_SWITCH;
     words[2] = 0xaa0003e8; // MOV X8,X0: the CMP W0 bounds only the low half.
