@@ -401,8 +401,10 @@ remain separate requirements.
 
 ## Canonical GPU backing lifetime guards
 
-`Memory::pin_gpu_range` registers up to64 nonoverlapping, page-aligned spans
-without copying their contents. Each must lie in one plain NORMAL readable and
+`Memory::pin_gpu_range` registers up to 1,024 nonoverlapping, page-aligned spans
+without copying their contents. This is a bounded runtime registration budget,
+not a hardware limit. GPU virtual-address aliases of one canonical allocation
+share its existing registration. Each must lie in one plain NORMAL readable and
 writable, nonexecutable region. Locked aliases, shared-memory copies, scattered
 regions and other states are unsupported. Globally unique checked opaque tokens
 prevent foreign-process or stale registrations from releasing a live span.
