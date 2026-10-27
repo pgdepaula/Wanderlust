@@ -396,6 +396,72 @@ fn negative_translation_and_input_protection() {
     assert!(!o.status.success());
     assert_eq!(fs::read(&input).unwrap(), raw(&[0xd65f03c0]));
 }
+
+#[test]
+fn advisory_low_word_candidates_never_truncate_a_native_x_index() {
+    let t = Temp::new();
+    let input = t.0.join("wide-index.a64");
+    // GNU as 2.46: CMP W0,#3; B.HI default; MOV X8,X0; ADR X9,table;
+    // ADR X10,case0; LDRH W11,[X9,X8,LSL #1]; ADD X10,X10,X11,LSL #2;
+    // BR X10. Four MOV/RET cases, default MOV/RET, halfword table 0,2,4,6.
+    let words = [
+        0x71000c1f, 0x540001e8, 0xaa0003e8, 0x100001e9, 0x1000008a, 0x7868792b, 0x8b0b094a,
+        0xd61f0140, 0x52800160, 0xd65f03c0, 0x528002c0, 0xd65f03c0, 0x52800420, 0xd65f03c0,
+        0x52800580, 0xd65f03c0, 0x52800c60, 0xd65f03c0, 0x00020000, 0x00060004,
+    ];
+    fs::write(&input, raw(&words)).unwrap();
+    let scan = cli()
+        .arg("dispatch-scan")
+        .arg(&input)
+        .arg("--raw")
+        .output()
+        .unwrap();
+    assert!(scan.status.success());
+    let report = state(&scan);
+    assert_eq!(report["complete_local_tables"], 0);
+    let candidates = report["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 4);
+    let roots = t.0.join("candidates.txt");
+    fs::write(
+        &roots,
+        candidates
+            .iter()
+            .map(|v| format!("{:#x}\n", v.as_u64().unwrap()))
+            .collect::<String>(),
+    )
+    .unwrap();
+    let exe =
+        t.0.join(format!("wide-index{}", std::env::consts::EXE_SUFFIX));
+    let compiled = cli()
+        .arg("recompile")
+        .arg(&input)
+        .args(["--raw", "--entry", "0x10000", "--roots-file"])
+        .arg(&roots)
+        .arg("--out")
+        .arg(&exe)
+        .output()
+        .unwrap();
+    assert!(compiled.status.success(), "{:?}", compiled);
+    for (index, expected) in [(0, 11), (1, 22), (2, 33), (3, 44), (4, 99)] {
+        let output = Command::new(&exe)
+            .args(["--reg", &format!("0={index}")])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        assert_eq!(state(&output)["x"][0], expected);
+    }
+    // Low W0 is a valid case, but X0's high word shifts the *real* load
+    // outside the image. Candidate discovery must never turn this into case2.
+    let fault = Command::new(&exe)
+        .args(["--reg", "0=4294967298"])
+        .output()
+        .unwrap();
+    assert!(!fault.status.success());
+    let message = String::from_utf8_lossy(&fault.stderr);
+    assert!(message.contains("memory"), "{message}");
+    assert!(message.contains("10014"), "{message}");
+    assert_eq!(fs::read(input).unwrap(), raw(&words));
+}
 #[test]
 fn compressed_nso_reconstructs_and_runs() {
     let t = Temp::new();
