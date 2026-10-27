@@ -29,8 +29,9 @@ pub(crate) fn native_adapter_source() -> &'static str {
 }
 
 /// Runtime sources compiled into the `wl_guest_runtime` rlib.
-pub const RUNTIME_SOURCES: [(&str, &str); 14] = [
+pub const RUNTIME_SOURCES: [(&str, &str); 15] = [
     ("lib.rs", include_str!("../../wl-runtime/src/lib.rs")),
+    ("audio.rs", include_str!("../../wl-runtime/src/audio.rs")),
     ("crypto.rs", include_str!("../../wl-runtime/src/crypto.rs")),
     (
         "display.rs",

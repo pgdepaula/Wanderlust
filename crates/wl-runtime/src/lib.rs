@@ -1,5 +1,6 @@
 //! Dependency-free guest runtime linked into AOT executables as an rlib.
 //! No guest address is converted into a host pointer; no unsafe code is used.
+pub mod audio;
 pub mod crypto;
 pub mod display;
 pub mod fp;
@@ -77,6 +78,9 @@ pub struct Memory {
     /// Disjoint regions sorted by base address (maintained by `map_state` and `split_at`).
     pub regions: Vec<Region>,
     gpu_pins: Vec<gpu_memory::PinRange>,
+    // Cache indices, never pointers or permissions. Every hit revalidates the
+    // current region, including after insertion, splitting, removal or remap.
+    region_cache: [std::sync::atomic::AtomicUsize; 2],
 }
 impl Memory {
     pub fn map(
@@ -179,11 +183,34 @@ impl Memory {
     /// Index of the region containing `address` (binary search over sorted regions).
     #[inline]
     pub fn region_index(&self, address: u64) -> Option<usize> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let contains = |i: usize| {
+            self.regions.get(i).is_some_and(|r| {
+                address
+                    .checked_sub(r.base)
+                    .is_some_and(|n| n < r.bytes.len() as u64)
+            })
+        };
+        let first = self.region_cache[0].load(Relaxed);
+        if contains(first) {
+            return Some(first);
+        }
+        let second = self.region_cache[1].load(Relaxed);
+        if second != first && contains(second) {
+            self.region_cache[0].store(second, Relaxed);
+            self.region_cache[1].store(first, Relaxed);
+            return Some(second);
+        }
         let i = self
             .regions
             .partition_point(|r| r.base <= address)
             .checked_sub(1)?;
-        (address < self.regions[i].end()).then_some(i)
+        if !contains(i) {
+            return None;
+        }
+        self.region_cache[1].store(first, Relaxed);
+        self.region_cache[0].store(i, Relaxed);
+        Some(i)
     }
     /// Slow path: an access spanning adjacent regions (as on hardware, where neighbouring
     /// pages with the same permission are contiguous) is split into per-region pieces

@@ -363,6 +363,8 @@ pub struct TransferMemory {
 
 #[derive(Debug)]
 pub struct Kernel {
+    /// Per-process audio service ownership; implementation is supplied by the launcher.
+    pub audio: Option<Box<dyn crate::audio::AudioHost>>,
     pub config: ProcessConfig,
     pub layout: Layout,
     pub code: Range,
@@ -520,6 +522,7 @@ impl Process {
             state::STACK,
         )?;
         let mut kernel = Kernel {
+            audio: crate::audio::create(),
             config,
             layout,
             code,
@@ -1255,8 +1258,8 @@ pub fn dispatch(c: &mut Cpu, m: &mut Process, id: u16) -> RuntimeResult<Option<S
             );
             return Err(format!(
                 "guest svcBreak: reason={reason:#x} arg={arg:#x} size={size:#x} val={val:#x} (desc={}, mod={}) bytes={:02x?}",
-                val & 0x1fff,
-                (val >> 9) & 0x1ff,
+                (val >> 9) & 0x1fff,
+                val & 0x1ff,
                 payload
             ));
         }

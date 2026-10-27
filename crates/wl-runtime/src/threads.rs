@@ -1183,6 +1183,12 @@ pub fn run_with_host(
             diagnostic_last = Some(elapsed);
         }
         expire(k, ticks(k.time_ns));
+        if let Err(error) = crate::audio::poll(&mut p.memory, k) {
+            return RunResult {
+                result: Err(error),
+                thread: k.current,
+            };
+        }
         rotate(k);
         if k.stats.slices % 16 == 0 {
             if let Some(vsync) = k.host.vi_vsync_event {
@@ -1220,6 +1226,7 @@ pub fn run_with_host(
                 .iter()
                 .filter(|th| th.state == ThreadState::Waiting)
                 .filter_map(|th| th.wait.as_ref().and_then(Wait::deadline))
+                .chain(crate::audio::next_deadline_tick(k))
                 .min();
             match next {
                 Some(deadline) if deadline < u64::MAX => {

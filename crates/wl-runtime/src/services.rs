@@ -84,6 +84,11 @@ pub enum HostObject {
     HidServer,
     HidAppletResource,
     ActiveVibrationDeviceList,
+    AudioRendererManager,
+    AudioRenderer {
+        index: usize,
+    },
+    AudioDevice,
 }
 
 /// The process serving a hosted object; domain object IDs are allocated per server.
@@ -101,6 +106,7 @@ pub enum Server {
     NvDrv,
     Vi,
     Hid,
+    Audio,
 }
 
 /// Size of `lm`'s pointer buffer (`lm_ipc_server.cpp`, `PointerBufferSize`).
@@ -115,6 +121,7 @@ pub const LOG_DESTINATION_TARGET_MANAGER: u32 = 1;
 /// State of the hosted services.
 #[derive(Clone, Debug, Default)]
 pub struct HostState {
+    pub audio_domain_ids: DomainIds,
     /// Destination set by ILogger::SetDestination; `None` before the first call.
     pub log_destination: Option<u32>,
     /// Immutable images installed before guest execution, never selected by a guest host path.
@@ -237,6 +244,7 @@ pub fn lookup(name: &[u8; 8]) -> Option<HostObject> {
         }
         b"vi:u\0\0\0\0" | b"vi:m\0\0\0\0" | b"vi:s\0\0\0\0" => Some(HostObject::ViUser),
         b"hid\0\0\0\0\0" | b"hid:sys\0" => Some(HostObject::HidServer),
+        b"audren:u" if crate::audio::available() => Some(HostObject::AudioRendererManager),
         _ => None,
     }
 }
@@ -282,11 +290,17 @@ impl HostObject {
             HostObject::HidServer => ("nn::hid::IHidServer", 0),
             HostObject::HidAppletResource => ("nn::hid::IAppletResource", 0),
             HostObject::ActiveVibrationDeviceList => ("nn::hid::IActiveVibrationDeviceList", 0),
+            HostObject::AudioRendererManager => ("audren:u IAudioRendererManager", 0),
+            HostObject::AudioRenderer { .. } => ("audren IAudioRenderer", 0),
+            HostObject::AudioDevice => ("audren IAudioDevice", 0),
         }
     }
     fn server(&self) -> Server {
         match self {
             HostObject::LogService | HostObject::Logger { .. } => Server::Lm,
+            HostObject::AudioRendererManager
+            | HostObject::AudioRenderer { .. }
+            | HostObject::AudioDevice => Server::Audio,
             HostObject::ApmManager | HostObject::ApmSession => Server::Ptm,
             HostObject::AocManager => Server::Ns,
             HostObject::EctxWriter | HostObject::EctxRegistrar => Server::Glue,
@@ -324,6 +338,7 @@ impl HostObject {
             | Server::NvDrv
             | Server::Vi
             | Server::Hid => Some(AM_POINTER_BUFFER_SIZE),
+            Server::Audio => Some(AM_POINTER_BUFFER_SIZE),
             Server::Ptm => None,
         }
     }
@@ -385,6 +400,7 @@ impl HostState {
             Server::NvDrv => &mut self.nvdrv_domain_ids,
             Server::Vi => &mut self.vi_domain_ids,
             Server::Hid => &mut self.hid_domain_ids,
+            Server::Audio => &mut self.audio_domain_ids,
         }
     }
     /// Registers `object` in domain `d` under a newly allocated ID of its server (`lm`
@@ -561,7 +577,11 @@ pub(crate) fn request(
                     (target, raw_start + 0x10..raw_start + 0x10 + size)
                 }
                 DOMAIN_CLOSE => {
+                    let object = k.host.domains[d].get(id);
                     k.host.remove(d, id);
+                    if let Some(object) = object {
+                        crate::audio::release_if_unreferenced(k, object);
+                    }
                     // No reply is written: the message buffer is returned as sent.
                     return Ok(Outcome::Reply(Vec::new()));
                 }
@@ -688,6 +708,20 @@ pub(crate) fn request(
         };
     }
     let done = match (target, command) {
+        (
+            HostObject::AudioRendererManager
+            | HostObject::AudioRenderer { .. }
+            | HostObject::AudioDevice,
+            _,
+        ) => {
+            let reply = crate::audio::request(memory, k, target, command, req, args)?;
+            Done {
+                code: reply.code,
+                data: reply.data,
+                objects: reply.objects,
+                copies: reply.copies,
+            }
+        }
         (HostObject::LogService, 0) => {
             // OpenLogger(ClientProcessId): the process ID is a u64 placeholder in the data,
             // replaced by the one the kernel wrote into the special header.
@@ -1530,7 +1564,10 @@ pub(crate) fn request(
             for o in done.objects {
                 match ipc::open_session(k, Endpoint::Host(o)) {
                     Ok(h) => handles.push(h),
-                    Err(e) => return Ok(Outcome::Reply(reply(interface_id, e, &[], &[], None))),
+                    Err(e) => {
+                        crate::audio::release_if_unreferenced(k, o);
+                        return Ok(Outcome::Reply(reply(interface_id, e, &[], &[], None)));
+                    }
                 }
             }
             reply_with_copies(

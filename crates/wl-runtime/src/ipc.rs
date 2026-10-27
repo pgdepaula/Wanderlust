@@ -143,6 +143,7 @@ pub fn close_handle(k: &mut Kernel, object: Object) {
                 if let Endpoint::Port(p) = session.endpoint {
                     k.ports[p].sessions = k.ports[p].sessions.saturating_sub(1);
                 }
+                crate::audio::release_session(k, s);
             }
         }
         Object::Port(p) => {
@@ -431,6 +432,7 @@ pub fn send_sync_request(
         }
         Reply::Close => {
             k.sessions[s].closed = true;
+            crate::audio::release_session(k, s);
             k.ipc.sessions_closed_by_server += 1;
             c.x[0] = u64::from(result::SESSION_CLOSED);
             Ok(None)

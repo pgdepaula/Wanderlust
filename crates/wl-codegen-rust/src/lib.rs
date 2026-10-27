@@ -1681,7 +1681,15 @@ fn emit_inner(
         out.push_str(build::native_adapter_source());
         out.push_str("\n}\n");
     }
-    writeln!(out, "fn main() {{ let m = match setup() {{ Ok(m) => m, Err(e) => {{ eprintln!(\"mapping: {{e}}\"); std::process::exit(2); }} }}; std::process::exit({launcher}); }}").unwrap();
+    let host_setup = if options.horizon.is_some() {
+        out.push_str("pub mod host_audio {\n");
+        out.push_str(include_str!("../../wl-runtime/hosted/audio.rs"));
+        out.push_str("\n}\n");
+        "if let Err(error) = host_audio::install() { eprintln!(\"audio host setup: {error}\"); std::process::exit(2); }"
+    } else {
+        ""
+    };
+    writeln!(out, "fn main() {{ let m = match setup() {{ Ok(m) => m, Err(e) => {{ eprintln!(\"mapping: {{e}}\"); std::process::exit(2); }} }}; {host_setup} std::process::exit({launcher}); }}").unwrap();
     Ok(Emitted {
         units,
         main: out,

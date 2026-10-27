@@ -56,6 +56,12 @@ In harness mode the only implemented SVC is 0x07, `ExitProcess` (`status=exit_pr
 
 ## Memory invariants
 
+Region lookup retains two recent region indices. Every hit checks the current
+region's bounds; permissions are checked by the access operation. The cache retains
+neither host pointers nor permission snapshots, so insertion, removal, splitting and
+backing replacement cannot authorize an access using stale metadata. Relaxed atomic
+indices permit concurrent read-only lookups without changing ownership of memory.
+
 `Memory` owns disjoint `Vec<u8>` regions; guest addresses are never host pointers. Mapping and access endpoints use checked addition; accesses validate the complete range and permissions before reading or writing little-endian bytes. SIMD&FP register and structure accesses use the same checked accessors (`load_vector`, `store_vector`), never host pointers. An access spanning adjacent regions succeeds only if every byte is mapped and grants it; it is checked completely before any byte moves. Each region carries a Horizon memory state and attribute; process mode splits regions at page boundaries when permissions or attributes change. Executable memory is immutable: self-modifying code and runtime code generation are unsupported. Exclusive and ordered accesses require natural alignment. No aliasing, shared memory, MMIO, guest exception delivery or multi-threaded memory ordering is implemented.
 
 ## Compatibility limits
@@ -81,3 +87,8 @@ source digest is checked again before linking. Successful CLI builds remove only
 unchanged staging units, retaining the keyed cached sources; failed builds preserve
 the staging files for diagnosis. This trades a bounded staging write and reread for
 lower compiler-parent memory use; it is not a zero-copy compilation path.
+
+Hosted [audio initialization](audio.md) uses a runtime callback contract with its
+concrete implementation included in launcher source. Core contract changes still
+invalidate all dependent native units; backend-only changes require a launcher
+rebuild and link while preserving compatible CPU-unit archives.
