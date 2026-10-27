@@ -96,10 +96,93 @@ impl GuestMemoryWrite for MemoryView<'_> {
         self.0.write_bytes(address.0, bytes).map_err(wl_gpu::Error)
     }
 }
+// Host staging budget, not a Tegra allocation-size limit. Ordinary single-region
+// pins retain the runtime's no-copy path, regardless of this consolidation budget.
+const MAX_HOST_GPU_JOIN_BYTES: u64 = 1024 * 1024 * 1024;
+pub(crate) fn pin_backing(
+    memory: &mut Memory,
+    base: GuestAddress,
+    size: u64,
+    join_budget: u64,
+) -> wl_gpu::Result<GpuPin> {
+    match memory.pin_gpu_range(base.0, size) {
+        Ok(pin) => return Ok(pin),
+        Err(error) if error == "GPU backing consolidation budget" => {}
+        Err(error) => return Err(wl_gpu::Error(error)),
+    }
+    // The runtime rejected only its copy budget, after checking the complete
+    // contiguous span, NORMAL RW attributes, address arithmetic and pin overlap.
+    // Exclusive &mut Memory prevents those facts from changing during staging.
+    if size > join_budget {
+        return Err(wl_gpu::Error(
+            "host GPU backing consolidation budget".into(),
+        ));
+    }
+    let length = usize::try_from(size)
+        .map_err(|_| wl_gpu::Error("GPU backing host-size overflow".into()))?;
+    let end = base
+        .0
+        .checked_add(size)
+        .ok_or_else(|| wl_gpu::Error("GPU backing address overflow".into()))?;
+    memory
+        .ensure_gpu_unpinned(base.0, size)
+        .map_err(wl_gpu::Error)?;
+    let first = memory
+        .region_index(base.0)
+        .ok_or_else(|| wl_gpu::Error("GPU backing start disappeared".into()))?;
+    let attributes = memory.regions[first].attribute;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(length)
+        .map_err(|_| wl_gpu::Error("host GPU backing consolidation allocation".into()))?;
+    for region in &memory.regions[first..] {
+        let low = base.0.max(region.base);
+        let high = end.min(region.end());
+        if low >= high {
+            break;
+        }
+        bytes.extend_from_slice(
+            &region.bytes[(low - region.base) as usize..(high - region.base) as usize],
+        );
+        if high == end {
+            break;
+        }
+    }
+    if bytes.len() != length {
+        return Err(wl_gpu::Error("GPU backing staging range changed".into()));
+    }
+    memory
+        .regions
+        .try_reserve(2)
+        .map_err(|_| wl_gpu::Error("GPU backing region metadata allocation".into()))?;
+    // No guest bytes, address ranges, permissions or canonical identity change.
+    // Only this unpinned range's owned storage representation is consolidated.
+    memory.split_at(base.0);
+    memory.split_at(end);
+    let first = memory
+        .region_index(base.0)
+        .ok_or_else(|| wl_gpu::Error("GPU backing start disappeared".into()))?;
+    let last = memory.regions.partition_point(|r| r.base < end);
+    memory.regions.splice(
+        first..last,
+        [wl_guest_runtime::Region {
+            base: base.0,
+            bytes,
+            read: true,
+            write: true,
+            execute: false,
+            state: wl_guest_runtime::horizon::state::NORMAL,
+            attribute: attributes,
+        }],
+    );
+    // The actual lifetime token still comes from the runtime; no token, mapping
+    // or host pointer is fabricated. A failed pin leaves equivalent guest bytes.
+    memory.pin_gpu_range(base.0, size).map_err(wl_gpu::Error)
+}
 impl driver::Memory for MemoryView<'_> {
     type Pin = GpuPin;
     fn pin(&mut self, base: GuestAddress, size: u64) -> wl_gpu::Result<GpuPin> {
-        self.0.pin_gpu_range(base.0, size).map_err(wl_gpu::Error)
+        pin_backing(self.0, base, size, MAX_HOST_GPU_JOIN_BYTES)
     }
     fn unpin(&mut self, pin: GpuPin) -> wl_gpu::Result<()> {
         self.0.release_gpu_pin(pin).map_err(wl_gpu::Error)
