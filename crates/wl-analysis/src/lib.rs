@@ -2,6 +2,7 @@
 //! Indirect control flow is resolved only where constant propagation proves the targets
 //! (jump tables, code pointers formed in code; see [`flow`]).
 pub mod flow;
+pub mod unwind;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use wl_aarch64::{Instruction, Op, decode};

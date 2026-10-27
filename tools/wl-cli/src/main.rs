@@ -19,6 +19,7 @@ USAGE:
   wanderlust link EXEFS [--link host|guest] [--base ADDRESS]
   wanderlust survey INPUT [--raw] [--base ADDRESS] [--examples N]
   wanderlust dispatch-scan INPUT [--raw] [--base ADDRESS] [--link host|guest]
+  wanderlust function-scan INPUT [--base ADDRESS] [--link host|guest]
   wanderlust analyze INPUT [--raw] [--base ADDRESS] [--entry ADDRESS] [--seed ADDRESS]...
                      [--link host|guest] [--no-pointer-seeds] [--allow-unsupported]
                      [--roots-file FILE] [--preserve-dispatch FILE] [--instruction-limit COUNT] [--summary]
@@ -34,6 +35,8 @@ every packaged NCA and compares it with its content ID.
 dispatch-scan inventories BR/BLR sites throughout executable mappings and reports bounded
 local-flow candidates and unresolved sites as JSON. Candidates remain speculative roots;
 the scan does not replace guest instructions or prove dynamically created pointers.
+function-scan reads supported MOD0 unwind indexes and checks indexed function locations
+against their FDEs and executable ranges. It does not execute guest exception unwinding.
 
 INPUT is an extracted, decrypted NSO0, raw little-endian A64 words (--raw), or an ExeFS
 directory holding NSO modules named rtld, main, subsdk0-9, sdk (optional .nso suffix).
@@ -120,12 +123,13 @@ fn utf8(value: &OsString) -> Result<&str> {
         .to_str()
         .ok_or_else(|| "option/address must be valid UTF-8".into())
 }
-const COMMANDS: [&str; 7] = [
+const COMMANDS: [&str; 8] = [
     "intake",
     "inspect",
     "link",
     "survey",
     "dispatch-scan",
+    "function-scan",
     "analyze",
     "recompile",
 ];
@@ -259,6 +263,7 @@ fn options(args: &[OsString]) -> Result<Options> {
         "link" => &["--link", "--base"],
         "survey" => &["--raw", "--base", "--link", "--examples"],
         "dispatch-scan" => &["--raw", "--base", "--link"],
+        "function-scan" => &["--base", "--link"],
         "analyze" => &[
             "--raw",
             "--base",
@@ -665,6 +670,82 @@ fn check_expected_code(program: &Program, targets: &[GuestAddr]) -> Result<()> {
     Ok(())
 }
 
+fn function_scan(o: &Options) -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct Source {
+        module: String,
+        index: Option<wl_analysis::unwind::FunctionIndex>,
+    }
+    fn index(
+        image: &Image,
+        module: &Module,
+        base: GuestAddr,
+    ) -> Result<Option<wl_analysis::unwind::FunctionIndex>> {
+        let Some(header) = &module.mod0 else {
+            return Ok(None);
+        };
+        let size = header
+            .unwind_end
+            .0
+            .checked_sub(header.unwind_start.0)
+            .ok_or("reversed MOD0 unwind bounds")?;
+        if size == 0 {
+            return Ok(None);
+        }
+        let address = base
+            .0
+            .checked_add(header.unwind_start.0)
+            .ok_or("MOD0 unwind address overflow")?;
+        wl_analysis::unwind::function_index(image, GuestAddr(address), size).map(Some)
+    }
+    let mut sources = Vec::new();
+    if o.input.is_dir() {
+        let modules = exefs_modules(&o.input)?;
+        let mode = o.link.unwrap_or(if modules[0].0 == "rtld" {
+            LinkMode::Guest
+        } else {
+            LinkMode::Host
+        });
+        let process = Process::build(
+            &modules,
+            o.base.unwrap_or(GuestAddr(DEFAULT_CODE_BASE)),
+            mode,
+        )?;
+        let image = Image::process(&process);
+        let mut total = 0usize;
+        for (name, module) in &modules {
+            let placed = process
+                .modules
+                .iter()
+                .find(|p| p.name == *name)
+                .ok_or("missing placed module")?;
+            let found = index(&image, module, placed.base)?;
+            total = total
+                .checked_add(found.as_ref().map_or(0, |i| i.functions.len()))
+                .filter(|n| *n <= wl_analysis::unwind::MAX_FUNCTIONS)
+                .ok_or("process unwind function budget exceeded")?;
+            sources.push(Source {
+                module: name.clone(),
+                index: found,
+            });
+        }
+    } else {
+        let module = Module::parse(&read_input(&o.input)?)?;
+        let base = o.base.unwrap_or(GuestAddr(RAW_BASE));
+        let image = Image::nso(&module, base)?;
+        sources.push(Source {
+            module: o
+                .input
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            index: index(&image, &module, base)?,
+        });
+    }
+    json(&sources)
+}
+
 fn run(args: &[OsString]) -> Result<()> {
     let o = options(args)?;
     if o.command == "intake" {
@@ -685,6 +766,9 @@ fn run(args: &[OsString]) -> Result<()> {
             return Err("inspect takes one NSO file; use link for a directory".into());
         }
         return inspect(&Module::parse(&read_input(&o.input)?)?, o.json);
+    }
+    if o.command == "function-scan" {
+        return function_scan(&o);
     }
     let nro = if directory {
         None
@@ -1064,6 +1148,21 @@ mod tests {
         ] {
             let mut args = vec!["dispatch-scan", "input"];
             args.extend(arguments);
+            assert!(parse(&args).is_err());
+        }
+    }
+    #[test]
+    fn function_scan_requires_metadata_input_and_rejects_execution_options() {
+        let parse = |args: &[&str]| options(&args.iter().map(OsString::from).collect::<Vec<_>>());
+        assert!(parse(&["function-scan", "input"]).is_ok());
+        assert!(parse(&["function-scan", "input", "--base", "0x8000000"]).is_ok());
+        for extra in [
+            vec!["--raw"],
+            vec!["--entry", "0x10000"],
+            vec!["--out", "unused"],
+        ] {
+            let mut args = vec!["function-scan", "input"];
+            args.extend(extra);
             assert!(parse(&args).is_err());
         }
     }
