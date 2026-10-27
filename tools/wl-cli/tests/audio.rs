@@ -39,6 +39,8 @@ fn libnx_audio_initialization_update_and_timed_events_execute_as_native_code() {
         String::from_utf8_lossy(&compiled.stderr)
     );
     let run = Command::new(exe)
+        .env("WL_NO_SDL", "1")
+        .env("WL_THREAD_TRACE", "1")
         .args(["--steps", "2000000"])
         .output()
         .unwrap();
@@ -49,6 +51,8 @@ fn libnx_audio_initialization_update_and_timed_events_execute_as_native_code() {
         String::from_utf8_lossy(&run.stderr)
     );
     let result: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(stderr.contains("[thread-state] id=114"));
     assert_eq!(result["status"], "exit_process");
     assert!(
         result["debug_output"]

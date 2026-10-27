@@ -56,6 +56,13 @@ without invalidating unchanged CPU units. This is a matched-toolchain Rust contr
 not a stable C ABI, dynamic-library interface or permission to mix incompatible Rust
 metadata. Runtime archive identity checks remain mandatory.
 
+For launcher diagnosis, `WL_THREAD_TRACE=1` prints saved thread IDs, priorities,
+states, PCs, pending SVCs and wait reasons to stderr at most once every five host
+seconds. Observation runs at the service-poll scheduler boundary and does not wake
+threads, change guest state or count instruction growth as main-thread progress.
+It is disabled by default. This avoids depending on private native memory offsets
+when investigating a process whose worker threads run while its main thread waits.
+
 ## Sources and executed validation
 
 Wire commands and structures follow [libnx audren.h](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/include/switch/services/audren.h),

@@ -283,9 +283,56 @@ impl Default for State {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Backend {
     state: State,
+    next_thread_trace: Option<std::time::Instant>,
+}
+impl Default for Backend {
+    fn default() -> Self {
+        Self {
+            state: State::default(),
+            next_thread_trace: (std::env::var_os("WL_THREAD_TRACE").as_deref()
+                == Some(std::ffi::OsStr::new("1")))
+            .then(std::time::Instant::now),
+        }
+    }
+}
+impl Backend {
+    /// Observe saved scheduler state at the callback boundary; never modify it.
+    fn trace_threads(&mut self, k: &Kernel) {
+        let Some(deadline) = self.next_thread_trace else {
+            return;
+        };
+        let now = std::time::Instant::now();
+        if now < deadline {
+            return;
+        }
+        self.next_thread_trace = now.checked_add(std::time::Duration::from_secs(5));
+        eprintln!(
+            "[thread-state] steps={} virtual_ns={} current={} threads={}",
+            k.total_steps,
+            k.time_ns,
+            k.current,
+            k.threads.len()
+        );
+        for thread in &k.threads {
+            let pc = thread.context.as_ref().map(|c| c.pc);
+            let steps = thread.context.as_ref().map(|c| c.steps);
+            eprintln!(
+                "[thread-state] id={} priority={} state={:?} pc={pc:?} steps={steps:?} svc={:?} wait={}",
+                thread.id,
+                thread.priority,
+                thread.state,
+                thread.pending_svc,
+                thread
+                    .wait
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_default()
+            );
+        }
+    }
 }
 #[derive(Default)]
 struct Shape {
@@ -538,6 +585,7 @@ impl AudioHost for Backend {
         Ok(reply)
     }
     fn poll(&mut self, _memory: &mut Memory, k: &mut Kernel) -> RuntimeResult<()> {
+        self.trace_threads(k);
         for renderer in self.state.renderers.values_mut() {
             if renderer.tick(k.time_ns) {
                 threads::signal_event(k, renderer.event);
