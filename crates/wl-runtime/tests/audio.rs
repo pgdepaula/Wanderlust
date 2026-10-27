@@ -210,7 +210,7 @@ fn silent_update_has_independently_specified_status_bytes() {
 }
 #[test]
 fn elapsed_render_info_begins_at_revision_five() {
-    for revision in [1, 4, 5, 8] {
+    for revision in [1, 4, 5, 8, 11] {
         let params = audio::Parameters::parse(&parameters(revision)).unwrap();
         let mut r = audio::Renderer::new(params, 0);
         r.elapsed_frames = 123;
@@ -228,6 +228,47 @@ fn elapsed_render_info_begins_at_revision_five() {
         assert_eq!(
             u32::from_le_bytes(output[40..44].try_into().unwrap()),
             if revision >= 5 { 16 } else { 0 }
+        );
+    }
+}
+#[test]
+fn disabled_effect_results_use_wire_state_four_in_both_revision_layouts() {
+    for (revision, result_bytes) in [(8, 16), (11, 144)] {
+        let mut params = parameters(revision);
+        params[24..28].copy_from_slice(&1u32.to_le_bytes());
+        let r = audio::Renderer::new(audio::Parameters::parse(&params).unwrap(), 0);
+        // Literal ABI sizes: behavior, five pools, one voice, one effect,
+        // final mix, sink, performance; channel resources are empty.
+        let sizes = [16u32, 160, 368, 0, 192, 2352, 320, 16, 0, 0];
+        let mut input = vec![0; 64 + sizes.iter().sum::<u32>() as usize];
+        let magic = 0x00564552 | (u32::from(b'0' + revision) << 24);
+        input[..4].copy_from_slice(&magic.to_le_bytes());
+        for (i, size) in sizes.iter().enumerate() {
+            input[4 + 4 * i..8 + 4 * i].copy_from_slice(&size.to_le_bytes());
+        }
+        let total = input.len() as u32;
+        input[60..64].copy_from_slice(&total.to_le_bytes());
+        input[64..68].copy_from_slice(&magic.to_le_bytes());
+        let output = r.update(&input, &Memory::default()).unwrap();
+        assert_eq!(
+            u32::from_le_bytes(output[20..24].try_into().unwrap()),
+            result_bytes as u32
+        );
+        let effect_out = 64 + 80 + 16;
+        // EffectState::Disabled = 4 on the wire. UsageState::Disabled = 3
+        // belongs to the server's separate internal state machine.
+        assert_eq!(output[effect_out], 4);
+        assert!(
+            output[effect_out + 1..effect_out + result_bytes]
+                .iter()
+                .all(|v| *v == 0)
+        );
+        let effect_in = 64 + 16 + 160 + 368;
+        input[effect_in + 2] = 1;
+        assert!(
+            r.update(&input, &Memory::default())
+                .unwrap_err()
+                .contains("DSP effect")
         );
     }
 }

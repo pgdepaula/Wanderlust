@@ -27,6 +27,8 @@ Silent updates validate section totals, memory-pool ranges, voice/sink/mix recor
 and output ranges before publication. AutoSelect B/C descriptors retain their slot
 indices, including empty slots. Status and performance outputs must not overlap.
 Pool attach/detach statuses are returned; voice results contain no consumed samples.
+Inactive effect slots return wire `EffectState::Disabled` (4); this is distinct
+from the server's internal usage-state enum. Enabled DSP effects are rejected.
 Elapsed-render information is emitted from REV5, and larger effect results from
 REV9. Parameter revisions REV1–REV15 are recognized subject to the supported
 geometry and silent-update restrictions; this is not full compatibility with each
@@ -72,6 +74,11 @@ and [auddev.c](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46a
 Ryujinx revision `4930dced25c0d9ec33096b0f2601d262daa477bf`,
 `AudioRenderSystem.SendCommands` and `BehaviourContext` (MIT). The implementation
 is independently written Rust, not imported emulator source.
+
+Effect response values were checked against
+[`EffectState`](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Parameter/EffectState.cs)
+and [`IEffectOutStatus`](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Parameter/IEffectOutStatus.cs)
+at the same revision.
 
 Runtime tests exercise real service discovery and CMIF dispatch, copied transfer
 memory and event handles, timed signaling, close/clone lifetime, malformed requests,
