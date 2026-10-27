@@ -460,7 +460,7 @@ impl Service {
                     cursor: 0,
                 }),
                 51 | 53 => {
-                    if args.len() < 72 || args[41] != 0 || !matches!(args[0], 1 | 4) {
+                    if args.len() < 72 || args[41] != 0 || !matches!(args[0], 1 | 3 | 4) {
                         return Err(format!(
                             "unsupported save mount attribute: command={command} bytes={} space={:?} type={:?} rank={:?}",
                             args.len(),
@@ -469,6 +469,13 @@ impl Service {
                             args.get(41)
                         ));
                     }
+                    let temporary = args[0] == 3 && args[40] == 4;
+                    if (args[0] == 3) != temporary {
+                        return Err("temporary save space/type mismatch".into());
+                    }
+                    if args[0] == 4 {
+                        return Ok(Reply::failure((1002 << 9) | 2));
+                    } // No SD-backed store is configured.
                     let application = u64_at(args, 8)?;
                     let current = application == 0 || application == kernel.config.program_id;
                     let volume = if args[40] == 5 {
@@ -479,20 +486,21 @@ impl Service {
                             return Err("unsupported cache UID/system ID".into());
                         }
                         u32::from(u16::from_le_bytes(args[42..44].try_into().unwrap()))
-                    } else if matches!(args[40], 1 | 3) {
+                    } else if matches!(args[40], 1 | 3) || temporary {
                         if !current {
                             return Ok(Reply::failure((1002 << 9) | 2));
                         }
                         if args[32..40].iter().any(|b| *b != 0) || args[42..44] != [0, 0] {
                             return Err("unsupported application save ID/index".into());
                         }
-                        if args[40] == 3 && args[16..32].iter().any(|b| *b != 0) {
+                        if (args[40] == 3 || temporary) && args[16..32].iter().any(|b| *b != 0) {
                             return Err("device save has a user ID".into());
                         }
-                        let key = args[16..44].to_vec();
+                        let mut key = vec![args[0]];
+                        key.extend_from_slice(&args[16..44]);
                         if let Some(id) = self.saves.get(&key) {
                             *id
-                        } else if command == 51 && self.volatile_saves {
+                        } else if command == 51 && (self.volatile_saves || temporary) {
                             if self.saves.len() >= 4 {
                                 return Err("volatile save-volume budget".into());
                             }

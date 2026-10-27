@@ -18,6 +18,17 @@ int main(void) {
         for(unsigned i=0;i<sizeof entries;i++)if(((const u8*)entries)[i]!=0x55)check(1);
         serviceClose(&reader);
     }
+    FsSaveDataAttribute temporary_attr={0};temporary_attr.save_data_type=FsSaveDataType_Temporary;
+    FsFileSystem temporary={0},temporary_alias={0};FsFile temp_file={0};
+    check(fsOpenSaveDataFileSystem(&temporary,FsSaveDataSpaceId_Temporary,&temporary_attr));
+    check(fsFsCreateFile(&temporary,"/temp",4,0));
+    check(fsFsOpenFile(&temporary,"/temp",FsOpenMode_Write,&temp_file));
+    u8 temp_bytes[4]={9,3,7,1};check(fsFileWrite(&temp_file,0,temp_bytes,4,FsWriteOption_Flush));fsFileClose(&temp_file);
+    check(fsOpenReadOnlySaveDataFileSystem(&temporary_alias,FsSaveDataSpaceId_Temporary,&temporary_attr));
+    check(fsFsOpenFile(&temporary_alias,"/temp",FsOpenMode_Read,&temp_file));
+    u8 temp_out[4]={0};u64 temp_read=0;check(fsFileRead(&temp_file,0,temp_out,4,0,&temp_read));
+    if(temp_read!=4||memcmp(temp_out,temp_bytes,4))check(1);fsFileClose(&temp_file);
+    fsFsClose(&temporary_alias);fsFsClose(&temporary);
     FsFileSystem save={0};FsSaveDataAttribute attr={0};attr.save_data_type=FsSaveDataType_Account;attr.uid.uid[0]=1;
     check(fsOpenSaveDataFileSystem(&save,FsSaveDataSpaceId_User,&attr));
     FsFile file={0};FsDir directory={0};FsDirEntryType type;

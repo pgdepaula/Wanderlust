@@ -289,3 +289,21 @@ rejected. The native libnx fixture selects HOS 16 wire wrappers explicitly and
 checks writable/read-only mount aliases, cross-title absence, file/directory
 rename, cleaning and deletion. Additional model tests verify user/type isolation,
 process-lifetime isolation and failed rename atomicity.
+
+### Temporary save storage
+
+The original-format `OpenSaveDataFileSystem` request can select temporary storage:
+space ID **3**, save type **4**, primary rank, zero UID/system ID and zero index.
+This is distinct from user-space account/device saves and from cache type 5.
+Writable opens create a bounded per-process temporary RAM volume lazily; read-only
+opens require an existing volume. It uses the same checked file, directory,
+permission and quota implementation. Temporary data does not enable the optional
+volatile account/device-save policy and is not included in cache-save enumeration.
+
+Storage space participates in identity. No SD-backed store is configured, so SD
+user-space mounts return `TargetNotFound` instead of aliasing internal storage.
+The enum values and mount layout follow pinned libnx `fs.h`/`fs.c` above. Tests
+cover the literal `(space=3,type=4)` request without the optional save policy,
+read-only reuse, absent-volume results, invalid space/type pairing, process
+isolation and separation from account/device/cache storage. The recompiled
+AArch64 client writes and reads independent bytes through temporary mount aliases.

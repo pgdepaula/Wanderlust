@@ -1327,3 +1327,78 @@ fn volatile_save_mounts_share_only_the_exact_application_user_and_type() {
         1u32.to_le_bytes()
     );
 }
+
+#[test]
+fn temporary_save_uses_space_three_type_four_without_enabling_durable_save_policy() {
+    use wl_runtime::{ipc::Request, services::HostObject};
+    let (mut p, _) = process();
+    let k = p.kernel.as_ref().unwrap();
+    let mut fs = host_fs::Service::default();
+    let plain = Request::default();
+    let mut attr = [0; 72];
+    attr[0] = 3;
+    attr[40] = 4;
+    let obj = |reply: wl_runtime::audio::Reply| match reply.objects[0] {
+        HostObject::AudioRenderer { index } => index,
+        _ => panic!(),
+    };
+    assert_eq!(
+        fs.request(&mut p.memory, k, host_fs::MANAGER, 53, &plain, &attr)
+            .unwrap()
+            .code,
+        0x7d402
+    );
+    let temp = obj(fs
+        .request(&mut p.memory, k, host_fs::MANAGER, 51, &plain, &attr)
+        .unwrap());
+    p.memory.write_bytes(DATA + 0x9000, b"/test\0").unwrap();
+    let mut path = Request::default();
+    path.statics.push((DATA + 0x9000, 0x301));
+    let mut size = [0; 16];
+    size[8..16].copy_from_slice(&4u64.to_le_bytes());
+    fs.request(&mut p.memory, k, temp, 0, &path, &size).unwrap();
+    let alias = obj(fs
+        .request(&mut p.memory, k, host_fs::MANAGER, 53, &plain, &attr)
+        .unwrap());
+    assert_eq!(
+        fs.request(&mut p.memory, k, alias, 7, &path, &[])
+            .unwrap()
+            .data,
+        1u32.to_le_bytes()
+    );
+    assert!(
+        fs.request(&mut p.memory, k, alias, 0, &path, &size)
+            .is_err()
+    );
+    let mut fresh = host_fs::Service::default();
+    assert_eq!(
+        fresh
+            .request(&mut p.memory, k, host_fs::MANAGER, 53, &plain, &attr)
+            .unwrap()
+            .code,
+        0x7d402
+    );
+    attr[0] = 1;
+    assert!(
+        fs.request(&mut p.memory, k, host_fs::MANAGER, 51, &plain, &attr)
+            .is_err()
+    );
+    attr[40] = 1;
+    attr[16] = 1;
+    assert_eq!(
+        fs.request(&mut p.memory, k, host_fs::MANAGER, 51, &plain, &attr)
+            .unwrap()
+            .code,
+        0x7d402
+    );
+    // SD is a different storage medium, never an alias of an internal volume.
+    attr[0] = 4;
+    attr[40] = 5;
+    attr[16] = 0;
+    assert_eq!(
+        fs.request(&mut p.memory, k, host_fs::MANAGER, 51, &plain, &attr)
+            .unwrap()
+            .code,
+        0x7d402
+    );
+}
