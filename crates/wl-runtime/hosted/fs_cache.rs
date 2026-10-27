@@ -9,10 +9,20 @@ use wl_guest_runtime::{
 };
 pub const MANAGER: usize = 1 << 29;
 const READER: usize = MANAGER + 1;
+const EMPTY_FILESYSTEM: usize = MANAGER + 2;
 pub fn owns(index: usize) -> bool {
-    matches!(index, MANAGER | READER)
+    matches!(index, MANAGER | READER | EMPTY_FILESYSTEM)
 }
-pub fn request(memory: &Memory, index: usize, command: u32, req: &Request) -> RuntimeResult<Reply> {
+pub fn request(
+    memory: &Memory,
+    index: usize,
+    command: u32,
+    req: &Request,
+    args: &[u8],
+) -> RuntimeResult<Reply> {
+    if index == EMPTY_FILESYSTEM {
+        return empty_open(memory, command, req, args);
+    }
     if req.pid.is_some()
         || req.copy_handles != 0
         || req.move_handles != 0
@@ -40,6 +50,52 @@ pub fn request(memory: &Memory, index: usize, command: u32, req: &Request) -> Ru
         _ => Err(format!("unsupported cache-save reader command {command}")),
     }
 }
+// Existing FileSystem objects represent unconfigured save/SD stores, never the
+// mounted RomFS (which has its own RomFsStorage object). Missing paths must return
+// the FS error, not successful replies with null IFile/IDirectory objects.
+fn empty_open(memory: &Memory, command: u32, req: &Request, args: &[u8]) -> RuntimeResult<Reply> {
+    if !matches!(command, 7..=9)
+        || req.pid.is_some()
+        || req.copy_handles != 0
+        || req.move_handles != 0
+        || req.exchanges != 0
+        || req.statics.len() != 1
+        || !req.sends.is_empty()
+        || !req.recvs.is_empty()
+        || req.recv_static_mode != 0
+    {
+        return Err("unsupported unconfigured filesystem request".into());
+    }
+    if command != 7 {
+        let mode = u32_at(args, 0).ok_or("truncated filesystem open mode")?;
+        let allowed = if command == 8 { 7 } else { 0x80000003 };
+        if mode == 0 || mode & !allowed != 0 {
+            return Err("invalid filesystem open mode".into());
+        }
+    }
+    let (address, size) = req.statics[0];
+    if size == 0 || size > 0x301 {
+        return Err("invalid filesystem path buffer size".into());
+    }
+    let mut bytes = vec![0; size as usize];
+    memory.read_into(address, &mut bytes)?;
+    let end = bytes
+        .iter()
+        .position(|b| *b == 0)
+        .ok_or("unterminated filesystem path")?;
+    if end == 0 || bytes[0] != b'/' {
+        return Err("filesystem path is not absolute".into());
+    }
+    if std::env::var_os("WL_FS_TRACE").is_some() {
+        eprintln!(
+            "[fs] unconfigured store cmd={command} path={}",
+            String::from_utf8_lossy(&bytes[..end])
+        );
+    }
+    // libnx/Ryujinx ResultFs.PathNotFound: module 2, description 1.
+    Ok(Reply::failure((1 << 9) | 2))
+}
+
 enum Location {
     Session(usize, Endpoint),
     Domain(usize, usize, HostObject),
@@ -68,6 +124,7 @@ pub fn bind(cpu: &Cpu, process: &mut Process, svc: u16) -> Option<Binding> {
     if !matches!(
         s.endpoint,
         Endpoint::Host(HostObject::FileSystemProxy)
+            | Endpoint::Host(HostObject::FileSystem)
             | Endpoint::Host(HostObject::AudioRenderer { index: READER })
     ) {
         return None;
@@ -122,7 +179,13 @@ pub fn bind(cpu: &Cpu, process: &mut Process, svc: u16) -> Option<Binding> {
         && cmif + 16 <= end
         && u32_at(&b, cmif)? == u32::from_le_bytes(*b"SFCI")
         && u32_at(&b, cmif + 8)? == 62;
-    if !reader && !opening {
+    let filesystem = !control
+        && !closing
+        && target == HostObject::FileSystem
+        && cmif + 16 <= end
+        && u32_at(&b, cmif)? == u32::from_le_bytes(*b"SFCI")
+        && matches!(u32_at(&b, cmif + 8)?, 7..=9);
+    if !reader && !opening && !filesystem {
         return None;
     }
     let k = process.kernel.as_mut()?;
@@ -130,8 +193,14 @@ pub fn bind(cpu: &Cpu, process: &mut Process, svc: u16) -> Option<Binding> {
     // to FS. Scope the existing ID allocator to FS for creation and domain close,
     // preventing collisions and avoiding a second domain/handle implementation.
     std::mem::swap(&mut k.host.fs_domain_ids, &mut k.host.audio_domain_ids);
-    let location = if opening {
-        let target = HostObject::AudioRenderer { index: MANAGER };
+    let location = if opening || filesystem {
+        let target = HostObject::AudioRenderer {
+            index: if filesystem {
+                EMPTY_FILESYSTEM
+            } else {
+                MANAGER
+            },
+        };
         match location {
             Location::Session(s, _) => k.sessions[s].endpoint = Endpoint::Host(target),
             Location::Domain(d, i, _) => k.host.domains[d].objects[i].1 = target,

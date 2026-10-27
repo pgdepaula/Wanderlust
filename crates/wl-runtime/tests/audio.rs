@@ -991,3 +991,60 @@ fn cache_reader_domain_objects_use_fs_ids_without_colliding_with_audio_ids() {
     assert_eq!(reply(&p, 0x28), 0);
     assert_eq!(reply(&p, 0x30), 2); // Audio's independent allocator was not changed.
 }
+
+#[test]
+fn unconfigured_save_open_returns_path_not_found_without_a_null_success_object() {
+    for domain in [false, true] {
+        let (mut p, mut c) = process();
+        let fs = named_manager(&mut p, &mut c, b"fsp-srv\0");
+        let root = if domain {
+            wire(&mut p, 0, false, &[], &[]);
+            let address = tls(&p);
+            p.store(address, 4, 5).unwrap();
+            call(&mut p, &mut c, fs);
+            Some(reply(&p, 0x20))
+        } else {
+            None
+        };
+        fs_reader_wire(&mut p, root, 51, false);
+        svc(&mut p, &mut c, 0x21, &[u64::from(fs)]);
+        let child = reply(&p, if domain { 0x30 } else { 12 });
+        let handle = if domain { fs } else { child };
+        for command in 7u32..=9 {
+            let mut b = [0u8; 256];
+            b[..4].copy_from_slice(&(4u32 | (1 << 16)).to_le_bytes());
+            b[8..12].copy_from_slice(&(0x301u32 << 16).to_le_bytes());
+            b[12..16].copy_from_slice(&((DATA + 0x9000) as u32).to_le_bytes());
+            let cmif = if domain { 32 } else { 16 };
+            if domain {
+                b[16] = 1;
+                b[18..20].copy_from_slice(&20u16.to_le_bytes());
+                b[20..24].copy_from_slice(&child.to_le_bytes());
+            }
+            b[4..8].copy_from_slice(&(((cmif + 20 - 16) / 4) as u32).to_le_bytes());
+            b[cmif..cmif + 4].copy_from_slice(b"SFCI");
+            b[cmif + 8..cmif + 12].copy_from_slice(&command.to_le_bytes());
+            b[cmif + 16..cmif + 20].copy_from_slice(&1u32.to_le_bytes());
+            p.write_bytes(DATA + 0x9000, b"/missing.dat\0").unwrap();
+            let address = tls(&p);
+            p.write_bytes(address, &b).unwrap();
+            svc(&mut p, &mut c, 0x21, &[u64::from(handle)]);
+            assert_eq!(c.x[0], 0);
+            assert_eq!(reply(&p, if domain { 0x28 } else { 0x18 }), 0x202);
+            assert_eq!(reply(&p, 4) >> 31, 0); // No moved fake object/handle.
+            p.write_bytes(DATA + 0x9000, &[b'x'; 0x301]).unwrap();
+            p.write_bytes(address, &b).unwrap();
+            c.x[0] = u64::from(handle);
+            assert!(
+                audio::service_hook(&mut c, &mut p, 0x21)
+                    .unwrap_err()
+                    .contains("unterminated")
+            );
+            // Failure restores the original filesystem target too.
+            p.write_bytes(DATA + 0x9000, b"/missing.dat\0").unwrap();
+            p.write_bytes(address, &b).unwrap();
+            svc(&mut p, &mut c, 0x21, &[u64::from(handle)]);
+            assert_eq!(reply(&p, if domain { 0x28 } else { 0x18 }), 0x202);
+        }
+    }
+}

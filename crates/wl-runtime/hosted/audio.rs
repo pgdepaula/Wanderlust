@@ -450,7 +450,7 @@ impl AudioHost for Backend {
         if let HostObject::AudioRenderer { index } = target
             && crate::host_fs::owns(index)
         {
-            return crate::host_fs::request(memory, index, command, req);
+            return crate::host_fs::request(memory, index, command, req, args);
         }
         if let HostObject::AudioRenderer { index } = target
             && index >= crate::host_opus::MANAGER

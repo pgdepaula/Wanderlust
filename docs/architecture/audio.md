@@ -212,3 +212,16 @@ unchanged output, FS/audio domain-ID separation, failed opening and close/reuse.
 The explicit `wl-cli --test fs_cache -- --ignored` run builds the synthetic
 [`fs_cache.c`](../../tests/horizon/fs_cache.c) client, recompiles its AArch64 code
 and exercises two domain reader lifetimes. It requires devkitA64/libnx.
+
+For the existing unconfigured save/SD `IFileSystem` objects, the hosted extension
+also handles `GetEntryType` (7), `OpenFile` (8) and `OpenDirectory` (9). These empty
+stores return FS `PathNotFound` (`0x202`) after checking the bounded absolute,
+NUL-terminated pointer-buffer path and open flags. They never return success
+without the required file/directory object. The mounted RomFS uses a distinct
+`RomFsStorage` object and retains its real image-backed reads. This is not a
+persistent save implementation; create/write operations are not added here.
+
+Path/open wire layouts follow the same pinned libnx `fs.c`; the result encoding
+is documented in [Switchbrew's error table](https://switchbrew.org/wiki/Error_codes).
+Tests exercise both moved sessions and domain children, restoration after invalid
+paths, and an actual recompiled libnx client making all three missing-path calls.

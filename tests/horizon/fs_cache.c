@@ -17,5 +17,12 @@ int main(void) {
         for(unsigned i=0;i<sizeof entries;i++)if(((const u8*)entries)[i]!=0x55)check(1);
         serviceClose(&reader);
     }
+    FsFileSystem save={0};FsSaveDataAttribute attr={0};
+    check(fsOpenSaveDataFileSystem(&save,FsSaveDataSpaceId_User,&attr));
+    FsFile file={0};FsDir directory={0};FsDirEntryType type;
+    if(fsFsOpenFile(&save,"/missing.dat",FsOpenMode_Read,&file)!=0x202)check(1);
+    if(fsFsGetEntryType(&save,"/missing.dat",&type)!=0x202)check(1);
+    if(fsFsOpenDirectory(&save,"/missing",FsDirOpenMode_ReadDirs,&directory)!=0x202)check(1);
+    fsFsClose(&save);
     fsExit();smExit();svcOutputDebugString("FSCACHE_NATIVE_OK",17);svcExitProcess();
 }
