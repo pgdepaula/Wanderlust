@@ -461,7 +461,13 @@ impl Service {
                 }),
                 51 | 53 => {
                     if args.len() < 72 || args[41] != 0 || !matches!(args[0], 1 | 4) {
-                        return Err("unsupported save mount attribute".into());
+                        return Err(format!(
+                            "unsupported save mount attribute: command={command} bytes={} space={:?} type={:?} rank={:?}",
+                            args.len(),
+                            args.first(),
+                            args.get(40),
+                            args.get(41)
+                        ));
                     }
                     let application = u64_at(args, 8)?;
                     let current = application == 0 || application == kernel.config.program_id;
