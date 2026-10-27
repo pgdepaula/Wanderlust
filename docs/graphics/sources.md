@@ -2229,3 +2229,9 @@ The page-size restriction, numerical kind identities and fallback relationships
 are semantic facts; implementation code is not copied. This is not a decoder
 for already-compressed guest memory or permission to accept unsupported B197
 attachment formats or sample counts.
+
+### Native-port reference boundaries
+
+[MacNativeGames at 66b89f3](https://github.com/ly05010419/MacNativeGames/tree/66b89f3a7338e165d145ff8f33e2690ff758fe7d) executes ARM64 on Apple ARM and implements NVN over Metal. Its runtime and NVN source are MIT-licensed, with separately licensed dependencies. Its CPU execution path cannot run unchanged on x86-64.
+
+[UltraTears at 1970c7a](https://github.com/kuraeow/ultratears/tree/1970c7ad35b3f239aa6e99ab8b4d6663c55860f3) translates ARM64 into C for x86-64 and replaces NVN with a Vulkan implementation. Its `tools/lifter/gen.py` uses unwind/symbol/relocation roots, bounded jump-table emulation and advisory table scanning; its loader installs host implementations by symbol. This differs from executing the original NVN implementation through GPFIFO/B197. The Vulkan backend requires host-memory import and shader-object capabilities, and uses direct guest addresses; it is not a drop-in wgpu backend. The root license is GPL-3.0-or-later. Explicitly attributed LASRecomp lifter/runtime portions and MacNativeGames NVN/shader-translator portions have MIT notices, while other files retain their stated licenses. No source implementation from these references is incorporated here. Portability and provenance must be assessed per component rather than inferred from the repository license or gameplay claims.

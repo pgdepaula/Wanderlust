@@ -111,3 +111,60 @@ fn zero_product_underflow_does_not_turn_into_a_valid_case_zero() {
     assert!(program.jump_tables.is_empty());
     assert!(!program.blocks.iter().any(|b| b.start.0 == 0x10024));
 }
+
+// GNU as 2.46: CMP W0,#3; B.HI default; MOV X8,X0; ADR X9,table;
+// ADR X10,case0; LDRH W11,[X9,X8,LSL #1]; ADD X10,X10,X11,LSL #2;
+// BR X10. The comparison deliberately leaves X0's upper word unknown.
+const LOW_WORD_SLICE: [u32; 20] = [
+    0x71000c1f, 0x540001e8, 0xaa0003e8, 0x100001e9, 0x1000008a, 0x7868792b, 0x8b0b094a, 0xd61f0140,
+    0x52800160, 0xd65f03c0, 0x528002c0, 0xd65f03c0, 0x52800420, 0xd65f03c0, 0x52800580, 0xd65f03c0,
+    0x52800c60, 0xd65f03c0, 0x00020000, 0x00060004,
+];
+
+#[test]
+fn advisory_scan_enumerates_low_word_slice_without_proving_a_full_index_bound() {
+    let bytes: Vec<_> = LOW_WORD_SLICE
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect();
+    let image = Image::raw(bytes.clone(), GuestAddr(0x10000)).unwrap();
+    let strict = discover(&image, GuestAddr(0x10000), &[]).unwrap();
+    assert!(strict.jump_tables.is_empty());
+    assert!(!strict.blocks.iter().any(|b| b.start.0 == 0x10020));
+    let scan = wl_analysis::flow::scan_indirect_candidates(&image).unwrap();
+    for pc in [0x10020, 0x10028, 0x10030, 0x10038] {
+        assert!(scan.candidates.contains(&GuestAddr(pc)));
+    }
+    assert_eq!(scan.complete_local_tables, 0);
+    assert_eq!(scan.unresolved_sites, [GuestAddr(0x1001c)]);
+    assert_eq!(image.mappings[0].bytes, bytes);
+}
+
+#[test]
+fn advisory_slice_still_requires_a_bound_and_mapped_table_entries() {
+    for replacement in [0xd503201f, 0x7100001f] {
+        let mut words = LOW_WORD_SLICE;
+        words[0] = replacement; // NOP (unbounded), or CMP W0,#0 (one candidate).
+        let image = Image::raw(
+            words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+            GuestAddr(0x10000),
+        )
+        .unwrap();
+        let scan = wl_analysis::flow::scan_indirect_candidates(&image).unwrap();
+        assert_eq!(
+            scan.candidates.len(),
+            usize::from(replacement != 0xd503201f)
+        );
+        assert_eq!(scan.complete_local_tables, 0);
+    }
+    let mut words = LOW_WORD_SLICE;
+    words[18] = 0xffff0000; // First case valid; second points outside the mapping.
+    let image = Image::raw(
+        words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        GuestAddr(0x10000),
+    )
+    .unwrap();
+    let scan = wl_analysis::flow::scan_indirect_candidates(&image).unwrap();
+    assert_eq!(scan.candidates.len(), 3);
+    assert_eq!(scan.complete_local_tables, 0);
+}

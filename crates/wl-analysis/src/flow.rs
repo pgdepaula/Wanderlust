@@ -109,7 +109,7 @@ pub fn scan_indirect_candidates(image: &Image) -> wl_common::Result<DispatchScan
             let entries = BTreeSet::from([start]);
             let leaders = super::leaders(&decoded, &entries, &BTreeMap::new())?;
             let blocks = super::build_blocks(&decoded, &leaders)?;
-            let found = propagate(image, &blocks, &entries, &BTreeMap::new());
+            let found = propagate_inner(image, &blocks, &entries, &BTreeMap::new(), true);
             if found.tables.contains_key(&pc) {
                 result.complete_local_tables += 1;
             } else {
@@ -180,6 +180,8 @@ impl Val {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Table {
+    /// Inventory-only low-word slice; never a proof covering the X register.
+    partial: bool,
     address: u64,
     count: u64,
     first: u64,
@@ -447,9 +449,9 @@ fn bounded_index(s: &State, index: Index) -> Option<u64> {
     (ok && max < MAX_TABLE_ENTRIES).then_some(max)
 }
 
-fn index_span(s: &State, index: Index) -> Option<(u64, u64, Option<Width>)> {
+fn index_span(s: &State, index: Index, advisory: bool) -> Option<(u64, u64, Option<Width>, bool)> {
     if let Some(max) = bounded_index(s, index) {
-        return Some((0, max + 1, None));
+        return Some((0, max + 1, None, false));
     }
     match s.get(index.reg)? {
         Val::Span {
@@ -457,7 +459,16 @@ fn index_span(s: &State, index: Index) -> Option<(u64, u64, Option<Width>)> {
             count,
             width,
         } if count <= MAX_TABLE_ENTRIES && matches!(index.extend, 2 | 3 | 6 | 7) => {
-            Some((first, count, Some(width)))
+            Some((first, count, Some(width), false))
+        }
+        // A W comparison does not bound the upper half of an X index. For
+        // the advisory inventory only, enumerate the high-word-zero slice.
+        // Guest loads retain their full index and all other paths remain
+        // unresolved; recursive discovery must never treat this as a proof.
+        Val::Bounded { max, full: false }
+            if advisory && matches!(index.extend, 3 | 7) && max < MAX_TABLE_ENTRIES =>
+        {
+            Some((0, max + 1, None, true))
         }
         _ => None,
     }
@@ -473,7 +484,11 @@ fn unsigned_max(value: Option<Val>, width: Width) -> Option<u64> {
     }
 }
 
+#[cfg(test)]
 fn transfer(image: &Image, state: &mut State, op: &Op) {
+    transfer_inner(image, state, op, false);
+}
+fn transfer_inner(image: &Image, state: &mut State, op: &Op, advisory: bool) {
     let flags_kept = preserves_flags(op);
     let mut result: Option<(Reg, Option<Val>, Width)> = None;
     let mut compare = None;
@@ -722,11 +737,12 @@ fn transfer(image: &Image, state: &mut State, op: &Op) {
             dst_width,
             index: Some(index),
         } => {
-            let value = match (state.get(base), index_span(state, index)) {
-                (Some(Val::Const(address)), Some((first, count, index_width)))
+            let value = match (state.get(base), index_span(state, index, advisory)) {
+                (Some(Val::Const(address)), Some((first, count, index_width, partial)))
                     if index.shift == 0 || 1u8 << index.shift == bytes =>
                 {
                     Some(Val::Element(Table {
+                        partial,
                         address,
                         count,
                         first,
@@ -841,7 +857,7 @@ fn record_pointer(
 
 fn table_targets(image: &Image, base: u64, t: Table, ext: u8, shift: u8) -> (Vec<GuestAddr>, bool) {
     let mut out = Vec::with_capacity(t.count as usize);
-    let mut complete = true;
+    let mut complete = !t.partial;
     for i in 0..t.count {
         let index = t.first.wrapping_add(i);
         let index = t.index_width.map_or(index, |width| mask(index, width));
@@ -877,6 +893,16 @@ pub fn propagate(
     entries: &BTreeSet<GuestAddr>,
     tables: &BTreeMap<GuestAddr, Vec<GuestAddr>>,
 ) -> Found {
+    propagate_inner(image, blocks, entries, tables, false)
+}
+
+fn propagate_inner(
+    image: &Image,
+    blocks: &[Block],
+    entries: &BTreeSet<GuestAddr>,
+    tables: &BTreeMap<GuestAddr, Vec<GuestAddr>>,
+    advisory: bool,
+) -> Found {
     let index: HashMap<u64, usize> = blocks
         .iter()
         .enumerate()
@@ -909,7 +935,7 @@ pub fn propagate(
         };
         let b = &blocks[i];
         for instruction in &b.instructions {
-            transfer(image, &mut state, &instruction.op);
+            transfer_inner(image, &mut state, &instruction.op, advisory);
         }
         if b.unsupported.is_some() {
             continue;
@@ -1027,7 +1053,7 @@ pub fn propagate(
                 }
                 _ => {}
             }
-            transfer(image, &mut state, &instruction.op);
+            transfer_inner(image, &mut state, &instruction.op, advisory);
         }
     }
     found
