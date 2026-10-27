@@ -1555,6 +1555,23 @@ fn emit_inner(
     for unit in &mut units {
         let blocks = &program.blocks[index..index + unit.blocks];
         index += unit.blocks;
+        if options.horizon.is_some()
+            && blocks.iter().any(|b| {
+                b.instructions
+                    .iter()
+                    .any(|i| matches!(i.op, Op::Svc { .. }))
+            })
+        {
+            let import_end = unit
+                .source
+                .find("use wl_guest_runtime::*;\n")
+                .ok_or("unit runtime import")?
+                + "use wl_guest_runtime::*;\n".len();
+            unit.source.insert_str(
+                import_end,
+                "extern crate wl_service_bridge;\nuse wl_service_bridge::service;\n",
+            );
+        }
         writeln!(
             unit.source,
             "pub static BLOCKS: [(u64, BlockFn); {}] = [",
@@ -1569,6 +1586,9 @@ fn emit_inner(
     let mut out = format!(
         "// Generated AArch64 translation: executable crate. No runtime decoder or JIT.\n{ALLOWS}extern crate wl_guest_runtime;\nuse wl_guest_runtime::*;\n"
     );
+    if options.horizon.is_some() {
+        out.push_str("extern crate wl_service_bridge;\n");
+    }
     for unit in &units {
         writeln!(out, "extern crate {};", unit.name).unwrap();
     }
@@ -1682,10 +1702,13 @@ fn emit_inner(
         out.push_str("\n}\n");
     }
     let host_setup = if options.horizon.is_some() {
+        out.push_str("pub mod host_opus {\n");
+        out.push_str(include_str!("../../wl-runtime/hosted/opus.rs"));
+        out.push_str("\n}\n");
         out.push_str("pub mod host_audio {\n");
         out.push_str(include_str!("../../wl-runtime/hosted/audio.rs"));
         out.push_str("\n}\n");
-        "if let Err(error) = host_audio::install() { eprintln!(\"audio host setup: {error}\"); std::process::exit(2); }"
+        "if let Err(error) = host_audio::install().and_then(|()| wl_service_bridge::install(host_audio::service_hook)) { eprintln!(\"host service setup: {error}\"); std::process::exit(2); }"
     } else {
         ""
     };

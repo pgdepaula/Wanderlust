@@ -380,11 +380,13 @@ impl Default for State {
 struct Backend {
     state: State,
     next_thread_trace: Option<std::time::Instant>,
+    opus: crate::host_opus::Service,
 }
 impl Default for Backend {
     fn default() -> Self {
         Self {
             state: State::default(),
+            opus: crate::host_opus::Service::default(),
             next_thread_trace: (std::env::var_os("WL_THREAD_TRACE").as_deref()
                 == Some(std::ffi::OsStr::new("1")))
             .then(std::time::Instant::now),
@@ -445,6 +447,11 @@ impl AudioHost for Backend {
         req: &Request,
         args: &[u8],
     ) -> RuntimeResult<Done> {
+        if let HostObject::AudioRenderer { index } = target
+            && index >= crate::host_opus::MANAGER
+        {
+            return self.opus.request(memory, k, index, command, req, args);
+        }
         let unsupported = |what: &str| -> RuntimeResult<Done> {
             Err(format!(
                 "unsupported Horizon audio: {what} (command {command} of {target:?})"
@@ -681,6 +688,7 @@ impl AudioHost for Backend {
         Ok(reply)
     }
     fn poll(&mut self, _memory: &mut Memory, k: &mut Kernel) -> RuntimeResult<()> {
+        register_codec_port(k);
         self.trace_threads(k);
         for renderer in self.state.renderers.values_mut() {
             if renderer.tick(k.time_ns) {
@@ -691,6 +699,10 @@ impl AudioHost for Backend {
     }
     fn close(&mut self, _kernel: &mut Kernel, object: HostObject) {
         if let HostObject::AudioRenderer { index } = object {
+            if index >= crate::host_opus::MANAGER {
+                self.opus.close(index);
+                return;
+            }
             self.state.renderers.remove(&index);
         }
     }
@@ -701,6 +713,75 @@ impl AudioHost for Backend {
             .filter_map(|r| r.next_tick_ns)
             .min()
     }
+}
+
+const CODEC_SERVICE: [u8; 8] = *b"hwopus\0\0";
+/// Trusted native provider registration. Guest service-access checks still run
+/// in the existing SM implementation. No guest server handle is fabricated.
+fn register_codec_port(k: &mut Kernel) {
+    if k.services.iter().any(|s| s.name == CODEC_SERVICE) {
+        return;
+    }
+    let port = k.ports.len();
+    k.ports.push(wl_guest_runtime::ipc::Port {
+        name: CODEC_SERVICE,
+        max_sessions: 64,
+        sessions: 0,
+        is_light: false,
+        server_closed: false,
+        references: 1,
+    });
+    k.services.push(wl_guest_runtime::ipc::Service {
+        name: CODEC_SERVICE,
+        owner: 0,
+        port,
+    });
+}
+
+/// Bind only the native-owned codec port to the existing hosted audio-server
+/// transport while one SVC executes. The opaque audio object index identifies
+/// its interface; no original request bytes, CPU instructions or results change.
+pub fn service_hook(
+    cpu: &mut wl_guest_runtime::Cpu,
+    process: &mut horizon::Process,
+    id: u16,
+) -> RuntimeResult<Option<wl_guest_runtime::Stop>> {
+    use wl_guest_runtime::{horizon::Object, ipc::Endpoint};
+    let binding = if let Some(k) = process.kernel.as_mut() {
+        register_codec_port(k);
+        if id == 0x21 {
+            if let Some(Object::Session(s)) = k.handles.get(cpu.x[0] as u32) {
+                if let Some(session) = k.sessions.get(s)
+                    && let Endpoint::Port(port) = session.endpoint
+                    && k.services.iter().any(|service| {
+                        service.port == port && service.name == CODEC_SERVICE && service.owner == 0
+                    })
+                {
+                    let original = session.endpoint;
+                    k.sessions[s].endpoint = Endpoint::Host(HostObject::AudioRenderer {
+                        index: crate::host_opus::MANAGER,
+                    });
+                    Some((s, original))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let result = wl_guest_runtime::service(cpu, process, id);
+    if let Some((session, original)) = binding
+        && let Some(k) = process.kernel.as_mut()
+        && let Some(s) = k.sessions.get_mut(session)
+    {
+        s.endpoint = original;
+    }
+    result
 }
 fn copy_event(k: &mut Kernel, event: usize) -> Done {
     match threads::readable_event_handle(k, event) {

@@ -64,6 +64,7 @@ pub const RUNTIME_SOURCES: [(&str, &str); 15] = [
         include_str!("../../wl-runtime/src/threads.rs"),
     ),
 ];
+pub const SERVICE_BRIDGE_SOURCE: &str = include_str!("../../wl-runtime/hosted/service_bridge.rs");
 
 #[derive(Clone, Debug)]
 pub struct BuildConfig {
@@ -87,6 +88,7 @@ pub struct BuildReport {
     pub compiler_flags: String,
     pub jobs: usize,
     pub runtime: CrateReport,
+    pub service_bridge: Option<CrateReport>,
     pub units: Vec<CrateReport>,
     pub cache_hits: usize,
     pub cache_misses: usize,
@@ -197,6 +199,16 @@ fn cached_rlib(
     files: &[(&str, &str)],
     runtime: Option<&Path>,
 ) -> Built {
+    cached_rlib_with_dependencies(cfg, name, key, files, runtime, &[])
+}
+fn cached_rlib_with_dependencies(
+    cfg: &BuildConfig,
+    name: &str,
+    key: &str,
+    files: &[(&str, &str)],
+    runtime: Option<&Path>,
+    dependencies: &[(&str, &Path)],
+) -> Built {
     let dir = cfg.cache_dir.join(format!("{name}-{}", &key[..20]));
     let rlib = dir.join(format!("lib{name}.rlib"));
     if complete_archive(&rlib) {
@@ -252,6 +264,18 @@ fn cached_rlib(
     if let Some(runtime) = runtime {
         cmd.arg("--extern")
             .arg(format!("wl_guest_runtime={}", runtime.display()));
+        cmd.arg("-L").arg(format!(
+            "dependency={}",
+            runtime.parent().ok_or("runtime directory")?.display()
+        ));
+    }
+    for (name, path) in dependencies {
+        cmd.arg("--extern")
+            .arg(format!("{name}={}", path.display()));
+        cmd.arg("-L").arg(format!(
+            "dependency={}",
+            path.parent().ok_or("dependency directory")?.display()
+        ));
     }
     cmd.arg("-o").arg(tmp.join(format!("lib{name}.rlib")));
     run(cmd, name)?;
@@ -518,6 +542,34 @@ fn build_inner(
         seconds: runtime_seconds,
         source_bytes: RUNTIME_SOURCES.iter().map(|s| s.1.len()).sum(),
     };
+    let service_bridge = if main.contains("extern crate wl_service_bridge;") {
+        let key = hash(&[
+            b"wl_service_bridge",
+            SERVICE_BRIDGE_SOURCE.as_bytes(),
+            runtime_key.as_bytes(),
+            toolchain.as_bytes(),
+            flags.as_bytes(),
+        ]);
+        let (path, cached, seconds) = cached_rlib(
+            cfg,
+            "wl_service_bridge",
+            &key,
+            &[("lib.rs", SERVICE_BRIDGE_SOURCE)],
+            Some(&runtime_rlib),
+        )?;
+        Some((
+            path,
+            CrateReport {
+                name: "wl_service_bridge".into(),
+                key,
+                cached,
+                seconds,
+                source_bytes: SERVICE_BRIDGE_SOURCE.len(),
+            },
+        ))
+    } else {
+        None
+    };
     // File sources are acquired and released by each worker, rather than
     // loading the entire generated program into the compiler parent's heap.
     type UnitBuilt = Result<(PathBuf, bool, f64, String, usize)>;
@@ -536,19 +588,29 @@ fn build_inner(
                     };
                     let result = (|| {
                         let source = unit.source()?;
-                        let key = hash(&[
+                        let mut key_parts = vec![
                             unit.name().as_bytes(),
                             source.as_bytes(),
                             runtime_key.as_bytes(),
                             toolchain.as_bytes(),
                             flags.as_bytes(),
-                        ]);
-                        let (archive, cached, seconds) = cached_rlib(
+                        ];
+                        let mut dependencies = Vec::new();
+                        if source.contains("extern crate wl_service_bridge;") {
+                            let (path, bridge) = service_bridge
+                                .as_ref()
+                                .ok_or("SVC unit requires a service bridge in the executable")?;
+                            key_parts.push(bridge.key.as_bytes());
+                            dependencies.push(("wl_service_bridge", path.as_path()));
+                        }
+                        let key = hash(&key_parts);
+                        let (archive, cached, seconds) = cached_rlib_with_dependencies(
                             cfg,
                             unit.name(),
                             &key,
                             &[("unit.rs", source.as_ref())],
                             Some(&runtime_rlib),
+                            &dependencies,
                         )?;
                         Ok((archive, cached, seconds, key, source.len()))
                     })();
@@ -565,6 +627,9 @@ fn build_inner(
     let units_wall_seconds = started.elapsed().as_secs_f64();
     let mut units = Vec::new();
     let mut rlibs = vec![runtime_rlib];
+    if let Some((path, _)) = &service_bridge {
+        rlibs.push(path.clone());
+    }
     for (i, result) in results
         .into_inner()
         .map_err(|_| "unit build state poisoned")?
@@ -636,17 +701,21 @@ fn build_inner(
         native.verify()?;
         fs::rename(temporary.as_ref().unwrap(), output).map_err(|e| e.to_string())?;
     }
-    let cache_hits = units.iter().filter(|u| u.cached).count() + runtime.cached as usize;
+    let cache_hits = units.iter().filter(|u| u.cached).count()
+        + runtime.cached as usize
+        + usize::from(service_bridge.as_ref().is_some_and(|(_, r)| r.cached));
+    let bridge_count = usize::from(service_bridge.is_some());
     Ok(BuildReport {
         toolchain: toolchain.lines().next().unwrap_or_default().to_string(),
         compiler_flags: flags,
         jobs,
-        cache_misses: unit_count + 1 - cache_hits,
+        cache_misses: unit_count + 1 + bridge_count - cache_hits,
         cache_hits,
         unit_compile_seconds: units.iter().map(|u| u.seconds).sum(),
         units_wall_seconds,
         main_seconds: started.elapsed().as_secs_f64(),
         runtime,
+        service_bridge: service_bridge.map(|(_, report)| report),
         units,
         native_gpu: native.map(|v| v.report),
     })
