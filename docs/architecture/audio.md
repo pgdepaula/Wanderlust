@@ -108,8 +108,13 @@ the default test run does not count it as executed. No commercial code is includ
 
 The native launcher registers a process-local `hwopus` service. Manager commands
 0/1 open a mono/stereo decoder using a copied transfer-memory handle or query its
-required work size. Decoder commands 0, 4 and 6 decode interleaved signed 16-bit
-PCM; command 6 additionally accepts a reset flag. Multistream and other commands
+required work size. Extended manager commands 4/5 use the 16-byte parameter
+structure, including the large-frame flag and reserved word. Unknown flags and
+nonzero reserved fields are explicitly unsupported. Decoder commands 0, 4, 6 and 8
+decode interleaved signed 16-bit PCM; commands 6/8 additionally accept a reset flag.
+Ordinary decoders permit 40 ms packets; extended decoders with large-frame flag 1
+permit 120 ms. Work-size reporting covers the software decoder workspace; PCM
+scratch is host-owned and does not reside in guest transfer memory. Multistream and other commands
 remain unsupported. The workspace requirement is the selected host decoder size
 plus 4096 bytes, not a claim about Nintendo's hardware workspace formula.
 
@@ -153,3 +158,12 @@ mono/stereo decoding and rejected final-range rollback. The explicit
 checks service discovery, transfer memory, exact PCM, output bounds and teardown.
 These tests require system libopus, and the latter also requires devkitA64/libnx.
 They contain no commercial game data.
+
+Extended parameter layout, command identities and the large-frame flag were checked
+against `HardwareOpusDecoderManager`, `HardwareOpusDecoderParameterInternalEx`,
+`OpusDecoderFlags` and `HardwareOpusDecoder` under
+[Ryujinx Codec/Detail](https://github.com/alula/Ryujinx/tree/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Horizon/Sdk/Codec/Detail)
+(MIT, same pinned revision as above). A literal three-frame CBR DTX packet checks
+60 ms decoding is rejected without publication under the ordinary limit and succeeds
+with exactly 2880 stereo samples under the large-frame limit. The packet layout
+follows RFC 6716; expected PCM and untouched tail bytes are independently specified.

@@ -176,6 +176,7 @@ pub struct Decoder {
     rate: u32,
     channels: u32,
     bytes: usize,
+    frame_ms: u32,
 }
 // SAFETY: libopus decoders have no thread affinity. This decoder is exclusively
 // owned; decoding/resetting requires &mut self and no native state pointer escapes.
@@ -209,6 +210,7 @@ impl Decoder {
             rate,
             channels,
             bytes,
+            frame_ms: 40,
         })
     }
     pub fn decode_to(
@@ -222,7 +224,8 @@ impl Decoder {
             return Err("hwopus buffer budget".into());
         }
         let capacity = (output.1 / (2 * u64::from(self.channels)))
-            .min(u64::from(self.rate) * 120 / 1000) as usize;
+            .min(u64::from(self.rate) * u64::from(self.frame_ms) / 1000)
+            as usize;
         if capacity == 0 {
             return Err("hwopus PCM output is too short".into());
         }
@@ -321,28 +324,39 @@ impl Service {
             return Err("unsupported hwopus request metadata".into());
         }
         if index == MANAGER {
-            if !matches!(command, 0 | 1) {
+            if !matches!(command, 0 | 1 | 4 | 5) {
                 return Err(format!("unsupported hwopus manager command {command}"));
             }
             if !req.sends.is_empty() || !req.statics.is_empty() || !req.recvs.is_empty() {
                 return Err("unsupported hwopus manager buffers".into());
             }
             let (rate, channels) = parameters(args)?;
+            let size_offset = if matches!(command, 4 | 5) {
+                if args.len() < 16 || word(args, 8) & !1 != 0 || word(args, 12) != 0 {
+                    return Err("unsupported hwopus extended flags or reserved fields".into());
+                }
+                16
+            } else {
+                8
+            };
             let size = work_size(channels)?;
             return match command {
-                1 if req.copy_handles == 0 => Ok(Reply::data(&size.to_le_bytes())),
-                0 if req.copy_handles == 1 && args.len() >= 12 => {
+                1 | 5 if req.copy_handles == 0 => Ok(Reply::data(&size.to_le_bytes())),
+                0 | 4 if req.copy_handles == 1 && args.len() >= size_offset + 4 => {
                     let Some(Object::TransferMemory(t)) = k.handles.get(req.copies[0]) else {
                         return Err("hwopus requires transfer memory".into());
                     };
-                    let supplied = word(args, 8);
+                    let supplied = word(args, size_offset);
                     if supplied < size || u64::from(supplied) > k.transfer_memories[t].size {
                         return Err("hwopus work buffer is too short".into());
                     }
                     if self.decoders.len() >= MAX_DECODERS || self.next_id >= MAX_LIFETIMES {
                         return Err("hwopus decoder capacity".into());
                     }
-                    let decoder = Decoder::new(rate, channels)?;
+                    let mut decoder = Decoder::new(rate, channels)?;
+                    if size_offset == 16 && word(args, 8) == 1 {
+                        decoder.frame_ms = 120;
+                    }
                     self.next_id += 1;
                     let id = MANAGER + self.next_id;
                     self.decoders.insert(id, decoder);
@@ -359,10 +373,10 @@ impl Service {
         {
             return Err("unsupported hwopus decode descriptors".into());
         }
-        if !matches!(command, 0 | 4 | 6) {
+        if !matches!(command, 0 | 4 | 6 | 8) {
             return Err(format!("unsupported hwopus decoder command {command}"));
         }
-        let reset = if command == 6 {
+        let reset = if matches!(command, 6 | 8) {
             match args.first() {
                 Some(0) => false,
                 Some(1) => true,

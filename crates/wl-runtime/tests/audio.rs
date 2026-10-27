@@ -647,7 +647,7 @@ fn opus_decode_wire(p: &mut Process, channels: u32, range: u32, command: u32) ->
     }
     b[32..36].copy_from_slice(b"SFCI");
     b[40..44].copy_from_slice(&command.to_le_bytes());
-    b[48] = u8::from(command == 6);
+    b[48] = u8::from(matches!(command, 6 | 8));
     let address = tls(p);
     p.write_bytes(address, &b).unwrap();
     (output, bytes)
@@ -681,7 +681,7 @@ fn hwopus_decodes_silence_validates_big_endian_headers_and_rolls_back_failed_pac
         let d = reply(&p, 12);
         svc(&mut p, &mut c, 0x16, &[u64::from(m)]);
         assert_eq!(c.x[0], 0);
-        for command in [0u32, 4, 6] {
+        for command in [0u32, 4, 6, 8] {
             let (output, bytes) = opus_decode_wire(&mut p, channels, 0, command);
             call(&mut p, &mut c, d);
             assert_eq!(reply(&p, 0x20), 11);
@@ -707,6 +707,96 @@ fn hwopus_decodes_silence_validates_big_endian_headers_and_rolls_back_failed_pac
         call(&mut p, &mut c, d);
         assert_eq!(reply(&p, 0x24), 960);
         svc(&mut p, &mut c, 0x16, &[u64::from(d)]);
+        svc(&mut p, &mut c, 0x16, &[u64::from(transfer)]);
+    }
+}
+
+#[test]
+#[ignore = "requires system libopus; validates extended CMIF opening and real decode"]
+fn hwopus_extended_manager_validates_flags_and_inline_work_size() {
+    for flags in [0u32, 1] {
+        let (mut p, mut c) = process();
+        let m = named_manager(&mut p, &mut c, b"hwopus\0\0");
+        let mut args = [48000u32, 2, flags, 0]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect::<Vec<_>>();
+        wire(&mut p, 5, false, &[], &args);
+        call(&mut p, &mut c, m);
+        let size = reply(&p, 0x20).next_multiple_of(4096);
+        svc(
+            &mut p,
+            &mut c,
+            0x15,
+            &[0, DATA + 0x10000, u64::from(size), 0],
+        );
+        assert_eq!(c.x[0], 0);
+        let transfer = c.x[1] as u32;
+        args.extend(size.to_le_bytes());
+        wire(&mut p, 4, false, &[transfer], &args);
+        call(&mut p, &mut c, m);
+        let decoder = reply(&p, 12);
+        let (output, bytes) = opus_decode_wire(&mut p, 2, 0, 8);
+        call(&mut p, &mut c, decoder);
+        assert_eq!(reply(&p, 0x20), 11);
+        assert_eq!(reply(&p, 0x24), 960);
+        assert!(p.read_bytes(output, bytes).unwrap().iter().all(|v| *v == 0));
+        // RFC 6716 code-3 CBR packet: three 20ms DTX frames, independently
+        // specified instead of obtaining expected PCM from the service itself.
+        opus_decode_wire(&mut p, 2, 0, 8);
+        let mut packet = 8u32.to_be_bytes().to_vec();
+        packet.extend(0u32.to_be_bytes());
+        packet.extend([0xfb, 3, 0xff, 0xfe, 0xff, 0xfe, 0xff, 0xfe]);
+        p.write_bytes(DATA + 0x4000, &packet).unwrap();
+        let address = tls(&p);
+        p.store(address + 8, 4, packet.len() as u64).unwrap();
+        let output_bytes = 2880 * 2 * 2;
+        p.store(address + 20, 4, (output_bytes + 16) as u64)
+            .unwrap();
+        p.write_bytes(DATA + 0x6000, &vec![0x55; output_bytes + 16])
+            .unwrap();
+        if flags == 1 {
+            call(&mut p, &mut c, decoder);
+            assert_eq!(reply(&p, 0x20), 16);
+            assert_eq!(reply(&p, 0x24), 2880);
+            assert!(
+                p.read_bytes(DATA + 0x6000, output_bytes)
+                    .unwrap()
+                    .iter()
+                    .all(|v| *v == 0)
+            );
+        } else {
+            c.x[0] = u64::from(decoder);
+            assert!(
+                audio::service_hook(&mut c, &mut p, 0x21)
+                    .unwrap_err()
+                    .contains("decode failed")
+            );
+            assert_eq!(
+                p.read_bytes(DATA + 0x6000, output_bytes).unwrap(),
+                &vec![0x55; output_bytes]
+            );
+        }
+        assert_eq!(
+            p.read_bytes(DATA + 0x6000 + output_bytes as u64, 16)
+                .unwrap(),
+            &[0x55; 16]
+        );
+        svc(&mut p, &mut c, 0x16, &[u64::from(decoder)]);
+        for (bits, reserved) in [(2u32, 0u32), (0, 1)] {
+            let invalid = [48000u32, 2, bits, reserved]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect::<Vec<_>>();
+            wire(&mut p, 5, false, &[], &invalid);
+            c.x[0] = u64::from(m);
+            assert!(
+                audio::service_hook(&mut c, &mut p, 0x21)
+                    .unwrap_err()
+                    .contains("extended flags")
+            );
+        }
+        svc(&mut p, &mut c, 0x16, &[u64::from(m)]);
         svc(&mut p, &mut c, 0x16, &[u64::from(transfer)]);
     }
 }
