@@ -661,19 +661,25 @@ impl AudioHost for Backend {
                         volume.to_bits()
                     ));
                 }
-                check_device_name(req, memory)?;
+                let known = check_device_name(req, memory)?;
                 if std::env::var_os("WL_AUDIO_TRACE").is_some() {
                     eprintln!(
-                        "[audio-device] volume={volume} bits={:#010x}",
+                        "[audio-device] known={known} volume={volume} bits={:#010x}",
                         volume.to_bits()
                     );
                 }
-                self.state.device_volume = volume;
+                if known {
+                    self.state.device_volume = volume;
+                }
                 Done::ok()
             }
             (HostObject::AudioDevice, 2 | 8) => {
-                check_device_name(req, memory)?;
-                Done::data(&self.state.device_volume.to_le_bytes())
+                let volume = if check_device_name(req, memory)? {
+                    self.state.device_volume
+                } else {
+                    0.0
+                };
+                Done::data(&volume.to_le_bytes())
             }
             (HostObject::AudioDevice, 5) => {
                 check(no_arguments)?;
@@ -813,7 +819,7 @@ fn audio_input(req: &Request) -> RuntimeResult<(u64, u64)> {
     a.or(x)
         .ok_or_else(|| unsupported("missing audio input descriptor"))
 }
-fn check_device_name(req: &Request, memory: &Memory) -> RuntimeResult<()> {
+fn check_device_name(req: &Request, memory: &Memory) -> RuntimeResult<bool> {
     if req.pid.is_some()
         || req.copy_handles != 0
         || req.move_handles != 0
@@ -832,10 +838,7 @@ fn check_device_name(req: &Request, memory: &Memory) -> RuntimeResult<()> {
         .iter()
         .position(|b| *b == 0)
         .ok_or_else(|| unsupported("unterminated audio device name"))?;
-    if &name[..end] != b"AudioTvOutput" {
-        return Err(unsupported("audio device name"));
-    }
-    Ok(())
+    Ok(&name[..end] == b"AudioTvOutput")
 }
 fn audio_output(req: &Request, slot: usize) -> Result<Option<(u64, u64)>, String> {
     let c_count = match req.recv_static_mode {

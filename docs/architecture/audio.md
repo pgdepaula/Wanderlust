@@ -18,8 +18,10 @@ formula. Renderer state resides on the host and belongs to one process.
 
 Renderer commands 0–3 query configuration, 4/10 perform supported updates,
 5/6 start/stop, 7 returns a copied event handle, and 8/9 set/query the time limit.
-Device commands expose one `AudioTvOutput` endpoint. Unknown device names and
-unsupported commands are rejected. At most four renderer instances can be live;
+Device commands expose one `AudioTvOutput` endpoint. Gain writes for an unknown
+well-formed device name succeed without changing the advertised device; its gain
+query returns zero. Unterminated or malformed name buffers and unsupported commands
+are rejected. At most four renderer instances can be live;
 instance identities are not reused, with a 4096-lifetime implementation bound.
 Closing the last session or domain reference removes the renderer clock.
 
@@ -179,3 +181,8 @@ playback or define a hardware clipping curve.
 
 `WL_AUDIO_TRACE=1` logs accepted device gain and its exact bit representation for
 protocol diagnosis; it does not change the value or audio state.
+
+Unknown-name gain behavior follows `AudioDevice.SetAudioDeviceOutputVolume` and
+`GetAudioDeviceOutputVolume` in the same pinned Ryujinx implementation. Names are
+still acquired through checked guest buffers; accepting an absent device does not
+add it to enumeration or redirect its gain to `AudioTvOutput`.

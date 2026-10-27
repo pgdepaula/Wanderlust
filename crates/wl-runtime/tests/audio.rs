@@ -848,3 +848,38 @@ fn audio_device_preserves_finite_gain_bits_without_an_invented_unit_interval() {
         assert_eq!(reply(&p, 0x20), f32::MAX.to_bits());
     }
 }
+
+#[test]
+fn unknown_audio_device_gain_does_not_mutate_the_advertised_output() {
+    let (mut p, mut c) = process();
+    let m = manager(&mut p, &mut c);
+    wire(&mut p, 2, false, &[], &0u64.to_le_bytes());
+    call(&mut p, &mut c, m);
+    let device = reply(&p, 12);
+    device_volume_wire(&mut p, 7, 0.75f32.to_bits());
+    call(&mut p, &mut c, device);
+    for command in [7u32, 8] {
+        device_volume_wire(&mut p, command, 2.5f32.to_bits());
+        let mut name = [0u8; 256];
+        name[..21].copy_from_slice(b"AudioStereoJackOutput");
+        p.write_bytes(DATA + 0x8000, &name).unwrap();
+        call(&mut p, &mut c, device);
+        if command == 8 {
+            assert_eq!(reply(&p, 0x20), 0.0f32.to_bits());
+        }
+    }
+    device_volume_wire(&mut p, 8, 0);
+    call(&mut p, &mut c, device);
+    assert_eq!(reply(&p, 0x20), 0.75f32.to_bits());
+    device_volume_wire(&mut p, 7, 1.0f32.to_bits());
+    p.write_bytes(DATA + 0x8000, &[b'x'; 256]).unwrap();
+    c.x[0] = u64::from(device);
+    assert!(
+        audio::service_hook(&mut c, &mut p, 0x21)
+            .unwrap_err()
+            .contains("unterminated")
+    );
+    device_volume_wire(&mut p, 8, 0);
+    call(&mut p, &mut c, device);
+    assert_eq!(reply(&p, 0x20), 0.75f32.to_bits());
+}
