@@ -332,8 +332,8 @@ impl service::Host for NativeHost {
     }
     fn open(&mut self, path: &str) -> service::HostResult<u32> {
         let result = self.driver.open(path).map_err(error);
-        if self.trace_remaining != 0 {
-            self.trace_remaining -= 1;
+        if self.trace_remaining != 0 || result.is_err() {
+            self.trace_remaining = self.trace_remaining.saturating_sub(1);
             let node = match path {
                 "/dev/nvmap"
                 | "/dev/nvhost-gpu"
@@ -439,8 +439,8 @@ impl service::Host for NativeHost {
                 &mut MemoryView(memory),
             )
             .map_err(error);
-        if self.trace_remaining != 0 {
-            self.trace_remaining -= 1;
+        if self.trace_remaining != 0 || result.is_err() {
+            self.trace_remaining = self.trace_remaining.saturating_sub(1);
             eprintln!(
                 "NVIDIA ioctl fd={fd} request={request:#010x} kind={kind:?} result={result:?}"
             );
