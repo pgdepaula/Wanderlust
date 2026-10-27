@@ -1702,6 +1702,9 @@ fn emit_inner(
         out.push_str("\n}\n");
     }
     let host_setup = if options.horizon.is_some() {
+        out.push_str("pub mod host_fs {\n");
+        out.push_str(include_str!("../../wl-runtime/hosted/fs_cache.rs"));
+        out.push_str("\n}\n");
         out.push_str("pub mod host_opus {\n");
         out.push_str(include_str!("../../wl-runtime/hosted/opus.rs"));
         out.push_str("\n}\n");

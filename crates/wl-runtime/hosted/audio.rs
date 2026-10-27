@@ -448,6 +448,11 @@ impl AudioHost for Backend {
         args: &[u8],
     ) -> RuntimeResult<Done> {
         if let HostObject::AudioRenderer { index } = target
+            && crate::host_fs::owns(index)
+        {
+            return crate::host_fs::request(memory, index, command, req);
+        }
+        if let HostObject::AudioRenderer { index } = target
             && index >= crate::host_opus::MANAGER
         {
             return self.opus.request(memory, k, index, command, req, args);
@@ -762,6 +767,7 @@ pub fn service_hook(
     id: u16,
 ) -> RuntimeResult<Option<wl_guest_runtime::Stop>> {
     use wl_guest_runtime::{horizon::Object, ipc::Endpoint};
+    let fs_binding = crate::host_fs::bind(cpu, process, id);
     let binding = if let Some(k) = process.kernel.as_mut() {
         register_codec_port(k);
         if id == 0x21 {
@@ -790,6 +796,7 @@ pub fn service_hook(
         None
     };
     let result = wl_guest_runtime::service(cpu, process, id);
+    crate::host_fs::restore(process, fs_binding);
     if let Some((session, original)) = binding
         && let Some(k) = process.kernel.as_mut()
         && let Some(s) = k.sessions.get_mut(session)

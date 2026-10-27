@@ -1,6 +1,8 @@
 extern crate wl_runtime as wl_guest_runtime;
 #[path = "../hosted/audio.rs"]
 mod audio;
+#[path = "../hosted/fs_cache.rs"]
+mod host_fs;
 #[path = "../hosted/opus.rs"]
 mod host_opus;
 use wl_runtime::{Cpu, Memory, Stop, horizon::*};
@@ -38,7 +40,7 @@ fn process() -> (Process, Cpu) {
             thread_limit: 8,
             is_application: true,
             svc_permissions: [u64::MAX; 3],
-            service_access: &[(false, "audren:u"), (false, "hwopus")],
+            service_access: &[(false, "audren:u"), (false, "hwopus"), (false, "fsp-srv")],
         },
     )
     .unwrap()
@@ -882,4 +884,110 @@ fn unknown_audio_device_gain_does_not_mutate_the_advertised_output() {
     device_volume_wire(&mut p, 8, 0);
     call(&mut p, &mut c, device);
     assert_eq!(reply(&p, 0x20), 0.75f32.to_bits());
+}
+
+fn fs_reader_wire(p: &mut Process, domain: Option<u32>, command: u32, output: bool) {
+    let mut b = [0u8; 256];
+    let descriptors = if output { 1u32 << 24 } else { 0 };
+    b[..4].copy_from_slice(&(4 | descriptors).to_le_bytes());
+    let at = if output {
+        b[8..12].copy_from_slice(&192u32.to_le_bytes());
+        b[12..16].copy_from_slice(&((DATA + 0x9000) as u32).to_le_bytes());
+        20usize
+    } else {
+        8
+    };
+    let raw = (at + 15) & !15;
+    let cmif = if let Some(id) = domain {
+        b[raw] = 1;
+        b[raw + 2..raw + 4].copy_from_slice(&16u16.to_le_bytes());
+        b[raw + 4..raw + 8].copy_from_slice(&id.to_le_bytes());
+        raw + 16
+    } else {
+        raw
+    };
+    b[4..8].copy_from_slice(&(((cmif + 16 - at) / 4) as u32).to_le_bytes());
+    b[cmif..cmif + 4].copy_from_slice(b"SFCI");
+    b[cmif + 8..cmif + 12].copy_from_slice(&command.to_le_bytes());
+    let address = tls(p);
+    p.write_bytes(address, &b).unwrap();
+}
+#[test]
+fn cache_save_reader_returns_a_real_session_and_empty_count_without_overwriting_output() {
+    let (mut p, mut c) = process();
+    let fs = named_manager(&mut p, &mut c, b"fsp-srv\0");
+    fs_reader_wire(&mut p, None, 62, false);
+    call(&mut p, &mut c, fs);
+    let reader = reply(&p, 12);
+    let Object::Session(s) = p.kernel.as_ref().unwrap().handles.get(fs).unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        p.kernel.as_ref().unwrap().sessions[s].endpoint,
+        wl_runtime::ipc::Endpoint::Host(wl_runtime::services::HostObject::FileSystemProxy)
+    );
+    p.write_bytes(DATA + 0x9000, &[0x55; 192]).unwrap();
+    for _ in 0..2 {
+        fs_reader_wire(&mut p, None, 0, true);
+        call(&mut p, &mut c, reader);
+        assert_eq!(p.load(tls(&p) + 0x20, 8).unwrap(), 0);
+        assert_eq!(p.read_bytes(DATA + 0x9000, 192).unwrap(), &[0x55; 192]);
+    }
+    svc(&mut p, &mut c, 0x16, &[u64::from(reader)]);
+}
+#[test]
+fn cache_reader_domain_objects_use_fs_ids_without_colliding_with_audio_ids() {
+    let (mut p, mut c) = process();
+    let audio = manager(&mut p, &mut c);
+    wire(&mut p, 0, false, &[], &[]);
+    let address = tls(&p);
+    p.store(address, 4, 5).unwrap();
+    call(&mut p, &mut c, audio);
+    let audio_root = reply(&p, 0x20);
+    let fs = named_manager(&mut p, &mut c, b"fsp-srv\0");
+    wire(&mut p, 0, false, &[], &[]);
+    p.store(address, 4, 5).unwrap();
+    call(&mut p, &mut c, fs);
+    let root = reply(&p, 0x20);
+    assert_eq!((audio_root, root), (1, 1));
+    // Invalid opening must restore both the FS target and its ID allocator.
+    fs_reader_wire(&mut p, Some(root), 62, true);
+    c.x[0] = u64::from(fs);
+    assert!(audio::service_hook(&mut c, &mut p, 0x21).is_err());
+    fs_reader_wire(&mut p, Some(root), 62, false);
+    svc(&mut p, &mut c, 0x21, &[u64::from(fs)]);
+    assert_eq!(reply(&p, 0x28), 0);
+    let reader = reply(&p, 0x30);
+    assert_ne!(reader, root);
+    p.write_bytes(DATA + 0x9000, &[0x55; 192]).unwrap();
+    fs_reader_wire(&mut p, Some(reader), 0, true);
+    svc(&mut p, &mut c, 0x21, &[u64::from(fs)]);
+    assert_eq!(reply(&p, 0x28), 0);
+    assert_eq!(p.load(address + 0x30, 8).unwrap(), 0);
+    assert_eq!(p.read_bytes(DATA + 0x9000, 192).unwrap(), &[0x55; 192]);
+    let k = p.kernel.as_ref().unwrap();
+    let Object::Session(s) = k.handles.get(fs).unwrap() else {
+        panic!()
+    };
+    let d = k.sessions[s].domain.unwrap();
+    let objects = &k.host.domains[d].objects;
+    assert_eq!(objects.len(), 2);
+    assert_ne!(objects[0].0, objects[1].0);
+    assert_eq!(
+        objects.iter().find(|(id, _)| *id == root).unwrap().1,
+        wl_runtime::services::HostObject::FileSystemProxy
+    );
+    fs_reader_wire(&mut p, Some(reader), 0, false);
+    p.store(address + 16, 1, 2).unwrap(); // Domain CloseObject.
+    p.store(address + 18, 2, 0).unwrap();
+    svc(&mut p, &mut c, 0x21, &[u64::from(fs)]);
+    fs_reader_wire(&mut p, Some(root), 62, false);
+    svc(&mut p, &mut c, 0x21, &[u64::from(fs)]);
+    assert_eq!(reply(&p, 0x30), reader); // The FS server recycles its own ID.
+    fs_reader_wire(&mut p, Some(audio_root), 2, false);
+    p.store(address + 4, 4, 12).unwrap();
+    p.store(address + 18, 2, 24).unwrap();
+    svc(&mut p, &mut c, 0x21, &[u64::from(audio)]);
+    assert_eq!(reply(&p, 0x28), 0);
+    assert_eq!(reply(&p, 0x30), 2); // Audio's independent allocator was not changed.
 }

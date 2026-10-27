@@ -186,3 +186,29 @@ Unknown-name gain behavior follows `AudioDevice.SetAudioDeviceOutputVolume` and
 `GetAudioDeviceOutputVolume` in the same pinned Ryujinx implementation. Names are
 still acquired through checked guest buffers; accepting an absent device does not
 add it to enumeration or redirect its gain to `AudioTvOutput`.
+
+## Cache-save enumeration through the hosted transport
+
+The launcher service bridge also handles `fsp-srv` command 62,
+`OpenSaveDataInfoReaderOnlyCacheStorage`. With no configured cache-save store,
+it returns a real kernel-managed reader session/domain object. Reader command 0
+returns an eight-byte signed zero count and preserves every output-buffer byte;
+no cache entries exist. Descriptor bounds and output permissions are checked.
+This implements empty cache enumeration, not persistent saves or general files.
+
+The extension reuses the indexed hosted callback transport. Its opaque indices
+are separate from audio renderers and Opus decoders. FS domain-ID allocation is
+scoped to the FS server during creation, conversion and close; the original target
+and allocator are restored on success or failure. The stock kernel remains
+responsible for HIPC/CMIF validation, handles, domain IDs and replies. Classification
+only selects this extension's calls and does not execute raw guest request bytes.
+No runtime structure layout or frozen CPU-unit ABI is changed.
+
+Command 62's object result follows Ryujinx `IFileSystemProxy` at revision
+`4930dced25c0d9ec33096b0f2601d262daa477bf` (MIT); reader command 0's MapAlias output
+and signed count follow libnx `fsSaveDataInfoReaderRead` at revision
+`feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973` (ISC). Model tests check real sessions,
+unchanged output, FS/audio domain-ID separation, failed opening and close/reuse.
+The explicit `wl-cli --test fs_cache -- --ignored` run builds the synthetic
+[`fs_cache.c`](../../tests/horizon/fs_cache.c) client, recompiles its AArch64 code
+and exercises two domain reader lifetimes. It requires devkitA64/libnx.
