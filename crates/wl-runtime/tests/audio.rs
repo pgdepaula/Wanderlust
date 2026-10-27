@@ -1048,3 +1048,188 @@ fn unconfigured_save_open_returns_path_not_found_without_a_null_success_object()
         }
     }
 }
+
+#[test]
+fn ram_cache_quota_faults_permissions_and_lifetimes_preserve_file_contents() {
+    use wl_runtime::{ipc::Request, services::HostObject};
+    let (mut p, _) = process();
+    let kernel = p.kernel.as_ref().unwrap();
+    let mut cache = host_fs::Service::default();
+    let plain = Request::default();
+    let mut create = [0u8; 24];
+    create[..2].copy_from_slice(&7u16.to_le_bytes());
+    create[8..16].copy_from_slice(&16u64.to_le_bytes());
+    for bad in [&create[..23], &[0xff; 24][..]] {
+        assert!(
+            cache
+                .request(&mut p.memory, kernel, host_fs::MANAGER + 3, 27, &plain, bad)
+                .is_err()
+        );
+    }
+    assert_eq!(
+        cache
+            .request(
+                &mut p.memory,
+                kernel,
+                host_fs::MANAGER + 3,
+                27,
+                &plain,
+                &create
+            )
+            .unwrap()
+            .data,
+        [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    );
+    assert_eq!(
+        cache
+            .request(
+                &mut p.memory,
+                kernel,
+                host_fs::MANAGER + 3,
+                27,
+                &plain,
+                &create
+            )
+            .unwrap()
+            .code,
+        0x402
+    );
+    let object = |reply: wl_runtime::audio::Reply| match reply.objects[0] {
+        HostObject::AudioRenderer { index } => index,
+        _ => panic!(),
+    };
+    let mut attr = [0u8; 72];
+    attr[0] = 1;
+    attr[40] = 5;
+    attr[42] = 7;
+    let mount = object(
+        cache
+            .request(&mut p.memory, kernel, host_fs::MANAGER, 51, &plain, &attr)
+            .unwrap(),
+    );
+    attr[8..16].copy_from_slice(&99u64.to_le_bytes());
+    assert!(
+        cache
+            .request(&mut p.memory, kernel, host_fs::MANAGER, 51, &plain, &attr)
+            .is_err()
+    );
+    attr[8..16].fill(0);
+    let mut other = host_fs::Service::default();
+    assert_eq!(
+        other
+            .request(&mut p.memory, kernel, host_fs::MANAGER, 51, &plain, &attr)
+            .unwrap()
+            .code,
+        (1002 << 9) | 2
+    );
+    p.memory.write_bytes(DATA + 0x9000, b"/a\0").unwrap();
+    let mut path = Request::default();
+    path.statics.push((DATA + 0x9000, 0x301));
+    let mut size = [0u8; 16];
+    size[8..16].copy_from_slice(&8u64.to_le_bytes());
+    assert_eq!(
+        cache
+            .request(&mut p.memory, kernel, mount, 0, &path, &size)
+            .unwrap()
+            .code,
+        0
+    );
+    let file = object(
+        cache
+            .request(&mut p.memory, kernel, mount, 8, &path, &3u32.to_le_bytes())
+            .unwrap(),
+    );
+    assert_eq!(
+        cache
+            .request(&mut p.memory, kernel, mount, 1, &path, &[])
+            .unwrap()
+            .code,
+        0xe02
+    );
+    assert_eq!(
+        cache
+            .request(&mut p.memory, kernel, mount, 8, &path, &3u32.to_le_bytes())
+            .unwrap()
+            .code,
+        0xe02
+    );
+    let mut transfer = [0u8; 24];
+    transfer[16..24].copy_from_slice(&8u64.to_le_bytes());
+    let mut input = Request::default();
+    input.sends.push((0, 8));
+    assert!(
+        cache
+            .request(&mut p.memory, kernel, file, 1, &input, &transfer)
+            .is_err()
+    );
+    p.memory
+        .write_bytes(DATA + 0xa000, &[1, 3, 7, 15, 31, 63, 127, 255])
+        .unwrap();
+    input.sends[0].0 = DATA + 0xa000;
+    cache
+        .request(&mut p.memory, kernel, file, 1, &input, &transfer)
+        .unwrap();
+    assert!(
+        cache
+            .request(&mut p.memory, kernel, file, 3, &plain, &17u64.to_le_bytes())
+            .is_err()
+    );
+    assert_eq!(
+        cache
+            .request(&mut p.memory, kernel, file, 4, &plain, &[])
+            .unwrap()
+            .data,
+        8i64.to_le_bytes()
+    );
+    let mut output = Request::default();
+    output.recvs.push((0, 8));
+    assert!(
+        cache
+            .request(&mut p.memory, kernel, file, 0, &output, &transfer)
+            .is_err()
+    );
+    output.recvs[0].0 = DATA + 0xb000;
+    cache
+        .request(&mut p.memory, kernel, file, 0, &output, &transfer)
+        .unwrap();
+    let mut actual = [0; 8];
+    p.memory.read_into(DATA + 0xb000, &mut actual).unwrap();
+    assert_eq!(actual, [1, 3, 7, 15, 31, 63, 127, 255]);
+    cache.close(file);
+    assert!(
+        cache
+            .request(&mut p.memory, kernel, file, 4, &plain, &[])
+            .is_err()
+    );
+    let readonly = object(
+        cache
+            .request(&mut p.memory, kernel, host_fs::MANAGER, 53, &plain, &attr)
+            .unwrap(),
+    );
+    assert!(
+        cache
+            .request(
+                &mut p.memory,
+                kernel,
+                readonly,
+                8,
+                &path,
+                &2u32.to_le_bytes()
+            )
+            .is_err()
+    );
+    assert_eq!(
+        cache
+            .request(&mut p.memory, kernel, mount, 1, &path, &[])
+            .unwrap()
+            .code,
+        0
+    );
+    assert_eq!(
+        cache
+            .request(&mut p.memory, kernel, mount, 8, &path, &1u32.to_le_bytes())
+            .unwrap()
+            .code,
+        0x202
+    );
+}

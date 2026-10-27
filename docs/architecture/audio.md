@@ -225,3 +225,39 @@ Path/open wire layouts follow the same pinned libnx `fs.c`; the result encoding
 is documented in [Switchbrew's error table](https://switchbrew.org/wiki/Error_codes).
 Tests exercise both moved sessions and domain children, restoration after invalid
 paths, and an actual recompiled libnx client making all three missing-path calls.
+
+### Volatile application cache
+
+The hosted extension implements `IApplicationFunctions::CreateCacheStorage` (27)
+with a real, per-process RAM volume. Its 24-byte input contains a 16-bit index
+and two aligned signed 64-bit sizes; the 16-byte output contains storage target
+1 and zero additional required space after successful allocation of the volume
+metadata. Sizes are checked before state changes. The combined declared data and
+journal budgets are limited to 128 MiB across at most 16 cache volumes. Journal
+space is accounted for but no persistent NAND image or crash-recovery journal is
+implemented. Cache contents disappear when the process exits; this interface
+must not be used as durable user-save storage.
+
+`fsp-srv` 51/53 recognize current-application, primary-rank cache attributes and
+return real writable/read-only mount objects. Command 62 creates an independent
+snapshot reader of the actually created cache volumes, including their index,
+application and declared size. File/directory objects have distinct bounded,
+non-recycled opaque identities and use the stock session/domain close machinery.
+Filesystem operations include file/directory creation, file deletion, entry type,
+file/directory opening, RAM-cache commit, and free/total data capacity. File
+operations implement bounded read/write, flush, resize and size; directory reads
+return sorted 0x310-byte entries with independent cursors. Writes are checked
+against access/append permissions and quota, acquire all source bytes before
+mutating the file, and cannot replace an open file through deletion. Failed reads
+or writes preserve file contents and enumeration cursors. Unknown operations and
+unsupported metadata remain explicit errors.
+
+The request shapes follow pinned libnx `fs.c`/`fs.h` above. AM command 27 is
+independently corroborated by Ryujinx `IApplicationFunctions.cs`, revision
+`4930dced25c0d9ec33096b0f2601d262daa477bf` (MIT), and the
+[AM command list](https://switchbrew.org/wiki/AM_services#IApplicationFunctions).
+The recompiled libnx client exercises AM and FS domain objects together, cache
+creation/mount, byte-exact file writes/reads with EOF tail preservation, reopening,
+directory enumeration and cache-save enumeration. Model tests additionally
+inject invalid sizes, cross-application mounts, quota overruns, unmapped transfer
+buffers, conflicting file handles, read-only access and stale closed objects.

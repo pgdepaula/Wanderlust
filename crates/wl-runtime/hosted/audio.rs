@@ -381,12 +381,14 @@ struct Backend {
     state: State,
     next_thread_trace: Option<std::time::Instant>,
     opus: crate::host_opus::Service,
+    fs: crate::host_fs::Service,
 }
 impl Default for Backend {
     fn default() -> Self {
         Self {
             state: State::default(),
             opus: crate::host_opus::Service::default(),
+            fs: crate::host_fs::Service::default(),
             next_thread_trace: (std::env::var_os("WL_THREAD_TRACE").as_deref()
                 == Some(std::ffi::OsStr::new("1")))
             .then(std::time::Instant::now),
@@ -450,7 +452,7 @@ impl AudioHost for Backend {
         if let HostObject::AudioRenderer { index } = target
             && crate::host_fs::owns(index)
         {
-            return crate::host_fs::request(memory, index, command, req, args);
+            return self.fs.request(memory, k, index, command, req, args);
         }
         if let HostObject::AudioRenderer { index } = target
             && index >= crate::host_opus::MANAGER
@@ -719,6 +721,10 @@ impl AudioHost for Backend {
     }
     fn close(&mut self, _kernel: &mut Kernel, object: HostObject) {
         if let HostObject::AudioRenderer { index } = object {
+            if crate::host_fs::owns(index) {
+                self.fs.close(index);
+                return;
+            }
             if index >= crate::host_opus::MANAGER {
                 self.opus.close(index);
                 return;
