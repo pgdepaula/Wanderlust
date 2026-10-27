@@ -388,7 +388,11 @@ impl Default for Backend {
         Self {
             state: State::default(),
             opus: crate::host_opus::Service::default(),
-            fs: crate::host_fs::Service::default(),
+            fs: if std::env::var("WL_VOLATILE_SAVES").as_deref() == Ok("1") {
+                crate::host_fs::Service::with_volatile_saves()
+            } else {
+                crate::host_fs::Service::default()
+            },
             next_thread_trace: (std::env::var_os("WL_THREAD_TRACE").as_deref()
                 == Some(std::ffi::OsStr::new("1")))
             .then(std::time::Instant::now),

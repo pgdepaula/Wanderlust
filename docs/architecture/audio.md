@@ -261,3 +261,31 @@ creation/mount, byte-exact file writes/reads with EOF tail preservation, reopeni
 directory enumeration and cache-save enumeration. Model tests additionally
 inject invalid sizes, cross-application mounts, quota overruns, unmapped transfer
 buffers, conflicting file handles, read-only access and stale closed objects.
+
+### Explicit volatile-save launcher policy
+
+`fsp-srv` commands 51 and 53 validate the complete mount request. Missing volumes
+and saves belonging to another application return `TargetNotFound` (`0x7d402`),
+without a fabricated filesystem object. Truncated requests cannot fall through
+to a success-only stub. By default, application saves remain unconfigured.
+
+A launcher may explicitly set `WL_VOLATILE_SAVES=1` to enable empty, per-process
+RAM saves for the current application. Writable account/device mounts then create
+bounded volumes on first use; read-only mounts never create volumes. Identity
+includes save type, user ID, primary rank and index. Repeated mounts share that
+volume, different users/types remain isolated, and unrelated application IDs
+cannot access it. At most four 32 MiB save volumes exist; cache volumes have
+separate IDs and remain the only entries in cache-save enumeration. **This policy
+does not persist user saves, import existing saves, or implement the console's
+NACP-controlled save provisioning.** A new process starts empty. It is intended
+for controlled execution without a durable save provider.
+
+The same bounded filesystem also supports file/directory rename, empty and
+recursive directory deletion, and recursive directory cleaning. Two-path requests
+validate both paths before mutation. Open files prevent deletion or renaming of
+their containing subtree; failed operations preserve existing bytes/names. Moving
+a directory into itself, deleting the root and overlong resulting paths are
+rejected. The native libnx fixture selects HOS 16 wire wrappers explicitly and
+checks writable/read-only mount aliases, cross-title absence, file/directory
+rename, cleaning and deletion. Additional model tests verify user/type isolation,
+process-lifetime isolation and failed rename atomicity.

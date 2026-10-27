@@ -41,6 +41,7 @@ fn libnx_cache_save_reader_uses_real_domain_objects_and_preserves_output() {
     );
     let run = Command::new(exe)
         .env("WL_NO_SDL", "1")
+        .env("WL_VOLATILE_SAVES", "1")
         .env("WL_THREAD_TRACE", "1")
         .args(["--steps", "2000000"])
         .output()

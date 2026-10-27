@@ -993,7 +993,7 @@ fn cache_reader_domain_objects_use_fs_ids_without_colliding_with_audio_ids() {
 }
 
 #[test]
-fn unconfigured_save_open_returns_path_not_found_without_a_null_success_object() {
+fn unconfigured_save_mount_returns_target_not_found_without_a_null_success_object() {
     for domain in [false, true] {
         let (mut p, mut c) = process();
         let fs = named_manager(&mut p, &mut c, b"fsp-srv\0");
@@ -1006,45 +1006,26 @@ fn unconfigured_save_open_returns_path_not_found_without_a_null_success_object()
         } else {
             None
         };
-        fs_reader_wire(&mut p, root, 51, false);
-        svc(&mut p, &mut c, 0x21, &[u64::from(fs)]);
-        let child = reply(&p, if domain { 0x30 } else { 12 });
-        let handle = if domain { fs } else { child };
-        for command in 7u32..=9 {
-            let mut b = [0u8; 256];
-            b[..4].copy_from_slice(&(4u32 | (1 << 16)).to_le_bytes());
-            b[8..12].copy_from_slice(&(0x301u32 << 16).to_le_bytes());
-            b[12..16].copy_from_slice(&((DATA + 0x9000) as u32).to_le_bytes());
-            let cmif = if domain { 32 } else { 16 };
-            if domain {
-                b[16] = 1;
-                b[18..20].copy_from_slice(&20u16.to_le_bytes());
-                b[20..24].copy_from_slice(&child.to_le_bytes());
-            }
-            b[4..8].copy_from_slice(&(((cmif + 20 - 16) / 4) as u32).to_le_bytes());
-            b[cmif..cmif + 4].copy_from_slice(b"SFCI");
-            b[cmif + 8..cmif + 12].copy_from_slice(&command.to_le_bytes());
-            b[cmif + 16..cmif + 20].copy_from_slice(&1u32.to_le_bytes());
-            p.write_bytes(DATA + 0x9000, b"/missing.dat\0").unwrap();
+        for command in [51, 53] {
+            fs_reader_wire(&mut p, root, command, false);
             let address = tls(&p);
-            p.write_bytes(address, &b).unwrap();
-            svc(&mut p, &mut c, 0x21, &[u64::from(handle)]);
-            assert_eq!(c.x[0], 0);
-            assert_eq!(reply(&p, if domain { 0x28 } else { 0x18 }), 0x202);
-            assert_eq!(reply(&p, 4) >> 31, 0); // No moved fake object/handle.
-            p.write_bytes(DATA + 0x9000, &[b'x'; 0x301]).unwrap();
-            p.write_bytes(address, &b).unwrap();
-            c.x[0] = u64::from(handle);
-            assert!(
-                audio::service_hook(&mut c, &mut p, 0x21)
-                    .unwrap_err()
-                    .contains("unterminated")
-            );
-            // Failure restores the original filesystem target too.
-            p.write_bytes(DATA + 0x9000, b"/missing.dat\0").unwrap();
-            p.write_bytes(address, &b).unwrap();
-            svc(&mut p, &mut c, 0x21, &[u64::from(handle)]);
-            assert_eq!(reply(&p, if domain { 0x28 } else { 0x18 }), 0x202);
+            let cmif = if domain { 32 } else { 16 };
+            p.store(address + 4, 4, (cmif + 16 + 72 - 8) / 4).unwrap();
+            if domain {
+                p.store(address + 18, 2, 88).unwrap();
+            }
+            let mut args = [0; 72];
+            args[0] = 1;
+            args[40] = 1;
+            args[16] = 1;
+            p.write_bytes(address + cmif + 16, &args).unwrap();
+            svc(&mut p, &mut c, 0x21, &[u64::from(fs)]);
+            assert_eq!(reply(&p, if domain { 0x28 } else { 0x18 }), 0x7d402);
+            assert_eq!(reply(&p, 4) >> 31, 0);
+            // A truncated mount cannot fall through to a success-only stub.
+            fs_reader_wire(&mut p, root, command, false);
+            c.x[0] = u64::from(fs);
+            assert!(audio::service_hook(&mut c, &mut p, 0x21).is_err());
         }
     }
 }
@@ -1231,5 +1212,118 @@ fn ram_cache_quota_faults_permissions_and_lifetimes_preserve_file_contents() {
             .unwrap()
             .code,
         0x202
+    );
+}
+
+#[test]
+fn volatile_save_mounts_share_only_the_exact_application_user_and_type() {
+    use wl_runtime::{ipc::Request, services::HostObject};
+    let (mut p, _) = process();
+    let k = p.kernel.as_ref().unwrap();
+    let mut fs = host_fs::Service::with_volatile_saves();
+    let plain = Request::default();
+    let object = |reply: wl_runtime::audio::Reply| match reply.objects[0] {
+        HostObject::AudioRenderer { index } => index,
+        _ => panic!(),
+    };
+    let mut attr = [0; 72];
+    attr[0] = 1;
+    attr[40] = 1;
+    attr[16] = 1;
+    let mount = object(
+        fs.request(&mut p.memory, k, host_fs::MANAGER, 51, &plain, &attr)
+            .unwrap(),
+    );
+    p.memory.write_bytes(DATA + 0x9000, b"/entry\0").unwrap();
+    let mut path = Request::default();
+    path.statics.push((DATA + 0x9000, 0x301));
+    let mut create = [0; 16];
+    create[8..16].copy_from_slice(&3u64.to_le_bytes());
+    fs.request(&mut p.memory, k, mount, 0, &path, &create)
+        .unwrap();
+    let alias = object(
+        fs.request(&mut p.memory, k, host_fs::MANAGER, 53, &plain, &attr)
+            .unwrap(),
+    );
+    assert_eq!(
+        fs.request(&mut p.memory, k, alias, 7, &path, &[])
+            .unwrap()
+            .data,
+        1u32.to_le_bytes()
+    );
+    assert!(fs.request(&mut p.memory, k, alias, 1, &path, &[]).is_err());
+    attr[16] = 2;
+    assert_eq!(
+        fs.request(&mut p.memory, k, host_fs::MANAGER, 53, &plain, &attr)
+            .unwrap()
+            .code,
+        0x7d402
+    );
+    let second = object(
+        fs.request(&mut p.memory, k, host_fs::MANAGER, 51, &plain, &attr)
+            .unwrap(),
+    );
+    assert_eq!(
+        fs.request(&mut p.memory, k, second, 7, &path, &[])
+            .unwrap()
+            .code,
+        0x202
+    );
+    attr[16] = 0;
+    attr[40] = 3;
+    let device = object(
+        fs.request(&mut p.memory, k, host_fs::MANAGER, 51, &plain, &attr)
+            .unwrap(),
+    );
+    assert_eq!(
+        fs.request(&mut p.memory, k, device, 7, &path, &[])
+            .unwrap()
+            .code,
+        0x202
+    );
+    attr[8..16].copy_from_slice(&0xffffu64.to_le_bytes());
+    assert_eq!(
+        fs.request(&mut p.memory, k, host_fs::MANAGER, 53, &plain, &attr)
+            .unwrap()
+            .code,
+        0x7d402
+    );
+    // A fresh process's store never inherits these volatile contents.
+    let mut fresh = host_fs::Service::default();
+    attr[8..16].fill(0);
+    assert_eq!(
+        fresh
+            .request(&mut p.memory, k, host_fs::MANAGER, 51, &plain, &attr)
+            .unwrap()
+            .code,
+        0x7d402
+    );
+    // Failed two-path renames and open-file deletion preserve the source entry.
+    p.memory.write_bytes(DATA + 0xa000, b"/else\0").unwrap();
+    let mut rename = Request::default();
+    rename
+        .statics
+        .extend_from_slice(&[(DATA + 0x9000, 0x301), (DATA + 0xa000, 0x301)]);
+    let file = object(
+        fs.request(&mut p.memory, k, mount, 8, &path, &1u32.to_le_bytes())
+            .unwrap(),
+    );
+    assert_eq!(
+        fs.request(&mut p.memory, k, mount, 5, &rename, &[])
+            .unwrap()
+            .code,
+        0xe02
+    );
+    fs.close(file);
+    rename.statics[1] = (0, 0x301);
+    assert!(
+        fs.request(&mut p.memory, k, mount, 5, &rename, &[])
+            .is_err()
+    );
+    assert_eq!(
+        fs.request(&mut p.memory, k, mount, 7, &path, &[])
+            .unwrap()
+            .data,
+        1u32.to_le_bytes()
     );
 }

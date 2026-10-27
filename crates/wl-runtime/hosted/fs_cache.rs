@@ -186,10 +186,7 @@ pub fn bind(cpu: &Cpu, process: &mut Process, svc: u16) -> Option<Binding> {
         && target == HostObject::FileSystemProxy
         && cmif + 16 <= end
         && u32_at(&b, cmif)? == u32::from_le_bytes(*b"SFCI")
-        && (u32_at(&b, cmif + 8)? == 62
-            || (matches!(u32_at(&b, cmif + 8)?, 51 | 53)
-                && cmif + 16 + 72 <= end
-                && b[cmif + 16 + 40] == 5));
+        && (u32_at(&b, cmif + 8)? == 62 || matches!(u32_at(&b, cmif + 8)?, 51 | 53));
     let filesystem = !control
         && !closing
         && target == HostObject::FileSystem
@@ -279,11 +276,11 @@ impl Volume {
 #[derive(Clone, Debug)]
 enum CacheObject {
     Mount {
-        volume: u16,
+        volume: u32,
         readonly: bool,
     },
     File {
-        volume: u16,
+        volume: u32,
         path: String,
         mode: u32,
     },
@@ -300,8 +297,10 @@ enum CacheObject {
 /// Limits are implementation budgets; no host path or host pointer is exposed.
 #[derive(Debug)]
 pub struct Service {
-    volumes: BTreeMap<u16, Volume>,
+    volumes: BTreeMap<u32, Volume>,
     objects: BTreeMap<usize, CacheObject>,
+    saves: BTreeMap<Vec<u8>, u32>,
+    volatile_saves: bool,
     next: usize,
 }
 impl Default for Service {
@@ -309,6 +308,8 @@ impl Default for Service {
         Self {
             volumes: BTreeMap::new(),
             objects: BTreeMap::new(),
+            saves: BTreeMap::new(),
+            volatile_saves: false,
             next: MANAGER + 0x100,
         }
     }
@@ -379,6 +380,13 @@ fn resize(data: &mut Vec<u8>, size: usize) -> RuntimeResult<()> {
     Ok(())
 }
 impl Service {
+    /// Explicit launcher policy for empty, nonpersistent current-application saves.
+    pub fn with_volatile_saves() -> Self {
+        Self {
+            volatile_saves: true,
+            ..Self::default()
+        }
+    }
     fn object(&mut self, object: CacheObject) -> RuntimeResult<Reply> {
         if self.next >= LIMIT || self.objects.len() >= 1024 {
             return Err("cache object lifetime budget".into());
@@ -405,11 +413,16 @@ impl Service {
             if command != 27 || args.len() < 24 {
                 return Err("invalid CreateCacheStorage request".into());
             }
-            let number = u16::from_le_bytes(args[..2].try_into().unwrap());
+            let number = u32::from(u16::from_le_bytes(args[..2].try_into().unwrap()));
             let size = u64_at(args, 8)?;
             let journal = u64_at(args, 16)?;
             let required = size.checked_add(journal).ok_or("cache size overflow")?;
-            let reserved: u64 = self.volumes.values().map(|v| v.quota + v.journal).sum();
+            let reserved: u64 = self
+                .volumes
+                .iter()
+                .filter(|(id, _)| **id < 65536)
+                .map(|(_, v)| v.quota + v.journal)
+                .sum();
             if size == 0
                 || required > MAX_CACHE_BYTES
                 || self.volumes.len() >= 16
@@ -439,25 +452,62 @@ impl Service {
             no_buffers(req)?;
             return match command {
                 62 => self.object(CacheObject::Reader {
-                    indices: self.volumes.keys().copied().collect(),
+                    indices: self
+                        .volumes
+                        .keys()
+                        .filter_map(|n| u16::try_from(*n).ok())
+                        .collect(),
                     cursor: 0,
                 }),
                 51 | 53 => {
-                    if args.len() < 72
-                        || args[40] != 5
-                        || args[41] != 0
-                        || !matches!(args[0], 1 | 4)
-                    {
-                        return Err("unsupported cache mount attribute".into());
+                    if args.len() < 72 || args[41] != 0 || !matches!(args[0], 1 | 4) {
+                        return Err("unsupported save mount attribute".into());
                     }
                     let application = u64_at(args, 8)?;
-                    if application != 0 && application != kernel.config.program_id {
-                        return Err("cache belongs to another application".into());
-                    }
-                    if args[16..40].iter().any(|b| *b != 0) {
-                        return Err("unsupported cache UID/system ID".into());
-                    }
-                    let volume = u16::from_le_bytes(args[42..44].try_into().unwrap());
+                    let current = application == 0 || application == kernel.config.program_id;
+                    let volume = if args[40] == 5 {
+                        if !current {
+                            return Err("cache belongs to another application".into());
+                        }
+                        if args[16..40].iter().any(|b| *b != 0) {
+                            return Err("unsupported cache UID/system ID".into());
+                        }
+                        u32::from(u16::from_le_bytes(args[42..44].try_into().unwrap()))
+                    } else if matches!(args[40], 1 | 3) {
+                        if !current {
+                            return Ok(Reply::failure((1002 << 9) | 2));
+                        }
+                        if args[32..40].iter().any(|b| *b != 0) || args[42..44] != [0, 0] {
+                            return Err("unsupported application save ID/index".into());
+                        }
+                        if args[40] == 3 && args[16..32].iter().any(|b| *b != 0) {
+                            return Err("device save has a user ID".into());
+                        }
+                        let key = args[16..44].to_vec();
+                        if let Some(id) = self.saves.get(&key) {
+                            *id
+                        } else if command == 51 && self.volatile_saves {
+                            if self.saves.len() >= 4 {
+                                return Err("volatile save-volume budget".into());
+                            }
+                            let id = 65536 + self.saves.len() as u32;
+                            self.volumes.insert(
+                                id,
+                                Volume {
+                                    quota: 32 * 1024 * 1024,
+                                    journal: 0,
+                                    files: BTreeMap::new(),
+                                    directories: BTreeSet::from(["/".into()]),
+                                },
+                            );
+                            self.saves.insert(key, id);
+                            id
+                        } else {
+                            return Ok(Reply::failure((1002 << 9) | 2));
+                        }
+                    } else {
+                        return Err("unsupported save data type".into());
+                    };
                     if !self.volumes.contains_key(&volume) {
                         Ok(Reply::failure((1002 << 9) | 2))
                     } else {
@@ -510,7 +560,7 @@ impl Service {
                 let n = (size as usize / 0x60).min(indices.len() - cursor);
                 let mut out = vec![0; n * 0x60];
                 for (dst, number) in out.chunks_exact_mut(0x60).zip(&indices[cursor..cursor + n]) {
-                    let v = &self.volumes[number];
+                    let v = &self.volumes[&u32::from(*number)];
                     dst[..8].copy_from_slice(&(u64::from(*number) + 1).to_le_bytes());
                     dst[8] = 1;
                     dst[9] = 5;
@@ -558,7 +608,7 @@ impl Service {
     fn mount(
         &mut self,
         memory: &Memory,
-        volume: u16,
+        volume: u32,
         readonly: bool,
         command: u32,
         req: &Request,
@@ -568,6 +618,67 @@ impl Service {
             no_buffers(req)?;
             return Ok(Reply::ok());
         } // RAM cache has no deferred host writes.
+        if matches!(command, 5 | 6) {
+            simple(req)?;
+            if readonly || req.statics.len() != 2 || !req.sends.is_empty() || !req.recvs.is_empty()
+            {
+                return Err("invalid cache rename request".into());
+            }
+            let mut one = Request::default();
+            one.statics.push(req.statics[0]);
+            let from = path(memory, &one)?;
+            one.statics[0] = req.statics[1];
+            let to = path(memory, &one)?;
+            if from == "/" || to == "/" || to.starts_with(&(from.clone() + "/")) {
+                return Err("invalid directory rename target".into());
+            }
+            if self.objects.values().any(|o| matches!(o,CacheObject::File { volume:v,path:n,.. } if *v==volume && (n==&from || (command==6 && n.starts_with(&(from.clone()+"/")))))) { return Ok(Reply::failure(0xe02)); }
+            let v = self
+                .volumes
+                .get_mut(&volume)
+                .ok_or("unmounted cache volume")?;
+            if v.files.contains_key(&to) || v.directories.contains(&to) {
+                return Ok(Reply::failure(0x402));
+            }
+            if !v.directories.contains(parent(&to)) {
+                return Ok(Reply::failure(0x202));
+            }
+            if command == 5 {
+                let Some(data) = v.files.remove(&from) else {
+                    return Ok(Reply::failure(0x202));
+                };
+                v.files.insert(to, data);
+                return Ok(Reply::ok());
+            }
+            if !v.directories.contains(&from) {
+                return Ok(Reply::failure(0x202));
+            }
+            let prefix = from.clone() + "/";
+            let files: Vec<_> = v
+                .files
+                .keys()
+                .filter(|n| n.starts_with(&prefix))
+                .map(|n| (n.clone(), format!("{to}{}", &n[from.len()..])))
+                .collect();
+            let dirs: Vec<_> = v
+                .directories
+                .iter()
+                .filter(|n| *n == &from || n.starts_with(&prefix))
+                .map(|n| (n.clone(), format!("{to}{}", &n[from.len()..])))
+                .collect();
+            if files.iter().chain(&dirs).any(|(_, n)| n.len() > 0x300) {
+                return Err("renamed path exceeds path limit".into());
+            }
+            for (old, new) in files {
+                let data = v.files.remove(&old).unwrap();
+                v.files.insert(new, data);
+            }
+            for (old, new) in dirs {
+                v.directories.remove(&old);
+                v.directories.insert(new);
+            }
+            return Ok(Reply::ok());
+        }
         let p = path(memory, req)?;
         if std::env::var_os("WL_FS_TRACE").is_some() {
             eprintln!("[fs] RAM-cache index={volume} cmd={command} path={p}");
@@ -628,6 +739,34 @@ impl Service {
                     return Err("cache entry budget".into());
                 }
                 v.directories.insert(p);
+                Ok(Reply::ok())
+            }
+            3 | 4 | 13 => {
+                if readonly || (p == "/" && command != 13) {
+                    return Err("invalid directory removal".into());
+                }
+                if !v.directories.contains(&p) {
+                    return Ok(Reply::failure(0x202));
+                }
+                let prefix = if p == "/" {
+                    "/".into()
+                } else {
+                    p.clone() + "/"
+                };
+                if self.objects.values().any(|o|matches!(o,CacheObject::File { volume:id,path:n,.. } if *id==volume && n.starts_with(&prefix))) { return Ok(Reply::failure(0xe02)); }
+                if command == 3
+                    && (v.files.keys().any(|n| n.starts_with(&prefix))
+                        || v.directories
+                            .iter()
+                            .any(|n| n != &p && n.starts_with(&prefix)))
+                {
+                    return Err("cannot delete nonempty directory".into());
+                }
+                v.files.retain(|n, _| !n.starts_with(&prefix));
+                v.directories.retain(|n| n == &p || !n.starts_with(&prefix));
+                if command != 13 {
+                    v.directories.remove(&p);
+                }
                 Ok(Reply::ok())
             }
             7 => {
