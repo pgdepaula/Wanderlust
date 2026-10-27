@@ -32,6 +32,8 @@ pub struct Parameters {
     pub voices: u32,
     pub sinks: u32,
     pub effects: u32,
+    pub splitters: u32,
+    pub splitter_destinations: u32,
     pub revision: u32,
 }
 impl Parameters {
@@ -47,6 +49,8 @@ impl Parameters {
             voices: word(data, 16),
             sinks: word(data, 20),
             effects: word(data, 24),
+            splitters: word(data, 36),
+            splitter_destinations: word(data, 40),
             revision: word(data, 48),
         };
         if !matches!((p.sample_rate, p.sample_count), (48000, 240) | (32000, 160))
@@ -58,21 +62,110 @@ impl Parameters {
             || p.revision & 0xffffff != 0x564552
             || !(b'1'..=b'0' + 15).contains(&((p.revision >> 24) as u8))
         {
-            return Err(unsupported("renderer geometry, counts or revision"));
+            return Err(format!(
+                "{}: {p:?}",
+                unsupported("renderer geometry, counts or revision")
+            ));
         }
         if data[32] > 1 || data[33..36] != [0; 3] || word(data, 44) != 0 {
             return Err(unsupported(
                 "renderer execution/device flags or external context",
             ));
         }
-        if word(data, 36) != 0 || word(data, 40) != 0 {
-            return Err(unsupported("splitter configuration"));
+        if p.splitters > 1024
+            || p.splitter_destinations > 8192
+            || ((p.splitters != 0 || p.splitter_destinations != 0)
+                && (!(5..=11).contains(&p.revision_number())
+                    || p.splitters == 0
+                    || p.splitter_destinations == 0))
+        {
+            return Err(format!(
+                "{}: {p:?}",
+                unsupported("splitter configuration or implementation limits")
+            ));
         }
         Ok(p)
     }
     pub fn revision_number(&self) -> u32 {
         (self.revision >> 24) - u32::from(b'0')
     }
+    /// REV5–REV11 routing metadata is observable only through silent updates:
+    /// active voices and DSP remain rejected before a result is returned.
+    fn validate_splitters(&self, section: &[u8]) -> RuntimeResult<()> {
+        if self.splitters == 0 {
+            return if section.is_empty() {
+                Ok(())
+            } else {
+                Err(unsupported("unexpected splitter section"))
+            };
+        }
+        if section.len() < 32 || section.len() % 16 != 0 || word(section, 0) != 0x48444e53 {
+            return Err(unsupported("splitter SNDH header or alignment"));
+        }
+        let info_count = word(section, 4);
+        let destination_count = word(section, 8);
+        if info_count > self.splitters || destination_count > self.splitter_destinations {
+            return Err(unsupported("splitter update counts"));
+        }
+        let mut at = 32usize;
+        let mut seen = vec![false; self.splitter_destinations as usize];
+        for _ in 0..info_count {
+            let info = take_section(section, &mut at, 16)?;
+            let count = word(info, 12) as usize;
+            if word(info, 0) != 0x49444e53
+                || word(info, 4) >= self.splitters
+                || count > self.splitter_destinations as usize
+            {
+                return Err(unsupported("splitter SNDI id or destination count"));
+            }
+            seen.fill(false);
+            let ids = take_section(section, &mut at, count * 4)?;
+            for value in ids.chunks_exact(4) {
+                let id = word(value, 0) as usize;
+                if id >= seen.len() || seen[id] {
+                    return Err(unsupported("splitter destination id or cyclic list"));
+                }
+                seen[id] = true;
+            }
+            // The wire's unused twelve bytes follow the variable IDs array.
+            take_section(section, &mut at, 12)?;
+        }
+        for _ in 0..destination_count {
+            let destination = take_section(section, &mut at, 0x70)?;
+            if word(destination, 0) != 0x44444e53
+                || word(destination, 4) >= self.splitter_destinations
+                || destination[0x6c] > 1
+            {
+                return Err(unsupported("splitter SNDD id or use flag"));
+            }
+            if destination[0x6c] != 0 {
+                let mix = word(destination, 0x68);
+                if mix != 0x7fffffff && mix > self.submixes {
+                    return Err(unsupported("splitter destination mix"));
+                }
+                if destination[8..0x68]
+                    .chunks_exact(4)
+                    .any(|v| !f32::from_bits(word(v, 0)).is_finite())
+                {
+                    return Err(unsupported("nonfinite splitter volume"));
+                }
+            }
+        }
+        if at.div_ceil(16) * 16 != section.len() {
+            return Err(unsupported("splitter section trailing records"));
+        }
+        Ok(())
+    }
+}
+
+fn take_section<'a>(bytes: &'a [u8], at: &mut usize, size: usize) -> RuntimeResult<&'a [u8]> {
+    let end = at
+        .checked_add(size)
+        .filter(|end| *end <= bytes.len())
+        .ok_or_else(|| unsupported("truncated splitter record"))?;
+    let result = &bytes[*at..end];
+    *at = end;
+    Ok(result)
 }
 
 #[derive(Clone, Debug)]
@@ -148,11 +241,10 @@ impl Renderer {
             || h[4] / 0x70 > p.voices as usize * 6
             || h[5] != p.effects as usize * 0xc0
             || h[7] != p.sinks as usize * 0x140
-            || h[9] != 0
             || !matches!(h[8], 0 | 0x10)
             || !matches!(h[10], 0 | 0x10)
         {
-            return Err(unsupported("update section geometry"));
+            return Err(format!("{}: {h:?}", unsupported("update section geometry")));
         }
         // Physical ordering differs from the header: channel resources precede voices;
         // splitters precede mixes. Every range is validated before slicing.
@@ -169,6 +261,7 @@ impl Renderer {
         if word(parts[1], 0) != p.revision || wide(parts[1], 8) != 0 {
             return Err(unsupported("behavior revision or flags"));
         }
+        p.validate_splitters(parts[9])?;
         for pool in parts[2].chunks_exact(0x20) {
             let state = word(pool, 16);
             if state > 6 {
@@ -381,7 +474,10 @@ impl AudioHost for Backend {
                     in_data: 0x34,
                     ..no_arguments
                 })?;
-                Parameters::parse(args)?;
+                let parameters = Parameters::parse(args)?;
+                if self.next_thread_trace.is_some() {
+                    eprintln!("[audio] work-buffer parameters: {parameters:?}");
+                }
                 Done::data(&WORK_BUFFER_BYTES.to_le_bytes())
             }
             (HostObject::AudioRendererManager, 0) => {

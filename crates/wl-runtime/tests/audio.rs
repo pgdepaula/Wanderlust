@@ -113,10 +113,12 @@ fn parameters(revision: u8) -> Vec<u8> {
     b
 }
 fn renderer(p: &mut Process, c: &mut Cpu, manager: u32) -> u32 {
+    open_renderer(p, c, manager, parameters(8))
+}
+fn open_renderer(p: &mut Process, c: &mut Cpu, manager: u32, mut args: Vec<u8>) -> u32 {
     svc(p, c, 0x15, &[0, DATA + 0x10000, 0x10000, 0]);
     assert_eq!(c.x[0], 0);
     let transfer = c.x[1] as u32;
-    let mut args = parameters(8);
     args.extend([0; 4]);
     args.extend(audio::WORK_BUFFER_BYTES.to_le_bytes());
     args.extend(0u64.to_le_bytes());
@@ -139,6 +141,120 @@ fn silent_input() -> Vec<u8> {
         b[80 + i * 32 + 16..80 + i * 32 + 20].copy_from_slice(&1u32.to_le_bytes());
     }
     b
+}
+
+fn splitter_parameters() -> Vec<u8> {
+    let mut p = parameters(11);
+    p[36..40].copy_from_slice(&2u32.to_le_bytes());
+    p[40..44].copy_from_slice(&3u32.to_le_bytes());
+    p
+}
+fn splitter_section() -> Vec<u8> {
+    // Independent wire fixture: two variable SNDI records followed by three
+    // 112-byte SNDD records, with deliberately nonzero unused/padding bytes.
+    let mut b = vec![0xa5; 32];
+    b[..4].copy_from_slice(b"SNDH");
+    b[4..8].copy_from_slice(&2u32.to_le_bytes());
+    b[8..12].copy_from_slice(&3u32.to_le_bytes());
+    for (id, destinations) in [(0u32, &[2u32, 0][..]), (1, &[1][..])] {
+        b.extend(b"SNDI");
+        b.extend(id.to_le_bytes());
+        b.extend(48000u32.to_le_bytes());
+        b.extend((destinations.len() as u32).to_le_bytes());
+        for id in destinations {
+            b.extend(id.to_le_bytes());
+        }
+        b.extend([0xa5; 12]);
+    }
+    assert_eq!(b.len(), 100);
+    for id in [2u32, 1, 0] {
+        let mut d = [0u8; 112];
+        d[..4].copy_from_slice(b"SNDD");
+        d[4..8].copy_from_slice(&id.to_le_bytes());
+        d[8..12].copy_from_slice(&1f32.to_bits().to_le_bytes());
+        d[12..16].copy_from_slice(&0.125f32.to_bits().to_le_bytes());
+        d[108] = 1;
+        d[109..].fill(0xa5); // Explicit reset is not a REV11 feature.
+        b.extend(d);
+    }
+    assert_eq!(b.len(), 436);
+    b.extend([0xbc; 12]);
+    b
+}
+fn input_with_splitters(section: &[u8]) -> Vec<u8> {
+    let mut input = silent_input();
+    input[..4].copy_from_slice(b"REV;"); // REV11 is REV0 + (11 << 24).
+    input[64..68].copy_from_slice(b"REV;");
+    input[36..40].copy_from_slice(&(section.len() as u32).to_le_bytes());
+    input.splice(576..576, section.iter().copied());
+    let total = input.len() as u32;
+    input[60..64].copy_from_slice(&total.to_le_bytes());
+    input
+}
+
+#[test]
+fn silent_rev11_splitter_updates_accept_variable_ids_and_opaque_padding() {
+    let r = audio::Renderer::new(audio::Parameters::parse(&splitter_parameters()).unwrap(), 0);
+    let input = input_with_splitters(&splitter_section());
+    let result = r.update(&input, &Memory::default()).unwrap();
+    assert_eq!(result.len(), 384);
+    assert_eq!(&result[..4], b"REV;");
+    assert!(result[128..].iter().all(|b| *b == 0));
+    let mut voice = input;
+    voice[208 + 9] = 1;
+    assert!(
+        r.update(&voice, &Memory::default())
+            .unwrap_err()
+            .contains("active voice")
+    );
+}
+
+#[test]
+fn malformed_splitter_ranges_and_ids_are_rejected_before_output() {
+    let r = audio::Renderer::new(audio::Parameters::parse(&splitter_parameters()).unwrap(), 0);
+    let memory = Memory::default();
+    for (at, bits) in [
+        (0, 0u32),
+        (4, 3),
+        (8, 4),
+        (36, 2),
+        (44, u32::MAX),
+        (48, 3),
+        (52, 2),
+        (100, 0),
+        (104, 3),
+        (204, 1),
+        (108, f32::NAN.to_bits()),
+    ] {
+        let mut section = splitter_section();
+        section[at..at + 4].copy_from_slice(&bits.to_le_bytes());
+        assert!(
+            r.update(&input_with_splitters(&section), &memory).is_err(),
+            "offset {at}"
+        );
+    }
+    let mut section = splitter_section();
+    section[208] = 2;
+    assert!(r.update(&input_with_splitters(&section), &memory).is_err());
+    section = splitter_section();
+    section.truncate(432);
+    assert!(r.update(&input_with_splitters(&section), &memory).is_err());
+    section = splitter_section();
+    section.extend([0; 16]);
+    assert!(r.update(&input_with_splitters(&section), &memory).is_err());
+    assert!(r.update(&input_with_splitters(&[]), &memory).is_err());
+    for (offset, bits) in [
+        (36, 1025u32),
+        (40, 8193),
+        (36, 0),
+        (40, 0),
+        (48, 0x34564552),
+        (48, 0x3c564552),
+    ] {
+        let mut p = splitter_parameters();
+        p[offset..offset + 4].copy_from_slice(&bits.to_le_bytes());
+        assert!(audio::Parameters::parse(&p).is_err());
+    }
 }
 
 #[test]
@@ -310,16 +426,19 @@ fn parameters_reject_unknown_revision_execution_mode_and_overflow_counts() {
 }
 
 fn update_wire(p: &mut Process, performance: u64) {
+    update_wire_input(p, performance, &silent_input());
+}
+fn update_wire_input(p: &mut Process, performance: u64, input_data: &[u8]) {
     let input = DATA + 0x4000;
     let output = DATA + 0x6000;
-    p.write_bytes(input, &silent_input()).unwrap();
+    p.write_bytes(input, input_data).unwrap();
     let mut b = [0u8; 256];
     // One A input, two B output slots and two C output slots. Status uses
     // C[0], performance uses B[1]; filtering zero B slots would swap them.
     b[..4].copy_from_slice(&(4u32 | 1 << 20 | 2 << 24).to_le_bytes());
     b[4..8].copy_from_slice(&(8u32 | 4 << 10).to_le_bytes());
     for (at, address, size) in [
-        (8, input, silent_input().len() as u32),
+        (8, input, input_data.len() as u32),
         (20, 0, 0),
         (32, performance, 32),
     ] {
@@ -366,6 +485,28 @@ fn invalid_performance_destination_does_not_partially_publish_status() {
     c.x[0] = u64::from(r);
     assert!(dispatch(&mut c, &mut p, 0x21).is_err());
     assert_eq!(p.read_bytes(output, 512).unwrap(), &[0x55; 512]);
+}
+#[test]
+fn splitter_cmif_update_validates_every_record_before_guest_publication() {
+    let (mut p, mut c) = process();
+    let m = manager(&mut p, &mut c);
+    let r = open_renderer(&mut p, &mut c, m, splitter_parameters());
+    let output = DATA + 0x6000;
+    let perf = DATA + 0x8000;
+    let input = input_with_splitters(&splitter_section());
+    update_wire_input(&mut p, perf, &input);
+    call(&mut p, &mut c, r);
+    assert_eq!(p.read_bytes(output, 4).unwrap(), b"REV;");
+    assert_eq!(p.load(output + 60, 4).unwrap(), 384);
+    p.write_bytes(output, &[0x55; 512]).unwrap();
+    p.write_bytes(perf, &[0x66; 32]).unwrap();
+    let mut bad = splitter_section();
+    bad[104..108].copy_from_slice(&3u32.to_le_bytes());
+    update_wire_input(&mut p, perf, &input_with_splitters(&bad));
+    c.x[0] = u64::from(r);
+    assert!(dispatch(&mut c, &mut p, 0x21).unwrap_err().contains("SNDD"));
+    assert_eq!(p.read_bytes(output, 512).unwrap(), &[0x55; 512]);
+    assert_eq!(p.read_bytes(perf, 32).unwrap(), &[0x66; 32]);
 }
 
 #[test]

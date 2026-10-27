@@ -4,8 +4,8 @@ Horizon-mode generated executables install a headless `audren:u` implementation.
 It supports renderer discovery, work-buffer sizing, transfer-memory-backed opening,
 configuration queries, start/stop, copied kernel event handles, device-name and
 volume queries, and bounded silent renderer updates. It does not produce audible
-output. Active voice playback, sample decoding, DSP effects, circular sinks and
-splitters fail explicitly; this is not a complete audio renderer.
+output. Active voice playback, sample decoding, enabled DSP effects and circular
+sinks fail explicitly; this is not a complete audio renderer.
 
 ## Wire protocol and ownership
 
@@ -33,6 +33,15 @@ Elapsed-render information is emitted from REV5, and larger effect results from
 REV9. Parameter revisions REV1–REV15 are recognized subject to the supported
 geometry and silent-update restrictions; this is not full compatibility with each
 revision's features.
+
+REV5–REV11 splitter descriptors are accepted for silent/stopped-voice updates.
+The bounded implementation permits 1024 splitter states and 8192 destinations;
+these are implementation budgets, not hardware maxima. It validates SNDH/SNDI/SNDD
+signatures, variable destination lists, cyclic lists, mix IDs, finite volumes and
+the 112-byte destination format. Twelve unused bytes follow each ID list; unused
+fields and final alignment padding need not be zero. Newer filtered destination
+formats remain unsupported. No audio samples are routed: an update with an active
+voice or enabled DSP effect still fails before publication.
 
 ## Event timing
 
@@ -79,6 +88,13 @@ Effect response values were checked against
 [`EffectState`](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Parameter/EffectState.cs)
 and [`IEffectOutStatus`](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Parameter/IEffectOutStatus.cs)
 at the same revision.
+
+Splitter records follow
+[`SplitterInParameterHeader`](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Parameter/SplitterInParameterHeader.cs),
+[`SplitterInParameter`](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Parameter/SplitterInParameter.cs),
+[`SplitterDestinationInParameterVersion1`](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Parameter/SplitterDestinationInParameterVersion1.cs)
+and `SplitterContext.UpdateState` at that revision. Only wire semantics were used;
+the bounds-checked Rust reader is independently implemented.
 
 Runtime tests exercise real service discovery and CMIF dispatch, copied transfer
 memory and event handles, timed signaling, close/clone lifetime, malformed requests,
