@@ -83,6 +83,8 @@ pub struct CrateReport {
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct BuildReport {
     pub toolchain: String,
+    /// Exact compiler policy included in runtime and unit cache identities.
+    pub compiler_flags: String,
     pub jobs: usize,
     pub runtime: CrateReport,
     pub units: Vec<CrateReport>,
@@ -637,6 +639,7 @@ fn build_inner(
     let cache_hits = units.iter().filter(|u| u.cached).count() + runtime.cached as usize;
     Ok(BuildReport {
         toolchain: toolchain.lines().next().unwrap_or_default().to_string(),
+        compiler_flags: flags,
         jobs,
         cache_misses: unit_count + 1 - cache_hits,
         cache_hits,
