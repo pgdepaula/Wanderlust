@@ -800,3 +800,51 @@ fn hwopus_extended_manager_validates_flags_and_inline_work_size() {
         svc(&mut p, &mut c, 0x16, &[u64::from(transfer)]);
     }
 }
+
+fn device_volume_wire(p: &mut Process, command: u32, bits: u32) {
+    let name_address = DATA + 0x8000;
+    let mut name = [0u8; 256];
+    name[..13].copy_from_slice(b"AudioTvOutput");
+    p.write_bytes(name_address, &name).unwrap();
+    let mut wire = [0u8; 256];
+    wire[..4].copy_from_slice(&(4u32 | 1 << 20).to_le_bytes());
+    wire[4..8].copy_from_slice(&8u32.to_le_bytes());
+    wire[8..12].copy_from_slice(&256u32.to_le_bytes());
+    wire[12..16].copy_from_slice(&(name_address as u32).to_le_bytes());
+    wire[32..36].copy_from_slice(b"SFCI");
+    wire[40..44].copy_from_slice(&command.to_le_bytes());
+    wire[48..52].copy_from_slice(&bits.to_le_bytes());
+    let address = tls(p);
+    p.write_bytes(address, &wire).unwrap();
+}
+#[test]
+fn audio_device_preserves_finite_gain_bits_without_an_invented_unit_interval() {
+    let (mut p, mut c) = process();
+    let m = manager(&mut p, &mut c);
+    wire(&mut p, 2, false, &[], &0u64.to_le_bytes());
+    call(&mut p, &mut c, m);
+    let device = reply(&p, 12);
+    for volume in [2.5f32, -0.5, -0.0, 1.0001, f32::MAX] {
+        device_volume_wire(&mut p, 7, volume.to_bits());
+        call(&mut p, &mut c, device);
+        device_volume_wire(&mut p, 8, 0);
+        call(&mut p, &mut c, device);
+        assert_eq!(reply(&p, 0x20), volume.to_bits());
+    }
+    for bits in [
+        f32::NAN.to_bits(),
+        f32::INFINITY.to_bits(),
+        f32::NEG_INFINITY.to_bits(),
+    ] {
+        device_volume_wire(&mut p, 7, bits);
+        c.x[0] = u64::from(device);
+        assert!(
+            audio::service_hook(&mut c, &mut p, 0x21)
+                .unwrap_err()
+                .contains("nonfinite audio device volume")
+        );
+        device_volume_wire(&mut p, 8, 0);
+        call(&mut p, &mut c, device);
+        assert_eq!(reply(&p, 0x20), f32::MAX.to_bits());
+    }
+}

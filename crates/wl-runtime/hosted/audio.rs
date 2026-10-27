@@ -655,10 +655,19 @@ impl AudioHost for Backend {
                     return unsupported("audio device volume input");
                 }
                 let volume = f32::from_bits(word(args, 0));
-                if !volume.is_finite() || !(0.0..=1.0).contains(&volume) {
-                    return unsupported("audio device volume range");
+                if !volume.is_finite() {
+                    return unsupported(&format!(
+                        "nonfinite audio device volume bits {:#010x}",
+                        volume.to_bits()
+                    ));
                 }
                 check_device_name(req, memory)?;
+                if std::env::var_os("WL_AUDIO_TRACE").is_some() {
+                    eprintln!(
+                        "[audio-device] volume={volume} bits={:#010x}",
+                        volume.to_bits()
+                    );
+                }
                 self.state.device_volume = volume;
                 Done::ok()
             }

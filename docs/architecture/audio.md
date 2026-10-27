@@ -167,3 +167,15 @@ against `HardwareOpusDecoderManager`, `HardwareOpusDecoderParameterInternalEx`,
 60 ms decoding is rejected without publication under the ordinary limit and succeeds
 with exactly 2880 stereo samples under the large-frame limit. The packet layout
 follows RFC 6716; expected PCM and untouched tail bytes are independently specified.
+
+Device output gain is stored and returned as the finite `f32` supplied by the
+client; it is not clamped to `[0,1]`. Nonfinite gains remain explicitly unsupported
+and do not change stored state. This follows the pass-through device gain in
+MacNativeGames `audio_mixer.c::audio_device_handler` at the pinned revision and
+Ryujinx `AudioDevice.SetAudioDeviceOutputVolume` at the pinned Codec/Audio revision.
+Bit-level CMIF tests cover gains above one, negative gains, negative zero and failed
+nonfinite writes followed by unchanged queries. This service does not claim audible
+playback or define a hardware clipping curve.
+
+`WL_AUDIO_TRACE=1` logs accepted device gain and its exact bit representation for
+protocol diagnosis; it does not change the value or audio state.
