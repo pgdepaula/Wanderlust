@@ -237,11 +237,18 @@ impl Decoder {
         if bytes > packet.len() - 8 {
             return Err("truncated hwopus packet".into());
         }
+        let mut snapshot = vec![std::mem::MaybeUninit::<u8>::uninit(); self.bytes];
         // SAFETY: libopus documents a contiguous, shallow-copyable decoder state
-        // of exactly decoder_get_size bytes. These are host-owned bytes, not guest memory.
-        let snapshot =
-            unsafe { std::slice::from_raw_parts(self.pointer.as_ptr().cast::<u8>(), self.bytes) }
-                .to_vec();
+        // of exactly decoder_get_size bytes. MaybeUninit preserves any C padding
+        // without asserting that every byte is an initialized Rust u8 value.
+        // Source and destination are distinct live host allocations, never guest memory.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                self.pointer.as_ptr().cast::<std::mem::MaybeUninit<u8>>(),
+                snapshot.as_mut_ptr(),
+                self.bytes,
+            );
+        }
         let result = (|| {
             if reset {
                 // SAFETY: exclusive live decoder; OPUS_RESET_STATE takes no variadic arguments.
@@ -287,7 +294,7 @@ impl Decoder {
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     snapshot.as_ptr(),
-                    self.pointer.as_ptr().cast::<u8>(),
+                    self.pointer.as_ptr().cast::<std::mem::MaybeUninit<u8>>(),
                     self.bytes,
                 )
             };
