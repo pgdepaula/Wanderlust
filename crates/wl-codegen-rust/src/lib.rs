@@ -1408,6 +1408,8 @@ pub struct HorizonOptions {
     pub priority_mask: u64,
     /// 0 selects the kernel maximum (1024).
     pub handle_table_size: u16,
+    /// Applications receive the 96-thread base resource budget; non-application
+    /// launches retain the bounded 32-thread standalone policy.
     pub is_application: bool,
     /// Bit `id` permits SVC `id` (0..0xC0).
     pub svc_permissions: [u64; 3],
@@ -1640,7 +1642,7 @@ fn emit_inner(
         Some(h) => {
             writeln!(
                 out,
-                "Ok(m) }}\nstatic IMAGE: ProcessImage = ProcessImage {{ code_start: {:#x}, code_end: {:#x}, config_source: {:?}, homebrew: {}, config: horizon::ProcessConfig {{ program_id: {:#x}, process_id: 0x51, main_thread_id: 0x72, main_thread_stack_size: {:#x}, main_thread_priority: {}, ideal_core: {}, core_mask: {:#x}, priority_mask: {:#x}, memory_limit: {:#x}, system_resource_size: {:#x}, handle_table_size: {}, thread_limit: 32, is_application: {}, svc_permissions: {:#x?}, service_access: &{:?} }} }};",
+                "Ok(m) }}\nstatic IMAGE: ProcessImage = ProcessImage {{ code_start: {:#x}, code_end: {:#x}, config_source: {:?}, homebrew: {}, config: horizon::ProcessConfig {{ program_id: {:#x}, process_id: 0x51, main_thread_id: 0x72, main_thread_stack_size: {:#x}, main_thread_priority: {}, ideal_core: {}, core_mask: {:#x}, priority_mask: {:#x}, memory_limit: {:#x}, system_resource_size: {:#x}, handle_table_size: {}, thread_limit: {}, is_application: {}, svc_permissions: {:#x?}, service_access: &{:?} }} }};",
                 h.code_start,
                 h.code_end,
                 h.source,
@@ -1654,6 +1656,10 @@ fn emit_inner(
                 h.memory_limit,
                 h.system_resource_size,
                 h.handle_table_size,
+                // BaseApplicationThreads, pm_spec.cpp at Atmosphere revision
+                // 0e9cd964c094946df14926b6c81a631b603a30f0. This is a launch
+                // resource policy, not an NPDM field or permission bypass.
+                if h.is_application { 96 } else { 32 },
                 h.is_application,
                 h.svc_permissions,
                 h.service_access
