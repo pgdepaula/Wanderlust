@@ -421,6 +421,61 @@ fn silent_update_has_independently_specified_status_bytes() {
     assert!(output[128..].iter().all(|v| *v == 0));
 }
 #[test]
+fn memory_pool_backing_is_not_limited_to_the_ipc_update_size() {
+    let r = audio::Renderer::new(audio::Parameters::parse(&parameters(8)).unwrap(), 0);
+    let mut memory = Memory::default();
+    let address = 0x40000000;
+    let bytes = audio::MAX_UPDATE_BYTES;
+    memory
+        .map(address, vec![0x5a; bytes], true, false, false)
+        .unwrap();
+    memory
+        .map(address + bytes as u64, vec![0xa5; 4096], true, false, false)
+        .unwrap();
+    let mut input = silent_input();
+    // Literal wire offsets: 64-byte header + 16-byte behavior; each pool is 32 bytes.
+    input[80..88].copy_from_slice(&address.to_le_bytes());
+    input[88..96].copy_from_slice(&(bytes as u64 + 4096).to_le_bytes());
+    input[96..100].copy_from_slice(&4u32.to_le_bytes());
+    let before = input.clone();
+    let output = r.update(&input, &memory).unwrap();
+    assert_eq!(u32::from_le_bytes(output[64..68].try_into().unwrap()), 5);
+    assert_eq!(input, before);
+    assert_eq!(memory.load(address, 1).unwrap(), 0x5a);
+    assert_eq!(memory.load(address + bytes as u64, 1).unwrap(), 0xa5);
+}
+
+#[test]
+fn attached_memory_pools_require_a_complete_readable_checked_range() {
+    let r = audio::Renderer::new(audio::Parameters::parse(&parameters(8)).unwrap(), 0);
+    let mut memory = Memory::default();
+    memory
+        .map(0x20000, vec![0; 4096], true, false, false)
+        .unwrap();
+    memory
+        .map(0x22000, vec![0; 4096], true, false, false)
+        .unwrap();
+    memory
+        .map(0x30000, vec![0; 4096], false, true, false)
+        .unwrap();
+    for (address, length, expected) in [
+        (0, 4096u64, "range"),
+        (0x20001, 4096, "range"),
+        (0x20000, 4095, "range"),
+        (0x20000, 0, "range"),
+        (u64::MAX - 4095, 8192, "overflow"),
+        (0x20000, 12288, "unmapped"),
+        (0x30000, 4096, "unreadable"),
+    ] {
+        let mut input = silent_input();
+        input[80..88].copy_from_slice(&address.to_le_bytes());
+        input[88..96].copy_from_slice(&length.to_le_bytes());
+        input[96..100].copy_from_slice(&4u32.to_le_bytes());
+        assert!(r.update(&input, &memory).unwrap_err().contains(expected));
+    }
+}
+
+#[test]
 fn elapsed_render_info_begins_at_revision_five() {
     for revision in [1, 4, 5, 8, 11] {
         let params = audio::Parameters::parse(&parameters(revision)).unwrap();

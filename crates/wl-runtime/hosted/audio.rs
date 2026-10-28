@@ -270,12 +270,14 @@ impl Renderer {
             if matches!(state, 4 | 5) {
                 let address = wide(pool, 0);
                 let length = wide(pool, 8);
-                if address % 0x1000 != 0
-                    || length == 0
-                    || length % 0x1000 != 0
-                    || length > MAX_UPDATE_BYTES as u64
-                {
-                    return Err(unsupported("memory-pool range"));
+                // libnx feebd026 audio/mempool.c: these are guest backing
+                // ranges, not bytes embedded in the IPC update. Validate mapped
+                // regions without copying the pool or applying the IPC size cap.
+                if address == 0 || address % 0x1000 != 0 || length == 0 || length % 0x1000 != 0 {
+                    return Err(format!(
+                        "{}: address={address:#x} length={length:#x} state={state}",
+                        unsupported("memory-pool range")
+                    ));
                 }
                 let end = address
                     .checked_add(length)
