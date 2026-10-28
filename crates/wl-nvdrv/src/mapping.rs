@@ -93,19 +93,19 @@ impl Request {
 
 /// Switch MapBufferEx bit 8 changes the kind of an existing mapping, without
 /// replacing its physical backing. Only aliases of already-uncompressed
-/// generic storage are supported here; no compression tags are created.
+/// storage are supported here; no compression tags are created.
 pub(super) fn uncompressed_retag(input: &[u8], small_pages: bool) -> Result<(u64, usize)> {
     if input.len() != 40 {
         return Err(NvError::InvalidSize.into());
     }
     let kind = word(input, 4);
-    let generic = matches!(kind, 0 | 0xfe | u32::MAX)
+    let uncompressed = matches!(kind, 0 | 0xfe | u32::MAX)
         || (small_pages
             && u16::try_from(kind)
                 .ok()
                 .and_then(super::remap::uncompressed_kind)
-                == Some(0xfe));
-    if word(input, 0) != 0x100 || word(input, 8) != 0 || word(input, 12) != 0 || !generic {
+                .is_some());
+    if word(input, 0) != 0x100 || word(input, 8) != 0 || word(input, 12) != 0 || !uncompressed {
         return Err(NvError::NotSupported.into());
     }
     let start = long(input, 32)
@@ -141,7 +141,7 @@ mod tests {
             (0x400001000, 8192)
         );
         assert!(uncompressed_retag(&input, false).is_err());
-        for (offset, value) in [(0, 0x104u32), (4, 0xd9), (4, 1), (8, 1), (12, 65536)] {
+        for (offset, value) in [(0, 0x104u32), (4, 0xd9), (4, 0xff), (8, 1), (12, 65536)] {
             let mut invalid = input;
             invalid[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
             assert!(uncompressed_retag(&invalid, true).is_err());
@@ -163,6 +163,13 @@ mod tests {
             uncompressed_retag(&input, false).unwrap(),
             (0x400001000, 8192)
         );
+        // GM20B Z16_2Z uses Z16 storage when compression is unavailable.
+        input[4] = 7;
+        assert_eq!(
+            uncompressed_retag(&input, true).unwrap(),
+            (0x400001000, 8192)
+        );
+        assert!(uncompressed_retag(&input, false).is_err());
     }
     #[test]
     fn compressed_kind_requires_explicit_small_page_fallback() {

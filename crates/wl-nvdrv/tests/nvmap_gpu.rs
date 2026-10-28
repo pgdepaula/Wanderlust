@@ -128,6 +128,9 @@ fn nvmap_free_retains_imports_and_retries_without_losing_backing() {
     let mut retagged = [0; 40];
     call(&mut d, &mut m, space, 0xc0284106, &retag, &mut retagged).unwrap();
     assert_eq!(&retagged, retag.as_slice());
+    retag[4..8].copy_from_slice(&7u32.to_le_bytes());
+    call(&mut d, &mut m, space, 0xc0284106, &retag, &mut retagged).unwrap();
+    assert_eq!(&retagged, retag.as_slice());
     // The reserved tail is not backing: changing its kind must not make it
     // resident. Failed changes preserve the live mapping and wire output.
     let mut padded = retag.clone();

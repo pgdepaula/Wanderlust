@@ -1945,10 +1945,10 @@ This does not decode compressed bytes or enable additional attachment formats.
 Unspecified/128 KiB page hints and unknown kinds cannot use this fallback.
 
 Switch `MapBufferEx` bit eight (`0x100`) accepts checked kind changes that retain
-identical generic uncompressed storage. Its base must identify a live mapping;
+uncompressed storage. Its base must identify a live mapping;
 the byte offset and length must select resident 4 KiB-aligned bytes within that
 mapping, excluding VA padding. Handle/page fields must be zero in this subset.
-Generic/pitch/default kinds are accepted; known color-compression aliases also
+Generic/pitch/default kinds are accepted; known color/depth-compression aliases also
 require a mapping established with the 64 KiB fallback above (or 64 KiB Remap).
 The mapping identity, epoch and canonical bytes remain unchanged because no
 physical pages or compression representation are replaced. This operation does
