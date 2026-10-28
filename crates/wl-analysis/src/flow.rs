@@ -197,6 +197,8 @@ struct Compare {
     reg: u8,
     imm: u64,
     width: Width,
+    /// CCMP can also produce literal flags when its input condition is false.
+    fallback: Option<u8>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct State {
@@ -626,10 +628,32 @@ fn transfer_inner(image: &Image, state: &mut State, op: &Op, advisory: bool) {
             };
             if flags && sub && dst == Reg::Zero {
                 if let (Reg::Gpr(reg), Operand::Imm(imm)) = (lhs, rhs) {
-                    compare = Some(Compare { reg, imm, width });
+                    compare = Some(Compare {
+                        reg,
+                        imm,
+                        width,
+                        fallback: None,
+                    });
                 }
             }
             result = Some((dst, value, width));
+        }
+        Op::CondCompare {
+            width,
+            lhs: Reg::Gpr(reg),
+            rhs: Operand::Imm(imm),
+            nzcv,
+            negate: false,
+            ..
+        } => {
+            // Keep both possible flag sources. A later edge may bound the
+            // operand only when the literal-flags alternative cannot take it.
+            compare = Some(Compare {
+                reg,
+                imm,
+                width,
+                fallback: Some(nzcv),
+            });
         }
         Op::MultiplyAdd {
             width,
@@ -799,9 +823,29 @@ fn transfer_inner(image: &Image, state: &mut State, op: &Op, advisory: bool) {
 /// Refines discovery state on a conditional edge. False excludes a proven
 /// impossible unsigned comparison; it never removes the decoded guest branch.
 fn refine(state: &mut State, condition: u8, taken: bool) -> bool {
-    let Some(Compare { reg, imm, width }) = state.flags else {
+    let Some(Compare {
+        reg,
+        imm,
+        width,
+        fallback,
+    }) = state.flags
+    else {
         return true;
     };
+    if let Some(nzcv) = fallback {
+        let carry = nzcv & 2 != 0;
+        let zero = nzcv & 4 != 0;
+        let alternate = match condition {
+            2 => carry,
+            3 => !carry,
+            8 => carry && !zero,
+            9 => !carry || zero,
+            _ => return true,
+        };
+        if alternate == taken {
+            return true;
+        }
+    }
     if let Some(Val::Const(value)) = state.regs.get(&reg) {
         let lhs = mask(*value, width);
         let rhs = mask(imm, width);
@@ -1241,11 +1285,69 @@ mod tests {
                         for taken in [false, true] {
                             let mut s = State::default();
                             s.set(Reg::Gpr(8), Some(Val::Const(value)), Width::X64);
-                            s.flags = Some(Compare { reg: 8, imm, width });
+                            s.flags = Some(Compare {
+                                reg: 8,
+                                imm,
+                                width,
+                                fallback: None,
+                            });
                             let before = s.clone();
                             assert_eq!(refine(&mut s, condition, taken), actual == taken);
                             assert_eq!(s, before, "do not weaken an exact register value");
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn conditional_compare_keeps_every_possible_literal_flag_path() {
+        let image = Image::raw(vec![0x1f, 0x20, 0x03, 0xd5], GuestAddr(0x10000)).unwrap();
+        for width in [Width::W32, Width::X64] {
+            for nzcv in 0..16 {
+                for condition in [2, 3, 8, 9] {
+                    // Independent truth table: unsigned predicates depend only on C/Z.
+                    let alternate = match condition {
+                        2 => [2, 3, 6, 7, 10, 11, 14, 15].contains(&nzcv),
+                        3 => [0, 1, 4, 5, 8, 9, 12, 13].contains(&nzcv),
+                        8 => [2, 3, 10, 11].contains(&nzcv),
+                        9 => ![2, 3, 10, 11].contains(&nzcv),
+                        _ => unreachable!(),
+                    };
+                    for taken in [false, true] {
+                        let mut state = State::default();
+                        transfer(
+                            &image,
+                            &mut state,
+                            &Op::CondCompare {
+                                width,
+                                lhs: Reg::Gpr(8),
+                                rhs: Operand::Imm(6),
+                                condition: 1,
+                                nzcv,
+                                negate: false,
+                            },
+                        );
+                        assert!(refine(&mut state, condition, taken));
+                        let bound = match (condition, taken) {
+                            (8, false) | (9, true) => Some(6),
+                            (2, false) | (3, true) => Some(5),
+                            _ => None,
+                        };
+                        let expected = if alternate == taken {
+                            None
+                        } else {
+                            bound.map(|max| Val::Bounded {
+                                max,
+                                full: width == Width::X64,
+                            })
+                        };
+                        assert_eq!(
+                            state.get(Reg::Gpr(8)),
+                            expected,
+                            "width={width:?} nzcv={nzcv} condition={condition} taken={taken}"
+                        );
                     }
                 }
             }
@@ -1261,6 +1363,7 @@ mod tests {
             reg: 8,
             imm: 2,
             width: Width::W32,
+            fallback: None,
         });
         for condition in [0, 1, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15] {
             for taken in [false, true] {

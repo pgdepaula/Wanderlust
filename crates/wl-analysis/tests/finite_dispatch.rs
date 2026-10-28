@@ -44,6 +44,31 @@ fn compare_refines_an_index_copied_before_the_comparison() {
     overwritten_source[5] = 0x2a0103e0; // MOV W0,W1 after the guard.
     assert_copied_family(&overwritten_source);
 }
+// Independently assembled with Clang 23.1.1, aarch64-none-elf:
+// MOV W8,W0; CMP X2,#0; NOP; CCMP W0,#2,#2,NE; remainder as COPIED_INDEX.
+// Literal NZCV=2 takes B.HI outside; only the evaluated comparison can fall through.
+#[test]
+fn conditional_compare_discovers_all_cases_only_when_alternate_flags_exit() {
+    let mut words = COPIED_INDEX;
+    words[1] = 0xf100005f;
+    words[3] = 0x7a421802;
+    assert_copied_family(&words);
+    for nzcv in 0..16u32 {
+        words[3] = 0x7a421800 | nzcv;
+        let found = analyze(&words);
+        if [2, 3, 10, 11].contains(&nzcv) {
+            assert_eq!(found.jump_tables.get(&GuestAddr(0x10028)), Some(&3));
+        } else {
+            assert!(
+                found.jump_tables.is_empty(),
+                "fallback {nzcv} permits an unbounded index"
+            );
+        }
+    }
+    words[3] = 0x3a421802; // CCMN addition is not a subtraction bound.
+    assert!(analyze(&words).jump_tables.is_empty());
+}
+
 #[test]
 fn copy_equality_does_not_survive_writes_calls_or_unknown_upper_words() {
     let mut variants = [COPIED_INDEX; 5];

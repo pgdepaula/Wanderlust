@@ -36,6 +36,15 @@ Low-word equality does not bound unknown upper halves of an X index. Independent
 assembled tests exercise halfword tables, chained copies, source/index writes,
 call clobbers and incompatible incoming paths.
 
+Immediate `CCMP` bounds retain both possible flag sources: subtraction flags
+and the instruction's literal NZCV fallback. An unsigned branch refines the
+compared operand only when the fallback cannot follow that edge. This handles
+conditional range checks without treating `CCMP` as an unconditional `CMP`.
+All 16 fallback combinations are tested for carry and carry/zero predicates,
+as well as a separately assembled halfword-table dispatch. `CCMN` addition and
+non-immediate conditional comparisons do not introduce subtraction bounds.
+The flag behavior follows the [Arm instruction-set reference, CCMP immediate](https://documentation-service.arm.com/static/6245c734b059dc5ff9a8bdab).
+
 Unsigned masked operands can bound a multiply-add when the product and accumulator do not overflow the instruction width. Subsequent immediate addition or subtraction retains a bounded modular interval, including W-register underflow. Mapped entries of a partly known table become speculative candidates; unreadable entries and invalid targets prevent reporting a complete table. Unknown upper bits, overflowing products and nonconstant subtract-products do not establish an unsigned bound. Original loads and indirect branches remain unchanged.
 
 `wanderlust dispatch-scan INPUT` examines every BR/BLR in executable mappings using bounded local control-flow windows of at most 64 instructions. It reuses the decoder, graph construction and propagation, preserving conditional-edge joins and call clobbers. JSON separates candidate addresses, complete local tables and unresolved sites. The scan is bounded to 128 million executable words, 262,144 indirect sites and 262,144 candidate addresses; exceeding a budget fails explicitly. Candidates can be supplied through `--roots-file` for ordinary traversal before emission. An advisory scan may enumerate the high-word-zero slice of an X-indexed table guarded by a W comparison. Such a slice always remains unresolved: the low-word bound is never promoted to a full-register proof. Ordinary recursive propagation retains its strict index bounds; original loads and branches are unchanged. This inventory does not prove runtime-generated virtual-call targets or global control-flow completeness.
