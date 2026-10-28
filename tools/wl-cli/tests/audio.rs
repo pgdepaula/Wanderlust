@@ -61,8 +61,15 @@ fn libnx_audio_initialization_update_and_timed_events_execute_as_native_code() {
             .iter()
             .any(|s| s.as_str() == Some("AUDIO_NATIVE_OK"))
     );
+    assert!(
+        result["debug_output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s.as_str() == Some("AUDIO_AUX_NATIVE_OK"))
+    );
     assert!(result["scheduler"]["idle_ns"].as_u64().unwrap() >= 5_000_000);
-    assert_eq!(result["svc_counts"]["0x15"], 1);
+    assert_eq!(result["svc_counts"]["0x15"], 2);
     assert!(result["svc_counts"]["0x18"].as_u64().unwrap() >= 2);
     fs::remove_dir_all(dir).unwrap();
 }

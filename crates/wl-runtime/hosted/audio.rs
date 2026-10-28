@@ -1,7 +1,9 @@
 //! Bounded headless audren initialization and stopped/paused-voice updates.
 //! Wire layouts: libnx feebd026, services/audren.c and services/audren.h.
 //! No active voice decoding, DSP effects or audible output is implemented.
+use crate::host_audio_dsp::Auxiliary;
 use wl_guest_runtime::audio::{AudioHost, Factory, Reply as Done};
+use wl_guest_runtime::gpu_memory::GpuPin;
 use wl_guest_runtime::{Memory, RuntimeResult};
 use wl_guest_runtime::{
     horizon::{self, Kernel},
@@ -168,7 +170,7 @@ fn take_section<'a>(bytes: &'a [u8], at: &mut usize, size: usize) -> RuntimeResu
     Ok(result)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Renderer {
     pub parameters: Parameters,
     pub running: bool,
@@ -176,6 +178,20 @@ pub struct Renderer {
     pub next_tick_ns: Option<u64>,
     pub elapsed_frames: u64,
     pub time_limit: u32,
+    auxiliary: Option<AuxiliaryState>,
+}
+#[derive(Debug)]
+struct AuxiliaryState {
+    exchange: Auxiliary,
+    channels: usize,
+    /// Server usage state: New=1, Enabled=2, Disabled=3 (not wire EffectState).
+    usage: u8,
+    pools: Vec<(u64, u64)>,
+    pins: Vec<GpuPin>,
+}
+struct PreparedUpdate {
+    bytes: Vec<u8>,
+    auxiliary: Option<AuxiliaryState>,
 }
 impl Renderer {
     pub fn new(parameters: Parameters, event: usize) -> Self {
@@ -186,6 +202,7 @@ impl Renderer {
             next_tick_ns: None,
             elapsed_frames: 0,
             time_limit: 100,
+            auxiliary: None,
         }
     }
     pub fn start(&mut self, now: u64) -> RuntimeResult<()> {
@@ -213,9 +230,47 @@ impl Renderer {
             .and_then(|n| next.checked_add(n));
         true
     }
-    /// Produce a reply only for silent initialization: active playback and
-    /// circular sinks fail before any guest output is changed.
+    pub fn advance(&mut self, memory: &mut Memory, now: u64) -> RuntimeResult<bool> {
+        if let Some(next) = self.next_tick_ns.filter(|n| *n <= now) {
+            if let Some(auxiliary) = &mut self.auxiliary {
+                let frames = (now - next) / 5_000_000 + 1;
+                if frames > 1024 {
+                    return Err(unsupported("auxiliary catch-up budget"));
+                }
+                let samples = self.parameters.sample_count as usize;
+                auxiliary
+                    .exchange
+                    .preflight(memory, auxiliary.channels, samples)?;
+                let input = vec![0.0; samples];
+                for _ in 0..frames {
+                    for channel in 0..auxiliary.channels {
+                        let update = if channel + 1 == auxiliary.channels {
+                            (samples * auxiliary.channels) as u32
+                        } else {
+                            0
+                        };
+                        // This subset has one final mix, no sample-producing
+                        // voices, one auxiliary and a headless device sink.
+                        // Each channel is independent; device output is discarded.
+                        auxiliary.exchange.exchange_channel(
+                            memory,
+                            &input,
+                            (samples * channel) as u32,
+                            update,
+                        )?;
+                    }
+                }
+                auxiliary.usage = if auxiliary.exchange.enabled { 2 } else { 3 };
+            }
+        }
+        Ok(self.tick(now))
+    }
+    /// Validate and preview a reply without installing DSP configuration. The
+    /// service adapter commits configuration after checked output publication.
     pub fn update(&self, input: &[u8], memory: &Memory) -> RuntimeResult<Vec<u8>> {
+        self.prepare_update(input, memory).map(|p| p.bytes)
+    }
+    fn prepare_update(&self, input: &[u8], memory: &Memory) -> RuntimeResult<PreparedUpdate> {
         if input.len() < 0x40 || input.len() > MAX_UPDATE_BYTES {
             return Err(unsupported("update input size"));
         }
@@ -362,7 +417,15 @@ impl Renderer {
                 return Err(unsupported("circular or unknown sink"));
             }
         }
-        if parts[5].chunks_exact(0xc0).any(|effect| effect[2] != 0) {
+        let auxiliary = if parts[5].len() == 0xc0
+            && parts[5][0] == 2
+            && (parts[5][1] != 0 || parts[5][2] != 0 || self.auxiliary.is_some())
+        {
+            Some(self.prepare_auxiliary(parts[5], parts[6], parts[7], parts[2], memory)?)
+        } else {
+            None
+        };
+        if auxiliary.is_none() && parts[5].chunks_exact(0xc0).any(|effect| effect[2] != 0) {
             let effects: Vec<_> = parts[5]
                 .chunks_exact(0xc0)
                 .enumerate()
@@ -427,19 +490,150 @@ impl Renderer {
             at += 0x10;
         }
         at += sizes[2];
-        for effect in parts[5].chunks_exact(0xc0) {
-            output[at] = if effect[2] != 0 { 3 } else { 4 };
+        for _ in parts[5].chunks_exact(0xc0) {
+            output[at] = if let Some(aux) = &auxiliary {
+                if (self.running && aux.usage != 3) || (!self.running && aux.usage == 1) {
+                    3
+                } else {
+                    4
+                }
+            } else {
+                4
+            };
             at += effect_stride;
         }
         at += sizes[6] + 0x10 + 0xb0;
         if sizes[9] != 0 {
             output[at..at + 8].copy_from_slice(&self.elapsed_frames.to_le_bytes());
         }
-        Ok(output)
+        Ok(PreparedUpdate {
+            bytes: output,
+            auxiliary,
+        })
+    }
+    fn prepare_auxiliary(
+        &self,
+        effect: &[u8],
+        mix: &[u8],
+        sinks: &[u8],
+        pools: &[u8],
+        memory: &Memory,
+    ) -> RuntimeResult<AuxiliaryState> {
+        if self.parameters.submixes != 0
+            || self.parameters.splitters != 0
+            || self.parameters.revision_number() < 10
+            || mix.len() != 0x930
+        {
+            return Err(unsupported(
+                "auxiliary requires REV10+ single final mix without splitters",
+            ));
+        }
+        if effect[1] > 1
+            || effect[2] > 1
+            || word(effect, 4) != 0
+            || word(mix, 16) != 0
+            || mix[12] != 1
+            || word(mix, 20) != 1
+        {
+            return Err(unsupported("auxiliary final-mix binding"));
+        }
+        let mut devices = 0;
+        for sink in sinks.chunks_exact(0x140).filter(|s| s[1] != 0) {
+            let count = word(sink, 0x120) as usize;
+            if sink[0] != 1
+                || !(1..=6).contains(&count)
+                || sink[0x124..0x124 + count]
+                    .iter()
+                    .any(|n| u32::from(*n) >= word(mix, 8))
+            {
+                return Err(unsupported("auxiliary headless device-sink geometry"));
+            }
+            devices += 1;
+        }
+        if devices == 0 {
+            return Err(unsupported("auxiliary requires a device sink"));
+        }
+        let specific = &effect[32..];
+        let channels = word(specific, 48) as usize;
+        if !(1..=6).contains(&channels)
+            || word(specific, 52) != self.parameters.sample_rate
+            || word(specific, 60) < channels as u32
+            || word(specific, 104) != self.parameters.sample_count
+            || word(mix, 4) != self.parameters.sample_rate
+            || word(mix, 8) < channels as u32
+            || word(mix, 8) > 24
+            || !f32::from_bits(word(mix, 0)).is_finite()
+            || specific[..channels]
+                .iter()
+                .copied()
+                .ne((0..channels).map(|c| c as u8))
+            || specific[24..24 + channels]
+                .iter()
+                .copied()
+                .ne((0..channels).map(|c| c as u8))
+        {
+            return Err(unsupported(
+                "auxiliary channel/rate/identity-routing subset",
+            ));
+        }
+        let exchange = Auxiliary {
+            send_info: wide(specific, 64),
+            return_info: wide(specific, 80),
+            capacity: word(specific, 56),
+            enabled: effect[2] != 0,
+        };
+        if exchange.send_info.checked_add(128) != Some(wide(specific, 72))
+            || exchange.return_info.checked_add(128) != Some(wide(specific, 88))
+        {
+            return Err(unsupported("auxiliary noncontiguous storage"));
+        }
+        let footprint = 128 + u64::from(exchange.capacity) * 4;
+        let mut attached = Vec::new();
+        for base in [exchange.send_info, exchange.return_info] {
+            let end = base
+                .checked_add(footprint)
+                .ok_or("auxiliary backing overflow")?;
+            let pool = pools.chunks_exact(32).find(|pool| {
+                matches!(word(pool, 16), 4 | 5)
+                    && wide(pool, 0) <= base
+                    && wide(pool, 0)
+                        .checked_add(wide(pool, 8))
+                        .is_some_and(|e| end <= e)
+            });
+            let Some(pool) = pool else {
+                return Err(unsupported("auxiliary storage outside attached pools"));
+            };
+            let range = (wide(pool, 0), wide(pool, 8));
+            if !attached.contains(&range) {
+                attached.push(range);
+            }
+        }
+        exchange.preflight(memory, channels, self.parameters.sample_count as usize)?;
+        let usage = if effect[1] != 0 {
+            1
+        } else if let Some(old) = &self.auxiliary {
+            if old.channels != channels
+                || old.exchange.send_info != exchange.send_info
+                || old.exchange.return_info != exchange.return_info
+                || old.exchange.capacity != exchange.capacity
+            {
+                return Err(unsupported("auxiliary rebind requires a new effect"));
+            }
+            old.usage
+        } else {
+            1
+        };
+        Ok(AuxiliaryState {
+            exchange,
+            channels,
+            usage,
+            pools: attached,
+            pins: Vec::new(),
+        })
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct State {
     pub renderers: std::collections::BTreeMap<usize, Renderer>,
     next_id: usize,
@@ -467,11 +661,13 @@ struct Backend {
     next_thread_trace: Option<std::time::Instant>,
     opus: crate::host_opus::Service,
     fs: crate::host_fs::Service,
+    released_audio_pins: Vec<GpuPin>,
 }
 impl Default for Backend {
     fn default() -> Self {
         Self {
             state: State::default(),
+            released_audio_pins: Vec::new(),
             opus: crate::host_opus::Service::default(),
             fs: if std::env::var("WL_VOLATILE_SAVES").as_deref() == Ok("1") {
                 crate::host_fs::Service::with_volatile_saves()
@@ -485,6 +681,51 @@ impl Default for Backend {
     }
 }
 impl Backend {
+    fn release_audio_pins(&mut self, memory: &mut Memory) -> RuntimeResult<()> {
+        while let Some(&token) = self.released_audio_pins.last() {
+            memory.release_gpu_pin(token)?;
+            self.released_audio_pins.pop();
+        }
+        Ok(())
+    }
+    fn pin_auxiliary(
+        &mut self,
+        memory: &mut Memory,
+        index: usize,
+        prepared: &mut PreparedUpdate,
+    ) -> RuntimeResult<()> {
+        let Some(new) = prepared.auxiliary.as_mut() else {
+            return Ok(());
+        };
+        let renderer = self
+            .state
+            .renderers
+            .get_mut(&index)
+            .ok_or("invalid audio renderer identity")?;
+        if let Some(old) = renderer.auxiliary.as_mut()
+            && old.pools == new.pools
+        {
+            new.pins = std::mem::take(&mut old.pins);
+            return Ok(());
+        }
+        // Reuse the runtime's existing canonical lifetime guards. No new
+        // memory model or escaped guest borrow is introduced. Shared existing
+        // GPU registrations and unsupported storage kinds fail explicitly.
+        for &(address, size) in &new.pools {
+            match memory.pin_gpu_range(address, size) {
+                Ok(pin) => new.pins.push(pin),
+                Err(error) => {
+                    for pin in new.pins.drain(..).rev() {
+                        memory.release_gpu_pin(pin)?;
+                    }
+                    return Err(format!(
+                        "unsupported audio auxiliary lifetime registration: {error}"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
     /// Observe saved scheduler state at the callback boundary; never modify it.
     fn trace_threads(&mut self, k: &Kernel) {
         let Some(deadline) = self.next_thread_trace else {
@@ -538,6 +779,7 @@ impl AudioHost for Backend {
         req: &Request,
         args: &[u8],
     ) -> RuntimeResult<Done> {
+        self.release_audio_pins(memory)?;
         if let HostObject::AudioRenderer { index } = target
             && crate::host_fs::owns(index)
         {
@@ -733,7 +975,8 @@ impl AudioHost for Backend {
                     .renderers
                     .get(&index)
                     .ok_or("invalid audio renderer identity")?;
-                let bytes = r.update(&bytes, memory)?;
+                let mut prepared = r.prepare_update(&bytes, memory)?;
+                let bytes = std::mem::take(&mut prepared.bytes);
                 if bytes.len() as u64 > output.1 || output.1 > MAX_UPDATE_BYTES as u64 {
                     return unsupported("audio update output capacity");
                 }
@@ -754,11 +997,26 @@ impl AudioHost for Backend {
                         return unsupported("overlapping audio outputs");
                     }
                 }
+                self.pin_auxiliary(memory, index, &mut prepared)?;
                 let mut full = bytes;
                 full.resize(output.1 as usize, 0);
                 memory.write_bytes(output.0, &full)?;
                 if let Some((address, size)) = performance {
                     memory.write_bytes(address, &vec![0; size as usize])?;
+                }
+                let old = std::mem::replace(
+                    &mut self
+                        .state
+                        .renderers
+                        .get_mut(&index)
+                        .ok_or("invalid audio renderer identity")?
+                        .auxiliary,
+                    prepared.auxiliary,
+                );
+                if let Some(old) = old {
+                    for pin in old.pins {
+                        memory.release_gpu_pin(pin)?;
+                    }
                 }
                 Done::ok()
             }
@@ -829,11 +1087,12 @@ impl AudioHost for Backend {
         };
         Ok(reply)
     }
-    fn poll(&mut self, _memory: &mut Memory, k: &mut Kernel) -> RuntimeResult<()> {
+    fn poll(&mut self, memory: &mut Memory, k: &mut Kernel) -> RuntimeResult<()> {
+        self.release_audio_pins(memory)?;
         register_codec_port(k);
         self.trace_threads(k);
         for renderer in self.state.renderers.values_mut() {
-            if renderer.tick(k.time_ns) {
+            if renderer.advance(memory, k.time_ns)? {
                 threads::signal_event(k, renderer.event);
             }
         }
@@ -849,7 +1108,11 @@ impl AudioHost for Backend {
                 self.opus.close(index);
                 return;
             }
-            self.state.renderers.remove(&index);
+            if let Some(renderer) = self.state.renderers.remove(&index)
+                && let Some(auxiliary) = renderer.auxiliary
+            {
+                self.released_audio_pins.extend(auxiliary.pins);
+            }
         }
     }
     fn next_deadline_ns(&self) -> Option<u64> {
@@ -928,6 +1191,15 @@ pub fn service_hook(
         && let Some(s) = k.sessions.get_mut(session)
     {
         s.endpoint = original;
+    }
+    if result.is_ok()
+        && matches!(id, 0x16 | 0x21)
+        && let Some(kernel) = process.kernel.as_mut()
+    {
+        // Close callbacks lack a Memory parameter in the frozen runtime ABI.
+        // Drain deferred lifetime releases at this same service boundary,
+        // before the next guest instruction can unmap/reuse the allocation.
+        wl_guest_runtime::audio::poll(&mut process.memory, kernel)?;
     }
     result
 }

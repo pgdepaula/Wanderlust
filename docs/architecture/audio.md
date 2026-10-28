@@ -4,8 +4,8 @@ Horizon-mode generated executables install a headless `audren:u` implementation.
 It supports renderer discovery, work-buffer sizing, transfer-memory-backed opening,
 configuration queries, start/stop, copied kernel event handles, device-name and
 volume queries, and bounded silent renderer updates. It does not produce audible
-output. Active voice playback, sample decoding, enabled DSP effects and circular
-sinks fail explicitly; this is not a complete audio renderer.
+output. Queued voice playback, sample decoding, effects beyond the auxiliary subset
+below and circular sinks fail explicitly; this is not a complete audio renderer.
 
 ## Wire protocol and ownership
 
@@ -45,7 +45,7 @@ Tests exercise oversized mapped pools, mapping gaps, permissions, address overfl
 paused counters and individual empty-descriptor mutations on Linux and native Windows.
 
 Inactive effect slots return wire `EffectState::Disabled` (4); this is distinct
-from the server's internal usage-state enum. Enabled DSP effects are rejected.
+from the server's internal usage-state enum. Unsupported effect configurations are rejected.
 Elapsed-render information is emitted from REV5, and larger effect results from
 REV9. Parameter revisions REV1–REV15 are recognized subject to the supported
 geometry and silent-update restrictions; this is not full compatibility with each
@@ -58,7 +58,51 @@ signatures, variable destination lists, cyclic lists, mix IDs, finite volumes an
 the 112-byte destination format. Twelve unused bytes follow each ID list; unused
 fields and final alignment padding need not be zero. Newer filtered destination
 formats remain unsupported. No audio samples are routed: an update with an active
-voice with queued samples or enabled DSP effect still fails before publication.
+voice with queued samples or an unsupported DSP effect still fails before publication.
+
+## Auxiliary shared-buffer exchange
+
+REV10–REV15 updates support one auxiliary effect (type 2) in a single final mix,
+without splitters or sample-producing voices. The initial subset permits one to
+six independent identity-mapped channels and headless device sinks. Return-buffer
+PCM is read and converted; final device output is discarded. Multiple mixes,
+multiple effects, reverb, limiter processing and audible output remain unsupported.
+
+The effect validates its complete send/return ring allocations against attached
+memory pools. CPU and DSP each own a 64-byte header; sample storage follows at
+byte 128. DSP processing writes send samples and advances only the DSP send-write
+and return-read cursors. The CPU headers and REV10+ lost-sample counters are
+preserved. Disabled processing resets the DSP read/write/total fields and bypasses
+samples. Wrapping accesses use explicit little-endian signed words. No guest
+address becomes a native pointer.
+
+Configuration is installed only after status/performance destinations pass
+validation and their output is published. A 5 ms virtual-time tick executes each
+channel before signaling the event; an update never creates an unconditional
+DSP frame. Due virtual-time work may run at the service boundary. Frame preflight validates all ring reads and writes before the first
+channel changes memory. A permission failure leaves both rings and the render
+clock retryable. Catch-up processing has a 1024-frame implementation budget.
+
+Canonical NORMAL RW pool storage is protected using the existing runtime lifetime
+registration (`Memory::pin_gpu_range`); this is only a lifetime guard, not an NVIDIA
+mapping or host GPU submission. Structural guest mutations cannot replace active
+backing. Compatible updates move the existing registration; they do not register
+it again. Already overlapping GPU registrations and unsupported backing kinds fail
+explicitly. Removing the effect releases its registrations, and the last object
+close drains releases before the next guest instruction. Active CPU byte writes
+remain visible to subsequent DSP ticks.
+
+Source semantics were checked against MIT-licensed Ryujinx revision
+`4930dced25c0d9ec33096b0f2601d262daa477bf`,
+[AuxiliaryBufferCommand](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Dsp/Command/AuxiliaryBufferCommand.cs),
+[AuxiliaryBufferEffect](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Server/Effect/AuxiliaryBufferEffect.cs)
+and [AuxiliaryBufferHeader](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Dsp/State/AuxiliaryBufferHeader.cs).
+The Rust implementation uses checked memory access and transactional write preflight.
+Tests cover wrap, header ownership, disabled/reset behavior, failed writes,
+registration rollback, close, and repeated updates. The synthetic AArch64
+[`audio.c`](../../tests/horizon/audio.c) client also opens an explicit REV11 renderer
+through CMIF, attaches shared memory, sends the effect and verifies 240-sample
+cursor advancement after a real timed kernel event. It contains no game data.
 
 ## Event timing
 

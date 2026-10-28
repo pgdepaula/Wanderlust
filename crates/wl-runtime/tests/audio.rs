@@ -1,6 +1,8 @@
 extern crate wl_runtime as wl_guest_runtime;
 #[path = "../hosted/audio.rs"]
 mod audio;
+#[path = "../hosted/audio_dsp.rs"]
+pub mod host_audio_dsp;
 #[path = "../hosted/fs_cache.rs"]
 mod host_fs;
 #[path = "../hosted/opus.rs"]
@@ -1620,4 +1622,274 @@ fn temporary_save_uses_space_three_type_four_without_enabling_durable_save_polic
             .code,
         0x7d402
     );
+}
+
+fn auxiliary_input() -> Vec<u8> {
+    let sizes = [16u32, 160, 368, 0, 192, 2352, 320, 16, 0, 0];
+    let total = 64 + sizes.iter().sum::<u32>();
+    let mut b = vec![0u8; total as usize];
+    b[..4].copy_from_slice(b"REV;");
+    b[64..68].copy_from_slice(b"REV;");
+    for (i, size) in sizes.iter().enumerate() {
+        b[4 + i * 4..8 + i * 4].copy_from_slice(&size.to_le_bytes());
+    }
+    b[60..64].copy_from_slice(&total.to_le_bytes());
+    for i in 0..5 {
+        b[80 + 32 * i + 16..84 + 32 * i + 16].copy_from_slice(&1u32.to_le_bytes());
+    }
+    // One attached 16 KiB pool encloses two separate auxiliary rings.
+    b[80..88].copy_from_slice(&(DATA + 0x20000).to_le_bytes());
+    b[88..96].copy_from_slice(&0x4000u64.to_le_bytes());
+    b[96..100].copy_from_slice(&4u32.to_le_bytes());
+    let effect = 608;
+    b[effect] = 2;
+    b[effect + 1] = 1;
+    b[effect + 2] = 1;
+    let specific = effect + 32;
+    for (at, value) in [(48, 1u32), (52, 48000), (56, 512), (60, 1), (104, 240)] {
+        b[specific + at..specific + at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (at, address) in [
+        (64, DATA + 0x20000),
+        (72, DATA + 0x20080),
+        (80, DATA + 0x22000),
+        (88, DATA + 0x22080),
+    ] {
+        b[specific + at..specific + at + 8].copy_from_slice(&address.to_le_bytes());
+    }
+    let mix = 800;
+    for (at, value) in [
+        (0, 1f32.to_bits()),
+        (4, 48000),
+        (8, 1),
+        (20, 1),
+        (0x924, u32::MAX),
+        (0x928, u32::MAX),
+    ] {
+        b[mix + at..mix + at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    b[mix + 12] = 1;
+    let sink = mix + 2352;
+    b[sink] = 1;
+    b[sink + 1] = 1;
+    b[sink + 0x120..sink + 0x124].copy_from_slice(&1u32.to_le_bytes());
+    b
+}
+fn auxiliary_renderer(p: &mut Process, c: &mut Cpu) -> u32 {
+    // Synthetic canonical NORMAL pool, separate from IPC CODE_DATA storage.
+    p.memory.split_at(DATA + 0x20000);
+    p.memory.split_at(DATA + 0x24000);
+    let i = p.memory.region_index(DATA + 0x20000).unwrap();
+    p.memory.regions[i].state = state::NORMAL;
+    let m = manager(p, c);
+    let mut params = parameters(11);
+    params[24..28].copy_from_slice(&1u32.to_le_bytes());
+    open_renderer(p, c, m, params)
+}
+fn auxiliary_update_wire(p: &mut Process, performance: u64) {
+    update_wire_input(p, performance, &auxiliary_input());
+    let address = tls(p) + 80;
+    p.write_bytes(address, &(768u32 << 16).to_le_bytes())
+        .unwrap();
+}
+#[test]
+fn guest_auxiliary_exchange_runs_on_the_audio_clock_after_successful_publication() {
+    let (mut p, mut c) = process();
+    let r = auxiliary_renderer(&mut p, &mut c);
+    p.write_bytes(DATA + 0x20000, &[0xa5; 64]).unwrap();
+    p.write_bytes(DATA + 0x22000, &[0x5a; 64]).unwrap();
+    p.write_bytes(DATA + 0x20080, &[0x77; 2048]).unwrap();
+    p.write_bytes(DATA + 0x22080, &[0; 2048]).unwrap();
+    p.write_bytes(DATA + 0x22080, &16384i32.to_le_bytes())
+        .unwrap();
+    auxiliary_update_wire(&mut p, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    assert_eq!(p.load(DATA + 0x6000 + 160, 1).unwrap(), 3); // Wire EffectState::Enabled.
+    assert_eq!(p.load(DATA + 0x20044, 4).unwrap(), 0); // Update itself executes no DSP frame.
+    wire(&mut p, 5, false, &[], &[]);
+    call(&mut p, &mut c, r);
+    let k = p.kernel.as_mut().unwrap();
+    k.time_ns = 5_000_000;
+    wl_runtime::audio::poll(&mut p.memory, k).unwrap();
+    assert_eq!(p.load(DATA + 0x20044, 4).unwrap(), 240);
+    assert_eq!(p.load(DATA + 0x22040, 4).unwrap(), 240);
+    assert_eq!(p.read_bytes(DATA + 0x20000, 64).unwrap(), vec![0xa5; 64]);
+    assert_eq!(p.read_bytes(DATA + 0x22000, 64).unwrap(), vec![0x5a; 64]);
+    assert_eq!(p.read_bytes(DATA + 0x20080, 960).unwrap(), vec![0; 960]);
+    assert_eq!(p.load(DATA + 0x20080 + 960, 4).unwrap(), 0x77777777);
+    // A redundant poll at the same virtual instant consumes no second frame.
+    wl_runtime::audio::poll(&mut p.memory, p.kernel.as_mut().unwrap()).unwrap();
+    assert_eq!(p.load(DATA + 0x20044, 4).unwrap(), 240);
+}
+#[test]
+fn failed_auxiliary_reply_does_not_install_a_pending_exchange() {
+    let (mut p, mut c) = process();
+    let r = auxiliary_renderer(&mut p, &mut c);
+    p.write_bytes(DATA + 0x20080, &[0x77; 2048]).unwrap();
+    auxiliary_update_wire(&mut p, 0x7fffffffff);
+    c.x[0] = u64::from(r);
+    assert!(dispatch(&mut c, &mut p, 0x21).is_err());
+    wire(&mut p, 5, false, &[], &[]);
+    call(&mut p, &mut c, r);
+    let k = p.kernel.as_mut().unwrap();
+    k.time_ns = 5_000_000;
+    wl_runtime::audio::poll(&mut p.memory, k).unwrap();
+    assert_eq!(p.load(DATA + 0x20044, 4).unwrap(), 0);
+    assert_eq!(p.load(DATA + 0x20080, 4).unwrap(), 0x77777777);
+}
+#[test]
+fn failed_auxiliary_clock_write_is_retryable_without_a_double_frame() {
+    let (mut p, mut c) = process();
+    let r = auxiliary_renderer(&mut p, &mut c);
+    p.write_bytes(DATA + 0x20080, &[0x77; 2048]).unwrap();
+    auxiliary_update_wire(&mut p, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    wire(&mut p, 5, false, &[], &[]);
+    call(&mut p, &mut c, r);
+    assert!(!p.memory.split_at(DATA + 0x22000)); // Active DMA lifetime guard.
+    // Trusted test-only permission fault injection; guest structural mutations are blocked.
+    let i = p.memory.region_index(DATA + 0x22000).unwrap();
+    p.memory.regions[i].write = false;
+    let k = p.kernel.as_mut().unwrap();
+    k.time_ns = 5_000_000;
+    assert!(wl_runtime::audio::poll(&mut p.memory, k).is_err());
+    assert_eq!(p.load(DATA + 0x20044, 4).unwrap(), 0);
+    assert_eq!(p.load(DATA + 0x20080, 4).unwrap(), 0x77777777);
+    p.memory.regions[i].write = true;
+    wl_runtime::audio::poll(&mut p.memory, p.kernel.as_mut().unwrap()).unwrap();
+    assert_eq!(p.load(DATA + 0x20044, 4).unwrap(), 240);
+    assert_eq!(p.load(DATA + 0x22040, 4).unwrap(), 240);
+}
+
+#[test]
+fn auxiliary_backing_cannot_be_remapped_and_close_releases_its_lifetime_guard() {
+    let (mut p, mut c) = process();
+    let r = auxiliary_renderer(&mut p, &mut c);
+    auxiliary_update_wire(&mut p, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    assert!(
+        p.memory
+            .ensure_gpu_unpinned(DATA + 0x20000, 0x4000)
+            .is_err()
+    );
+    assert!(!p.memory.split_at(DATA + 0x22000));
+    wire(&mut p, 5, false, &[], &[]);
+    call(&mut p, &mut c, r);
+    svc(&mut p, &mut c, 0x16, &[u64::from(r)]);
+    assert_eq!(c.x[0], 0);
+    assert!(p.memory.ensure_gpu_unpinned(DATA + 0x20000, 0x4000).is_ok());
+    assert!(p.memory.split_at(DATA + 0x22000));
+    let k = p.kernel.as_mut().unwrap();
+    k.time_ns = 10_000_000;
+    wl_runtime::audio::poll(&mut p.memory, k).unwrap();
+    assert_eq!(p.load(DATA + 0x20044, 4).unwrap(), 0);
+}
+
+#[test]
+fn failed_auxiliary_registration_rolls_back_earlier_pins_and_preserves_reply() {
+    let (mut p, mut c) = process();
+    let r = auxiliary_renderer(&mut p, &mut c);
+    let existing = p.memory.pin_gpu_range(DATA + 0x22000, 0x1000).unwrap();
+    let mut input = auxiliary_input();
+    input[88..96].copy_from_slice(&0x1000u64.to_le_bytes());
+    input[112..120].copy_from_slice(&(DATA + 0x22000).to_le_bytes());
+    input[120..128].copy_from_slice(&0x1000u64.to_le_bytes());
+    input[128..132].copy_from_slice(&4u32.to_le_bytes());
+    p.write_bytes(DATA + 0x6000, &[0x5c; 768]).unwrap();
+    update_wire_input(&mut p, DATA + 0x8000, &input);
+    let address = tls(&p) + 80;
+    p.write_bytes(address, &(768u32 << 16).to_le_bytes())
+        .unwrap();
+    c.x[0] = u64::from(r);
+    assert!(
+        dispatch(&mut c, &mut p, 0x21)
+            .unwrap_err()
+            .contains("lifetime registration")
+    );
+    assert!(p.memory.ensure_gpu_unpinned(DATA + 0x20000, 0x1000).is_ok());
+    assert!(
+        p.memory
+            .ensure_gpu_unpinned(DATA + 0x22000, 0x1000)
+            .is_err()
+    );
+    assert_eq!(p.read_bytes(DATA + 0x6000, 768).unwrap(), vec![0x5c; 768]);
+    p.memory.release_gpu_pin(existing).unwrap();
+}
+
+#[test]
+fn unchanged_auxiliary_updates_reuse_the_same_registered_pool() {
+    let (mut p, mut c) = process();
+    let r = auxiliary_renderer(&mut p, &mut c);
+    for _ in 0..32 {
+        auxiliary_update_wire(&mut p, DATA + 0x8000);
+        call(&mut p, &mut c, r);
+        assert!(
+            p.memory
+                .ensure_gpu_unpinned(DATA + 0x20000, 0x4000)
+                .is_err()
+        );
+    }
+    svc(&mut p, &mut c, 0x16, &[u64::from(r)]);
+    assert!(p.memory.ensure_gpu_unpinned(DATA + 0x20000, 0x4000).is_ok());
+}
+
+#[test]
+fn removing_auxiliary_before_pool_detach_releases_registration() {
+    let (mut p, mut c) = process();
+    let r = auxiliary_renderer(&mut p, &mut c);
+    auxiliary_update_wire(&mut p, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    let mut input = auxiliary_input();
+    input[608] = 0;
+    input[609] = 0;
+    input[610] = 0;
+    input[96..100].copy_from_slice(&2u32.to_le_bytes());
+    update_wire_input(&mut p, DATA + 0x8000, &input);
+    let address = tls(&p) + 80;
+    p.write_bytes(address, &(768u32 << 16).to_le_bytes())
+        .unwrap();
+    call(&mut p, &mut c, r);
+    assert_eq!(p.load(DATA + 0x6000 + 64, 4).unwrap(), 3); // Detached pool status.
+    assert!(p.memory.ensure_gpu_unpinned(DATA + 0x20000, 0x4000).is_ok());
+}
+
+#[test]
+fn auxiliary_disable_takes_effect_on_the_next_tick_and_failed_updates_preserve_state() {
+    let (mut p, mut c) = process();
+    let r = auxiliary_renderer(&mut p, &mut c);
+    auxiliary_update_wire(&mut p, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    wire(&mut p, 5, false, &[], &[]);
+    call(&mut p, &mut c, r);
+    // Invalid publication must retain the preceding enabled configuration.
+    let mut input = auxiliary_input();
+    input[609] = 0;
+    input[610] = 0;
+    update_wire_input(&mut p, 0x7fffffffff, &input);
+    let address = tls(&p) + 80;
+    p.write_bytes(address, &(768u32 << 16).to_le_bytes())
+        .unwrap();
+    c.x[0] = u64::from(r);
+    assert!(dispatch(&mut c, &mut p, 0x21).is_err());
+    let k = p.kernel.as_mut().unwrap();
+    k.time_ns = 5_000_000;
+    wl_runtime::audio::poll(&mut p.memory, k).unwrap();
+    assert_eq!(p.load(DATA + 0x20044, 4).unwrap(), 240);
+    update_wire_input(&mut p, DATA + 0x8000, &input);
+    let address = tls(&p) + 80;
+    p.write_bytes(address, &(768u32 << 16).to_le_bytes())
+        .unwrap();
+    call(&mut p, &mut c, r);
+    assert_eq!(p.load(DATA + 0x6000 + 160, 1).unwrap(), 3); // Prior DSP usage until its next frame.
+    let k = p.kernel.as_mut().unwrap();
+    k.time_ns = 10_000_000;
+    wl_runtime::audio::poll(&mut p.memory, k).unwrap();
+    assert_eq!(p.load(DATA + 0x20044, 4).unwrap(), 0);
+    assert_eq!(p.load(DATA + 0x22040, 4).unwrap(), 0);
+    update_wire_input(&mut p, DATA + 0x8000, &input);
+    let address = tls(&p) + 80;
+    p.write_bytes(address, &(768u32 << 16).to_le_bytes())
+        .unwrap();
+    call(&mut p, &mut c, r);
+    assert_eq!(p.load(DATA + 0x6000 + 160, 1).unwrap(), 4);
 }
