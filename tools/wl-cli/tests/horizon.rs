@@ -241,7 +241,9 @@ fn check_ipc(state: &serde_json::Value) {
         ipc["sessions_closed_by_server"].as_u64().unwrap() >= 3,
         "{ipc}"
     );
-    assert_eq!(ipc["services"], serde_json::json!(["wl:late"]));
+    // The hosted codec provider is process-owned and remains registered alongside
+    // the guest service. The temporary wl:test service must still be absent.
+    assert_eq!(ipc["services"], serde_json::json!(["hwopus", "wl:late"]));
 }
 
 #[test]
