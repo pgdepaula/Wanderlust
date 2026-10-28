@@ -201,6 +201,9 @@ struct Compare {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct State {
     regs: BTreeMap<u8, Val>,
+    /// Proven equality of low words after register copies, including copies
+    /// made before a comparison. Any write breaks that register's relations.
+    low_equal: [u32; 31],
     /// Registers whose upper 32 bits are known to be zero.
     narrow: u32,
     flags: Option<Compare>,
@@ -216,6 +219,9 @@ impl State {
             true
         });
         self.narrow &= other.narrow;
+        for (equal, incoming) in self.low_equal.iter_mut().zip(other.low_equal) {
+            *equal &= incoming;
+        }
         if self.flags != other.flags {
             self.flags = None;
         }
@@ -230,6 +236,10 @@ impl State {
     }
     fn set(&mut self, reg: Reg, value: Option<Val>, width: Width) {
         let Reg::Gpr(n) = reg else { return };
+        self.low_equal[n as usize] = 0;
+        for equal in &mut self.low_equal {
+            *equal &= !(1 << n);
+        }
         match value {
             Some(v) => self.regs.insert(n, v),
             None => self.regs.remove(&n),
@@ -492,6 +502,7 @@ fn transfer_inner(image: &Image, state: &mut State, op: &Op, advisory: bool) {
     let flags_kept = preserves_flags(op);
     let mut result: Option<(Reg, Option<Val>, Width)> = None;
     let mut compare = None;
+    let mut copied = None;
     match *op {
         Op::Address { dst, value } => result = Some((dst, Some(Val::Const(value.0)), Width::X64)),
         Op::Wide {
@@ -693,6 +704,9 @@ fn transfer_inner(image: &Image, state: &mut State, op: &Op, advisory: bool) {
             kind: 1,
             invert: false,
         } => {
+            if let (Reg::Gpr(src), Reg::Gpr(dst)) = (reg, dst) {
+                copied = Some((dst, state.low_equal[src as usize] | (1 << src)));
+            }
             let value = match state.get(reg) {
                 Some(Val::Const(c)) => Some(Val::Const(mask(c, width))),
                 // A W-register copy zeroes the upper half, making even a bound
@@ -772,6 +786,14 @@ fn transfer_inner(image: &Image, state: &mut State, op: &Op, advisory: bool) {
     } else if !flags_kept {
         state.flags = None;
     }
+    if let Some((dst, mut group)) = copied {
+        group |= 1 << dst;
+        for reg in 0..31 {
+            if group & (1 << reg) != 0 {
+                state.low_equal[reg] |= group & !(1 << reg);
+            }
+        }
+    }
 }
 
 /// Refines discovery state on a conditional edge. False excludes a proven
@@ -803,6 +825,28 @@ fn refine(state: &mut State, condition: u8, taken: bool) -> bool {
     let narrow = state.narrow;
     state.regs.insert(reg, Val::Bounded { max, full });
     state.narrow = narrow;
+    // Low-word equality never proves equality of unknown high halves. A
+    // copied W index is full-width bounded only because its write zeroed them.
+    if max <= u64::from(u32::MAX) {
+        let aliases = state.low_equal[reg as usize];
+        for alias in 0..31u8 {
+            if aliases & (1 << alias) == 0 {
+                continue;
+            }
+            let max = match state.regs.get(&alias) {
+                None => max,
+                Some(Val::Bounded { max: prior, .. }) => max.min(*prior),
+                _ => continue,
+            };
+            state.regs.insert(
+                alias,
+                Val::Bounded {
+                    max,
+                    full: narrow & (1 << alias) != 0,
+                },
+            );
+        }
+    }
     true
 }
 

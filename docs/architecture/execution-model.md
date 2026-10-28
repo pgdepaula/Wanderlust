@@ -28,6 +28,14 @@ wl-runtime (rlib): CPU and SIMD&FP state, guest memory, dispatch, FP semantics, 
 
 Indirect branches are resolved only where a forward constant and bounds propagation over the decoded graph proves their targets: bounded jump tables and code addresses formed by `ADR`/`ADRP`/`ADD` that are stored, passed to calls or branched to. Proposed targets are traversed as speculative roots; jump-table entries also become block leaders and graph edges. Analysis and traversal alternate until no new code appears ([ADR-0005](../decisions/ADR-0005-proven-indirect-targets.md)). Reports include `jump_tables` and `flow_roots`.
 
+Register copies retain proven low-word equality even when copied before an
+unsigned comparison. A bounded source can therefore bound a previously copied
+W index. Every register write and caller-saved call clobber invalidates affected
+relations; control-flow joins retain only equality established on every path.
+Low-word equality does not bound unknown upper halves of an X index. Independent
+assembled tests exercise halfword tables, chained copies, source/index writes,
+call clobbers and incompatible incoming paths.
+
 Unsigned masked operands can bound a multiply-add when the product and accumulator do not overflow the instruction width. Subsequent immediate addition or subtraction retains a bounded modular interval, including W-register underflow. Mapped entries of a partly known table become speculative candidates; unreadable entries and invalid targets prevent reporting a complete table. Unknown upper bits, overflowing products and nonconstant subtract-products do not establish an unsigned bound. Original loads and indirect branches remain unchanged.
 
 `wanderlust dispatch-scan INPUT` examines every BR/BLR in executable mappings using bounded local control-flow windows of at most 64 instructions. It reuses the decoder, graph construction and propagation, preserving conditional-edge joins and call clobbers. JSON separates candidate addresses, complete local tables and unresolved sites. The scan is bounded to 128 million executable words, 262,144 indirect sites and 262,144 candidate addresses; exceeding a budget fails explicitly. Candidates can be supplied through `--roots-file` for ordinary traversal before emission. An advisory scan may enumerate the high-word-zero slice of an X-indexed table guarded by a W comparison. Such a slice always remains unresolved: the low-word bound is never promoted to a full-register proof. Ordinary recursive propagation retains its strict index bounds; original loads and branches are unchanged. This inventory does not prove runtime-generated virtual-call targets or global control-flow completeness.

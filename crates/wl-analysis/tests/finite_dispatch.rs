@@ -16,6 +16,47 @@ fn analyze(words: &[u32]) -> Program {
     assert_eq!(image.mappings[0].bytes, bytes);
     program
 }
+
+// GNU as: MOV W8,W0; two NOPs; CMP W0,#2; B.HI outside; NOP;
+// ADR X9,case0; ADR X10,table; LDRH W11,[X10,X8,LSL#1];
+// ADD X9,X9,X11,LSL#2; BR X9. Three two-instruction cases and RET outside.
+// Independent halfword table values 0,2,4 select case entries 0x2c/0x34/0x3c.
+const COPIED_INDEX: [u32; 20] = [
+    0x2a0003e8, 0xd503201f, 0xd503201f, 0x7100081f, 0x540001a8, 0xd503201f, 0x100000a9, 0x1000016a,
+    0x7868794b, 0x8b0b0929, 0xd61f0120, 0x52800160, 0xd65f03c0, 0x528002c0, 0xd65f03c0, 0x52800420,
+    0xd65f03c0, 0xd65f03c0, 0x00020000, 0x00000004,
+];
+fn assert_copied_family(words: &[u32]) {
+    let program = analyze(words);
+    assert_eq!(program.jump_tables.get(&GuestAddr(0x10028)), Some(&3));
+    for entry in [0x1002c, 0x10034, 0x1003c] {
+        assert!(program.blocks.iter().any(|b| b.start == GuestAddr(entry)));
+    }
+}
+#[test]
+fn compare_refines_an_index_copied_before_the_comparison() {
+    assert_copied_family(&COPIED_INDEX);
+    let mut chained = COPIED_INDEX;
+    chained[1] = 0x2a0803e7; // MOV W7,W8.
+    chained[2] = 0x2a0703e8; // MOV W8,W7.
+    assert_copied_family(&chained);
+    let mut overwritten_source = COPIED_INDEX;
+    overwritten_source[5] = 0x2a0103e0; // MOV W0,W1 after the guard.
+    assert_copied_family(&overwritten_source);
+}
+#[test]
+fn copy_equality_does_not_survive_writes_calls_or_unknown_upper_words() {
+    let mut variants = [COPIED_INDEX; 5];
+    variants[0][1] = 0x2a0103e0; // Overwrite compared W0 before CMP.
+    variants[1][5] = 0x2a0103e8; // Overwrite copied W8 after the guard.
+    variants[2][0] = 0xaa0003e8; // MOV X8,X0: unknown high bits are not bounded.
+    variants[3][5] = 0x9400000c; // BL outside (RET): caller-saved W8 is clobbered.
+    variants[4][1] = 0x34000041; // CBZ W1,+8; equality holds on only one path.
+    variants[4][2] = 0x2a0203e8; // MOV W8,W2.
+    for words in variants {
+        assert!(analyze(&words).jump_tables.is_empty());
+    }
+}
 fn assert_candidates(program: &Program) {
     for target in [0x10024, 0x1002c, 0x10034] {
         assert!(program.blocks.iter().any(|b| b.start.0 == target));
