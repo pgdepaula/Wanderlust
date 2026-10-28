@@ -540,6 +540,55 @@ fn disabled_effect_results_use_wire_state_four_in_both_revision_layouts() {
     }
 }
 #[test]
+fn paused_voices_do_not_advance_samples_and_started_voices_report_metadata() {
+    let r = audio::Renderer::new(audio::Parameters::parse(&parameters(8)).unwrap(), 0);
+    let mut input = silent_input();
+    input[208 + 9] = 1;
+    input[208 + 10] = 2; // libnx Paused enum; not Started (0).
+    let output = r.update(&input, &Memory::default()).unwrap();
+    assert!(output[128..144].iter().all(|v| *v == 0));
+    input[208 + 10] = 0;
+    input[208 + 11] = 1;
+    input[208 + 12..208 + 16].copy_from_slice(&48000u32.to_le_bytes());
+    input[208 + 24..208 + 28].copy_from_slice(&2u32.to_le_bytes());
+    input[208 + 60..208 + 64].copy_from_slice(&1u32.to_le_bytes());
+    let error = r.update(&input, &Memory::default()).unwrap_err();
+    for expected in [
+        "active voice playback",
+        "slot=0",
+        "used=1",
+        "state=0",
+        "format=1",
+        "rate=48000",
+        "channels=2",
+        "wave_buffers=1",
+        "active_effects=0",
+        "sink_types=[0]",
+    ] {
+        assert!(error.contains(expected), "{error}");
+    }
+}
+
+#[test]
+fn revision_fifteen_voice_diagnostics_follow_the_float_biquad_stride() {
+    let r = audio::Renderer::new(audio::Parameters::parse(&parameters(15)).unwrap(), 0);
+    let mut input = silent_input();
+    // REV15 expands two biquad records by 24 bytes before the wave-buffer count.
+    input.splice(208 + 60..208 + 60, [0; 24]);
+    input[..4].copy_from_slice(b"REV?");
+    input[64..68].copy_from_slice(b"REV?");
+    input[12..16].copy_from_slice(&0x188u32.to_le_bytes());
+    let length = input.len() as u32;
+    input[60..64].copy_from_slice(&length.to_le_bytes());
+    input[208 + 9] = 1;
+    input[208 + 0x54..208 + 0x58].copy_from_slice(&2u32.to_le_bytes());
+    input[208 + 0x78..208 + 0x80].copy_from_slice(&0x12345000u64.to_le_bytes());
+    let error = r.update(&input, &Memory::default()).unwrap_err();
+    assert!(error.contains("wave_buffers=2"), "{error}");
+    assert!(error.contains("buffers=[(305418240,"), "{error}");
+}
+
+#[test]
 fn active_playback_and_malformed_updates_are_explicit_errors() {
     let params = audio::Parameters::parse(&parameters(8)).unwrap();
     let r = audio::Renderer::new(params, 0);

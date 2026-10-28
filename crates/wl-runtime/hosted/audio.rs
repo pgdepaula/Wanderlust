@@ -1,4 +1,4 @@
-//! Bounded headless audren initialization and stopped-voice update protocol.
+//! Bounded headless audren initialization and stopped/paused-voice updates.
 //! Wire layouts: libnx feebd026, services/audren.c and services/audren.h.
 //! No active voice decoding, DSP effects or audible output is implemented.
 use wl_guest_runtime::audio::{AudioHost, Factory, Reply as Done};
@@ -295,9 +295,49 @@ impl Renderer {
                 }
             }
         }
-        for voice in parts[3].chunks_exact(stride) {
-            if word(voice, 0) >= p.voices || voice[9] > 1 || (voice[9] != 0 && voice[10] != 1) {
-                return Err(unsupported("active voice playback"));
+        for (slot, voice) in parts[3].chunks_exact(stride).enumerate() {
+            // libnx feebd026: Started=0, Stopped=1, Paused=2. Paused
+            // voices cannot advance DSP samples, like this renderer's stopped
+            // subset. Actual playback remains unsupported, with useful metadata.
+            if word(voice, 0) >= p.voices
+                || voice[9] > 1
+                || (voice[9] != 0 && !matches!(voice[10], 1 | 2))
+            {
+                let wave_base = if p.revision_number() >= 15 {
+                    0x78
+                } else {
+                    0x60
+                };
+                let buffers: Vec<_> = (0..4)
+                    .map(|i| {
+                        let at = wave_base + i * 0x38;
+                        (
+                            wide(voice, at),
+                            wide(voice, at + 8),
+                            word(voice, at + 16),
+                            word(voice, at + 20),
+                            voice[at + 24],
+                            voice[at + 25],
+                            voice[at + 26],
+                        )
+                    })
+                    .collect();
+                return Err(format!(
+                    "{}: slot={slot} id={} used={} state={} format={} rate={} channels={} wave_buffers={} active_effects={} sink_types={:?} buffers={buffers:?}",
+                    unsupported("active voice playback"),
+                    word(voice, 0),
+                    voice[9],
+                    voice[10],
+                    voice[11],
+                    word(voice, 12),
+                    word(voice, 24),
+                    word(voice, wave_base - 0x24),
+                    parts[5].chunks_exact(0xc0).filter(|e| e[2] != 0).count(),
+                    parts[7]
+                        .chunks_exact(0x140)
+                        .map(|s| s[0])
+                        .collect::<Vec<_>>()
+                ));
             }
         }
         for sink in parts[7].chunks_exact(0x140) {
