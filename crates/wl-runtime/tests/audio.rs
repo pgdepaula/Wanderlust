@@ -1893,3 +1893,297 @@ fn auxiliary_disable_takes_effect_on_the_next_tick_and_failed_updates_preserve_s
     call(&mut p, &mut c, r);
     assert_eq!(p.load(DATA + 0x6000 + 160, 1).unwrap(), 4);
 }
+
+fn graph_parameters() -> Vec<u8> {
+    let mut p = parameters(11);
+    p[12..16].copy_from_slice(&3u32.to_le_bytes());
+    p[24..28].copy_from_slice(&4u32.to_le_bytes());
+    p
+}
+fn graph_input() -> Vec<u8> {
+    let sizes = [16u32, 256, 368, 0, 768, 4 * 2352, 320, 16, 0, 0];
+    let mut b = vec![0; 64 + sizes.iter().sum::<u32>() as usize];
+    b[..4].copy_from_slice(b"REV;");
+    b[64..68].copy_from_slice(b"REV;");
+    for (i, n) in sizes.iter().enumerate() {
+        b[4 + i * 4..8 + i * 4].copy_from_slice(&n.to_le_bytes());
+    }
+    let total = b.len() as u32;
+    b[60..64].copy_from_slice(&total.to_le_bytes());
+    for i in 0..8 {
+        b[96 + i * 32..100 + i * 32].copy_from_slice(&1u32.to_le_bytes());
+    }
+    b[80..88].copy_from_slice(&(DATA + 0x20000).to_le_bytes());
+    b[88..96].copy_from_slice(&0x10000u64.to_le_bytes());
+    b[96..100].copy_from_slice(&4u32.to_le_bytes());
+    let effects = 704;
+    for (slot, kind, mix) in [(0, 2, 3u32), (1, 5, 2), (2, 7, 1), (3, 2, 0)] {
+        let e = effects + slot * 192;
+        b[e] = kind;
+        b[e + 1] = 1;
+        b[e + 2] = 1;
+        b[e + 4..e + 8].copy_from_slice(&mix.to_le_bytes());
+        let s = e + 32;
+        if kind == 2 {
+            for (at, value) in [(48, 1u32), (52, 48000), (56, 512), (60, 1), (104, 240)] {
+                b[s + at..s + at + 4].copy_from_slice(&value.to_le_bytes());
+            }
+            let base = if slot == 0 {
+                DATA + 0x20000
+            } else {
+                DATA + 0x24000
+            };
+            for (at, value) in [
+                (64, base),
+                (72, base + 128),
+                (80, base + 0x2000),
+                (88, base + 0x2080),
+            ] {
+                b[s + at..s + at + 8].copy_from_slice(&value.to_le_bytes());
+            }
+        } else {
+            let base = DATA + 0x28000 + if kind == 7 { 0x1000 } else { 0 };
+            b[e + 8..e + 16].copy_from_slice(&base.to_le_bytes());
+            b[e + 16..e + 24].copy_from_slice(&4096u64.to_le_bytes());
+            b[s + 12..s + 14].copy_from_slice(&6u16.to_le_bytes());
+            b[s + 14..s + 16].copy_from_slice(&1u16.to_le_bytes());
+            if kind == 5 {
+                b[s + 20..s + 24].copy_from_slice(&48000u32.to_le_bytes());
+                for (at, value) in [
+                    (24, -12000f32),
+                    (28, 4000.),
+                    (32, 1.),
+                    (36, 0.7),
+                    (40, -12000.),
+                    (44, 0.),
+                    (48, 0.),
+                    (52, 50.),
+                    (56, 0.),
+                    (60, 0.),
+                    (64, 70.),
+                    (68, 1.),
+                ] {
+                    b[s + at..s + at + 4].copy_from_slice(&value.to_le_bytes());
+                }
+            } else {
+                b[s + 16..s + 20].copy_from_slice(&48000u32.to_le_bytes());
+                for (at, value) in [(36, 1f32), (40, 1.), (44, 0.25), (48, 1.), (52, 1.)] {
+                    b[s + at..s + at + 4].copy_from_slice(&value.to_le_bytes());
+                }
+                b[s + 56..s + 60].copy_from_slice(&2u32.to_le_bytes());
+                b[s + 60..s + 64].copy_from_slice(&9u32.to_le_bytes());
+                b[s + 65] = 1;
+                b[s + 66] = 1;
+            }
+        }
+    }
+    let mix = effects + 768;
+    for id in 0..4 {
+        let m = mix + id * 2352;
+        for (at, value) in [
+            (0, if id == 3 { 0.5f32 } else { 1. }.to_bits()),
+            (4, 48000),
+            (8, 1),
+            (16, id as u32),
+            (20, 1),
+            (36, 1f32.to_bits()),
+            (0x924, if id == 0 { 0x7fffffff } else { id as u32 - 1 }),
+            (0x928, u32::MAX),
+        ] {
+            b[m + at..m + at + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        b[m + 12] = 1;
+        b[m + 13] = 1;
+    }
+    let sink = mix + 4 * 2352;
+    b[sink] = 1;
+    b[sink + 1] = 1;
+    b[sink + 0x120..sink + 0x124].copy_from_slice(&1u32.to_le_bytes());
+    b
+}
+fn graph_renderer(p: &mut Process, c: &mut Cpu) -> u32 {
+    p.memory.split_at(DATA + 0x20000);
+    p.memory.split_at(DATA + 0x30000);
+    let i = p.memory.region_index(DATA + 0x20000).unwrap();
+    p.memory.regions[i].state = state::NORMAL;
+    let m = manager(p, c);
+    open_renderer(p, c, m, graph_parameters())
+}
+fn graph_update(p: &mut Process, b: &[u8], performance: u64) {
+    update_wire_input(p, performance, b);
+    let at = tls(p) + 80;
+    p.write_bytes(at, &(2048u32 << 16).to_le_bytes()).unwrap();
+}
+#[test]
+fn routed_auxiliary_reverb_limiter_graph_processes_real_return_samples_and_statistics() {
+    let (mut p, mut c) = process();
+    let r = graph_renderer(&mut p, &mut c);
+    let input = graph_input();
+    for k in 0..512 {
+        p.write_bytes(DATA + 0x22080 + k * 4, &32768i32.to_le_bytes())
+            .unwrap();
+    }
+    graph_update(&mut p, &input, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    wire(&mut p, 5, false, &[], &[]);
+    call(&mut p, &mut c, r);
+    p.kernel.as_mut().unwrap().time_ns = 5_000_000;
+    wl_runtime::audio::poll(&mut p.memory, p.kernel.as_mut().unwrap()).unwrap();
+    assert_eq!(p.load(DATA + 0x24044, 4).unwrap(), 240);
+    assert_eq!(p.load(DATA + 0x24080, 4).unwrap(), 0);
+    assert_eq!(p.load(DATA + 0x24084, 4).unwrap(), 0);
+    for k in 2..240 {
+        assert_eq!(p.load(DATA + 0x24080 + k * 4, 4).unwrap(), 8191);
+    }
+    // An unchanged update preserves the limiter's two delayed samples.
+    let mut update = input.clone();
+    for slot in 0..4 {
+        update[704 + slot * 192 + 1] = 0;
+    }
+    update[704 + 192 + 32 + 72] = 2;
+    update[704 + 384 + 32 + 64] = 2;
+    update[704 + 384 + 32 + 66] = 0;
+    graph_update(&mut p, &update, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    let stats = DATA + 0x6000 + 64 + 128 + 16 + 2 * 144 + 16;
+    let peak = f32::from_bits(p.load(stats, 4).unwrap() as u32);
+    assert!((peak - 0.5 * (32768. / 32767.)).abs() < 1e-6);
+    p.kernel.as_mut().unwrap().time_ns = 10_000_000;
+    wl_runtime::audio::poll(&mut p.memory, p.kernel.as_mut().unwrap()).unwrap();
+    assert_eq!(p.load(DATA + 0x24080 + 240 * 4, 4).unwrap(), 8191);
+    assert!(
+        p.memory
+            .ensure_gpu_unpinned(DATA + 0x20000, 0x10000)
+            .is_err()
+    );
+    svc(&mut p, &mut c, 0x16, &[u64::from(r)]);
+    assert!(
+        p.memory
+            .ensure_gpu_unpinned(DATA + 0x20000, 0x10000)
+            .is_ok()
+    );
+}
+#[test]
+fn graph_cycle_alias_and_late_write_fault_are_atomic_and_retryable() {
+    let (mut p, mut c) = process();
+    let r = graph_renderer(&mut p, &mut c);
+    let input = graph_input();
+    for (at, value) in [(1472 + 2352 + 0x924, 2u32), (704 + 384 + 4, 30)] {
+        let mut bad = input.clone();
+        bad[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        graph_update(&mut p, &bad, DATA + 0x8000);
+        c.x[0] = u64::from(r);
+        assert!(dispatch(&mut c, &mut p, 0x21).is_err());
+        assert!(
+            p.memory
+                .ensure_gpu_unpinned(DATA + 0x20000, 0x10000)
+                .is_ok()
+        );
+    }
+    let mut alias = input.clone();
+    alias[704 + 576 + 32 + 64..704 + 576 + 32 + 72]
+        .copy_from_slice(&(DATA + 0x20000).to_le_bytes());
+    alias[704 + 576 + 32 + 72..704 + 576 + 32 + 80]
+        .copy_from_slice(&(DATA + 0x20080).to_le_bytes());
+    graph_update(&mut p, &alias, DATA + 0x8000);
+    c.x[0] = u64::from(r);
+    assert!(dispatch(&mut c, &mut p, 0x21).is_err());
+    graph_update(&mut p, &input, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    wire(&mut p, 5, false, &[], &[]);
+    call(&mut p, &mut c, r);
+    let i = p.memory.region_index(DATA + 0x20000).unwrap();
+    p.memory.regions[i].write = false;
+    p.kernel.as_mut().unwrap().time_ns = 5_000_000;
+    assert!(wl_runtime::audio::poll(&mut p.memory, p.kernel.as_mut().unwrap()).is_err());
+    assert_eq!(p.load(DATA + 0x20044, 4).unwrap(), 0);
+    assert_eq!(p.load(DATA + 0x24044, 4).unwrap(), 0);
+    p.memory.regions[i].write = true;
+    wl_runtime::audio::poll(&mut p.memory, p.kernel.as_mut().unwrap()).unwrap();
+    assert_eq!(p.load(DATA + 0x20044, 4).unwrap(), 240);
+    assert_eq!(p.load(DATA + 0x24044, 4).unwrap(), 240);
+}
+#[test]
+fn downstream_dsp_rejection_does_not_commit_earlier_auxiliary_or_delay_state() {
+    let (mut p, mut c) = process();
+    let r = graph_renderer(&mut p, &mut c);
+    let mut input = graph_input();
+    let m = 1472 + 3 * 2352;
+    input[m..m + 4].copy_from_slice(&64f32.to_le_bytes());
+    input[m + 36..m + 40].copy_from_slice(&64f32.to_le_bytes());
+    p.write_bytes(DATA + 0x22080, &i32::MAX.to_le_bytes())
+        .unwrap();
+    graph_update(&mut p, &input, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    wire(&mut p, 5, false, &[], &[]);
+    call(&mut p, &mut c, r);
+    p.kernel.as_mut().unwrap().time_ns = 5_000_000;
+    assert!(
+        wl_runtime::audio::poll(&mut p.memory, p.kernel.as_mut().unwrap())
+            .unwrap_err()
+            .contains("reverb input")
+    );
+    for address in [0x20044, 0x22040, 0x24044, 0x26040] {
+        assert_eq!(p.load(DATA + address, 4).unwrap(), 0);
+    }
+    p.write_bytes(DATA + 0x22080, &0i32.to_le_bytes()).unwrap();
+    wl_runtime::audio::poll(&mut p.memory, p.kernel.as_mut().unwrap()).unwrap();
+    assert_eq!(p.load(DATA + 0x20044, 4).unwrap(), 240);
+    assert_eq!(p.read_bytes(DATA + 0x24080, 960).unwrap(), vec![0; 960]);
+    wl_runtime::audio::poll(&mut p.memory, p.kernel.as_mut().unwrap()).unwrap();
+    assert_eq!(p.load(DATA + 0x20044, 4).unwrap(), 240);
+}
+#[test]
+fn dirty_mix_updates_preserve_unmentioned_routes_and_failed_update_keeps_configuration() {
+    let (mut p, mut c) = process();
+    let r = graph_renderer(&mut p, &mut c);
+    let input = graph_input();
+    for k in 0..512 {
+        p.write_bytes(DATA + 0x22080 + k * 4, &32768i32.to_le_bytes())
+            .unwrap();
+    }
+    graph_update(&mut p, &input, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    wire(&mut p, 5, false, &[], &[]);
+    call(&mut p, &mut c, r);
+    p.kernel.as_mut().unwrap().time_ns = 5_000_000;
+    wl_runtime::audio::poll(&mut p.memory, p.kernel.as_mut().unwrap()).unwrap();
+    let mut dirty = input[..1472].to_vec();
+    let mut header = [0; 32];
+    header[..4].copy_from_slice(&0xcafebabeu32.to_le_bytes());
+    header[4..8].copy_from_slice(&1u32.to_le_bytes());
+    dirty.extend(header);
+    let mut mix = input[1472 + 3 * 2352..1472 + 4 * 2352].to_vec();
+    mix[..4].copy_from_slice(&0f32.to_le_bytes());
+    dirty.extend(mix);
+    dirty.extend(&input[1472 + 4 * 2352..]);
+    let len = dirty.len() as u32;
+    dirty[24..28].copy_from_slice(&(32u32 + 2352).to_le_bytes());
+    dirty[60..64].copy_from_slice(&len.to_le_bytes());
+    for slot in 0..4 {
+        dirty[704 + slot * 192 + 1] = 0;
+    }
+    dirty[704 + 192 + 32 + 72] = 2;
+    dirty[704 + 384 + 32 + 64] = 2;
+    dirty[704 + 384 + 32 + 66] = 0;
+    graph_update(&mut p, &dirty, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    let mut invalid = dirty.clone();
+    invalid[1472 + 32 + 0x924..1472 + 32 + 0x928].copy_from_slice(&3u32.to_le_bytes());
+    graph_update(&mut p, &invalid, DATA + 0x8000);
+    c.x[0] = u64::from(r);
+    assert!(dispatch(&mut c, &mut p, 0x21).is_err());
+    p.kernel.as_mut().unwrap().time_ns = 10_000_000;
+    wl_runtime::audio::poll(&mut p.memory, p.kernel.as_mut().unwrap()).unwrap();
+    assert_eq!(p.load(DATA + 0x24044, 4).unwrap(), 480);
+    assert_eq!(
+        p.read_bytes(DATA + 0x24080 + 242 * 4, 238 * 4).unwrap(),
+        vec![0; 238 * 4]
+    );
+    svc(&mut p, &mut c, 0x16, &[u64::from(r)]);
+    assert!(
+        p.memory
+            .ensure_gpu_unpinned(DATA + 0x20000, 0x10000)
+            .is_ok()
+    );
+}

@@ -1,6 +1,6 @@
 //! Bounded headless audren initialization and stopped/paused-voice updates.
 //! Wire layouts: libnx feebd026, services/audren.c and services/audren.h.
-//! No active voice decoding, DSP effects or audible output is implemented.
+//! Bounded auxiliary/reverb/limiter processing; no queued voice decoding or audible output.
 use crate::host_audio_dsp::Auxiliary;
 use wl_guest_runtime::audio::{AudioHost, Factory, Reply as Done};
 use wl_guest_runtime::gpu_memory::GpuPin;
@@ -179,6 +179,7 @@ pub struct Renderer {
     pub elapsed_frames: u64,
     pub time_limit: u32,
     auxiliary: Option<AuxiliaryState>,
+    graph: Option<EffectGraph>,
 }
 #[derive(Debug)]
 struct AuxiliaryState {
@@ -192,6 +193,7 @@ struct AuxiliaryState {
 struct PreparedUpdate {
     bytes: Vec<u8>,
     auxiliary: Option<AuxiliaryState>,
+    graph: Option<EffectGraph>,
 }
 impl Renderer {
     pub fn new(parameters: Parameters, event: usize) -> Self {
@@ -203,6 +205,7 @@ impl Renderer {
             elapsed_frames: 0,
             time_limit: 100,
             auxiliary: None,
+            graph: None,
         }
     }
     pub fn start(&mut self, now: u64) -> RuntimeResult<()> {
@@ -232,6 +235,20 @@ impl Renderer {
     }
     pub fn advance(&mut self, memory: &mut Memory, now: u64) -> RuntimeResult<bool> {
         if let Some(next) = self.next_tick_ns.filter(|n| *n <= now) {
+            if let Some(graph) = &mut self.graph {
+                let frames = (now - next) / 5_000_000 + 1;
+                if frames > 1024 {
+                    return Err(unsupported("effect graph catch-up budget"));
+                }
+                let samples = self.parameters.sample_count as usize;
+                graph.preflight(memory, samples)?;
+                for _ in 0..frames {
+                    graph.frame(memory, samples)?;
+                    self.elapsed_frames = self.elapsed_frames.saturating_add(1);
+                    self.next_tick_ns = self.next_tick_ns.and_then(|n| n.checked_add(5_000_000));
+                }
+                return Ok(true);
+            }
             if let Some(auxiliary) = &mut self.auxiliary {
                 let frames = (now - next) / 5_000_000 + 1;
                 if frames > 1024 {
@@ -417,7 +434,15 @@ impl Renderer {
                 return Err(unsupported("circular or unknown sink"));
             }
         }
-        let auxiliary = if parts[5].len() == 0xc0
+        let graph = if self.graph.is_some()
+            || (p.submixes != 0 && parts[5].chunks_exact(0xc0).any(|e| e[0] != 0))
+        {
+            Some(self.prepare_graph(parts[5], parts[6], parts[7], parts[2], memory)?)
+        } else {
+            None
+        };
+        let auxiliary = if graph.is_none()
+            && parts[5].len() == 0xc0
             && parts[5][0] == 2
             && (parts[5][1] != 0 || parts[5][2] != 0 || self.auxiliary.is_some())
         {
@@ -425,7 +450,10 @@ impl Renderer {
         } else {
             None
         };
-        if auxiliary.is_none() && parts[5].chunks_exact(0xc0).any(|effect| effect[2] != 0) {
+        if graph.is_none()
+            && auxiliary.is_none()
+            && parts[5].chunks_exact(0xc0).any(|effect| effect[2] != 0)
+        {
             let effects: Vec<_> = parts[5]
                 .chunks_exact(0xc0)
                 .enumerate()
@@ -490,8 +518,18 @@ impl Renderer {
             at += 0x10;
         }
         at += sizes[2];
-        for _ in parts[5].chunks_exact(0xc0) {
-            output[at] = if let Some(aux) = &auxiliary {
+        for (slot, _) in parts[5].chunks_exact(0xc0).enumerate() {
+            output[at] = if let Some(effect) = graph
+                .as_ref()
+                .and_then(|g| g.effects.get(slot))
+                .and_then(Option::as_ref)
+            {
+                if (self.running && effect.usage != 3) || (!self.running && effect.usage == 1) {
+                    3
+                } else {
+                    4
+                }
+            } else if let Some(aux) = &auxiliary {
                 if (self.running && aux.usage != 3) || (!self.running && aux.usage == 1) {
                     3
                 } else {
@@ -500,6 +538,27 @@ impl Renderer {
             } else {
                 4
             };
+            if effect_stride >= 0x90 {
+                if let Some(Effect {
+                    processor: EffectProcessor::Limiter(_, limiter),
+                    ..
+                }) = graph
+                    .as_ref()
+                    .and_then(|g| g.effects.get(slot))
+                    .and_then(Option::as_ref)
+                {
+                    for (i, value) in limiter
+                        .statistics
+                        .peak
+                        .iter()
+                        .chain(&limiter.statistics.minimum_gain)
+                        .enumerate()
+                    {
+                        output[at + 16 + i * 4..at + 20 + i * 4]
+                            .copy_from_slice(&value.to_le_bytes());
+                    }
+                }
+            }
             at += effect_stride;
         }
         at += sizes[6] + 0x10 + 0xb0;
@@ -509,6 +568,7 @@ impl Renderer {
         Ok(PreparedUpdate {
             bytes: output,
             auxiliary,
+            graph,
         })
     }
     fn prepare_auxiliary(
@@ -694,6 +754,31 @@ impl Backend {
         index: usize,
         prepared: &mut PreparedUpdate,
     ) -> RuntimeResult<()> {
+        if let Some(new) = prepared.graph.as_mut() {
+            let renderer = self
+                .state
+                .renderers
+                .get_mut(&index)
+                .ok_or("invalid audio renderer identity")?;
+            if let Some(old) = renderer.graph.as_mut()
+                && old.pools == new.pools
+            {
+                new.pins = std::mem::take(&mut old.pins);
+                return Ok(());
+            }
+            for &(address, size) in &new.pools {
+                match memory.pin_gpu_range(address, size) {
+                    Ok(pin) => new.pins.push(pin),
+                    Err(error) => {
+                        for pin in new.pins.drain(..).rev() {
+                            memory.release_gpu_pin(pin)?;
+                        }
+                        return Err(format!("audio graph lifetime registration: {error}"));
+                    }
+                }
+            }
+            return Ok(());
+        }
         let Some(new) = prepared.auxiliary.as_mut() else {
             return Ok(());
         };
@@ -1018,6 +1103,16 @@ impl AudioHost for Backend {
                         memory.release_gpu_pin(pin)?;
                     }
                 }
+                let renderer = self
+                    .state
+                    .renderers
+                    .get_mut(&index)
+                    .ok_or("invalid renderer")?;
+                if let Some(old) = std::mem::replace(&mut renderer.graph, prepared.graph) {
+                    for pin in old.pins {
+                        memory.release_gpu_pin(pin)?;
+                    }
+                }
                 Done::ok()
             }
             (HostObject::AudioDevice, 0 | 3 | 6 | 10 | 13 | 14) => {
@@ -1108,10 +1203,13 @@ impl AudioHost for Backend {
                 self.opus.close(index);
                 return;
             }
-            if let Some(renderer) = self.state.renderers.remove(&index)
-                && let Some(auxiliary) = renderer.auxiliary
-            {
-                self.released_audio_pins.extend(auxiliary.pins);
+            if let Some(renderer) = self.state.renderers.remove(&index) {
+                if let Some(auxiliary) = renderer.auxiliary {
+                    self.released_audio_pins.extend(auxiliary.pins);
+                }
+                if let Some(graph) = renderer.graph {
+                    self.released_audio_pins.extend(graph.pins);
+                }
             }
         }
     }
@@ -1276,4 +1374,534 @@ static FACTORY: Factory = Factory {
 };
 pub fn install() -> RuntimeResult<()> {
     wl_guest_runtime::audio::install(&FACTORY)
+}
+
+#[derive(Clone, Debug)]
+struct Mix {
+    channels: usize,
+    destination: Option<usize>,
+    volume: f32,
+    matrix: Vec<f32>,
+    effect_count: usize,
+}
+#[derive(Clone, Debug)]
+enum EffectProcessor {
+    Auxiliary(Auxiliary),
+    Reverb(
+        crate::host_audio_dsp::reverb3d::ReverbParams,
+        Box<crate::host_audio_dsp::reverb3d::Reverb3d>,
+    ),
+    Limiter(
+        crate::host_audio_dsp::limiter::LimiterParams,
+        Box<crate::host_audio_dsp::limiter::Limiter>,
+    ),
+}
+#[derive(Clone, Debug)]
+struct Effect {
+    mix: usize,
+    order: u32,
+    input: Vec<usize>,
+    output: Vec<usize>,
+    enabled: bool,
+    usage: u8,
+    processor: EffectProcessor,
+}
+#[derive(Debug)]
+struct EffectGraph {
+    mixes: Vec<Option<Mix>>,
+    effects: Vec<Option<Effect>>,
+    order: Vec<usize>,
+    pools: Vec<(u64, u64)>,
+    pins: Vec<GpuPin>,
+}
+impl EffectGraph {
+    fn preflight(&self, memory: &Memory, samples: usize) -> RuntimeResult<()> {
+        for effect in self.effects.iter().flatten() {
+            if let EffectProcessor::Auxiliary(exchange) = &effect.processor {
+                exchange.preflight(memory, effect.input.len(), samples)?;
+            }
+        }
+        Ok(())
+    }
+    fn frame(&mut self, memory: &mut Memory, samples: usize) -> RuntimeResult<()> {
+        // No sample-producing voices are accepted by prepare_update yet. Mix
+        // buffers start clear each frame; real auxiliary return samples and
+        // persistent delay tails are processed and routed, never discarded early.
+        let mut buffers: Vec<Vec<Vec<f32>>> = self
+            .mixes
+            .iter()
+            .map(|m| vec![vec![0.; samples]; m.as_ref().map_or(0, |m| m.channels)])
+            .collect();
+        let mut processors = self.effects.clone();
+        let mut writes = Vec::new();
+        for &mix_id in &self.order {
+            let mut effects: Vec<_> = processors
+                .iter_mut()
+                .flatten()
+                .filter(|e| e.mix == mix_id)
+                .collect();
+            effects.sort_by_key(|e| e.order);
+            for effect in effects {
+                let input: Vec<_> = effect
+                    .input
+                    .iter()
+                    .map(|&c| buffers[mix_id][c].clone())
+                    .collect();
+                let output = match &mut effect.processor {
+                    EffectProcessor::Auxiliary(exchange) => {
+                        let count = input.len();
+                        let mut output = Vec::with_capacity(count);
+                        for (c, channel) in input.iter().enumerate() {
+                            let (result, plan) = exchange.plan_channel(
+                                memory,
+                                channel,
+                                (samples * c) as u32,
+                                if c + 1 == count {
+                                    (samples * count) as u32
+                                } else {
+                                    0
+                                },
+                            )?;
+                            writes.extend(plan);
+                            buffers[mix_id][effect.input[c]] = result.quantized_input;
+                            output.push(result.output);
+                        }
+                        output
+                    }
+                    EffectProcessor::Reverb(_, reverb) => {
+                        if effect.enabled {
+                            reverb.process(&input)?
+                        } else {
+                            input
+                        }
+                    }
+                    EffectProcessor::Limiter(_, limiter) => {
+                        limiter.process(&input, effect.enabled)?
+                    }
+                };
+                for (&c, data) in effect.output.iter().zip(output) {
+                    buffers[mix_id][c] = data;
+                }
+                effect.usage = if effect.enabled { 2 } else { 3 };
+            }
+            let mix = self.mixes[mix_id].as_ref().unwrap();
+            if let Some(dest) = mix.destination {
+                let (source, destination) = if mix_id < dest {
+                    let (left, right) = buffers.split_at_mut(dest);
+                    (&left[mix_id], &mut right[0])
+                } else {
+                    let (left, right) = buffers.split_at_mut(mix_id);
+                    (&right[0], &mut left[dest])
+                };
+                for (c, channel) in source.iter().enumerate() {
+                    for (d, target) in destination.iter_mut().enumerate() {
+                        let gain = mix.matrix[c * 24 + d] * mix.volume;
+                        if gain != 0. {
+                            for (to, from) in target.iter_mut().zip(channel) {
+                                *to += from * gain;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if buffers.iter().flatten().flatten().any(|v| !v.is_finite()) {
+            return Err(unsupported("effect graph nonfinite output"));
+        }
+        crate::host_audio_dsp::commit(memory, writes)?;
+        self.effects = processors;
+        Ok(())
+    }
+}
+fn float(data: &[u8], at: usize) -> f32 {
+    f32::from_bits(word(data, at))
+}
+fn short(data: &[u8], at: usize) -> usize {
+    u16::from_le_bytes(data[at..at + 2].try_into().unwrap()) as usize
+}
+impl Renderer {
+    fn prepare_graph(
+        &self,
+        effects: &[u8],
+        mix_bytes: &[u8],
+        sinks: &[u8],
+        pools: &[u8],
+        memory: &Memory,
+    ) -> RuntimeResult<EffectGraph> {
+        use crate::host_audio_dsp::{
+            limiter::{Limiter, LimiterParams},
+            reverb3d::{Reverb3d, ReverbParams},
+        };
+        if self.parameters.effects > 64 {
+            return Err(unsupported("effect graph allocation budget"));
+        }
+        if self.parameters.revision_number() < 10 {
+            return Err(unsupported("effect graph requires REV10+"));
+        }
+        let count = self.parameters.submixes as usize + 1;
+        let mut mixes = self
+            .graph
+            .as_ref()
+            .map_or_else(|| vec![None; count], |g| g.mixes.clone());
+        let dirty_only = mix_bytes.len() >= 32 && word(mix_bytes, 0) == 0xcafebabe;
+        let records = if dirty_only {
+            if (mix_bytes.len() - 32) % 0x930 != 0
+                || word(mix_bytes, 4) as usize != (mix_bytes.len() - 32) / 0x930
+            {
+                return Err(unsupported("dirty mix geometry"));
+            }
+            &mix_bytes[32..]
+        } else {
+            if mix_bytes.len() != count * 0x930 {
+                return Err(unsupported("full mix geometry"));
+            }
+            mix_bytes
+        };
+        let mut seen = vec![false; count];
+        for (slot, m) in records.chunks_exact(0x930).enumerate() {
+            let id = word(m, 16) as usize;
+            if id >= count || seen[id] || (!dirty_only && id != slot) || m[12] > 1 || m[13] > 1 {
+                return Err(unsupported("mix id/flags"));
+            }
+            seen[id] = true;
+            if m[12] == 0 {
+                mixes[id] = None;
+                continue;
+            }
+            let channels = word(m, 8) as usize;
+            if !(1..=24).contains(&channels)
+                || word(m, 4) != self.parameters.sample_rate
+                || !float(m, 0).is_finite()
+                || float(m, 0).abs() > 64.
+                || word(m, 0x928) != u32::MAX
+            {
+                return Err(unsupported("mix geometry, gain or splitter destination"));
+            }
+            let destination = match word(m, 0x924) {
+                0x7fffffff => None,
+                d if (d as usize) < count && d as usize != id => Some(d as usize),
+                _ => return Err(unsupported("mix destination")),
+            };
+            if id == 0 && destination.is_some() {
+                return Err(unsupported("final mix destination"));
+            }
+            let matrix: Vec<_> = (0..576).map(|i| float(m, 36 + i * 4)).collect();
+            if matrix.iter().any(|v| !v.is_finite() || v.abs() > 64.) {
+                return Err(unsupported("mix matrix coefficient"));
+            }
+            mixes[id] = Some(Mix {
+                channels,
+                destination,
+                volume: float(m, 0),
+                matrix,
+                effect_count: word(m, 20) as usize,
+            });
+        }
+        if mixes[0].is_none()
+            || mixes.iter().flatten().map(|m| m.channels).sum::<usize>()
+                > self.parameters.mix_buffers as usize
+        {
+            return Err(unsupported("final mix or mix-buffer budget"));
+        }
+        for m in mixes.iter().flatten() {
+            if let Some(d) = m.destination {
+                if mixes[d].is_none() {
+                    return Err(unsupported("inactive mix destination"));
+                }
+            }
+        }
+        let mut pending = vec![0usize; count];
+        for m in mixes.iter().flatten() {
+            if let Some(d) = m.destination {
+                pending[d] += 1;
+            }
+        }
+        let mut order = Vec::new();
+        let mut ready: Vec<_> = (0..count)
+            .filter(|&i| mixes[i].is_some() && pending[i] == 0)
+            .collect();
+        while let Some(i) = ready.pop() {
+            order.push(i);
+            if let Some(d) = mixes[i].as_ref().unwrap().destination {
+                pending[d] -= 1;
+                if pending[d] == 0 {
+                    ready.push(d);
+                }
+            }
+        }
+        if order.len() != mixes.iter().flatten().count() {
+            return Err(unsupported("cyclic mix routing"));
+        }
+        for sink in sinks.chunks_exact(0x140).filter(|s| s[1] != 0) {
+            let channels = word(sink, 0x120) as usize;
+            if sink[0] != 1
+                || !(1..=6).contains(&channels)
+                || sink[0x124..0x124 + channels]
+                    .iter()
+                    .any(|c| *c as usize >= mixes[0].as_ref().unwrap().channels)
+            {
+                return Err(unsupported("graph device sink geometry"));
+            }
+        }
+        let mut result = EffectGraph {
+            mixes,
+            effects: Vec::new(),
+            order,
+            pools: Vec::new(),
+            pins: Vec::new(),
+        };
+        let mut occupied = Vec::<(u64, u64)>::new();
+        let mut attach = |base: u64, size: u64| -> RuntimeResult<()> {
+            let end = base
+                .checked_add(size)
+                .filter(|e| *e > base)
+                .ok_or("effect backing overflow/empty")?;
+            if occupied.iter().any(|&(a, b)| base < b && a < end) {
+                return Err(unsupported("overlapping effect storage"));
+            }
+            occupied.push((base, end));
+            let pool = pools
+                .chunks_exact(32)
+                .find(|p| {
+                    matches!(word(p, 16), 4 | 5)
+                        && wide(p, 0) <= base
+                        && wide(p, 0).checked_add(wide(p, 8)).is_some_and(|e| end <= e)
+                })
+                .ok_or("effect storage outside attached pools")?;
+            let range = (wide(pool, 0), wide(pool, 8));
+            if !result.pools.contains(&range) {
+                result.pools.push(range);
+            }
+            Ok(())
+        };
+        let mut state_samples = 0usize;
+        for (slot, e) in effects.chunks_exact(0xc0).enumerate() {
+            if e[0] == 0 {
+                if e[2] != 0 {
+                    return Err(unsupported("enabled invalid effect"));
+                }
+                result.effects.push(None);
+                continue;
+            }
+            if ![2, 5, 7].contains(&e[0]) || e[1] > 1 || e[2] > 1 {
+                return Err(unsupported("effect graph kind or flags"));
+            }
+            let mix = word(e, 4) as usize;
+            let Some(m) = result.mixes.get(mix).and_then(Option::as_ref) else {
+                return Err(unsupported("effect inactive mix"));
+            };
+            let s = &e[32..];
+            let enabled = e[2] != 0;
+            let channels = if e[0] == 2 {
+                word(s, 48) as usize
+            } else {
+                short(s, 14)
+            };
+            if channels == 0 || channels > 6 {
+                return Err(unsupported("effect channel count"));
+            }
+            let (input, output): (Vec<_>, Vec<_>) = if e[0] == 2 {
+                (
+                    s[..channels].iter().map(|v| *v as usize).collect(),
+                    s[24..24 + channels].iter().map(|v| *v as usize).collect(),
+                )
+            } else {
+                (
+                    s[..channels].iter().map(|v| *v as usize).collect(),
+                    s[6..6 + channels].iter().map(|v| *v as usize).collect(),
+                )
+            };
+            if input.iter().chain(&output).any(|&c| c >= m.channels)
+                || output
+                    .iter()
+                    .enumerate()
+                    .any(|(i, c)| output[..i].contains(c))
+                || (input != output && input.iter().any(|c| output.contains(c)))
+            {
+                return Err(unsupported("effect channel mapping or partial alias"));
+            }
+            let old = self
+                .graph
+                .as_ref()
+                .and_then(|g| g.effects.get(slot))
+                .and_then(Option::as_ref);
+            let reuse = e[1] == 0;
+            let usage = if reuse { old.map_or(1, |e| e.usage) } else { 1 };
+            let processor = match e[0] {
+                2 => {
+                    if word(s, 52) != self.parameters.sample_rate
+                        || word(s, 60) < channels as u32
+                        || word(s, 104) != self.parameters.sample_count
+                    {
+                        return Err(unsupported("auxiliary graph rate/frame"));
+                    }
+                    let exchange = Auxiliary {
+                        send_info: wide(s, 64),
+                        return_info: wide(s, 80),
+                        capacity: word(s, 56),
+                        enabled,
+                    };
+                    if exchange.send_info.checked_add(128) != Some(wide(s, 72))
+                        || exchange.return_info.checked_add(128) != Some(wide(s, 88))
+                    {
+                        return Err(unsupported("auxiliary graph storage"));
+                    }
+                    for base in [exchange.send_info, exchange.return_info] {
+                        attach(base, 128 + u64::from(exchange.capacity) * 4)?;
+                    }
+                    exchange.preflight(memory, channels, self.parameters.sample_count as usize)?;
+                    if reuse && let Some(old) = old {
+                        match &old.processor {
+                            EffectProcessor::Auxiliary(p)
+                                if p.send_info == exchange.send_info
+                                    && p.return_info == exchange.return_info
+                                    && p.capacity == exchange.capacity
+                                    && old.input.len() == channels => {}
+                            _ => {
+                                return Err(unsupported(
+                                    "auxiliary graph rebind requires new effect",
+                                ));
+                            }
+                        }
+                    }
+                    EffectProcessor::Auxiliary(exchange)
+                }
+                5 => {
+                    if word(s, 20) != self.parameters.sample_rate
+                        || short(s, 12) < channels
+                        || s[72] > 2
+                    {
+                        return Err(unsupported("reverb graph rate/state"));
+                    }
+                    let p = ReverbParams {
+                        channels,
+                        rate: word(s, 20),
+                        room_hf: float(s, 24),
+                        hf_reference: float(s, 28),
+                        decay: float(s, 32),
+                        hf_decay: float(s, 36),
+                        room_gain: float(s, 40),
+                        reflections_gain: float(s, 44),
+                        reverb_gain: float(s, 48),
+                        diffusion: float(s, 52),
+                        reflection_delay: float(s, 56),
+                        reverb_delay: float(s, 60),
+                        density: float(s, 64),
+                        dry_gain: float(s, 68),
+                    };
+                    p.validate()?;
+                    state_samples += p.rate as usize * 2; // conservative bound on all delay lines
+                    if state_samples > 8 * 1024 * 1024 {
+                        return Err(unsupported("effect delay allocation budget"));
+                    }
+                    attach(wide(e, 8), wide(e, 16))?;
+                    memory.validate_write(
+                        wide(e, 8),
+                        usize::try_from(wide(e, 16)).map_err(|_| "reverb work size")?,
+                    )?;
+                    let state = if reuse && s[72] != 0 {
+                        if let Some(Effect {
+                            processor: EffectProcessor::Reverb(old_p, old_state),
+                            ..
+                        }) = old
+                        {
+                            let mut state = (**old_state).clone();
+                            if *old_p != p || s[72] == 1 {
+                                state.set_params(p)?;
+                            }
+                            state
+                        } else {
+                            Reverb3d::new(p)?
+                        }
+                    } else {
+                        Reverb3d::new(p)?
+                    };
+                    EffectProcessor::Reverb(p, Box::new(state))
+                }
+                7 => {
+                    if word(s, 16) != self.parameters.sample_rate
+                        || short(s, 12) < channels
+                        || s[64] > 2
+                        || s[65] > 1
+                        || s[66] > 1
+                    {
+                        return Err(unsupported("limiter graph rate/state"));
+                    }
+                    let p = LimiterParams {
+                        channels,
+                        delay_min: word(s, 56) as usize,
+                        delay_max: word(s, 60) as usize,
+                        attack: float(s, 36),
+                        release: float(s, 40),
+                        threshold: float(s, 44),
+                        input_gain: float(s, 48),
+                        output_gain: float(s, 52),
+                        statistics_enabled: s[65] != 0,
+                    };
+                    p.validate()?;
+                    state_samples += p.channels * p.delay_max;
+                    if state_samples > 8 * 1024 * 1024 {
+                        return Err(unsupported("effect delay allocation budget"));
+                    }
+                    attach(wide(e, 8), wide(e, 16))?;
+                    memory.validate_write(
+                        wide(e, 8),
+                        usize::try_from(wide(e, 16)).map_err(|_| "limiter work size")?,
+                    )?;
+                    let mut state = if reuse && s[64] != 0 {
+                        if let Some(Effect {
+                            processor: EffectProcessor::Limiter(old_p, old_state),
+                            ..
+                        }) = old
+                        {
+                            if old_p.channels != p.channels || old_p.delay_max != p.delay_max {
+                                return Err(unsupported("limiter resize requires new effect"));
+                            }
+                            (**old_state).clone()
+                        } else {
+                            Limiter::new(p)?
+                        }
+                    } else {
+                        Limiter::new(p)?
+                    };
+                    state.set_params(p, s[66] != 0)?;
+                    EffectProcessor::Limiter(p, Box::new(state))
+                }
+                _ => unreachable!(),
+            };
+            result.effects.push(Some(Effect {
+                mix,
+                order: word(e, 24),
+                input,
+                output,
+                enabled,
+                usage,
+                processor,
+            }));
+        }
+        result.pools.sort_unstable();
+        for (id, m) in result
+            .mixes
+            .iter()
+            .enumerate()
+            .filter_map(|(id, m)| m.as_ref().map(|m| (id, m)))
+        {
+            let effects: Vec<_> = result
+                .effects
+                .iter()
+                .flatten()
+                .filter(|e| e.mix == id)
+                .collect();
+            if effects.len() != m.effect_count
+                || effects
+                    .iter()
+                    .enumerate()
+                    .any(|(i, e)| effects[..i].iter().any(|p| p.order == e.order))
+            {
+                return Err(unsupported("mix effect count/order"));
+            }
+        }
+        result.preflight(memory, self.parameters.sample_count as usize)?;
+        Ok(result)
+    }
 }

@@ -4,8 +4,8 @@ Horizon-mode generated executables install a headless `audren:u` implementation.
 It supports renderer discovery, work-buffer sizing, transfer-memory-backed opening,
 configuration queries, start/stop, copied kernel event handles, device-name and
 volume queries, and bounded silent renderer updates. It does not produce audible
-output. Queued voice playback, sample decoding, effects beyond the auxiliary subset
-below and circular sinks fail explicitly; this is not a complete audio renderer.
+output. Queued voice playback, sample decoding, effects outside the bounded auxiliary/reverb/limiter
+subset below and circular sinks fail explicitly; this is not a complete audio renderer.
 
 ## Wire protocol and ownership
 
@@ -57,16 +57,17 @@ these are implementation budgets, not hardware maxima. It validates SNDH/SNDI/SN
 signatures, variable destination lists, cyclic lists, mix IDs, finite volumes and
 the 112-byte destination format. Twelve unused bytes follow each ID list; unused
 fields and final alignment padding need not be zero. Newer filtered destination
-formats remain unsupported. No audio samples are routed: an update with an active
-voice with queued samples or an unsupported DSP effect still fails before publication.
+formats remain unsupported. Splitter descriptors are not consumed by the bounded effect graph, whose mix edges
+use direct mix destinations. A mix with a splitter destination, an active voice with
+queued samples or an unsupported DSP effect still fails before publication.
 
 ## Auxiliary shared-buffer exchange
 
 REV10–REV15 updates support one auxiliary effect (type 2) in a single final mix,
 without splitters or sample-producing voices. The initial subset permits one to
 six independent identity-mapped channels and headless device sinks. Return-buffer
-PCM is read and converted; final device output is discarded. Multiple mixes,
-multiple effects, reverb, limiter processing and audible output remain unsupported.
+PCM is read and converted; final device output is discarded. The graph extension below also routes return PCM through multiple mixes. Audible
+output remains unsupported.
 
 The effect validates its complete send/return ring allocations against attached
 memory pools. CPU and DSP each own a 64-byte header; sample storage follows at
@@ -385,3 +386,45 @@ through the real applet proxy and checks the same round trip.
 
 Wire command identities and float layout follow
 [libnx applet.c at feebd026](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/services/applet.c).
+
+## Stateful effect graph
+
+REV10–REV15 additionally support bounded direct-destination submix graphs with
+auxiliary (type 2), Reverb3D (type 5) and limiter (type 7) effects. Full mix arrays
+and `0xcafebabe` dirty-only mix updates preserve unchanged mix configuration.
+Each in-use mix validates its sample rate, channel count, volume, 24×24 routing
+matrix, effect count and destination. Topological execution rejects cycles and
+inactive destinations. Effects execute in unique per-mix processing order;
+identity or disjoint channel mappings are supported, partial in-place aliases
+are rejected. Final device output remains headless; intermediate return samples
+and delay tails are processed before it is discarded.
+
+Reverb supports mono, stereo and quad at 32/48 kHz. Owned pre-delay, FDN and
+all-pass histories persist across frames. Six-channel reverb remains unsupported.
+Limiter supports mono/stereo/quad/six-channel lookahead, attack/release envelope,
+threshold, input/output gain and peak/minimum-gain result statistics. Disabled
+limiting bypasses without advancing delay history. Statistics-reset is consumed
+by one enabled command, rather than repeated on every future tick. New/reset
+parameters create new DSP state; compatible coefficient updates preserve delay
+buffers. The shared wire work-buffer span is validated and lifetime-protected;
+internal DSP state is owned by the host, not serialized into that workspace.
+
+A graph frame stages auxiliary writes and a working copy of DSP histories.
+Only after every effect succeeds and all destinations validate does it commit
+writes and histories. Failed downstream processing preserves earlier rings,
+filter state and the virtual clock. Catch-up advances the clock after each
+successful frame, preventing replay of an already committed prefix. This safety
+path allocates/copies bounded host delay state; it is not allocation-free.
+Budgets are 64 effect slots and eight million conservatively estimated delay
+samples, plus the existing mix/ring/IPC bounds. Unsupported valid configurations
+fail explicitly; these budgets are not hardware maxima.
+
+The reverb adaptation retains MIT notices from
+[MacNativeGames audio_reverb.c at 66b89f3](https://github.com/ly05010419/MacNativeGames/blob/66b89f3a7338e165d145ff8f33e2690ff758fe7d/games/totk/runtime/audio_reverb.c)
+and [Ryujinx Reverb3dState at 4930dced](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Dsp/State/Reverb3dState.cs).
+Limiter semantics follow
+[LimiterCommandVersion2](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Dsp/Command/LimiterCommandVersion2.cs)
+and its parameter/state/statistics types at the same revision. Tests use nonzero
+synthetic PCM, independently specified lookahead/threshold values, impulse
+response, chunk continuity, disabled behavior, routing, statistics and failure
+injection. No retail audio samples are included.
