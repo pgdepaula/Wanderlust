@@ -1932,18 +1932,29 @@ The existing GPU driver owns each reservation, mapping ID and mapping epoch.
 Automatic VA is acquired only after size/handle validation and is released if
 mapping fails. Unmapping an automatic mapping also releases its VA; fixed
 reservations retain their distinct `FreeSpace` lifecycle. Nonzero automatic
-offset/alignment unions and kind-changing remaps remain
-unsupported. Canonical backing pins survive unmapping until allocation/session
+offset/alignment unions remain unsupported. Canonical backing pins survive unmapping until allocation/session
 teardown, and pending-output guards still prohibit mapping mutation.
 Pitch and generic-uncompressed aliases retain identical canonical storage.
 Mapping does not swizzle bytes: supported TIC/B197 surface descriptors select
 the existing layout converters when resources are accessed. Compressed PTE
-kinds requiring compression tags and kind-changing subrange remaps remain unsupported.
+kinds requiring compression tags remain unsupported.
 With an explicit 64 KiB page hint, `MapBufferEx` also applies the same bounded
 uncompressed-kind fallback used by `Remap`, including C32_2CRA (`0xdb`) to generic
 storage. NVIDIA disables compression below its 128 KiB compression granularity.
 This does not decode compressed bytes or enable additional attachment formats.
 Unspecified/128 KiB page hints and unknown kinds cannot use this fallback.
+
+Switch `MapBufferEx` bit eight (`0x100`) accepts checked kind changes that retain
+identical generic uncompressed storage. Its base must identify a live mapping;
+the byte offset and length must select resident 4 KiB-aligned bytes within that
+mapping, excluding VA padding. Handle/page fields must be zero in this subset.
+Generic/pitch/default kinds are accepted; known color-compression aliases also
+require a mapping established with the 64 KiB fallback above (or 64 KiB Remap).
+The mapping identity, epoch and canonical bytes remain unchanged because no
+physical pages or compression representation are replaced. This operation does
+not submit GPU work or publish pending output. Other kind-changing operations
+remain unsupported. The wire interpretation follows the
+[pinned MIT-licensed device implementation](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostAsGpu/NvHostAsGpuDeviceFile.cs).
 
 Fixed `MapBufferEx` mappings may occupy an unmapped subinterval of an existing
 reservation, including multiple disjoint buffers within one large reservation.

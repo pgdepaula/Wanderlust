@@ -121,6 +121,24 @@ fn nvmap_free_retains_imports_and_retries_without_losing_backing() {
     );
     assert_eq!(unchanged, [0xcc; 40]);
     call(&mut d, &mut m, space, 0xc0284106, &map, &mut [0; 40]).unwrap();
+    let mut retag = words(&[0x100, 0xdb, 0, 0]);
+    retag.extend(0u64.to_le_bytes());
+    retag.extend(4096u64.to_le_bytes());
+    retag.extend(0x400000000u64.to_le_bytes());
+    let mut retagged = [0; 40];
+    call(&mut d, &mut m, space, 0xc0284106, &retag, &mut retagged).unwrap();
+    assert_eq!(&retagged, retag.as_slice());
+    // The reserved tail is not backing: changing its kind must not make it
+    // resident. Failed changes preserve the live mapping and wire output.
+    let mut padded = retag.clone();
+    padded[24..32].copy_from_slice(&65536u64.to_le_bytes());
+    unchanged.fill(0xcc);
+    error(
+        call(&mut d, &mut m, space, 0xc0284106, &padded, &mut unchanged),
+        NvError::InvalidAddress,
+    );
+    assert_eq!(unchanged, [0xcc; 40]);
+    call(&mut d, &mut m, space, 0xc0284106, &retag, &mut retagged).unwrap();
     result.fill(0xcc);
     error(
         call(&mut d, &mut m, fd, 0xc0180105, &request, &mut result),
@@ -138,6 +156,12 @@ fn nvmap_free_retains_imports_and_retries_without_losing_backing() {
     )
     .unwrap();
     let mut free = 0x400000000u64.to_le_bytes().to_vec();
+    unchanged.fill(0xcc);
+    error(
+        call(&mut d, &mut m, space, 0xc0284106, &retag, &mut unchanged),
+        NvError::InvalidAddress,
+    );
+    assert_eq!(unchanged, [0xcc; 40]);
     free.extend(words(&[1, 65536]));
     call(&mut d, &mut m, space, 0xc0104103, &free, &mut [0; 16]).unwrap();
     d.close(space, &mut m).unwrap();

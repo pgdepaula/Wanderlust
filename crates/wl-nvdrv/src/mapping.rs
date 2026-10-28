@@ -19,6 +19,9 @@ pub(super) struct Extent {
     pub span: u64,
 }
 impl Request {
+    pub fn small_page_kinds(&self) -> bool {
+        self.hint == 65536
+    }
     pub fn decode(input: &[u8]) -> Result<Self> {
         if input.len() != 40 {
             return Err(NvError::InvalidSize.into());
@@ -88,9 +91,79 @@ impl Request {
     }
 }
 
+/// Switch MapBufferEx bit 8 changes the kind of an existing mapping, without
+/// replacing its physical backing. Only aliases of already-uncompressed
+/// generic storage are supported here; no compression tags are created.
+pub(super) fn uncompressed_retag(input: &[u8], small_pages: bool) -> Result<(u64, usize)> {
+    if input.len() != 40 {
+        return Err(NvError::InvalidSize.into());
+    }
+    let kind = word(input, 4);
+    let generic = matches!(kind, 0 | 0xfe | u32::MAX)
+        || (small_pages
+            && u16::try_from(kind)
+                .ok()
+                .and_then(super::remap::uncompressed_kind)
+                == Some(0xfe));
+    if word(input, 0) != 0x100 || word(input, 8) != 0 || word(input, 12) != 0 || !generic {
+        return Err(NvError::NotSupported.into());
+    }
+    let start = long(input, 32)
+        .checked_add(long(input, 16))
+        .ok_or(NvError::InvalidSize)?;
+    let size = long(input, 24);
+    if size == 0
+        || start % 4096 != 0
+        || size % 4096 != 0
+        || start.checked_add(size).is_none_or(|end| end > 1 << 40)
+    {
+        return Err(NvError::InvalidSize.into());
+    }
+    Ok((
+        start,
+        usize::try_from(size).map_err(|_| NvError::InvalidSize)?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn retag_checks_wire_fields_page_policy_and_address_arithmetic() {
+        let mut input = [0; 40];
+        input[..4].copy_from_slice(&0x100u32.to_le_bytes());
+        input[4] = 0xdb;
+        input[16..24].copy_from_slice(&4096u64.to_le_bytes());
+        input[24..32].copy_from_slice(&8192u64.to_le_bytes());
+        input[32..40].copy_from_slice(&0x400000000u64.to_le_bytes());
+        assert_eq!(
+            uncompressed_retag(&input, true).unwrap(),
+            (0x400001000, 8192)
+        );
+        assert!(uncompressed_retag(&input, false).is_err());
+        for (offset, value) in [(0, 0x104u32), (4, 0xd9), (4, 1), (8, 1), (12, 65536)] {
+            let mut invalid = input;
+            invalid[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+            assert!(uncompressed_retag(&invalid, true).is_err());
+        }
+        for (offset, value) in [
+            (16, u64::MAX),
+            (16, 1),
+            (24, 0),
+            (24, u64::MAX),
+            (32, 1 << 40),
+        ] {
+            let mut invalid = input;
+            invalid[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+            assert!(uncompressed_retag(&invalid, true).is_err());
+        }
+        assert!(uncompressed_retag(&input[..39], true).is_err());
+        input[4] = 0xfe;
+        assert_eq!(
+            uncompressed_retag(&input, false).unwrap(),
+            (0x400001000, 8192)
+        );
+    }
     #[test]
     fn compressed_kind_requires_explicit_small_page_fallback() {
         let mut input = [0; 40];

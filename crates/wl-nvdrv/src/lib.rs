@@ -96,7 +96,9 @@ struct Reservation {
 struct BufferMapping {
     address: u64,
     size: u64,
+    resident: u64,
     id: MappingId,
+    small_page_kinds: bool,
 }
 #[derive(Debug)]
 struct Space {
@@ -521,7 +523,9 @@ impl<P: Copy> Driver<P> {
                         .map(|m| BufferMapping {
                             address: m.address.0,
                             size: m.size,
+                            resident: m.size,
                             id: m.id,
+                            small_page_kinds: true,
                         })
                         .collect();
                 }
@@ -589,6 +593,32 @@ impl<P: Copy> Driver<P> {
                 Ok(())
             }
             0xc0284106 => {
+                if word(r.input, 0) == 0x100 {
+                    let base = long(r.input, 32);
+                    let mapped = space
+                        .reservations
+                        .iter()
+                        .flat_map(|v| &v.mappings)
+                        .find(|m| m.address == base)
+                        .ok_or(NvError::InvalidAddress)?;
+                    let (address, size) =
+                        mapping::uncompressed_retag(r.input, mapped.small_page_kinds)?;
+                    let end = address
+                        .checked_add(size as u64)
+                        .ok_or(NvError::InvalidSize)?;
+                    let resident_end = mapped
+                        .address
+                        .checked_add(mapped.resident)
+                        .ok_or(NvError::InvalidAddress)?;
+                    if end > resident_end {
+                        return Err(NvError::InvalidAddress.into());
+                    }
+                    // These supported kinds select identical uncompressed
+                    // canonical bytes. Preserve mapping IDs/epochs and any
+                    // pending output; no backing is replaced or published.
+                    r.output.copy_from_slice(r.input);
+                    return Ok(());
+                }
                 let request = mapping::Request::decode(r.input)?;
                 let handle = request.handle;
                 let allocation = self
@@ -629,7 +659,9 @@ impl<P: Copy> Driver<P> {
                         mappings: vec![BufferMapping {
                             address,
                             size,
+                            resident: size,
                             id: mapping,
+                            small_page_kinds: request.small_page_kinds(),
                         }],
                         automatic: true,
                         sparse: false,
@@ -664,7 +696,9 @@ impl<P: Copy> Driver<P> {
                 reservation.mappings.push(BufferMapping {
                     address,
                     size: span,
+                    resident: size,
                     id: mapping,
+                    small_page_kinds: request.small_page_kinds(),
                 });
                 r.output.copy_from_slice(r.input);
                 Ok(())
