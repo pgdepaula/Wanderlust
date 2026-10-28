@@ -29,6 +29,21 @@ Silent updates validate section totals, memory-pool ranges, voice/sink/mix recor
 and output ranges before publication. AutoSelect B/C descriptors retain their slot
 indices, including empty slots. Status and performance outputs must not overlap.
 Pool attach/detach statuses are returned; voice results contain no consumed samples.
+Pools are independently mapped guest backing ranges, not embedded IPC payloads.
+The 16 MiB update-message budget does not limit their size. Attach validation checks
+nonzero page-aligned address/length, overflow and readable coverage across adjacent
+regions without copying pool contents; mapping gaps and unreadable pages fail.
+
+Stopped and paused voices do not advance sample counters. A started voice is also
+accepted when its queued-buffer count is zero and all four descriptors are pristine,
+empty and already sent. This initializes a voice without decoding samples or claiming
+ADPCM playback. Any queued sample data or inconsistent descriptor still fails.
+REV15 diagnostics account for the expanded floating-point biquad records. These
+rules follow libnx's voice-state wire enum and the skip/initialization behavior in
+[Ryujinx VoiceState at 4930dced](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Server/Voice/VoiceState.cs).
+Tests exercise oversized mapped pools, mapping gaps, permissions, address overflow,
+paused counters and individual empty-descriptor mutations on Linux and native Windows.
+
 Inactive effect slots return wire `EffectState::Disabled` (4); this is distinct
 from the server's internal usage-state enum. Enabled DSP effects are rejected.
 Elapsed-render information is emitted from REV5, and larger effect results from
@@ -36,14 +51,14 @@ REV9. Parameter revisions REV1–REV15 are recognized subject to the supported
 geometry and silent-update restrictions; this is not full compatibility with each
 revision's features.
 
-REV5–REV11 splitter descriptors are accepted for silent/stopped-voice updates.
+REV5–REV11 splitter descriptors are accepted for the supported silent voice updates.
 The bounded implementation permits 1024 splitter states and 8192 destinations;
 these are implementation budgets, not hardware maxima. It validates SNDH/SNDI/SNDD
 signatures, variable destination lists, cyclic lists, mix IDs, finite volumes and
 the 112-byte destination format. Twelve unused bytes follow each ID list; unused
 fields and final alignment padding need not be zero. Newer filtered destination
 formats remain unsupported. No audio samples are routed: an update with an active
-voice or enabled DSP effect still fails before publication.
+voice with queued samples or enabled DSP effect still fails before publication.
 
 ## Event timing
 
