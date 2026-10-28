@@ -52,6 +52,15 @@ int main(void) {
     check(serviceDispatchIn(&applet,0,reserved,.in_send_pid=true,
         .in_num_handles=1,.in_handles={CUR_PROCESS_HANDLE},
         .out_num_objects=1,.out_objects=&proxy));
+    Service audio={0};float main_volume=0,library_volume=0;
+    check(serviceDispatch(&proxy,3,.out_num_objects=1,.out_objects=&audio));
+    check(serviceDispatchOut(&audio,1,main_volume));check(serviceDispatchOut(&audio,2,library_volume));
+    if(main_volume!=1.0f||library_volume!=1.0f)check(1);
+    struct { float main_volume,library_volume; } balance={0.25f,0.75f};
+    check(serviceDispatchIn(&audio,0,balance));
+    check(serviceDispatchOut(&audio,1,main_volume));check(serviceDispatchOut(&audio,2,library_volume));
+    if(main_volume!=0.25f||library_volume!=0.75f)check(1);
+    serviceClose(&audio);
     check(serviceDispatch(&proxy,20,.out_num_objects=1,.out_objects=&functions));
     struct { u16 index;u8 pad[6];s64 size,journal; } create={7,{0},1048576,4096};
     struct { u32 target,pad;u64 required; } result={0};

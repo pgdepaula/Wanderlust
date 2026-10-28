@@ -364,6 +364,8 @@ pub struct State {
     next_id: usize,
     pub device_event: Option<usize>,
     pub device_volume: f32,
+    pub expected_main_volume: f32,
+    pub expected_library_volume: f32,
 }
 impl Default for State {
     fn default() -> Self {
@@ -372,6 +374,8 @@ impl Default for State {
             next_id: 0,
             device_event: None,
             device_volume: 1.0,
+            expected_main_volume: 1.0,
+            expected_library_volume: 1.0,
         }
     }
 }
@@ -487,6 +491,37 @@ impl AudioHost for Backend {
         };
         let no_arguments = Shape::default();
         let reply = match (target, command) {
+            // Applet audio balance is process-owned control state, distinct
+            // from an output device's gain and from renderer voice volumes.
+            (HostObject::AudioRenderer { index }, 0..=2)
+                if index == crate::host_fs::APPLET_AUDIO_CONTROLLER =>
+            {
+                check(Shape {
+                    in_data: if command == 0 { 8 } else { 0 },
+                    ..no_arguments
+                })?;
+                if command == 0 {
+                    let main = f32::from_bits(word(args, 0));
+                    let library = f32::from_bits(word(args, 4));
+                    if !main.is_finite()
+                        || !library.is_finite()
+                        || !(0.0..=1.0).contains(&main)
+                        || !(0.0..=1.0).contains(&library)
+                    {
+                        return unsupported("applet expected volume outside finite 0..1 subset");
+                    }
+                    self.state.expected_main_volume = main;
+                    self.state.expected_library_volume = library;
+                    Done::ok()
+                } else {
+                    let volume = if command == 1 {
+                        self.state.expected_main_volume
+                    } else {
+                        self.state.expected_library_volume
+                    };
+                    Done::data(&volume.to_le_bytes())
+                }
+            }
             (HostObject::AudioRendererManager, 1) => {
                 check(Shape {
                     in_data: 0x34,

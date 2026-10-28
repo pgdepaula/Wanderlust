@@ -307,3 +307,22 @@ cover the literal `(space=3,type=4)` request without the optional save policy,
 read-only reuse, absent-volume results, invalid space/type pairing, process
 isolation and separation from account/device/cache storage. The recompiled
 AArch64 client writes and reads independent bytes through temporary mount aliases.
+
+### Applet expected-volume controls
+
+Hosted AM `IAudioController` implements commands 0, 1 and 2: setting the main
+and library-applet expected volumes together, and reading each independently.
+Both start at 1.0 per process. The bounded supported input range is finite 0..1;
+invalid pairs preserve both previous values. These controls are distinct from
+device gain and renderer voices; they do not enable audible mixing or fades.
+Commands 3/4 and unspecified transition semantics remain unsupported.
+
+Session and domain requests use the existing checked HIPC/CMIF dispatch, with a
+scoped native callback identity restored on success and failure. The commands
+create no objects and do not exchange FS/audio domain ID allocators. Tests cover
+independent values, rejected NaN/infinity/range inputs, process isolation and
+domain identity restoration. The recompiled libnx client acquires the controller
+through the real applet proxy and checks the same round trip.
+
+Wire command identities and float layout follow
+[libnx applet.c at feebd026](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/services/applet.c).

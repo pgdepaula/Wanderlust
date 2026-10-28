@@ -91,6 +91,95 @@ fn call(p: &mut Process, c: &mut Cpu, handle: u32) {
     assert_eq!(c.x[0], 0);
     assert_eq!(reply(p, 0x18), 0);
 }
+fn applet_audio_session(p: &mut Process) -> (u32, usize) {
+    use wl_runtime::{ipc, services::HostObject};
+    let k = p.kernel.as_mut().unwrap();
+    let index = k.sessions.len();
+    k.sessions.push(ipc::Session {
+        endpoint: ipc::Endpoint::Host(HostObject::AudioController),
+        domain: None,
+        closed: false,
+        references: 1,
+    });
+    (k.handles.add(Object::Session(index)).unwrap(), index)
+}
+#[test]
+fn applet_expected_volumes_round_trip_and_invalid_pair_is_atomic() {
+    use wl_runtime::{ipc::Endpoint, services::HostObject};
+    let (mut p, mut c) = process();
+    let (handle, session) = applet_audio_session(&mut p);
+    for command in [1, 2] {
+        wire(&mut p, command, false, &[], &[]);
+        call(&mut p, &mut c, handle);
+        assert_eq!(reply(&p, 0x20), 1.0f32.to_bits());
+    }
+    let pair = [0.25f32.to_le_bytes(), 0.75f32.to_le_bytes()].concat();
+    wire(&mut p, 0, false, &[], &pair);
+    call(&mut p, &mut c, handle);
+    for value in [f32::NAN, f32::INFINITY, -1.0, 2.0] {
+        let invalid = [0.5f32.to_le_bytes(), value.to_le_bytes()].concat();
+        wire(&mut p, 0, false, &[], &invalid);
+        c.x[0] = u64::from(handle);
+        assert!(audio::service_hook(&mut c, &mut p, 0x21).is_err());
+        assert_eq!(
+            p.kernel.as_ref().unwrap().sessions[session].endpoint,
+            Endpoint::Host(HostObject::AudioController)
+        );
+        for (command, expected) in [(1, 0.25f32), (2, 0.75)] {
+            wire(&mut p, command, false, &[], &[]);
+            call(&mut p, &mut c, handle);
+            assert_eq!(reply(&p, 0x20), expected.to_bits());
+        }
+    }
+    let (mut other, mut cpu) = process();
+    let (other_handle, _) = applet_audio_session(&mut other);
+    wire(&mut other, 1, false, &[], &[]);
+    call(&mut other, &mut cpu, other_handle);
+    assert_eq!(reply(&other, 0x20), 1.0f32.to_bits());
+}
+#[test]
+fn applet_audio_domain_dispatch_restores_the_am_object() {
+    use wl_runtime::services::HostObject;
+    let (mut p, mut c) = process();
+    let (handle, session) = applet_audio_session(&mut p);
+    wire(&mut p, 0, false, &[], &[]);
+    let address = tls(&p);
+    p.store(address, 4, 5).unwrap(); // ConvertCurrentObjectToDomain.
+    call(&mut p, &mut c, handle);
+    let root = reply(&p, 0x20);
+    for (command, args, expected) in [
+        (
+            0,
+            [0.125f32.to_le_bytes(), 0.875f32.to_le_bytes()].concat(),
+            None,
+        ),
+        (1, vec![], Some(0.125f32)),
+        (2, vec![], Some(0.875f32)),
+    ] {
+        wire(&mut p, command, false, &[], &args);
+        let mut b = [0; 256];
+        p.memory.read_into(address, &mut b).unwrap();
+        b.copy_within(16..240, 32);
+        b[16..32].fill(0);
+        b[16] = 1;
+        b[18..20].copy_from_slice(&((16 + args.len()) as u16).to_le_bytes());
+        b[20..24].copy_from_slice(&root.to_le_bytes());
+        let words = u32::from_le_bytes(b[4..8].try_into().unwrap()) + 4;
+        b[4..8].copy_from_slice(&words.to_le_bytes());
+        p.write_bytes(address, &b).unwrap();
+        svc(&mut p, &mut c, 0x21, &[u64::from(handle)]);
+        assert_eq!(reply(&p, 0x28), 0);
+        if let Some(volume) = expected {
+            assert_eq!(reply(&p, 0x30), volume.to_bits());
+        }
+        let k = p.kernel.as_ref().unwrap();
+        let domain = k.sessions[session].domain.unwrap();
+        assert_eq!(
+            k.host.domains[domain].objects,
+            [(root, HostObject::AudioController)]
+        );
+    }
+}
 fn manager(p: &mut Process, c: &mut Cpu) -> u32 {
     named_manager(p, c, b"audren:u")
 }
