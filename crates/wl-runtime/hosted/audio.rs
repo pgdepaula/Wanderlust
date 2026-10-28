@@ -295,19 +295,36 @@ impl Renderer {
                 }
             }
         }
+        let wave_base = if p.revision_number() >= 15 {
+            0x78
+        } else {
+            0x60
+        };
         for (slot, voice) in parts[3].chunks_exact(stride).enumerate() {
+            // Ryujinx Audio 4930dced VoiceState.ShouldSkip: zero queued
+            // wave buffers produce no sample-processing commands. Require the
+            // pristine already-sent descriptors; actual queued audio still fails.
+            let empty_started = voice[10] == 0
+                && word(voice, wave_base - 0x24) == 0
+                && (0..4).all(|i| {
+                    let at = wave_base + i * 0x38;
+                    wide(voice, at) == 0
+                        && wide(voice, at + 8) == 0
+                        && word(voice, at + 16) == 0
+                        && word(voice, at + 20) == 0
+                        && voice[at + 24] == 0
+                        && voice[at + 25] == 0
+                        && voice[at + 26] == 1
+                        && wide(voice, at + 32) == 0
+                        && wide(voice, at + 40) == 0
+                });
             // libnx feebd026: Started=0, Stopped=1, Paused=2. Paused
             // voices cannot advance DSP samples, like this renderer's stopped
             // subset. Actual playback remains unsupported, with useful metadata.
             if word(voice, 0) >= p.voices
                 || voice[9] > 1
-                || (voice[9] != 0 && !matches!(voice[10], 1 | 2))
+                || (voice[9] != 0 && !matches!(voice[10], 1 | 2) && !empty_started)
             {
-                let wave_base = if p.revision_number() >= 15 {
-                    0x78
-                } else {
-                    0x60
-                };
                 let buffers: Vec<_> = (0..4)
                     .map(|i| {
                         let at = wave_base + i * 0x38;
@@ -346,7 +363,29 @@ impl Renderer {
             }
         }
         if parts[5].chunks_exact(0xc0).any(|effect| effect[2] != 0) {
-            return Err(unsupported("active DSP effect"));
+            let effects: Vec<_> = parts[5]
+                .chunks_exact(0xc0)
+                .enumerate()
+                .filter(|(_, e)| e[2] != 0)
+                .take(16)
+                .map(|(slot, e)| {
+                    (
+                        slot,
+                        e[0],
+                        e[1],
+                        e[2],
+                        word(e, 4),
+                        wide(e, 8),
+                        wide(e, 16),
+                        word(e, 24),
+                        &e[32..64],
+                    )
+                })
+                .collect();
+            return Err(format!(
+                "{}: first_enabled={effects:?}",
+                unsupported("active DSP effect")
+            ));
         }
         let mixes = parts[6];
         if mixes.len() != (p.submixes as usize + 1) * 0x930

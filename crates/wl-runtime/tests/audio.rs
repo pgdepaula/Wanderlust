@@ -570,6 +570,32 @@ fn paused_voices_do_not_advance_samples_and_started_voices_report_metadata() {
 }
 
 #[test]
+fn started_voice_with_no_pending_wave_buffers_processes_no_samples() {
+    let r = audio::Renderer::new(audio::Parameters::parse(&parameters(8)).unwrap(), 0);
+    let mut input = silent_input();
+    input[208 + 9] = 1;
+    input[208 + 11] = 6; // ADPCM format; no compressed bytes are queued or decoded.
+    input[208 + 12..208 + 16].copy_from_slice(&48000u32.to_le_bytes());
+    input[208 + 24..208 + 28].copy_from_slice(&1u32.to_le_bytes());
+    for i in 0..4 {
+        input[208 + 0x60 + i * 0x38 + 26] = 1;
+    }
+    let output = r.update(&input, &Memory::default()).unwrap();
+    assert!(output[128..144].iter().all(|v| *v == 0));
+    let pristine = input.clone();
+    // Every individual descriptor must remain pristine, independently of count.
+    for at in [208 + 60, 208 + 0x60, 208 + 0x60 + 26, 208 + 0x60 + 32] {
+        let mut changed = pristine.clone();
+        changed[at] ^= 1;
+        assert!(
+            r.update(&changed, &Memory::default())
+                .unwrap_err()
+                .contains("active voice")
+        );
+    }
+}
+
+#[test]
 fn revision_fifteen_voice_diagnostics_follow_the_float_biquad_stride() {
     let r = audio::Renderer::new(audio::Parameters::parse(&parameters(15)).unwrap(), 0);
     let mut input = silent_input();
