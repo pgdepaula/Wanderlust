@@ -5,7 +5,7 @@ use crate::{NvError, Result, word};
 // Remap uses 64 KiB pages. NVIDIA's kind/compression setup downgrades these
 // kinds to their uncompressed storage when pages are below the 128 KiB compression
 // granularity. No compressed payload or compression tags are imported here.
-fn uncompressed_kind(kind: u16) -> Option<u16> {
+pub(super) fn uncompressed_kind(kind: u16) -> Option<u16> {
     // PTE storage identity is distinct from B197/TIC format and sample count.
     // Registering an alias does not enable raster formats or multisampling.
     match kind {

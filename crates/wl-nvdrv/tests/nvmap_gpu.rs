@@ -106,10 +106,20 @@ fn nvmap_free_retains_imports_and_retries_without_losing_backing() {
     call(&mut d, &mut m, space, 0xc0184102, &reserve, &mut [0; 24]).unwrap();
     // Only 4 KiB can be borrowed from Backing. The padded 64 KiB VA window
     // must not extend that backing registration or require an oversized pin.
-    let mut map = words(&[5, 0, handle, 65536]);
+    // C32_2CRA (0xdb) falls back to generic uncompressed storage below the
+    // 128 KiB compression granularity. This must still pin only real bytes.
+    let mut map = words(&[5, 0xdb, handle, 65536]);
     map.extend(0u64.to_le_bytes());
     map.extend(65536u64.to_le_bytes());
     map.extend(0x400000000u64.to_le_bytes());
+    let mut invalid = map.clone();
+    invalid[12..16].copy_from_slice(&131072u32.to_le_bytes());
+    let mut unchanged = [0xcc; 40];
+    error(
+        call(&mut d, &mut m, space, 0xc0284106, &invalid, &mut unchanged),
+        NvError::NotSupported,
+    );
+    assert_eq!(unchanged, [0xcc; 40]);
     call(&mut d, &mut m, space, 0xc0284106, &map, &mut [0; 40]).unwrap();
     result.fill(0xcc);
     error(

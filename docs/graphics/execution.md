@@ -1938,7 +1938,12 @@ teardown, and pending-output guards still prohibit mapping mutation.
 Pitch and generic-uncompressed aliases retain identical canonical storage.
 Mapping does not swizzle bytes: supported TIC/B197 surface descriptors select
 the existing layout converters when resources are accessed. Compressed PTE
-kinds, compression tags and kind-changing subrange remaps remain unsupported.
+kinds requiring compression tags and kind-changing subrange remaps remain unsupported.
+With an explicit 64 KiB page hint, `MapBufferEx` also applies the same bounded
+uncompressed-kind fallback used by `Remap`, including C32_2CRA (`0xdb`) to generic
+storage. NVIDIA disables compression below its 128 KiB compression granularity.
+This does not decode compressed bytes or enable additional attachment formats.
+Unspecified/128 KiB page hints and unknown kinds cannot use this fallback.
 
 Fixed `MapBufferEx` mappings may occupy an unmapped subinterval of an existing
 reservation, including multiple disjoint buffers within one large reservation.

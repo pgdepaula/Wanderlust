@@ -25,10 +25,17 @@ impl Request {
         }
         let flags = word(input, 0);
         let hint = word(input, 12);
-        if flags & !5 != 0
-            || !matches!(word(input, 4), 0 | 0xfe | u32::MAX)
-            || !matches!(hint, 0 | 4096 | 65536 | 131072)
-        {
+        let kind = word(input, 4);
+        // A verified 64 KiB page request cannot carry 128 KiB compression
+        // tags. Apply the same explicit uncompressed-kind fallback as Remap;
+        // an unspecified or 128 KiB page request cannot use this guarantee.
+        let supported_kind = matches!(kind, 0 | 0xfe | u32::MAX)
+            || (hint == 65536
+                && u16::try_from(kind)
+                    .ok()
+                    .and_then(super::remap::uncompressed_kind)
+                    .is_some());
+        if flags & !5 != 0 || !supported_kind || !matches!(hint, 0 | 4096 | 65536 | 131072) {
             return Err(NvError::NotSupported.into());
         }
         let fixed = flags & 1 != 0;
@@ -85,6 +92,26 @@ impl Request {
 mod tests {
     use super::*;
     #[test]
+    fn compressed_kind_requires_explicit_small_page_fallback() {
+        let mut input = [0; 40];
+        input[0] = 4;
+        input[4] = 0xdb;
+        input[8..12].copy_from_slice(&185u32.to_le_bytes());
+        input[12..16].copy_from_slice(&65536u32.to_le_bytes());
+        let request = Request::decode(&input).unwrap();
+        assert_eq!(request.handle, 185);
+        assert_eq!(request.extent(0x20000).unwrap().resident, 0x20000);
+        for page in [0u32, 4096, 131072] {
+            input[12..16].copy_from_slice(&page.to_le_bytes());
+            assert!(Request::decode(&input).is_err());
+        }
+        input[12..16].copy_from_slice(&65536u32.to_le_bytes());
+        for kind in [0xebu32, 0xff, 0x100db] {
+            input[4..8].copy_from_slice(&kind.to_le_bytes());
+            assert!(Request::decode(&input).is_err());
+        }
+    }
+    #[test]
     fn whole_buffer_hint_does_not_extend_canonical_backing() {
         let mut input = [0; 40];
         input[8] = 1;
@@ -102,7 +129,7 @@ mod tests {
                 .resident,
             4096
         );
-        for (at, value) in [(0, 2u32), (4, 1), (12, 8192)] {
+        for (at, value) in [(0, 2u32), (4, 0xff), (12, 8192)] {
             let mut invalid = input;
             invalid[at..at + 4].copy_from_slice(&value.to_le_bytes());
             assert!(Request::decode(&invalid).is_err());
