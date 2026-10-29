@@ -53,6 +53,7 @@ impl Frame {
 }
 
 pub(crate) struct Target {
+    pub(crate) format: crate::raster::ColorFormat,
     extent: (u32, u32),
     pub(crate) texture: wgpu::Texture,
     pub(crate) view: wgpu::TextureView,
@@ -130,8 +131,10 @@ impl Renderer {
         }))
         .map_err(|e| Error(format!("no headless adapter: {e}")))?;
         let supported = adapter.features();
-        let enabled =
-            supported & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TEXTURE_COMPRESSION_BC);
+        let enabled = supported
+            & (wgpu::Features::TIMESTAMP_QUERY
+                | wgpu::Features::TEXTURE_COMPRESSION_BC
+                | wgpu::Features::RG11B10UFLOAT_RENDERABLE);
         let adapter_limits = adapter.limits();
         let required_limits =
             wgpu::Limits::downlevel_defaults().using_resolution(adapter_limits.clone());
@@ -227,6 +230,36 @@ impl Renderer {
     }
 
     pub(crate) fn ensure_target(&mut self, width: u32, height: u32) -> Result<()> {
+        self.ensure_color_target(width, height, crate::raster::ColorFormat::Rgba8)
+    }
+    pub(crate) fn ensure_color_target(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: crate::raster::ColorFormat,
+    ) -> Result<()> {
+        self.validate_color_format(format)?;
+        self.ensure_color_target_supported(width, height, format)
+    }
+    pub(crate) fn validate_color_format(&self, format: crate::raster::ColorFormat) -> Result<()> {
+        if format == crate::raster::ColorFormat::Rg11b10Float
+            && !self
+                .capabilities
+                .enabled
+                .contains(wgpu::Features::RG11B10UFLOAT_RENDERABLE)
+        {
+            return Err(invalid(
+                "adapter does not support native R11G11B10 float rendering",
+            ));
+        }
+        Ok(())
+    }
+    fn ensure_color_target_supported(
+        &mut self,
+        width: u32,
+        height: u32,
+        format: crate::raster::ColorFormat,
+    ) -> Result<()> {
         let limit = self.capabilities.device_limits.max_texture_dimension_2d;
         if width == 0 || height == 0 || width > limit || height > limit {
             return Err(invalid("invalid render extent"));
@@ -234,7 +267,7 @@ impl Renderer {
         if self
             .target
             .as_ref()
-            .is_some_and(|t| t.extent == (width, height))
+            .is_some_and(|t| t.extent == (width, height) && t.format == format)
         {
             self.counters.cache_hits += 1;
             return Ok(());
@@ -246,7 +279,7 @@ impl Renderer {
             return Err(invalid("readback exceeds device buffer limit"));
         }
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("offscreen rgba8"),
+            label: Some("guest color attachment"),
             size: wgpu::Extent3d {
                 width,
                 height,
@@ -255,7 +288,7 @@ impl Renderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: format.host(),
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::COPY_SRC
                 | wgpu::TextureUsages::COPY_DST,
@@ -269,6 +302,7 @@ impl Renderer {
             mapped_at_creation: false,
         });
         self.target = Some(Target {
+            format,
             extent: (width, height),
             texture,
             view,
@@ -379,7 +413,15 @@ impl Renderer {
         readback: bool,
     ) -> Result<Option<Frame>> {
         let start = Instant::now();
-        self.ensure_target(width, height)?;
+        if self.hardware_raster.is_none() {
+            self.ensure_target(width, height)?;
+        } else if self
+            .target
+            .as_ref()
+            .is_none_or(|t| t.extent != (width, height))
+        {
+            return Err(invalid("hardware target was not prepared"));
+        }
         let target = self.target.as_ref().expect("validated target");
         let mut encoder = self
             .device

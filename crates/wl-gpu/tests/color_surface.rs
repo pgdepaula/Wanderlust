@@ -140,6 +140,7 @@ fn surface_limits_and_full_footprint_address_range() {
         assert!(BlockLinear2d::new(w, h, Format::Rgba8Unorm, log).is_err());
     }
     let mut t = ColorTarget {
+        format: wl_gpu::raster::ColorFormat::Rgba8,
         address: GpuAddress((1 << 40) - 256),
         width: 1,
         height: 1,
@@ -155,4 +156,22 @@ fn surface_limits_and_full_footprint_address_range() {
     assert!(t.size().is_err());
     t.width = u32::MAX;
     assert!(t.linear_pitch().is_err());
+}
+
+#[test]
+fn packed_hdr_preview_preserves_unsigned_float_components_and_implicit_alpha() {
+    let cases = [
+        (0x00000000u32, [0, 0, 0, 255]),
+        (0x781e03c0, [255, 255, 255, 255]),
+        (0x741c0340, [64, 128, 191, 255]),
+        (0x00000400, [255, 0, 0, 255]),
+        (0x00000001, [0, 0, 0, 255]),
+        (0x000007c0, [255, 0, 0, 255]),
+        (0x000007c1, [0, 0, 0, 255]),
+    ];
+    for (word, expected) in cases {
+        let mut pixel = word.to_le_bytes();
+        ColorFormat::Rg11b10Float.preview(&mut pixel);
+        assert_eq!(pixel, expected, "packed {word:#010x}");
+    }
 }

@@ -1064,3 +1064,191 @@ fn inactive_color_target_selectors_preserve_pixels_and_pipeline() {
         BG,
     );
 }
+
+#[path = "common/gob.rs"]
+mod hdr_gob;
+#[test]
+#[ignore = "requires actual GPU; native R11G11B10 attachment, exact packed guest bytes, GOB padding, deferred warm draws and RGBA diagnostic preview"]
+fn native_hdr_targets_preserve_float_guest_pixels_and_deferred_residency() {
+    for tiled in [false, true] {
+        let (mut data, mut words, image) = fixture();
+        data[0x4100..0x4100 + include_bytes!("fixtures/maxwell/hdr.bin").len()]
+            .copy_from_slice(include_bytes!("fixtures/maxwell/hdr.bin"));
+        let draw = words.split_off(words.len() - 8);
+        method(&mut words, 0x810, 0xe0);
+        method(&mut words, 0x2144, 0x100); // independently assembled HDR fragment
+        if tiled {
+            method(&mut words, 0x808, 52);
+            method(&mut words, 0x814, 0x10);
+        }
+        words.extend(draw);
+        let linear: Vec<_> = (0..52 * 29)
+            .flat_map(|_| 0x00200000u32.to_le_bytes())
+            .collect(); // HDR (0,2,0), not UNORM green
+        let mut initial = if tiled {
+            hdr_gob::encode(&linear, 52, 29, 1, &vec![0xa5; 8192])
+        } else {
+            linear
+        };
+        data[RT..RT + initial.len()].copy_from_slice(&initial);
+        let (mut d, _, c, b, _) = setup_driver();
+        put(&mut data, 0x10000, &words);
+        let first = d
+            .submit(
+                c,
+                KICKOFF_PB,
+                &header(1),
+                Some(&entry(0xb0000, words.len())),
+                &mut mem(&mut data),
+            )
+            .unwrap();
+        assert!(first.fault.is_none(), "{:?}", first.fault);
+        assert_eq!(first.progress.draws_submitted, 1);
+        assert_eq!(&data[RT..RT + initial.len()], initial);
+        assert_eq!(d.graphics_counters().readback_operations, 0);
+        let before = d.graphics_counters();
+        let draws = [
+            0x20010586u32,
+            4,
+            0x200105f7,
+            0,
+            0x200105f8,
+            3,
+            0x20010585,
+            0,
+        ];
+        let bytes: Vec<_> = draws.iter().flat_map(|w| w.to_le_bytes()).collect();
+        d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+            .unwrap();
+        for _ in 0..32 {
+            let r = d
+                .submit(
+                    c,
+                    KICKOFF_PB,
+                    &header(1),
+                    Some(&entry(0xb0000, draws.len())),
+                    &mut mem(&mut data),
+                )
+                .unwrap();
+            assert!(r.fault.is_none(), "{:?}", r.fault);
+        }
+        let after = d.graphics_counters();
+        assert_eq!(after.readback_operations, 0);
+        assert_eq!(after.synchronization_points, before.synchronization_points);
+        assert_eq!(
+            after.render_target_upload_bytes,
+            before.render_target_upload_bytes
+        );
+        assert_eq!(after.target_deswizzle_bytes, before.target_deswizzle_bytes);
+        assert_eq!(after.pipeline_allocations, before.pipeline_allocations);
+        assert_eq!(
+            after.shader_module_allocations,
+            before.shader_module_allocations
+        );
+        // CPU-after-GPU patches are packed guest bytes, including GOB padding.
+        d.write_backing(
+            b,
+            RT as u64,
+            &0x80000000u32.to_le_bytes(),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+        if tiled {
+            let mut occupied = vec![false; 8192];
+            for y in 0..29 {
+                for x in 0..208 {
+                    occupied[hdr_gob::address(x, y, 52, 1)] = true;
+                }
+            }
+            let hole = occupied.iter().position(|used| !used).unwrap();
+            d.write_backing(b, (RT + hole) as u64, &[0x5a], &mut mem(&mut data))
+                .unwrap();
+            initial[hole] = 0x5a;
+            let old = data.clone();
+            assert!(d.publish(c, &mut FailWrite(&mut data)).is_err());
+            assert_eq!(data, old);
+            assert!(d.has_pending_output());
+            assert_eq!(d.graphics_counters().draw_commands, 33);
+        }
+        let frame = d.publish(c, &mut mem(&mut data)).unwrap().unwrap();
+        assert_eq!(&frame.rgba[..4], &[0, 0, 255, 255]);
+        let mut coverage = frame.rgba.clone();
+        coverage[..4].copy_from_slice(&[0, 255, 0, 255]);
+        check(
+            &coverage,
+            &image,
+            Some([255, 128, 64, 255]),
+            [0, 255, 0, 255],
+        );
+        let raw = if tiled {
+            hdr_gob::decode(&data[RT..RT + 8192], 52, 29, 1)
+        } else {
+            data[RT..RT + SIZE].to_vec()
+        };
+        for pixel in raw.chunks_exact(4) {
+            let bits = u32::from_le_bytes(pixel.try_into().unwrap());
+            assert!(
+                matches!(bits, 0x00200000 | 0x681c0400 | 0x80000000),
+                "incorrect native HDR representation {bits:#010x}"
+            );
+        }
+        if tiled {
+            assert_eq!(
+                &data[RT..RT + 8192],
+                hdr_gob::encode(&raw, 52, 29, 1, &initial)
+            );
+        }
+        assert_eq!(&raw[..4], &0x80000000u32.to_le_bytes());
+        assert_eq!(
+            d.graphics_counters().readback_operations,
+            if tiled { 2 } else { 1 }
+        );
+        assert_eq!(d.graphics_counters().draw_commands, 33);
+        // Same backing/dimensions, incompatible storage interpretation: recreate
+        // only the native target/pipeline, keeping the translated stage modules.
+        let baseline = d.graphics_counters();
+        let ldr: Vec<_> = (0..52 * 29).flat_map(|_| BG).collect();
+        let ldr = if tiled {
+            hdr_gob::encode(&ldr, 52, 29, 1, &initial)
+        } else {
+            ldr
+        };
+        d.write_backing(b, RT as u64, &ldr, &mut mem(&mut data))
+            .unwrap();
+        let mut words = Vec::new();
+        method(&mut words, 0x810, 0xd5);
+        words.extend(draws);
+        let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+            .unwrap();
+        let r = d
+            .submit(
+                c,
+                KICKOFF_PB,
+                &header(1),
+                Some(&entry(0xb0000, words.len())),
+                &mut mem(&mut data),
+            )
+            .unwrap();
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        let after = d.graphics_counters();
+        assert_eq!(
+            after.pipeline_allocations,
+            baseline.pipeline_allocations + 1
+        );
+        assert_eq!(
+            after.shader_module_allocations,
+            baseline.shader_module_allocations
+        );
+        assert_eq!(
+            after.render_target_allocations,
+            baseline.render_target_allocations + 1
+        );
+        check(
+            &d.publish(c, &mut mem(&mut data)).unwrap().unwrap().rgba,
+            &image,
+            Some([255, 128, 64, 255]),
+            BG,
+        );
+    }
+}

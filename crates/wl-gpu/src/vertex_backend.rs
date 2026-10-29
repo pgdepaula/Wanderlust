@@ -58,6 +58,7 @@ pub(crate) struct ResidentVertex {
     stride: u64,
     offsets: [u64; 2],
     position_format: PositionFormat,
+    target_format: crate::raster::ColorFormat,
     stamp: Option<BackingStamp>,
     flip_y: bool,
     depth_clip: crate::raster::DepthClipRange,
@@ -75,7 +76,14 @@ impl Renderer {
         stride: u64,
         offsets: [u64; 2],
     ) -> Result<()> {
-        self.set_vertex_program_raster(program, stride, offsets, PositionFormat::Float32x4, None)
+        self.set_vertex_program_raster(
+            program,
+            stride,
+            offsets,
+            PositionFormat::Float32x4,
+            None,
+            crate::raster::ColorFormat::Rgba8,
+        )
     }
     fn set_vertex_program_raster(
         &mut self,
@@ -84,6 +92,7 @@ impl Renderer {
         offsets: [u64; 2],
         position_format: PositionFormat,
         raster: Option<crate::raster::Rasterization>,
+        target_format: crate::raster::ColorFormat,
     ) -> Result<()> {
         let flip_y = raster.is_some_and(|r| r.flip_y);
         let depth_clip = raster.map_or_else(Default::default, |r| r.depth_clip);
@@ -122,6 +131,7 @@ impl Renderer {
                 && v.stride == stride
                 && v.offsets == offsets
                 && v.position_format == position_format
+                && v.target_format == target_format
                 && v.flip_y == flip_y
                 && v.depth_clip == depth_clip
                 && v.color == color
@@ -201,7 +211,7 @@ impl Renderer {
                     entry_point: Some("fs_main"),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        format: target_format.host(),
                         blend: color.blend.map(host_blend),
                         write_mask: wgpu::ColorWrites::from_bits_truncate(u32::from(
                             color.write_mask,
@@ -229,6 +239,7 @@ impl Renderer {
             stride,
             offsets,
             position_format,
+            target_format,
             flip_y,
             depth_clip,
             color,
@@ -352,6 +363,11 @@ impl Renderer {
             .as_ref()
             .ok_or_else(|| invalid("missing fragment for vertex pairing"))?;
         let stride = u64::from(array.stride);
+        let target_format = if self.hardware_raster.is_some() {
+            engine.rasterization()?.0.format
+        } else {
+            crate::raster::ColorFormat::Rgba8
+        };
         let offsets = array.offsets.map(u64::from);
         let flip_y = self.hardware_raster.is_some_and(|r| r.flip_y);
         let depth_clip = self
@@ -375,6 +391,7 @@ impl Renderer {
                 || v.stride != stride
                 || v.offsets != offsets
                 || v.position_format != array.position_format
+                || v.target_format != target_format
         }) {
             let program = selected.program.clone();
             self.set_vertex_program_raster(
@@ -383,6 +400,7 @@ impl Renderer {
                 offsets,
                 array.position_format,
                 self.hardware_raster,
+                target_format,
             )?;
         }
         let cached = self

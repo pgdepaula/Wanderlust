@@ -49,6 +49,48 @@ pub struct ColorTarget {
     pub width: u32,
     pub height: u32,
     pub layout: ColorLayout,
+    pub format: ColorFormat,
+}
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum ColorFormat {
+    #[default]
+    Rgba8,
+    Rg11b10Float,
+}
+impl ColorFormat {
+    #[cfg(feature = "wgpu-backend")]
+    pub(crate) fn host(self) -> wgpu::TextureFormat {
+        match self {
+            Self::Rgba8 => wgpu::TextureFormat::Rgba8Unorm,
+            Self::Rg11b10Float => wgpu::TextureFormat::Rg11b10Ufloat,
+        }
+    }
+    /// Display-only conversion after exact packed guest publication. HDR is
+    /// clamped for the existing RGBA8 diagnostic image, never for guest storage.
+    pub fn preview(self, bytes: &mut [u8]) {
+        if self == Self::Rgba8 {
+            return;
+        }
+        for pixel in bytes.chunks_exact_mut(4) {
+            let packed = u32::from_le_bytes(pixel.try_into().unwrap());
+            for (out, (bits, fraction)) in pixel[..3].iter_mut().zip([
+                (packed & 2047, 6),
+                ((packed >> 11) & 2047, 6),
+                (packed >> 22, 5),
+            ]) {
+                let exponent = bits >> fraction;
+                let mantissa = bits & ((1 << fraction) - 1);
+                let value = match exponent {
+                    0 => mantissa as f32 * f32::from_bits((113 - fraction) << 23),
+                    31 if mantissa == 0 => f32::INFINITY,
+                    31 => f32::NAN,
+                    _ => f32::from_bits(((exponent + 112) << 23) | (mantissa << (23 - fraction))),
+                };
+                *out = (value.clamp(0., 1.) * 255.).round_ties_even() as u8;
+            }
+            pixel[3] = 255;
+        }
+    }
 }
 impl ColorTarget {
     pub(crate) fn storage(self) -> SurfaceStorage {
@@ -57,7 +99,7 @@ impl ColorTarget {
             width: self.width,
             height: self.height,
             layout: self.layout,
-            format: SurfaceFormat::Rgba8,
+            format: SurfaceFormat::Color(self.format),
         }
     }
     pub fn linear_pitch(&self) -> Result<u32> {
@@ -73,13 +115,13 @@ impl ColorTarget {
 /// Storage identity is independent of GPU aliases and host attachment handles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SurfaceFormat {
-    Rgba8,
+    Color(ColorFormat),
     Depth(DepthFormat),
 }
 impl SurfaceFormat {
     fn bytes_per_texel(self) -> u32 {
         match self {
-            Self::Rgba8 => 4,
+            Self::Color(_) => 4,
             Self::Depth(format) => format.bytes_per_sample(),
         }
     }
@@ -97,7 +139,7 @@ impl SurfaceStorage {
     pub fn depth_format(self) -> Result<DepthFormat> {
         match self.format {
             SurfaceFormat::Depth(format) => Ok(format),
-            SurfaceFormat::Rgba8 => Err(invalid("color surface used as depth storage")),
+            SurfaceFormat::Color(_) => Err(invalid("color surface used as depth storage")),
         }
     }
     pub fn linear_pitch(self) -> Result<u32> {
@@ -655,7 +697,7 @@ impl RasterRegisters {
                     1 => value % 256 == 0,
                     2 => value > 0 && value <= 0x0fffffff,
                     3 => value > 0 && value <= 0x1ffff,
-                    4 => value == 0xd5,
+                    4 => matches!(value, 0xd5 | 0xe0),
                     5 => value == 0x1000 || (value & !0x70 == 0 && (value >> 4) <= 5),
                     6 => value == 1,
                     7 => true, // DWORD array pitch is checked after complete geometry is known.
@@ -891,6 +933,11 @@ impl RasterRegisters {
             width,
             height: c[3],
             layout,
+            format: if c[4] == 0xe0 {
+                ColorFormat::Rg11b10Float
+            } else {
+                ColorFormat::Rgba8
+            },
         };
         let size = target.size()?;
         if c[7] != 0
@@ -936,7 +983,10 @@ impl RasterRegisters {
             for (out, word) in values.iter_mut().zip(self.clear_color) {
                 *out =
                     f32::from_bits(word.ok_or_else(|| invalid("incomplete color clear values"))?);
-                if !out.is_finite() || !(0.0..=1.0).contains(out) {
+                if !out.is_finite()
+                    || *out < 0.
+                    || (target.format == ColorFormat::Rgba8 && *out > 1.)
+                {
                     return Err(invalid("unsupported UNORM clear value"));
                 }
             }

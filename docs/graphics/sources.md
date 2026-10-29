@@ -2336,3 +2336,22 @@ seven inactive selectors. The independently constructed identity mapping is
 `0x0fac6881`; requiring the whole register to equal one would incorrectly reject
 that equivalent single-target configuration. Multiple outputs and active target
 remapping remain unsupported.
+
+### Native R11G11B10 unsigned-float color targets
+
+NVIDIA's pinned B197 header names color format `0xe0` BF10GF11RF11. The existing
+`0xd5` A8B8G8R8 remains RGBA8 UNORM. The former is a packed, little-endian 32-bit
+unsigned-float RGB texel: R/G have six mantissa bits and five exponent bits; B
+has five mantissa bits and five exponent bits, with exponent bias 15 and no
+stored alpha. These are not normalized integers or an RGBA8 channel permutation.
+The native `Rg11b10Ufloat` mapping and optional renderability feature follow
+[wgpu-types 26](https://github.com/gfx-rs/wgpu/blob/0c978d0d46c7eaf68f6d1ecf2ea1bd03a96b7c47/wgpu-types/src/lib.rs)
+and the [WebGPU texture-format specification](https://www.w3.org/TR/webgpu/#texture-format-caps).
+
+The attachment and linked graphics pipeline use the native format, preserving
+host raster/blend precision and packed readback without a CPU HDR encoder or
+RGBA16 surrogate. Tegra layout conversion still moves four bytes per texel;
+format identity is separate from GOB addressing. Guest publication retains those
+native bits. Only the public diagnostic image is converted in place to clamped
+linear RGBA8, with implicit alpha one. This preview is not HDR display output,
+tone mapping or a VI presentation event.

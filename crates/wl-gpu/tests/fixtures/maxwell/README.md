@@ -575,3 +575,9 @@ SHA-256 including SPH:
 
 - conditional-immediate.bin:0f07262306da9f50776700f06addbd1833cb2e62e4dcc381739439ed23272e4c
 - vertex-conditional-immediate.bin:ef86a1c1b7c1054c671c79ba5af22a746df514becfe692fc75932df10b4d9051
+
+`hdr.asm`/`hdr.bin` use the same documented 80-byte pixel SPH and independent
+GM107 assembler/scheduling recipe as `quarters`, but export floating-point
+RGBA (2, 0.5, 0.25, 1). The red component must survive above UNORM range in
+a native R11G11B10 target. Binary SHA-256:
+`85b1dd8e15489ca8fda202646041ca3a1b7085a478fc122ef5839a9a5b93dbf3`.

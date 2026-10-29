@@ -250,6 +250,9 @@ impl Renderer {
             }
             memory.write(stamp.guest, &frame.rgba)?;
         }
+        if let crate::raster::SurfaceFormat::Color(format) = stamp.surface.format {
+            format.preview(&mut frame.rgba);
+        }
         // Failed atomic writes retain the original pending GPU image and journal.
         changes.commit_publication(
             PendingAttachment::Color,
@@ -621,7 +624,7 @@ impl Renderer {
         let prepared: Result<wgpu::CommandBuffer> = (|| {
             if let Some((target, _)) = clear.color {
                 let before = self.counters.texture_allocations;
-                self.ensure_target(target.width, target.height)?;
+                self.ensure_color_target(target.width, target.height, target.format)?;
                 if before != self.counters.texture_allocations {
                     self.counters.render_target_allocations += 1;
                 } else {
@@ -719,6 +722,7 @@ impl Renderer {
         self.vertex_ready = false;
         self.hardware_raster = None;
         let (target, raster) = engine.rasterization()?;
+        self.validate_color_format(target.format)?;
         let size = target.size()?;
         let guest = map.resolve(target.address, size)?;
         memory.validate_write(guest, size)?;
@@ -827,7 +831,7 @@ impl Renderer {
             self.device.push_error_scope(wgpu::ErrorFilter::Validation);
             let prepared: Result<()> = (|| {
                 let old = self.counters.texture_allocations;
-                self.ensure_target(target.width, target.height)?;
+                self.ensure_color_target(target.width, target.height, target.format)?;
                 let created = self.counters.texture_allocations != old;
                 if created {
                     self.counters.render_target_allocations += 1;

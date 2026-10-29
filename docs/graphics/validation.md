@@ -3900,3 +3900,27 @@ active remaps, reserved bits and an unaligned offset without changing valid stat
 GPFIFO/B197 commands and two indexed textured draws with different inactive
 mappings. Both outputs match the independent pixel oracle, with no extra shader
 read, shader module or pipeline allocation on the second draw.
+
+`hdr.asm`/`hdr.bin` are independently assembled GM107 fragments exporting
+(2, 0.5, 0.25, 1), with the same verified SPH/scheduling recipe as `quarters`.
+The R11G11B10 guest result is exactly `0x681c0400`; background (0, 2, 0) is
+`0x00200000`, demonstrating values above UNORM range in both upload and rendering.
+The native HDR driver test exercises pitch and block-linear storage, independent
+GOB padding checks, 32 warm deferred draws, a packed CPU-after-GPU patch, a padding
+patch and injected atomic-publication failure/retry without draw replay. A
+same-backing HDR-to-UNORM transition checks target/pipeline replacement and shader
+module reuse. The diagnostic image is checked with independent triangle coverage;
+its values are clamped for display while guest HDR bits remain unchanged.
+
+The HDR scenario passed native Windows D3D12/Vulkan and WSL Vulkan. Its initial
+OpenGL attempt failed because that backend does not expose native renderability;
+that case is unavailable there, not a successful execution or a silent fallback.
+A test-only premature completion-token retirement was corrected before the
+successful native runs; completed draw/publication behavior was not weakened.
+
+The HDR change passed 435 default-feature CPU tests (194 GPU cases ignored by
+that command), 430 no-default-feature tests, strict package Clippy, formatting
+and a live all-target workspace check. Explicit execution passed all 194 GPU
+scenarios on WSL Vulkan and all 13 driver scenarios on native Windows D3D12 and
+Vulkan. OpenGL passed the other 12 driver scenarios; the unsupported HDR case was
+explicitly excluded after its capability failure, not counted as passed.

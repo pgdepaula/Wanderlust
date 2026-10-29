@@ -2709,3 +2709,18 @@ requiring one full-register literal. Inactive TARGET1..7 mappings do not affect
 attachment selection or host pipeline identity. Reserved bits, target count
 other than one and an active TARGET0 remap are rejected before state mutation;
 this does not enable multiple color attachments.
+
+`ColorTarget::format` distinguishes RGBA8 UNORM and R11G11B10 unsigned-float.
+Native target format participates in residency and pipeline identity; changing
+format at identical dimensions/backing replaces incompatible target/pipeline
+resources while preserving compatible translated shader modules. Both formats
+use four-byte pitch/block-linear guest storage. GPU copies and checked atomic
+publication operate on native packed bytes, including exact CPU byte patches
+and preserved GOB padding. Conversion to the existing RGBA8 `Frame` occurs only
+after successful guest writeback; failed publication keeps native pending output
+retryable. HDR clear values admit nonnegative finite values above one.
+
+R11G11B10 rendering requires the adapter's `RG11B10UFLOAT_RENDERABLE` feature.
+Unsupported adapters reject the actual draw before pipeline creation rather than
+substituting UNORM storage. The tested OpenGL backend lacks this feature; native
+D3D12/Vulkan and WSL Vulkan support the tested HDR path.
