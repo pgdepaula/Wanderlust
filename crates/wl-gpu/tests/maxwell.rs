@@ -1840,3 +1840,52 @@ fn inactive_target_blend_and_write_masks_do_not_alias_target_zero() {
             .contains("0x1364")
     );
 }
+
+#[test]
+fn unused_blend_constants_preserve_rgba_wire_bits_and_shadow_history() {
+    let mut c = Channel::default();
+    for w in common::hardware::setup() {
+        c.push_word(w).unwrap();
+    }
+    let expected = c.engine.rasterization().unwrap();
+    assert_eq!(
+        c.engine.auxiliary_raster_controls().blend_constant_bits,
+        [None; 4]
+    );
+    c.engine.apply(write(0x124, 1)).unwrap();
+    for (m, v) in [
+        (0x131c, 0x3f800000),
+        (0x1320, 0x7fc00001),
+        (0x1324, 0x7f800000),
+        (0x1328, 0x80000000),
+    ] {
+        c.engine.apply(write(m, v)).unwrap();
+    }
+    let bits = [
+        Some(0x3f800000),
+        Some(0x7fc00001),
+        Some(0x7f800000),
+        Some(0x80000000),
+    ];
+    assert_eq!(
+        c.engine.auxiliary_raster_controls().blend_constant_bits,
+        bits
+    );
+    assert_eq!(c.engine.rasterization().unwrap(), expected);
+    assert!(c.engine.apply(write(0x131d, 0)).is_err());
+    c.engine.apply(write(0x124, 2)).unwrap();
+    for m in [0x131c, 0x1320, 0x1324, 0x1328] {
+        c.engine.apply(write(m, 0)).unwrap();
+    }
+    c.engine.apply(write(0x124, 3)).unwrap();
+    for m in [0x131c, 0x1320, 0x1324, 0x1328] {
+        c.engine.apply(write(m, u32::MAX)).unwrap();
+    }
+    assert_eq!(
+        c.engine.auxiliary_raster_controls().blend_constant_bits,
+        bits
+    );
+    assert_eq!(c.engine.rasterization().unwrap(), expected);
+    c.engine.apply(write(0x124, 2)).unwrap();
+    assert!(c.engine.apply(write(0x1344, 0xc001)).is_err()); // Consuming constants is not implemented.
+}

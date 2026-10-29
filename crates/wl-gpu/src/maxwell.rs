@@ -92,6 +92,8 @@ pub struct AuxiliaryRasterControls {
     pub iterated_blend: Option<(bool, bool)>,
     /// Eight-bit pass count, inert while iterated blending is disabled.
     pub iterated_blend_pass: Option<u8>,
+    /// Raw RGBA fixed-blend constants. Constant blend factors remain unsupported.
+    pub blend_constant_bits: [Option<u32>; 4],
     pub alpha_coverage_qualifier: Option<u8>,
     /// Disabled tile cache and exact public-driver baseline tuning words only.
     pub tile_cache_profile: [Option<u32>; 7],
@@ -183,6 +185,7 @@ impl ShadowRam {
                     0xe00..=0xef8 => (method - 0xe00) % 16 < 12,
                     0x1e00..=0x1efc => (method - 0x1e00) % 32 < 28,
                     0x1364..=0x137c | 0x1a04..=0x1a1c => true,
+                    0x131c..=0x1328 => true,
                     _ => matches!(
                         method,
                         0x02ec
@@ -621,6 +624,7 @@ impl Maxwell3d {
         // The pinned B197 context method table initializes these to 0 and 1.
         self.auxiliary_raster.iterated_blend = Some((false, false));
         self.auxiliary_raster.iterated_blend_pass = Some(1);
+        self.auxiliary_raster.blend_constant_bits = [Some(0); 4];
         Ok(())
     }
     /// Configured A-stream address. Only stream zero can supply vertex fetches
@@ -1199,6 +1203,12 @@ impl Maxwell3d {
                 // Ordered watermarks only. Host warp scheduling remains wgpu's
                 // responsibility, not an emulated timing/completion primitive.
                 self.auxiliary_raster.pixel_warp_watermarks = Some((low, high));
+            }
+            0x131c..=0x1328 => {
+                // Preserve the wire bits without clamping, specializing shaders
+                // or using them with an unsupported constant blend factor.
+                self.auxiliary_raster.blend_constant_bits[usize::from((method - 0x131c) / 4)] =
+                    Some(value);
             }
             0x0dd0 => {
                 // Color/alpha enables occupy bits 0/1. Active requests remain

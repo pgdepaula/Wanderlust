@@ -4064,3 +4064,21 @@ intermediate Vulkan suite failures were diagnostic-prefix assertion mismatches;
 the compatible final prefix passed the complete suite. Strict package all-target
 Clippy and workspace formatting passed. Additional color attachments are still
 unsupported; inactive-bank retention does not implement MRT rendering.
+
+
+Unused fixed-blend constants are tested as four independent raw component
+words, including signed zero, infinity and a NaN payload, with exact shadow
+capture/replay. Constant-consuming factors remain rejected. A real indexed
+textured draw uses ordinary ONE/ZERO blending; 32 subsequent hardware draws
+change only the unused words and retain identical expected pixels with no new
+pipeline, shader module, texture upload, readback or synchronization point before
+final publication. This is 32 queue submissions, not one combined GPU batch or
+an allocation-free claim. CPU suites passed 444 default-feature tests (202 GPU
+scenarios ignored in that ordinary run) and 439 without default features. All
+202 GPU scenarios executed on WSL Vulkan. The new scenario also passed on WSL
+OpenGL. Native Windows D3D12 and Vulkan each executed 19 driver GPU scenarios,
+with all passes and no skips. A failed WSL launch was not counted: final results
+came from the actual Windows-local executables with matching SHA-256 hashes,
+fresh native batch receipt and per-backend Rust test summaries. Strict package
+all-target Clippy and workspace formatting passed. No original-game frame is
+inferred from these synthetic texture scenes.

@@ -1644,3 +1644,79 @@ fn mme_inactive_target_banks_preserve_pixels_pipeline_and_pending_output() {
     );
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+#[test]
+#[ignore = "requires actual GPU; unused fixed blend constants remain data and do not specialize textured draws"]
+fn unused_blend_constants_keep_pixels_and_warm_pipeline_data_independent() {
+    let (mut data, mut words, image) = fixture();
+    let draw = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x1360, 1),
+        (0x133c, 1),
+        (0x1340, 1),
+        (0x1344, 2),
+        (0x1348, 1),
+        (0x134c, 1),
+        (0x1350, 2),
+        (0x1358, 1),
+    ] {
+        method(&mut words, m, v);
+    }
+    words.extend([0x200404c7, 0x3f800000, 0x7fc00001, 0x7f800000, 0x80000000]);
+    words.extend_from_slice(&draw);
+    let (mut d, _, c, b, _) = setup_driver();
+    put(&mut data, 0x10000, &words);
+    let first = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, words.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(first.fault.is_none(), "{:?}", first.fault);
+    check(
+        &d.publish(c, &mut mem(&mut data)).unwrap().unwrap().rgba,
+        &image,
+        None,
+        BG,
+    );
+    d.retire(first.token).unwrap();
+    let before = d.graphics_counters();
+    for i in 0..32u32 {
+        let mut next = vec![0x200404c7, i, 0x3e800000, 0x3f000000, 0x3f800000];
+        next.extend_from_slice(&draw);
+        let bytes: Vec<_> = next.iter().flat_map(|v| v.to_le_bytes()).collect();
+        d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+            .unwrap();
+        let report = d
+            .submit(
+                c,
+                KICKOFF_PB,
+                &header(1),
+                Some(&entry(0xb0000, next.len())),
+                &mut mem(&mut data),
+            )
+            .unwrap();
+        assert!(report.fault.is_none(), "{:?}", report.fault);
+        assert_eq!(report.progress.draws_submitted, 1);
+    }
+    let after = d.graphics_counters();
+    assert_eq!(after.draw_commands, before.draw_commands + 32);
+    assert_eq!(after.pipeline_allocations, before.pipeline_allocations);
+    assert_eq!(
+        after.shader_module_allocations,
+        before.shader_module_allocations
+    );
+    assert_eq!(after.texture_uploads, before.texture_uploads);
+    assert_eq!(after.readback_operations, before.readback_operations);
+    assert_eq!(after.synchronization_points, before.synchronization_points);
+    check(
+        &d.publish(c, &mut mem(&mut data)).unwrap().unwrap().rgba,
+        &image,
+        None,
+        BG,
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

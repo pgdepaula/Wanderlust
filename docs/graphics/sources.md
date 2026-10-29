@@ -2465,3 +2465,13 @@ and disassembled using envytools revision `f102b82381f3f11cee113d16374c87091db03
 Its two nine-word entries increment method-word addresses from `0x4d9` (inactive
 blend enables) and `0x681` (inactive channel masks), producing seven writes each.
 The committed words contain no original-game commands or shaders.
+
+
+The pinned B197 header defines independent 32-bit words for blend-constant RED
+(`0x131c`), GREEN (`0x1320`), BLUE (`0x1324`) and ALPHA (`0x1328`). These must not
+be confused with shader constant-buffer resources or the neighboring alpha-test
+reference/function registers. The pinned
+[Nouveau B197 context table](https://github.com/torvalds/linux/blob/b562e44f507e863c6792946e4e1b1449fbbac85d/drivers/gpu/drm/nouveau/nvkm/engine/gr/ctxgm204.c#L587)
+initializes all four words to zero. The implementation retains exact bits without
+inventing clamp or NaN arithmetic while these values are unreferenced by the
+supported blend factors; consuming constant factors still fails explicitly.

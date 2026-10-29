@@ -2802,3 +2802,13 @@ B197 method/value diagnostics identify underlying unsupported macro-emitted
 method addresses in hexadecimal separately from the caller's macro entry.
 Incomplete fixed-raster diagnostics list the missing byte methods explicitly;
 this additional formatting allocates only on the error path.
+
+
+`SET_BLEND_CONST_RED/GREEN/BLUE/ALPHA` at `0x131c..0x1328` retain their raw
+32-bit component words, including signed zero and NaN payload bits. The
+initialized driver context uses the source-listed zero components. These writes
+participate in pure-state shadow capture/replay. Current executable blend factors
+do not consume constant color/alpha: requests for constant blend factors remain
+unsupported. Consequently changing these unused words neither changes pixels
+nor specializes a shader/pipeline or uploads a shader constant buffer. This state
+retention is not implementation of constant-factor blending or NaN arithmetic.
