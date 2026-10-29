@@ -3975,3 +3975,17 @@ and 434 without default features. Ten clear GPU scenarios passed on each of WSL
 Vulkan/OpenGL and native Windows D3D12/Vulkan (40 actual passes, zero skips).
 Package all-target strict Clippy and workspace formatting passed. Initialization
 still leaves unrelated absent fixed controls unresolved.
+
+
+The GpuDriver initialized-channel regression removes explicit global TRUE,
+multisample-mode and base-layer writes from the caller's B06F stream. Pitch and
+tiled clears produce the independent expected guest bytes. A later unsupported
+global FALSE faults without replaying or dropping the pending clear. The raw
+engine regression still rejects a missing global gate. The package passed 439
+CPU tests with default features (198 GPU scenarios ignored by that ordinary run)
+and 434 without default features. All 198 GPU scenarios executed on WSL Vulkan;
+10 clear scenarios additionally passed on WSL OpenGL. Native Windows D3D12 and
+Vulkan each executed 10 clear and 15 driver scenarios, all passing with zero
+skips. Package strict all-target Clippy and workspace formatting passed. The
+global TRUE starting policy is explicit software-driver initialization, not
+independent evidence of a Switch firmware reset value.

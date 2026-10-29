@@ -573,6 +573,20 @@ struct ActiveMacro {
     idle_completed: bool,
 }
 impl Maxwell3d {
+    /// Deliberate initialization by the supported software driver, not a claim
+    /// about unobserved hardware reset values. Raw channels remain strict.
+    #[cfg(feature = "wgpu-backend")]
+    pub(crate) fn initialize_driver_context(&mut self) -> Result<()> {
+        // The driver starts without a global predicate. Base layer zero is
+        // independently listed by the pinned B197 context initialization table.
+        for (method, value) in [(0x0138, 1), (0x0820, 0)] {
+            self.raster
+                .apply(method, value)
+                .map_err(|error| invalid(&format!("driver context initialization: {error:?}")))?;
+            self.macros.observe_color_target(method, value);
+        }
+        Ok(())
+    }
     /// Configured A-stream address. Only stream zero can supply vertex fetches
     /// in the supported attribute subset; inactive addresses are not read.
     pub fn vertex_stream_address(&self, slot: usize) -> Option<GpuAddress> {

@@ -2409,3 +2409,17 @@ initializes multisample mode `0x15d0` to zero. This supports initialized single
 sampling without requiring a redundant guest write; it does not justify enabling
 multisample rendering, guessing other missing controls, or changing the initial
 conditional-render mode without separate evidence.
+
+
+NVIDIA's pinned B197 definition identifies `0x0138` as the global-render-enable
+control and TRUE as value one. Nouveau's pinned
+[graphics object initialization](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nvc0/nvc0_screen.c#L940-L973)
+creates supported Maxwell objects and explicitly establishes unconditional local
+rendering (`COND_MODE`, `0x1558`). This is operational context for a driver's
+unconditional starting profile; it is **not** a specification of the global
+register's Switch firmware reset value. Wanderlust explicitly programs a TRUE
+global gate in its service-independent driver profile. The exact Switch context
+image remains unverified. The pinned B197 context table separately specifies
+[base layer zero for all eight color targets](https://github.com/torvalds/linux/blob/b562e44f507e863c6792946e4e1b1449fbbac85d/drivers/gpu/drm/nouveau/nvkm/engine/gr/ctxgm204.c#L304-L315),
+which justifies target-zero base-layer initialization. Raw interpreter state and
+unsupported conditional operations are kept distinct from this driver policy.

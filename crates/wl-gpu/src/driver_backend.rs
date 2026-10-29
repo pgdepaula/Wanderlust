@@ -218,11 +218,13 @@ impl GpuDriver {
         if self.channels.len() >= 16 {
             return Err(invalid("channel capacity"));
         }
+        let mut engine = Channel::default();
+        engine.engine.initialize_driver_context()?;
         let id = ChannelId(identity()?);
         self.channels.push(Context {
             id,
             space,
-            engine: Channel::default(),
+            engine,
             sequence: 0,
             timeout: None,
         });

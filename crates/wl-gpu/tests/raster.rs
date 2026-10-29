@@ -68,7 +68,18 @@ fn raster_invalid_incomplete_bounds_and_unsupported_formats() {
     let mut e = Maxwell3d::default();
     set(&mut e, 0, 0xb197).unwrap();
     assert!(e.rasterization().is_err());
+    // A raw engine does not silently gain the GpuDriver initialization policy.
+    assert!(
+        e.clear_surface(true, false)
+            .unwrap_err()
+            .to_string()
+            .contains("0x0138")
+    );
     for (m, v) in [
+        (0x138, 0),
+        (0x138, 2),
+        (0x138, 3),
+        (0x138, 4),
         (0x800, 256),
         (0x804, 1),
         (0x808, 0),

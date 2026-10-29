@@ -2751,3 +2751,15 @@ source-pinned Nouveau method list. This narrow initialization does not populate
 unrelated absent raster state. Clear failures identify the missing fixed-state
 method and include bounded control, attachment and clipping register values;
 these diagnostics allocate only on failure and do not expose shader binaries.
+
+
+`GpuDriver::create_channel` deliberately establishes an unconditional global
+render gate (`0x0138=TRUE`) and target-zero base layer (`0x0820=0`) through the
+validated raster-state handler. This is software-driver context setup, not a
+claim that either write was present in a guest pushbuffer or that the global
+gate has a specified hardware power-on value. It creates no subchannel binding,
+GPU work, guest-memory write or guest method-write count. The supported profile
+starts without a global predicate; FALSE and conditional global requests remain
+explicitly unsupported rather than being coerced to TRUE. Raw `Channel` engines
+retain their explicit-global-gate requirement. The initialized base layer is also
+visible to supported MME reads; no unrelated method-read values are synthesized.

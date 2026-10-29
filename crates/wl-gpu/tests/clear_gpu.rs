@@ -990,6 +990,12 @@ fn initialized_context_allows_clear_before_window_and_multisample_writes() {
         // Remove the explicit single-sample write: initial B197 context supplies it.
         let index = words.windows(2).position(|v| v == [0x20010574, 0]).unwrap();
         words.drain(index..index + 2);
+        // Driver-owned initialization also establishes the unconditional gate
+        // and target-zero base layer. Neither is injected by the test caller.
+        for pair in [[0x2001004e, 1], [0x20010208, 0]] {
+            let index = words.windows(2).position(|v| v == pair).unwrap();
+            words.drain(index..index + 2);
+        }
         clear_values(&mut words, [0.25, 0.5, 0.75, 1.]);
         for index in 0..8 {
             method(&mut words, 0xd00 + index * 8, 0);
@@ -998,6 +1004,17 @@ fn initialized_context_allows_clear_before_window_and_multisample_writes() {
         method(&mut words, 0x19d0, 0x3c);
         let accepted = submit(&mut d, c, b, &mut data, &words);
         assert!(accepted.fault.is_none(), "{:?}", accepted.fault);
+        assert_eq!(d.graphics_counters().clear_commands, 1);
+        // Unsupported global gating cannot be silently coerced to TRUE, nor
+        // discard or replay the previously accepted driver-context clear.
+        let mut unsupported = Vec::new();
+        method(&mut unsupported, 0x0138, 0);
+        method(&mut unsupported, 0x19d0, 0x3c);
+        assert!(
+            submit(&mut d, c, b, &mut data, &unsupported)
+                .fault
+                .is_some()
+        );
         assert_eq!(d.graphics_counters().clear_commands, 1);
         d.publish(c, &mut mem(&mut data)).unwrap();
         let expected = expected_color(7, 9, bh, [64, 128, 191, 255]);
