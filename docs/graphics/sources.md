@@ -2294,3 +2294,13 @@ partial selector without dereferencing it or treating it as an allocation.
 Actual compute execution, QMD launch, scratch access, memory throttling and SM
 scheduling remain unsupported. No valid address or launch is inferred from
 selectors alone.
+
+### Graphics local-memory storage selectors
+
+The same pinned NVIDIA B197 header defines local-memory A/B at
+`0x0790/0x0794` as an eight/32-bit GPU address, C/D at `0x0798/0x079c`
+as a six/32-bit size, and E at `0x07a0` as a 26-bit default size per warp.
+These widths differ from the B1C0 size/SM-count configuration and are validated
+independently. The backend retains the fields without dereferencing or allocating
+scratch storage. The admitted shader header/instruction subset still rejects
+local-memory use; accepting configuration is not local-memory shader support.

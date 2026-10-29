@@ -3875,3 +3875,11 @@ and an unsupported compute launch through the driver/GPFIFO boundary. It checks
 one accepted draw, a launch-specific fault, deferred guest visibility, and exact
 reference pixels after publication without replay. This verifies graphics
 isolation and failure semantics; it does not claim compute shader execution.
+
+Graphics scratch tests distinguish the 40-bit address, 38-bit size and 26-bit
+per-warp fields and check atomic rejection at their first-invalid boundaries.
+`graphics_scratch_configuration_preserves_real_pixels_and_warm_pipeline`
+submits a guest indexed/textured draw with maximum selectors, changes all scratch
+selectors to zero and submits another draw. Both images match the independent
+pixel oracle; the second draw requires no additional pipeline/module allocation
+or shader-code read. No scratch allocation or scratch-access shader is implied.

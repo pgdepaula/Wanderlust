@@ -890,3 +890,71 @@ fn compute_resource_selectors_preserve_graphics_and_reject_dispatch() {
     assert_eq!(d.graphics_counters().draw_commands, 1);
     assert_eq!(d.graphics_counters().readback_operations, 1);
 }
+
+#[test]
+#[ignore = "requires actual GPU; graphics scratch selectors cannot create an implicit fetch or change scratch-free shader pixels"]
+fn graphics_scratch_configuration_preserves_real_pixels_and_warm_pipeline() {
+    let (mut data, mut words, image) = fixture();
+    let (mut d, _, c, b, _) = setup_driver();
+    for (m, v) in [
+        (0x790, 255),
+        (0x794, u32::MAX),
+        (0x798, 63),
+        (0x79c, u32::MAX),
+        (0x7a0, 0x03ffffff),
+    ] {
+        method(&mut words, m, v);
+    }
+    put(&mut data, 0x10000, &words);
+    let first = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, words.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(first.fault.is_none(), "{:?}", first.fault);
+    assert_eq!(first.progress.draws_submitted, 1);
+    check(
+        &d.publish(c, &mut mem(&mut data)).unwrap().unwrap().rgba,
+        &image,
+        None,
+        BG,
+    );
+    d.retire(first.token).unwrap();
+    let before = d.graphics_counters();
+    let mut words = Vec::new();
+    for m in [0x790, 0x794, 0x798, 0x79c, 0x7a0] {
+        method(&mut words, m, 0);
+    }
+    words.extend([0x20010586, 4, 0x200105f7, 0, 0x200105f8, 3, 0x20010585, 0]);
+    let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let second = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, words.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(second.fault.is_none(), "{:?}", second.fault);
+    assert_eq!(second.progress.draws_submitted, 1);
+    let after = d.graphics_counters();
+    assert_eq!(after.pipeline_allocations, before.pipeline_allocations);
+    assert_eq!(
+        after.shader_module_allocations,
+        before.shader_module_allocations
+    );
+    assert_eq!(after.shader_binary_bytes, before.shader_binary_bytes);
+    check(
+        &d.publish(c, &mut mem(&mut data)).unwrap().unwrap().rgba,
+        &image,
+        None,
+        BG,
+    );
+}

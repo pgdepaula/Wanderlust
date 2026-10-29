@@ -1517,3 +1517,47 @@ fn compute_pool_and_local_memory_fields_are_bounded_partial_and_engine_local() {
         ComputeConfiguration::default()
     );
 }
+
+#[test]
+fn graphics_scratch_selectors_use_40_bit_address_and_38_bit_size_fields() {
+    let mut e = Maxwell3d::default();
+    e.apply(write(0, CLASS)).unwrap();
+    for (method, maximum) in [(0x790, 255), (0x798, 63), (0x7a0, 0x03ffffff)] {
+        e.apply(write(method, maximum)).unwrap();
+        let old = e.auxiliary_raster_controls();
+        assert_eq!(
+            e.apply(write(method, maximum + 1)),
+            Err(MethodError::UnsupportedValue {
+                method,
+                value: maximum + 1
+            })
+        );
+        assert!(e.apply(write(method + 1, 0)).is_err());
+        assert_eq!(e.auxiliary_raster_controls(), old);
+    }
+    assert_eq!(
+        e.auxiliary_raster_controls().local_memory.address_lower,
+        None
+    );
+    assert_eq!(e.auxiliary_raster_controls().local_memory.size_lower, None);
+    e.apply(write(0x794, u32::MAX)).unwrap();
+    e.apply(write(0x79c, u32::MAX)).unwrap();
+    let before = e.auxiliary_raster_controls().local_memory;
+    assert_eq!(before.address_upper, Some(255));
+    assert_eq!(before.address_lower, Some(u32::MAX));
+    assert_eq!(before.size_upper, Some(63));
+    assert_eq!(before.size_lower, Some(u32::MAX));
+    assert_eq!(before.default_size_per_warp, Some(0x03ffffff));
+    e.apply(write(0, EngineClass::Compute as u32)).unwrap();
+    e.apply(write(0x790, 0)).unwrap();
+    e.apply(write(0x794, 0)).unwrap();
+    assert_eq!(e.auxiliary_raster_controls().local_memory, before);
+    e.apply(write(0, CLASS)).unwrap();
+    assert_eq!(e.auxiliary_raster_controls().local_memory, before);
+    assert_eq!(
+        Maxwell3d::default()
+            .auxiliary_raster_controls()
+            .local_memory,
+        GraphicsLocalMemory::default()
+    );
+}

@@ -2688,3 +2688,10 @@ partial writes persist across submissions and engine rebinding. Configuration
 does not fetch guest descriptors, map scratch memory, alter B197 bindings or
 execute compute shaders. Unsupported launch methods continue to latch faults
 while preserving previously submitted graphics work for explicit publication.
+
+B197 graphics scratch address, size and per-warp selectors are retained separately
+from B1C0 compute scratch state. Individual fields can be written before the
+other halves and survive engine rebinding. They do not alter pipeline identity
+for the supported shaders without local-memory accesses. Reserved field bits
+fail before mutation; no unmapped scratch address is silently translated to a
+host pointer or used to authorize an unsupported shader instruction.

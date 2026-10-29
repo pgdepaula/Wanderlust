@@ -36,6 +36,17 @@ pub struct ComputeLocalMemorySize {
     pub max_sm_count: Option<u16>,
 }
 
+/// B197 scratch selectors only. Supported shader headers/instructions do not
+/// admit local-memory accesses, so these fields never authorize a guest fetch.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct GraphicsLocalMemory {
+    pub address_upper: Option<u8>,
+    pub address_lower: Option<u32>,
+    pub size_upper: Option<u8>,
+    pub size_lower: Option<u32>,
+    pub default_size_per_warp: Option<u32>,
+}
+
 /// Configuration only. Compute dispatch and shader execution remain unsupported.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ComputeConfiguration {
@@ -99,6 +110,7 @@ pub struct AuxiliaryRasterControls {
     pub two_sided_stencil: Option<bool>,
     pub spa_version: Option<u16>,
     pub local_memory_window: Option<u32>,
+    pub local_memory: GraphicsLocalMemory,
     pub target_independent_raster_control: Option<u8>,
     pub balanced_primitive_workload: Option<u8>,
     pub geometry_selects_target_layer: Option<bool>,
@@ -1188,6 +1200,26 @@ impl Maxwell3d {
                 // A shader-local window base is not a mapped GPU allocation.
                 // Neither SPH decoder admits local-memory storage or accesses.
                 self.auxiliary_raster.local_memory_window = Some(value);
+            }
+            0x0790 => {
+                if value > 255 {
+                    return Err(bad());
+                }
+                self.auxiliary_raster.local_memory.address_upper = Some(value as u8);
+            }
+            0x0794 => self.auxiliary_raster.local_memory.address_lower = Some(value),
+            0x0798 => {
+                if value > 63 {
+                    return Err(bad());
+                }
+                self.auxiliary_raster.local_memory.size_upper = Some(value as u8);
+            }
+            0x079c => self.auxiliary_raster.local_memory.size_lower = Some(value),
+            0x07a0 => {
+                if value > 0x03ff_ffff {
+                    return Err(bad());
+                }
+                self.auxiliary_raster.local_memory.default_size_per_warp = Some(value);
             }
             0x1130 | 0x0374 => {
                 let mask = if method == 0x1130 { 0x13 } else { 0x11 };
