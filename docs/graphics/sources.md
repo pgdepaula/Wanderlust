@@ -2475,3 +2475,12 @@ reference/function registers. The pinned
 initializes all four words to zero. The implementation retains exact bits without
 inventing clamp or NaN arithmetic while these values are unreferenced by the
 supported blend factors; consuming constant factors still fails explicitly.
+
+Neutral depth-bias coefficient methods use NVIDIA `clb197.h` at revision
+`9fdf5c4062007929d9f4e6cbad9c9771fe61b880`: `SET_SLOPE_SCALE_DEPTH_BIAS`
+(`0x156c`), `SET_DEPTH_BIAS` (`0x15bc`) and `SET_DEPTH_BIAS_CLAMP`
+(`0x187c`) each expose the complete 32-bit value. `SET_POLY_OFFSET_FILL`
+(`0x0dc8`) is a separate enable. The implemented subset accepts zero coefficients
+only; it does not infer depth-format scaling for nonzero values from host defaults.
+The initial diagnostic snapshot is a Wanderlust file format, not a NVIDIA or
+Switch submission ABI; entry validation reuses the existing B06F GPFIFO decoder.

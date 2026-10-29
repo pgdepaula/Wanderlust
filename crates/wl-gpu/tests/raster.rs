@@ -461,3 +461,23 @@ fn explicitly_empty_exclusive_window_rectangles_cannot_reject_samples() {
         assert!(engine.rasterization().is_err());
     }
 }
+
+#[test]
+fn neutral_depth_bias_coefficients_preserve_raster_and_reject_active_values() {
+    let mut e = ready();
+    let before = e.rasterization().unwrap();
+    for method in [0x156c, 0x15bc, 0x187c] {
+        for value in [0, 0x8000_0000] {
+            set(&mut e, method, value).unwrap();
+        }
+        for value in [1, 0x3f80_0000, 0xbf80_0000, 0x7f80_0000, 0x7fc0_0000] {
+            assert!(matches!(
+                set(&mut e, method, value),
+                Err(MethodError::UnsupportedValue { .. })
+            ));
+            assert_eq!(e.rasterization().unwrap(), before);
+        }
+        assert!(set(&mut e, method + 1, 0).is_err());
+    }
+    assert!(set(&mut e, 0xdc8, 1).is_err());
+}

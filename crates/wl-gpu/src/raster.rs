@@ -559,6 +559,16 @@ impl RasterRegisters {
                 Err(MethodError::UnsupportedValue { method, value })
             };
         }
+        // Only neutral IEEE-754 bias coefficients are supported. The triangle
+        // fill-offset enable remains independently checked; nonzero coefficients
+        // require depth-format-specific scaling and are not silently ignored.
+        if matches!(method, 0x156c | 0x15bc | 0x187c) {
+            return if value & 0x7fff_ffff == 0 {
+                Ok(true)
+            } else {
+                Err(MethodError::UnsupportedValue { method, value })
+            };
+        }
         let bad = || MethodError::UnsupportedValue { method, value };
         if let Some((n, (_, expected))) = FIXED_RASTER_STATE
             .iter()

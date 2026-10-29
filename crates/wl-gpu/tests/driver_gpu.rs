@@ -1720,3 +1720,80 @@ fn unused_blend_constants_keep_pixels_and_warm_pipeline_data_independent() {
     );
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+#[test]
+#[ignore = "requires actual GPU; neutral depth bias preserves indexed textured output and warm pipeline"]
+fn neutral_depth_bias_preserves_indexed_pixels_and_rejects_active_slope() {
+    let (mut data, mut words, image) = fixture();
+    let draw = words.split_off(words.len() - 8);
+    for method_offset in [0x156c, 0x15bc, 0x187c] {
+        method(&mut words, method_offset, 0);
+    }
+    words.extend_from_slice(&draw);
+    let (mut d, _, c, b, _) = setup_driver();
+    put(&mut data, 0x10000, &words);
+    let first = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, words.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(first.fault.is_none(), "{:?}", first.fault);
+    let before = d.graphics_counters();
+    let mut next = Vec::new();
+    for method_offset in [0x156c, 0x15bc, 0x187c] {
+        method(&mut next, method_offset, 0x80000000);
+    }
+    next.extend_from_slice(&draw);
+    let bytes: Vec<_> = next.iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let second = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, next.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(second.fault.is_none());
+    assert_eq!(
+        d.graphics_counters().pipeline_allocations,
+        before.pipeline_allocations
+    );
+    assert_eq!(
+        d.graphics_counters().shader_module_allocations,
+        before.shader_module_allocations
+    );
+    assert_eq!(
+        d.graphics_counters().readback_operations,
+        before.readback_operations
+    );
+    // An active coefficient cannot be silently accepted, nor discard either draw.
+    let bad = [0x2001055bu32, 1f32.to_bits()];
+    let bytes: Vec<_> = bad.iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let rejected = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, 2)),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(rejected.fault.unwrap().to_string().contains("0x156c"));
+    assert_eq!(d.graphics_counters().draw_commands, 2);
+    check(
+        &d.publish(c, &mut mem(&mut data)).unwrap().unwrap().rgba,
+        &image,
+        None,
+        BG,
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

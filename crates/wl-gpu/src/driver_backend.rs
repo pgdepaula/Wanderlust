@@ -80,6 +80,7 @@ pub struct GpuDriver {
     records: Vec<Record>,
     active: Option<ChannelId>,
     last_host: Option<HostFence>,
+    initial_capture: Option<crate::initial_capture::InitialCapture>,
     pub counters: DriverCounters,
 }
 impl GpuDriver {
@@ -95,8 +96,28 @@ impl GpuDriver {
             records: Vec::with_capacity(MAX_COMPLETIONS),
             active: None,
             last_host: None,
+            initial_capture: std::env::var_os("WL_GPU_INITIAL_COMMAND_CAPTURE_DIR")
+                .map(crate::initial_capture::InitialCapture::new),
             counters: DriverCounters::default(),
         })
+    }
+    /// Opt-in pre-execution diagnostics, available only before channel acceptance.
+    /// No snapshot is used as a source of actual GPU commands.
+    pub fn enable_initial_command_capture(
+        &mut self,
+        directory: impl Into<std::path::PathBuf>,
+    ) -> Result<()> {
+        if self.counters.accepted != 0
+            || self.renderer.counters.submissions != 0
+            || self.has_pending_output()
+        {
+            return Err(invalid("initial capture must be enabled before execution"));
+        }
+        self.initial_capture = Some(crate::initial_capture::InitialCapture::new(directory));
+        Ok(())
+    }
+    pub fn initial_capture_counters(&self) -> Option<crate::initial_capture::CaptureCounters> {
+        self.initial_capture.as_ref().map(|s| s.counters())
     }
     pub fn graphics_counters(&self) -> crate::Counters {
         self.renderer.counters
@@ -286,6 +307,23 @@ impl GpuDriver {
             .sequence
             .checked_add(1)
             .ok_or_else(|| invalid("channel sequence exhausted"))?;
+        if self.renderer.counters.submissions == 0 && !self.renderer.target_pending {
+            if let Some(sink) = &mut self.initial_capture {
+                let space = self.channels[n].space;
+                sink.record(
+                    crate::initial_capture::SnapshotIdentity {
+                        process: std::process::id(),
+                        channel: channel.0,
+                        space: space.0,
+                        sequence,
+                        mapping_epoch: self.memory.mapping_epoch(space)?,
+                    },
+                    request.entries(),
+                    self.memory.address_map(space)?,
+                    memory,
+                );
+            }
+        }
         // All metadata/identity errors above are preflight, do not consume state.
         if self.active != Some(channel) {
             // Guest RAM publication is already complete. The bounded diagnostic

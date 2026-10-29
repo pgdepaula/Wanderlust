@@ -186,6 +186,7 @@ impl ShadowRam {
                     0x1e00..=0x1efc => (method - 0x1e00) % 32 < 28,
                     0x1364..=0x137c | 0x1a04..=0x1a1c => true,
                     0x131c..=0x1328 => true,
+                    0x156c | 0x15bc | 0x187c => true,
                     _ => matches!(
                         method,
                         0x02ec

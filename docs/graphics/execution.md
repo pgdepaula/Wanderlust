@@ -2812,3 +2812,32 @@ do not consume constant color/alpha: requests for constant blend factors remain
 unsupported. Consequently changing these unused words neither changes pixels
 nor specializes a shader/pipeline or uploads a shader constant buffer. This state
 retention is not implementation of constant-factor blending or NaN arithmetic.
+
+Initial command diagnostics can be enabled before driver execution with
+`GpuDriver::enable_initial_command_capture`, or the opt-in
+`WL_GPU_INITIAL_COMMAND_CAPTURE_DIR` environment variable. The driver records
+bounded pre-execution command snapshots only before its first host queue
+submission and while no output is pending. These files are not consumed-command
+traces: inline uploads, CPU writes and GPU output may alter an unread suffix
+later. The real executor continues its ordinary guarded borrow/reacquisition;
+it never executes the diagnostic copy. Capture failures disable further records
+without changing GPU execution or forcing publication. Capture counters report
+additional guest borrows and published diagnostic bytes explicitly.
+
+The versioned `WLGPFC01` format uses explicit little-endian process, diagnostic
+channel/address-space, sequence and mapping-epoch identities, validated GPFIFO
+entries and their borrowed payload bytes. Files are bounded to 8 MiB, 32 records
+and 64 MiB per driver, and published without replacing existing records. The
+reader checks descriptor ranges, entry/payload lengths, aggregate work, footer
+and trailing data. `inspect_initial_capture` produces an offline literal-method
+inventory with B06F packet continuation across entries and consecutive channel
+requests. It does not execute MME, shaders, resources or GPU work, and its output
+must not be used as evidence of completed draws or compatibility coverage.
+Keep captures from commercial inputs in private ignored storage.
+
+The single-target raster subset accepts only neutral positive/negative-zero
+values for slope-scale depth bias (`0x156c`), constant depth bias (`0x15bc`) and
+bias clamp (`0x187c`). Nonzero, NaN and infinite coefficients remain unsupported;
+polygon fill offset enable remains separately rejected. This is not general
+polygon-offset support. These validated pure-state words participate in the
+bounded shadow bank without adding host pipeline specialization.

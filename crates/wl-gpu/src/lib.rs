@@ -22,6 +22,7 @@ mod gpfifo_backend;
 pub mod index;
 #[cfg(feature = "wgpu-backend")]
 mod index_backend;
+pub mod initial_capture;
 pub mod layout;
 pub mod maxwell;
 pub mod memory;

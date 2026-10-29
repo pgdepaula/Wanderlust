@@ -4082,3 +4082,22 @@ came from the actual Windows-local executables with matching SHA-256 hashes,
 fresh native batch receipt and per-backend Rust test summaries. Strict package
 all-target Clippy and workspace formatting passed. No original-game frame is
 inferred from these synthetic texture scenes.
+
+The initial-command capture suite validates independently encoded little-endian
+records, a method packet split across two entries, all truncated prefixes,
+invalid headers/counts/lengths, 40-bit command-range overflow, aggregate work
+limits, extra trailing bytes, short guest reads, nonreplacement and cleanup of
+partial records. The GPU regression submits a real B197 RGBA8 clear followed by
+a command entry aliasing the cleared target. The snapshot contains the original
+NOP; actual execution correctly republishes/reacquires the changed bytes and
+faults on the new header. Both successful capture and injected filesystem failure
+must preserve the clear and identical guest pixels. This is a synthetic
+command-acquisition regression, not an original-game frame.
+Neutral depth-bias tests preserve resolved raster state and reject nonzero,
+nonfinite and unaligned inputs without mutating the valid state.
+The capture/neutral-bias validation ran 450 default-feature CPU tests and 445
+without default features. The full Vulkan regression executed 203 ignored GPU
+scenarios, followed by the additional neutral-bias GPU scenario; none failed or
+skipped. Both new scenarios also executed on WSL OpenGL and native Windows D3D12
+and Vulkan. Native Windows additionally ran all 20 driver GPU scenarios per
+backend. Strict package all-target Clippy and workspace formatting passed.
