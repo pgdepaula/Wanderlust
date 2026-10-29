@@ -94,6 +94,15 @@ pub struct AuxiliaryRasterControls {
     pub iterated_blend_pass: Option<u8>,
     /// Raw RGBA fixed-blend constants. Constant blend factors remain unsupported.
     pub blend_constant_bits: [Option<u32>; 4],
+    /// Supported disabled pixel controls; active variants require new semantics.
+    pub api_mandated_early_z: Option<bool>,
+    pub post_z_pixel_sample_mask: Option<bool>,
+    pub constant_color_rendering: Option<bool>,
+    pub hybrid_anti_alias_control: Option<u8>,
+    pub pixel_shader_interlock: Option<u8>,
+    pub offset_render_target_index: Option<u32>,
+    /// Disabled vertex-cull, tessellation-init, tessellation and geometry TYPE.
+    pub disabled_pipeline_types: [Option<u8>; 4],
     pub alpha_coverage_qualifier: Option<u8>,
     /// Disabled tile cache and exact public-driver baseline tuning words only.
     pub tile_cache_profile: [Option<u32>; 7],
@@ -187,6 +196,7 @@ impl ShadowRam {
                     0x1364..=0x137c | 0x1a04..=0x1a1c => true,
                     0x131c..=0x1328 => true,
                     0x156c | 0x15bc | 0x187c => true,
+                    0x0210 | 0x0f1c | 0x0f40 | 0x1224 | 0x11f0 | 0x0754 => true,
                     _ => matches!(
                         method,
                         0x02ec
@@ -341,6 +351,8 @@ pub enum MethodEffect {
     HostCacheMaintenance,
     ShaderCachesInvalidated(u32),
     TextureDataInvalidated,
+    /// Whole texture-data cache invalidation after real host queue completion.
+    TextureDataInvalidatedWaitIdle,
 }
 /// Bounded pitch-linear, one-row B197 inline upload. Configuration remains
 /// separate from the active transfer snapshot; no guest memory is retained.
@@ -1031,6 +1043,54 @@ impl Maxwell3d {
                 }
                 self.auxiliary_raster.zero_bandwidth_clear_disable_masks
                     [usize::from(method == 0x7a8)] = Some(value as u16);
+            }
+            0x0210 | 0x0f1c | 0x0f40 | 0x1224 | 0x11f0 => {
+                if value != 0 {
+                    return Err(bad());
+                }
+                match method {
+                    0x0210 => self.auxiliary_raster.api_mandated_early_z = Some(false),
+                    0x0f1c => self.auxiliary_raster.post_z_pixel_sample_mask = Some(false),
+                    0x0f40 => self.auxiliary_raster.constant_color_rendering = Some(false),
+                    0x1224 => self.auxiliary_raster.pixel_shader_interlock = Some(0),
+                    _ => self.auxiliary_raster.offset_render_target_index = Some(0),
+                }
+            }
+            0x0754 => {
+                // One hybrid-AA pass, centroid per fragment, no extended passes.
+                if value != 1 {
+                    return Err(bad());
+                }
+                self.auxiliary_raster.hybrid_anti_alias_control = Some(1);
+            }
+            0x2000 | 0x2080 | 0x20c0 | 0x2100 => {
+                let stage = ((method - 0x2000) / 64) as u8;
+                if value != u32::from(stage) << 4 {
+                    return Err(bad());
+                }
+                let index = if stage == 0 {
+                    0
+                } else {
+                    usize::from(stage - 1)
+                };
+                self.auxiliary_raster.disabled_pipeline_types[index] = Some(stage);
+            }
+            0x0de0 => {
+                // SYSMEMBAR_ENABLE=false only. A full host queue wait is a
+                // conservative implementation of the fragment barrier; it does
+                // not imply guest RAM publication or a hardware-equivalent stall.
+                if value != 0 {
+                    return Err(bad());
+                }
+                return Ok(MethodEffect::WaitIdle);
+            }
+            0x0f74 => {
+                // deko3d's all-lines invalidate with implicit WFI. Per-tag
+                // invalidation is separately unsupported, not silently widened.
+                if value != 0 {
+                    return Err(bad());
+                }
+                return Ok(MethodEffect::TextureDataInvalidatedWaitIdle);
             }
             0x1288 => {
                 // Whole-cache invalidation only; per-tag forms are unsupported.

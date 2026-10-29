@@ -4101,3 +4101,18 @@ scenarios, followed by the additional neutral-bias GPU scenario; none failed or
 skipped. Both new scenarios also executed on WSL OpenGL and native Windows D3D12
 and Vulkan. Native Windows additionally ran all 20 driver GPU scenarios per
 backend. Strict package all-target Clippy and workspace formatting passed.
+
+Fragment-barrier validation checks two explicit completion waits after an indexed
+textured draw, with no additional queue submission, readback or guest framebuffer
+publication. Guest RAM remains at its initial background while the resident image
+is newer. The all-lines WFI invalidate forces a texture refresh on the next draw
+without recompiling the shader, and final publication matches the independent
+triangle/UV oracle. Disabled pixel controls and correctly typed inactive optional
+shader stages are exercised in the same hardware fixture. CPU tests reject
+system-memory/per-tag barrier operands, active pixel controls, enabled optional
+stages, wrong types and unaligned offsets without corrupting retained state.
+The fragment-barrier/control validation ran 452 default-feature CPU tests, 447
+without default features, and all 205 explicit Vulkan GPU scenarios. The new
+scenario also passed on WSL OpenGL; all 21 driver GPU scenarios passed on native
+Windows D3D12 and Vulkan. No executed case failed or skipped. Package all-target
+strict Clippy and workspace formatting passed.

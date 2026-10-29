@@ -84,6 +84,7 @@ impl Renderer {
                                     | MethodEffect::HostCacheMaintenance
                                     | MethodEffect::ShaderCachesInvalidated(_)
                                     | MethodEffect::TextureDataInvalidated
+                                    | MethodEffect::TextureDataInvalidatedWaitIdle
                             ) {
                                 draw = Some(effect);
                                 break;

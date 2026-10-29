@@ -134,6 +134,7 @@ impl Renderer {
                             | MethodEffect::HostCacheMaintenance
                             | MethodEffect::ShaderCachesInvalidated(_)
                             | MethodEffect::TextureDataInvalidated
+                            | MethodEffect::TextureDataInvalidatedWaitIdle
                     ) {
                         if let Some(frame) =
                             self.channel_effect(channel, effect, map, memory, changes, synchronous)?
@@ -401,6 +402,11 @@ impl Renderer {
         synchronous: bool,
     ) -> Result<Option<Frame>> {
         match effect {
+            MethodEffect::TextureDataInvalidatedWaitIdle => {
+                self.guest_effect(engine, MethodEffect::WaitIdle, map, memory, changes, false)?;
+                self.invalidate_texture_data();
+                Ok(None)
+            }
             MethodEffect::TextureDataInvalidated => {
                 self.invalidate_texture_data();
                 Ok(None)

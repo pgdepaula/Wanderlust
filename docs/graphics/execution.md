@@ -2841,3 +2841,22 @@ bias clamp (`0x187c`). Nonzero, NaN and infinite coefficients remain unsupported
 polygon fill offset enable remains separately rejected. This is not general
 polygon-offset support. These validated pure-state words participate in the
 bounded shadow bank without adding host pipeline specialization.
+
+B197 `PIXEL_SHADER_BARRIER` (`0x0de0`) with `SYSMEMBAR_ENABLE=false`
+executes a conservative whole-host-queue completion wait. This is stronger than
+a fragment-stage-only dependency, and is not a physical pipeline timing model.
+It retains GPU-newer attachments without publishing guest RAM. The system-memory
+barrier operand remains unsupported. The operand-zero all-lines texture-data
+invalidate with implicit WFI (`0x0f74`) likewise waits for actual queue completion,
+then invalidates sampled-resource stamps; a later draw reacquires affected guest
+texture data. Per-tag forms remain unsupported. Neither method is captured in
+shadow state or treated as an inert register write.
+
+The bounded triangle path also retains disabled API-mandated early Z (`0x0210`),
+post-Z pixel mask (`0x0f1c`), constant-color rendering (`0x0f40`), pixel interlock
+(`0x1224`), render-target-index offset (`0x11f0`), and the one-pass/per-fragment
+hybrid-AA profile (`0x0754=1`). Active alternatives fail before state mutation.
+Vertex-cull, tessellation-init, tessellation and geometry pipeline slots accept
+only their correctly typed disabled encodings. This does not provide executable
+shaders for those stages. Vertex and fragment selection keep their existing
+strict validation and resource fetching.

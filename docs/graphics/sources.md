@@ -2484,3 +2484,20 @@ Neutral depth-bias coefficient methods use NVIDIA `clb197.h` at revision
 only; it does not infer depth-format scaling for nonzero values from host defaults.
 The initial diagnostic snapshot is a Wanderlust file format, not a NVIDIA or
 Switch submission ABI; entry validation reuses the existing B06F GPFIFO decoder.
+
+B197 fragment completion and inactive controls use NVIDIA header revision
+`9fdf5c4062007929d9f4e6cbad9c9771fe61b880`: `PIXEL_SHADER_BARRIER`
+(`0x0de0`, bit 0 system-memory barrier), `SET_API_MANDATED_EARLY_Z`,
+`SET_POST_Z_PS_IMASK`, `SET_CONSTANT_COLOR_RENDERING`,
+`SET_PIXEL_SHADER_INTERLOCK_CONTROL`, `SET_OFFSET_RENDER_TARGET_INDEX`,
+`SET_HYBRID_ANTI_ALIAS_CONTROL` and the ENABLE/TYPE fields of
+`SET_PIPELINE_SHADER(j)`. Whole-host completion is an explicit conservative
+Wanderlust policy, not a claim that a hardware fragment barrier waits all engines.
+
+The pinned deko3d `engine_3d.def` at
+`373bfd43d8b2d805fa2eb7d406dbb823032df958` identifies word method `0x3dd`
+(byte `0x0f74`) as texture-data invalidation, with the same line/tag fields as
+the no-WFI form and an implicit WFI. Its comment labels that interpretation
+“theoretical”; this is reference-based compatibility evidence, not a public
+NVIDIA timing specification. Only operand-zero whole-cache invalidation is
+accepted, with a real conservative host wait followed by cache-stamp invalidation.

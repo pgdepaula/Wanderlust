@@ -1797,3 +1797,92 @@ fn neutral_depth_bias_preserves_indexed_pixels_and_rejects_active_slope() {
     );
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+#[test]
+#[ignore = "requires actual GPU; fragment completion and WFI texture invalidation retain unpublished output"]
+fn pixel_barrier_waits_without_publication_and_texture_wfi_invalidates() {
+    let (mut data, mut words, image) = fixture();
+    let draw = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x210, 0),
+        (0xf1c, 0),
+        (0xf40, 0),
+        (0x1224, 0),
+        (0x11f0, 0),
+        (0x754, 1),
+        (0x2000, 0),
+        (0x2080, 0x20),
+        (0x20c0, 0x30),
+        (0x2100, 0x40),
+    ] {
+        method(&mut words, m, v);
+    }
+    words.extend_from_slice(&draw);
+    let (mut d, _, c, b, _) = setup_driver();
+    put(&mut data, 0x10000, &words);
+    let first = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, words.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(first.fault.is_none());
+    assert!(d.has_pending_output());
+    assert!(data[RT..RT + SIZE].chunks_exact(4).all(|p| p == BG));
+    let before = d.graphics_counters();
+    // Pixel barrier and all-lines texture invalidate are two ordered actions.
+    let barriers = [0x20010378u32, 0, 0x200103dd, 0];
+    let bytes: Vec<_> = barriers.iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let report = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, 4)),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(report.fault.is_none(), "{:?}", report.fault);
+    let after = d.graphics_counters();
+    assert_eq!(
+        after.synchronization_points,
+        before.synchronization_points + 2
+    );
+    assert_eq!(after.submissions, before.submissions);
+    assert_eq!(after.readback_operations, before.readback_operations);
+    assert_eq!(after.draw_commands, before.draw_commands);
+    assert!(d.has_pending_output());
+    assert!(d.wait(report.token).unwrap().host_completed);
+    assert!(!d.query(report.token).unwrap().guest_visible);
+    assert!(data[RT..RT + SIZE].chunks_exact(4).all(|p| p == BG));
+    let bytes: Vec<_> = draw.iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let next = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, draw.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(next.fault.is_none());
+    assert!(d.graphics_counters().texture_uploads > after.texture_uploads);
+    assert_eq!(
+        d.graphics_counters().shader_module_allocations,
+        after.shader_module_allocations
+    );
+    check(
+        &d.publish(c, &mut mem(&mut data)).unwrap().unwrap().rgba,
+        &image,
+        None,
+        BG,
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

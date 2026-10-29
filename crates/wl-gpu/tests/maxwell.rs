@@ -1889,3 +1889,75 @@ fn unused_blend_constants_preserve_rgba_wire_bits_and_shadow_history() {
     c.engine.apply(write(0x124, 2)).unwrap();
     assert!(c.engine.apply(write(0x1344, 0xc001)).is_err()); // Consuming constants is not implemented.
 }
+
+#[test]
+fn fragment_and_texture_barriers_are_ordered_actions_with_strict_operands() {
+    let mut e = Maxwell3d::default();
+    assert!(e.apply(write(0xde0, 0)).is_err());
+    e.apply(write(0, CLASS)).unwrap();
+    e.apply(write(0x164c, 0x1000)).unwrap();
+    for (method, effect) in [
+        (0xde0, MethodEffect::WaitIdle),
+        (0xf74, MethodEffect::TextureDataInvalidatedWaitIdle),
+    ] {
+        assert_eq!(e.apply(write(method, 0)), Ok(effect));
+        for value in [1, 0x10, 0x80000000, u32::MAX] {
+            assert!(matches!(
+                e.apply(write(method, value)),
+                Err(MethodError::UnsupportedValue { .. })
+            ));
+        }
+        assert!(matches!(
+            e.apply(write(method + 1, 0)),
+            Err(MethodError::InvalidMethod(_))
+        ));
+    }
+    assert_eq!(e.vertex_id_uses_array_start(), Some(true));
+    e.apply(write(0, 0x902d)).unwrap();
+    assert!(e.apply(write(0xde0, 0)).is_err());
+    assert!(e.apply(write(0xf74, 0)).is_err());
+}
+
+#[test]
+fn inactive_pixel_controls_and_disabled_optional_stages_remain_strict() {
+    let mut e = Maxwell3d::default();
+    e.apply(write(0, CLASS)).unwrap();
+    for (method, value) in [
+        (0x210, 0),
+        (0xf1c, 0),
+        (0xf40, 0),
+        (0x1224, 0),
+        (0x11f0, 0),
+        (0x754, 1),
+        (0x2000, 0),
+        (0x2080, 0x20),
+        (0x20c0, 0x30),
+        (0x2100, 0x40),
+    ] {
+        e.apply(write(method, value)).unwrap();
+        let before = e.auxiliary_raster_controls();
+        for bad in [value ^ 1, 0x80000000, u32::MAX] {
+            assert!(matches!(
+                e.apply(write(method, bad)),
+                Err(MethodError::UnsupportedValue { .. })
+            ));
+            assert_eq!(e.auxiliary_raster_controls(), before);
+        }
+        assert!(e.apply(write(method + 1, value)).is_err());
+    }
+    let a = e.auxiliary_raster_controls();
+    assert_eq!(
+        a.disabled_pipeline_types,
+        [Some(0), Some(2), Some(3), Some(4)]
+    );
+    assert_eq!(a.hybrid_anti_alias_control, Some(1));
+    assert_eq!(a.api_mandated_early_z, Some(false));
+    assert_eq!(a.pixel_shader_interlock, Some(0));
+    // Pure disabled raster values replay; action ports remain non-shadow state.
+    e.apply(write(0x124, 0)).unwrap();
+    e.apply(write(0x1224, 0)).unwrap();
+    e.apply(write(0x124, 3)).unwrap();
+    e.apply(write(0x1224, u32::MAX)).unwrap();
+    assert!(e.apply(write(0xde0, 0)).is_err());
+    assert!(e.apply(write(0xf74, 0)).is_err());
+}
