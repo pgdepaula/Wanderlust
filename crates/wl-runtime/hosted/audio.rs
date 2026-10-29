@@ -393,9 +393,17 @@ impl Renderer {
             // libnx feebd026: Started=0, Stopped=1, Paused=2. Paused
             // voices cannot advance DSP samples, like this renderer's stopped
             // subset. Actual playback remains unsupported, with useful metadata.
+            let queued_candidate = p.revision_number() == 11
+                && p.submixes > 0
+                && voice[9] == 1
+                && voice[10] == 0
+                && word(voice, wave_base - 0x24) > 0;
             if word(voice, 0) >= p.voices
                 || voice[9] > 1
-                || (voice[9] != 0 && !matches!(voice[10], 1 | 2) && !empty_started)
+                || (voice[9] != 0
+                    && !matches!(voice[10], 1 | 2)
+                    && !empty_started
+                    && !queued_candidate)
             {
                 let buffers: Vec<_> = (0..4)
                     .map(|i| {
@@ -437,7 +445,7 @@ impl Renderer {
         let graph = if self.graph.is_some()
             || (p.submixes != 0 && parts[5].chunks_exact(0xc0).any(|e| e[0] != 0))
         {
-            Some(self.prepare_graph(parts[5], parts[6], parts[7], parts[2], memory)?)
+            Some(self.prepare_graph(&parts, memory)?)
         } else {
             None
         };
@@ -517,7 +525,13 @@ impl Renderer {
             output[at..at + 4].copy_from_slice(&state.to_le_bytes());
             at += 0x10;
         }
-        at += sizes[2];
+        for voice in parts[3].chunks_exact(stride) {
+            if let Some(state) = graph.as_ref().and_then(|g| g.voices.get(&word(voice, 0))) {
+                output[at..at + 8].copy_from_slice(&state.queue.played.to_le_bytes());
+                output[at + 8..at + 12].copy_from_slice(&state.queue.consumed.to_le_bytes());
+            }
+            at += 16;
+        }
         for (slot, _) in parts[5].chunks_exact(0xc0).enumerate() {
             output[at] = if let Some(effect) = graph
                 .as_ref()
@@ -760,23 +774,52 @@ impl Backend {
                 .renderers
                 .get_mut(&index)
                 .ok_or("invalid audio renderer identity")?;
-            if let Some(old) = renderer.graph.as_mut()
-                && old.pools == new.pools
+            let old_pools = renderer
+                .graph
+                .as_ref()
+                .map_or(&[][..], |g| g.pools.as_slice());
+            if renderer
+                .graph
+                .as_ref()
+                .is_some_and(|g| g.pins.len() != g.pools.len())
             {
-                new.pins = std::mem::take(&mut old.pins);
-                return Ok(());
+                return Err("audio pool ownership invariant".into());
             }
-            for &(address, size) in &new.pools {
+            let mut planned = vec![None; new.pools.len()];
+            // Acquire only genuinely new ranges. A failure releases this prefix
+            // while every old token remains attached to the old configuration.
+            for (i, &(address, size)) in new.pools.iter().enumerate() {
+                if old_pools.contains(&(address, size)) {
+                    continue;
+                }
                 match memory.pin_gpu_range(address, size) {
-                    Ok(pin) => new.pins.push(pin),
+                    Ok(pin) => planned[i] = Some(pin),
                     Err(error) => {
-                        for pin in new.pins.drain(..).rev() {
+                        for pin in planned.into_iter().flatten().rev() {
                             memory.release_gpu_pin(pin)?;
                         }
                         return Err(format!("audio graph lifetime registration: {error}"));
                     }
                 }
             }
+            if let Some(old) = renderer.graph.as_mut() {
+                let mut remaining_pools = Vec::new();
+                let mut remaining_pins = Vec::new();
+                for (pool, pin) in old.pools.drain(..).zip(old.pins.drain(..)) {
+                    if let Some(i) = new.pools.iter().position(|p| *p == pool) {
+                        planned[i] = Some(pin);
+                    } else {
+                        remaining_pools.push(pool);
+                        remaining_pins.push(pin);
+                    }
+                }
+                old.pools = remaining_pools;
+                old.pins = remaining_pins;
+            }
+            new.pins = planned
+                .into_iter()
+                .map(|p| p.expect("validated audio pool token"))
+                .collect();
             return Ok(());
         }
         let Some(new) = prepared.auxiliary.as_mut() else {
@@ -1413,6 +1456,9 @@ struct EffectGraph {
     order: Vec<usize>,
     pools: Vec<(u64, u64)>,
     pins: Vec<GpuPin>,
+    sample_rate: u32,
+    voices: std::collections::BTreeMap<u32, crate::host_audio_dsp::voice::MonoVoice>,
+    routing: crate::host_audio_dsp::routing::Routing,
 }
 impl EffectGraph {
     fn preflight(&self, memory: &Memory, samples: usize) -> RuntimeResult<()> {
@@ -1432,6 +1478,20 @@ impl EffectGraph {
             .iter()
             .map(|m| vec![vec![0.; samples]; m.as_ref().map_or(0, |m| m.channels)])
             .collect();
+        let mut voices = self.voices.clone();
+        let mut routing = self.routing.clone();
+        let mut sequence: Vec<_> = voices.values_mut().collect();
+        sequence.sort_by_key(|voice| (std::cmp::Reverse(voice.priority), voice.order, voice.id));
+        for voice in sequence {
+            let source = voice.render(memory, samples)?;
+            routing.route_mono(
+                voice.splitter as usize,
+                self.sample_rate,
+                &source,
+                &mut buffers,
+            )?;
+        }
+        routing.finish_frame();
         let mut processors = self.effects.clone();
         let mut writes = Vec::new();
         for &mix_id in &self.order {
@@ -1510,6 +1570,8 @@ impl EffectGraph {
         }
         crate::host_audio_dsp::commit(memory, writes)?;
         self.effects = processors;
+        self.voices = voices;
+        self.routing = routing;
         Ok(())
     }
 }
@@ -1520,14 +1582,9 @@ fn short(data: &[u8], at: usize) -> usize {
     u16::from_le_bytes(data[at..at + 2].try_into().unwrap()) as usize
 }
 impl Renderer {
-    fn prepare_graph(
-        &self,
-        effects: &[u8],
-        mix_bytes: &[u8],
-        sinks: &[u8],
-        pools: &[u8],
-        memory: &Memory,
-    ) -> RuntimeResult<EffectGraph> {
+    fn prepare_graph(&self, parts: &[&[u8]; 11], memory: &Memory) -> RuntimeResult<EffectGraph> {
+        let (effects, mix_bytes, sinks, pools, voice_bytes, splitter_bytes) =
+            (parts[5], parts[6], parts[7], parts[2], parts[3], parts[9]);
         use crate::host_audio_dsp::{
             limiter::{Limiter, LimiterParams},
             reverb3d::{Reverb3d, ReverbParams},
@@ -1649,7 +1706,20 @@ impl Renderer {
             order,
             pools: Vec::new(),
             pins: Vec::new(),
+            sample_rate: self.parameters.sample_rate,
+            voices: std::collections::BTreeMap::new(),
+            routing: if let Some(old) = &self.graph {
+                old.routing.clone()
+            } else {
+                crate::host_audio_dsp::routing::Routing::new(
+                    self.parameters.splitters as usize,
+                    self.parameters.splitter_destinations as usize,
+                )?
+            },
         };
+        if !splitter_bytes.is_empty() {
+            result.routing = result.routing.update(splitter_bytes, count)?;
+        }
         let mut occupied = Vec::<(u64, u64)>::new();
         let mut attach = |base: u64, size: u64| -> RuntimeResult<()> {
             let end = base
@@ -1879,6 +1949,85 @@ impl Renderer {
                 processor,
             }));
         }
+        let mut voice_ids = std::collections::BTreeSet::new();
+        let voice_stride = if self.parameters.revision_number() >= 15 {
+            0x188
+        } else {
+            0x170
+        };
+        for wire in voice_bytes.chunks_exact(voice_stride) {
+            let id = word(wire, 0);
+            if wire[9] == 0 {
+                continue;
+            }
+            if !voice_ids.insert(id) {
+                return Err(unsupported("duplicate voice id"));
+            }
+            let old = self.graph.as_ref().and_then(|g| g.voices.get(&id));
+            let queued = word(wire, 60) > 0;
+            if wire[10] == 1 {
+                if old.is_some_and(|v| v.has_queued_buffers()) {
+                    return Err(unsupported("queued voice stop/depop"));
+                }
+                if let Some(old) = old {
+                    let mut state = old.clone();
+                    state.playing = false;
+                    result.voices.insert(id, state);
+                }
+                continue;
+            }
+            if !queued {
+                if let Some(old) = old {
+                    let mut state = old.clone();
+                    state.playing = false;
+                    result.voices.insert(id, state);
+                }
+                continue;
+            }
+            if self.parameters.revision_number() != 11 {
+                return Err(unsupported("queued voice revision"));
+            }
+            let voice = crate::host_audio_dsp::voice::MonoVoice::prepare(
+                old,
+                wire,
+                self.parameters.sample_rate,
+            )?;
+            for (base, size) in voice.backing_ranges() {
+                let range = attached_audio_pool(pools, base, size)?;
+                if !result.pools.contains(&range) {
+                    result.pools.push(range);
+                }
+            }
+            // Validate all currently referenced reads and routes on a disposable
+            // state. Installation retains the unadvanced queue/filter history.
+            let mut preview = voice.clone();
+            let source = preview.render(memory, self.parameters.sample_count as usize)?;
+            let mut scratch: Vec<_> = result
+                .mixes
+                .iter()
+                .map(|m| {
+                    vec![
+                        vec![0.; self.parameters.sample_count as usize];
+                        m.as_ref().map_or(0, |m| m.channels)
+                    ]
+                })
+                .collect();
+            let mut routing = result.routing.clone();
+            routing.route_mono(
+                voice.splitter as usize,
+                self.parameters.sample_rate,
+                &source,
+                &mut scratch,
+            )?;
+            result.voices.insert(id, voice);
+        }
+        if self.graph.as_ref().is_some_and(|g| {
+            g.voices
+                .iter()
+                .any(|(id, v)| !voice_ids.contains(id) && v.has_queued_buffers())
+        }) {
+            return Err(unsupported("queued voice release/depop"));
+        }
         result.pools.sort_unstable();
         for (id, m) in result
             .mixes
@@ -1904,4 +2053,20 @@ impl Renderer {
         result.preflight(memory, self.parameters.sample_count as usize)?;
         Ok(result)
     }
+}
+
+fn attached_audio_pool(pools: &[u8], base: u64, size: u64) -> RuntimeResult<(u64, u64)> {
+    let end = base
+        .checked_add(size)
+        .filter(|e| *e > base)
+        .ok_or("audio source range overflow/empty")?;
+    let pool = pools
+        .chunks_exact(32)
+        .find(|p| {
+            matches!(word(p, 16), 4 | 5)
+                && wide(p, 0) <= base
+                && wide(p, 0).checked_add(wide(p, 8)).is_some_and(|e| end <= e)
+        })
+        .ok_or("audio source outside attached pool")?;
+    Ok((wide(pool, 0), wide(pool, 8)))
 }

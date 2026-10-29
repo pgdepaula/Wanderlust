@@ -4,8 +4,8 @@ Horizon-mode generated executables install a headless `audren:u` implementation.
 It supports renderer discovery, work-buffer sizing, transfer-memory-backed opening,
 configuration queries, start/stop, copied kernel event handles, device-name and
 volume queries, and bounded silent renderer updates. It does not produce audible
-output. Queued voice playback, sample decoding, effects outside the bounded auxiliary/reverb/limiter
-subset below and circular sinks fail explicitly; this is not a complete audio renderer.
+output. Voice formats outside the bounded mono DSP-ADPCM subset, effects outside the
+auxiliary/reverb/limiter subset below and circular sinks fail explicitly; this is not a complete audio renderer.
 
 ## Wire protocol and ownership
 
@@ -28,7 +28,8 @@ Closing the last session or domain reference removes the renderer clock.
 Silent updates validate section totals, memory-pool ranges, voice/sink/mix records
 and output ranges before publication. AutoSelect B/C descriptors retain their slot
 indices, including empty slots. Status and performance outputs must not overlap.
-Pool attach/detach statuses are returned; voice results contain no consumed samples.
+Pool attach/detach statuses are returned; voice results report actual played samples and consumed buffers for the supported
+queued-voice subset, and zero for silent initialization.
 Pools are independently mapped guest backing ranges, not embedded IPC payloads.
 The 16 MiB update-message budget does not limit their size. Attach validation checks
 nonzero page-aligned address/length, overflow and readable coverage across adjacent
@@ -37,7 +38,8 @@ regions without copying pool contents; mapping gaps and unreadable pages fail.
 Stopped and paused voices do not advance sample counters. A started voice is also
 accepted when its queued-buffer count is zero and all four descriptors are pristine,
 empty and already sent. This initializes a voice without decoding samples or claiming
-ADPCM playback. Any queued sample data or inconsistent descriptor still fails.
+ADPCM playback. Queued data follows the stricter playback subset below; inconsistent empty
+descriptors still fail.
 REV15 diagnostics account for the expanded floating-point biquad records. These
 rules follow libnx's voice-state wire enum and the skip/initialization behavior in
 [Ryujinx VoiceState at 4930dced](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Server/Voice/VoiceState.cs).
@@ -58,8 +60,8 @@ signatures, variable destination lists, cyclic lists, mix IDs, finite volumes an
 the 112-byte destination format. Twelve unused bytes follow each ID list; unused
 fields and final alignment padding need not be zero. Newer filtered destination
 formats remain unsupported. Splitter descriptors are not consumed by the bounded effect graph, whose mix edges
-use direct mix destinations. A mix with a splitter destination, an active voice with
-queued samples or an unsupported DSP effect still fails before publication.
+use direct mix destinations. A mix with a splitter destination, a queued voice outside the supported subset or an unsupported DSP effect still
+fails before publication.
 
 ## Auxiliary shared-buffer exchange
 
@@ -428,3 +430,58 @@ and its parameter/state/statistics types at the same revision. Tests use nonzero
 synthetic PCM, independently specified lookahead/threshold values, impulse
 response, chunk continuity, disabled behavior, routing, statistics and failure
 injection. No retail audio samples are included.
+
+## Queued mono DSP-ADPCM voices
+
+REV11 direct-mix graphs additionally accept mono Nintendo DSP-ADPCM voices at
+the renderer rate, pitch 1 and default SRC quality, routed through unfiltered
+splitters. Four nonlooping, non-EOS wave slots retain checked guest addresses,
+start/end sample positions and optional six-byte little-endian ADPCM contexts.
+Predictor coefficients are read from the checked 32-byte guest range. Processing
+acquires only the encoded frames needed for the current tick, rather than
+copying each complete wave allocation. Partial initial frames require an explicit
+context. Unknown predictors, truncated reads, overflowing ranges and unverified
+32-bit accumulator overflow fail explicitly.
+
+The source path includes the default-quality four-tap phase-zero SRC filter even
+when input and output rates match. Four preceding samples persist between ticks;
+this is not a linear interpolation approximation or a direct sample copy. Two
+Q14 biquads and the voice-volume ramp precede splitter fanout. Voice and splitter
+volume products follow the pinned reference's nearest-even PCM rounding. Splitter
+current/previous gains persist across dirty-only updates and advance after a
+successful frame; independent destinations may fan out one mono source. Repeated
+destinations accumulating into the same mix are explicitly unsupported.
+
+Sample and consumed-buffer counters advance only for successfully decoded source
+samples, not starvation padding or paused frames. A consumed slot can be reused;
+a redundant poll cannot consume it twice. Queue, SRC, filter, volume and splitter
+histories are staged together with effect histories. A failure after reading a
+first buffer does not consume it or publish earlier auxiliary writes. Reply
+publication installs the new configuration after validation, and compatible pool
+registrations move by exact pool identity. Adding a new source pool acquires only
+new guards; failed acquisition preserves the old graph and its guards.
+
+Wave, coefficient and context spans must be contained in attached readable pools.
+Those canonical pools remain protected while referenced. Removing drained source
+ranges releases their guards without disturbing still-active effect pools. Last
+close cancels future ticks and releases the remaining guards. CPU byte writes are
+observed by later checked acquisitions; corrupted encoded data is a retryable
+frame error, not an unchecked host memory access.
+
+This subset does not support queued PCM formats, resampling ratios other than one,
+other SRC qualities, loops, EOS handling, nonzero initial queue indices, queued
+stop/flush/depop transitions or audible device output. Such requests fail rather
+than returning invented playback progress. Decoder/SRC/filter semantics follow
+[AdpcmHelper](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Dsp/AdpcmHelper.cs),
+[ResamplerHelper](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Dsp/ResamplerHelper.cs),
+[BiquadFilterHelper](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Dsp/BiquadFilterHelper.cs)
+and the volume-ramp/splitter state types at MIT-licensed Ryujinx revision
+`4930dced25c0d9ec33096b0f2601d262daa477bf`.
+
+Tests cover nibble order, signed scales, saturation, ties, every split position,
+partial contexts, four-slot wrap/reuse, starvation, malformed late buffers,
+filter response, phase-zero impulse latency and 2,400 synthetic ticks with
+retail-sized allocation geometry. A CMIF fixture runs nonzero encoded samples
+through SRC, filtering, splitters, reverb/limiter and an observable auxiliary send
+ring, then verifies actual counters and incremental lifetime guards. No retail
+audio or commercial executable content is included.
