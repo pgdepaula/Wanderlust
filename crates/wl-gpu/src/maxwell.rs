@@ -182,6 +182,7 @@ impl ShadowRam {
                     0xc00..=0xcfc => true,
                     0xe00..=0xef8 => (method - 0xe00) % 16 < 12,
                     0x1e00..=0x1efc => (method - 0x1e00) % 32 < 28,
+                    0x1364..=0x137c | 0x1a04..=0x1a1c => true,
                     _ => matches!(
                         method,
                         0x02ec
@@ -274,7 +275,18 @@ pub enum MethodError {
 }
 impl std::fmt::Display for MethodError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Maxwell method fault: {self:?}")
+        // Preserve the established diagnostic prefix for existing consumers,
+        // adding byte-address context without changing the typed failure.
+        write!(f, "Maxwell method fault: {self:?}")?;
+        match self {
+            Self::UnsupportedMethod(method) => {
+                write!(f, " [B197 method {method:#06x}]")
+            }
+            Self::UnsupportedValue { method, value } => {
+                write!(f, " [B197 method {method:#06x}, value {value:#010x}]")
+            }
+            _ => Ok(()),
+        }
     }
 }
 impl std::error::Error for MethodError {}

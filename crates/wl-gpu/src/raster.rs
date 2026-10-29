@@ -404,6 +404,8 @@ pub(crate) struct RasterRegisters {
     scissor_enable: [Option<u32>; 16],
     fixed: u64,
     blend_enabled: bool,
+    inactive_blend_enabled: [Option<bool>; 7],
+    inactive_write_masks: [Option<u8>; 7],
     blend_per_target: bool,
     target_blend: [[Option<u32>; 7]; 8],
     blend_separate: Option<bool>,
@@ -446,6 +448,8 @@ impl Default for RasterRegisters {
             scissor_enable: Default::default(),
             fixed: Default::default(),
             blend_enabled: Default::default(),
+            inactive_blend_enabled: Default::default(),
+            inactive_write_masks: Default::default(),
             blend_per_target: Default::default(),
             target_blend: Default::default(),
             blend_separate: Default::default(),
@@ -627,6 +631,19 @@ impl RasterRegisters {
             return Ok(true);
         }
         match method {
+            0x1364..=0x137c => {
+                if value > 1 {
+                    return Err(bad());
+                }
+                self.inactive_blend_enabled[usize::from((method - 0x1364) / 4)] = Some(value != 0);
+            }
+            0x1a04..=0x1a1c => {
+                if value & !0x1111 != 0 {
+                    return Err(bad());
+                }
+                self.inactive_write_masks[usize::from((method - 0x1a04) / 4)] =
+                    Some((0..4).fold(0, |mask, n| mask | (((value >> (n * 4)) & 1) as u8) << n));
+            }
             0x1e00..=0x1efc => {
                 let bank = usize::from((method - 0x1e00) / 32);
                 let field = usize::from((method - 0x1e00) % 32 / 4);
@@ -901,7 +918,17 @@ impl RasterRegisters {
         }
         if self.fixed != (1u64 << FIXED_RASTER_STATE.len()) - 1 || self.scissor_enable[0] != Some(1)
         {
-            return Err(invalid("incomplete or unsupported fixed raster state"));
+            let missing = FIXED_RASTER_STATE
+                .iter()
+                .enumerate()
+                .filter(|(n, _)| self.fixed & (1 << n) == 0)
+                .map(|(_, (method, _))| format!("{method:#06x}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(invalid(&format!(
+                "incomplete or unsupported fixed raster state: missing=[{missing}], scissor0={:?}",
+                self.scissor_enable[0]
+            )));
         }
         if !matches!(self.clip_profile, Some(0x1801 | 0x181d)) {
             return Err(invalid("missing supported unclamped clip profile"));

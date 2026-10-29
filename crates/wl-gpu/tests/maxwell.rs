@@ -1791,3 +1791,52 @@ fn disabled_iterated_blending_retains_pass_fields_without_enabling_iterations() 
         assert_eq!(c.engine.rasterization().unwrap(), expected);
     }
 }
+
+#[test]
+fn inactive_target_blend_and_write_masks_do_not_alias_target_zero() {
+    let mut c = Channel::default();
+    for word in common::hardware::setup() {
+        c.push_word(word).unwrap();
+    }
+    let expected = c.engine.rasterization().unwrap();
+    c.engine.apply(write(0x124, 1)).unwrap();
+    for slot in 1..8u16 {
+        let blend = 0x1360 + slot * 4;
+        for v in [0, 1] {
+            c.engine.apply(write(blend, v)).unwrap();
+        }
+        assert!(c.engine.apply(write(blend, 2)).is_err());
+        assert_eq!(c.engine.shadow_value(blend), Some(ShadowValue::Known(1)));
+        let mask = 0x1a00 + slot * 4;
+        for v in [
+            0, 1, 0x10, 0x11, 0x100, 0x101, 0x110, 0x111, 0x1000, 0x1001, 0x1010, 0x1011, 0x1100,
+            0x1101, 0x1110, 0x1111,
+        ] {
+            c.engine.apply(write(mask, v)).unwrap();
+            assert_eq!(c.engine.rasterization().unwrap(), expected);
+        }
+        for v in [2, 0x10000, u32::MAX] {
+            assert!(c.engine.apply(write(mask, v)).is_err());
+        }
+        assert_eq!(
+            c.engine.shadow_value(mask),
+            Some(ShadowValue::Known(0x1111))
+        );
+    }
+    c.engine.apply(write(0x124, 3)).unwrap();
+    for slot in 1..8u16 {
+        c.engine.apply(write(0x1360 + slot * 4, u32::MAX)).unwrap();
+        c.engine.apply(write(0x1a00 + slot * 4, u32::MAX)).unwrap();
+        assert_eq!(c.engine.rasterization().unwrap(), expected);
+    }
+    c.engine.apply(write(0x124, 2)).unwrap();
+    for m in [0x1365, 0x1380, 0x1a20] {
+        assert!(c.engine.apply(write(m, 1)).is_err());
+    }
+    assert_eq!(c.engine.rasterization().unwrap(), expected);
+    assert!(
+        MethodError::UnsupportedMethod(0x1364)
+            .to_string()
+            .contains("0x1364")
+    );
+}

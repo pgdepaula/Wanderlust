@@ -2451,3 +2451,17 @@ independent color ENABLE bit 0 and ALPHA_ENABLE bit 1, both FALSE zero/TRUE one.
 independently programs zero enables and count one. These justify the disabled
 iteration subset and retaining bounded inactive count state, not emulation of
 active iteration, alpha iteration or an arbitrary number of host draws.
+
+
+NVIDIA's pinned B197 header defines `SET_BLEND(i)` at `0x1360+i*4`, with ENABLE
+at bit 0, and `SET_CT_WRITE(i)` at `0x1a00+i*4`, with R/G/B/A enables at bits
+0/4/8/12. The eight-bank extent is independently corroborated by the pinned
+[Nouveau B197 initialization table](https://github.com/torvalds/linux/blob/b562e44f507e863c6792946e4e1b1449fbbac85d/drivers/gpu/drm/nouveau/nvkm/engine/gr/ctxgm204.c),
+which programs eight blend enables. The following `0x1380` stencil control is
+separate and cannot be aliased as a ninth blend bank. The supported one-target
+configuration retains banks 1–7 without fetching another attachment or changing
+RT0 state. The independently authored `inactive-targets.asm` fixture was assembled
+and disassembled using envytools revision `f102b82381f3f11cee113d16374c87091db039d9`.
+Its two nine-word entries increment method-word addresses from `0x4d9` (inactive
+blend enables) and `0x681` (inactive channel masks), producing seven writes each.
+The committed words contain no original-game commands or shaders.

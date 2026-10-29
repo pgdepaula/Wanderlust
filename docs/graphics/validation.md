@@ -4041,3 +4041,26 @@ failed in WSL interoperability before test startup (`UtilAcceptVsock`, 110);
 a subsequent launch through the live interoperability endpoint executed the
 actual binaries, with zero GPU failures/skips. Strict package all-target Clippy
 and workspace formatting passed. Active iterated blending remains unsupported.
+
+
+Inactive target-bank coverage exercises all seven blend enables and all sixteen
+RGBA mask combinations per inactive target, including alignment, reserved bits,
+last-bank bounds and shadow replay. The independently assembled two-entry MME
+fixture programs each complete family through GpuDriver/GPFIFO, uses filtered
+capture and replay with invalid incoming replacements, and renders an indexed
+asymmetric texture scene. Changing only inactive target state preserves pixels,
+shader modules, pipelines and texture uploads. An invalid macro-generated mask
+fails at RT1 without replaying or discarding the earlier pending draw. The error
+diagnostic preserves its previous prefix while adding the actual B197 byte
+method in hexadecimal. CPU suites passed 443 default-feature tests (201 GPU
+scenarios ignored in that ordinary run) and 438 without default features.
+All 201 GPU scenarios executed successfully on WSL Vulkan. The new MME scenario
+also passed on WSL OpenGL. Native Windows D3D12 and Vulkan each executed 18
+driver, five blend-equation and twelve depth scenarios (35 per backend), all
+passing. WSL interoperability launch failures were isolated from test results;
+final native runs used hash-verified copies in a Windows-local directory and a
+single native batch with per-binary logs and a fresh completion receipt. Two
+intermediate Vulkan suite failures were diagnostic-prefix assertion mismatches;
+the compatible final prefix passed the complete suite. Strict package all-target
+Clippy and workspace formatting passed. Additional color attachments are still
+unsupported; inactive-bank retention does not implement MRT rendering.

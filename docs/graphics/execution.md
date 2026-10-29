@@ -2790,3 +2790,15 @@ context uses the source-listed disabled controls and count one. Both registers
 participate in the bounded pure-state shadow capture/replay path; invalid writes
 cannot poison an earlier captured count. Disabled count changes do not specialize
 shaders or pipelines. Dedicated clears do not use this blending control.
+
+
+The single-active-target path retains all seven inactive `SET_BLEND` banks at
+`0x1364..0x137c` and inactive RGBA write masks at `0x1a04..0x1a1c`. Enables accept
+only bit 0; masks accept only bits 0/4/8/12. These states remain independent of
+RT0, participate in bounded shadow capture/replay, and do not authorize more
+active attachments. Unsupported MRT selection is still rejected. Inactive bank
+changes do not alter the active pipeline key or trigger shader compilation.
+B197 method/value diagnostics identify underlying unsupported macro-emitted
+method addresses in hexadecimal separately from the caller's macro entry.
+Incomplete fixed-raster diagnostics list the missing byte methods explicitly;
+this additional formatting allocates only on the error path.
