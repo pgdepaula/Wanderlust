@@ -4214,3 +4214,14 @@ unconditional EXIT; moving that branch before EXIT or changing its target fails
 CPU validation. Strict Clippy and formatting passed. Windows native execution
 remains unavailable because the WSL interop launcher fails before test startup;
 no native pass or skipped-as-pass is claimed for this delivery.
+
+`multiply_ftz_rtz_dynamic_bits_and_rounding_edges` executes a synthetic Maxwell
+fragment through `GpuDriver` and actual indexed rasterization. Three guest
+constant words supply operands and expected result bits. A separate binary64
+oracle computes exact products and truncates to binary32 toward zero. Fourteen
+fixed edge cases and 96 deterministic random pairs check bitwise equality on the
+GPU; a deliberately wrong reference changes red from 64 to zero. Green/blue/
+alpha remain 128/191/255; independently calculated uncovered pixels retain the
+background. The 111 draws reuse shader modules and pipelines while constants
+change. Per-case explicit publication is intentional verification, not a frame
+batch benchmark. Vulkan llvmpipe passed the complete bitwise workload.

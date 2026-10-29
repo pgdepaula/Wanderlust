@@ -2946,3 +2946,11 @@ Canonical self-parking BRA padding is accepted only after the already decoded
 unconditional EXIT, with its exact inert control profile. It does not add
 executable branching, loops or relaxed dependency checks to live instructions.
 All other unsupported footer encodings remain rejected.
+
+Register `FMUL.FTZ.RZ` uses an exact 24×24-bit significand product in two
+unsigned WGSL words, followed by truncation toward zero. Subnormal operands and
+results flush to signed zero; finite overflow produces signed maximum finite.
+NaN results use a quiet canonical encoding; NVIDIA does not specify single-
+precision NaN payload preservation. Other rounding, saturation, negation and
+absolute-value modifiers remain unsupported by this form. Existing initialized-
+register, dependency and fixed-latency checks still apply.

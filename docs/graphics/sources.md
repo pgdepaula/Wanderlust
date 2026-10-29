@@ -2566,3 +2566,12 @@ The unreachable self-branch encoding is corroborated by the pinned envytools
 GM107 BRA decoder and disassembler. Its relative target is the same instruction;
 it is admitted solely as padding after unconditional EXIT. This does not infer
 instruction execution, timing or dynamic control flow from padding bytes.
+
+`FMUL.FTZ.RZ`: envytools GM107 register opcode and modifier fields at
+`f102b82381f3f11cee113d16374c87091db039d9`,
+[`envydis/gm107.c`](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/gm107.c).
+Rounding and signed FTZ behavior follow NVIDIA
+[PTX ISA 9.4, floating-point mul](https://docs.nvidia.com/cuda/parallel-thread-execution/#floating-point-instructions-mul).
+The binary fixture is independently assembled with that unmodified envytools
+revision (`envyas -m gm107 -i`), using synthetic constants and registers.
+The WGSL integer significand algorithm is an independent implementation.

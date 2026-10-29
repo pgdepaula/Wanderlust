@@ -225,6 +225,12 @@ pub enum Operation {
         right: u8,
         operator: FloatOperator,
     },
+    /// Register FMUL.FTZ.RZ, evaluated as an exact significand product.
+    MultiplyRtz {
+        dst: u8,
+        left: u8,
+        right: u8,
+    },
     /// IEEE f32 immediate bits. Short encodings omit twelve low mantissa bits;
     /// full-width forms retain all bits. This is not a GPR or integer conversion.
     FloatImmediate {
@@ -1116,6 +1122,18 @@ impl Program {
                         width,
                         signed: word & (1 << 48) != 0,
                     }
+                } else if word & !(255 | (255u64 << 8) | (255u64 << 20)) == 0x5c68118000070000 {
+                    let left = ((word >> 8) & 255) as u8;
+                    let right = ((word >> 20) & 255) as u8;
+                    if write_barrier != 7
+                        || dst == 255
+                        || [left, right]
+                            .iter()
+                            .any(|r| !initialized[*r as usize] || pending[*r as usize])
+                    {
+                        return Err(fail("unready FMUL.FTZ.RZ operand or unsupported schedule"));
+                    }
+                    Operation::MultiplyRtz { dst, left, right }
                 } else if matches!(
                     word & !(255 | (255u64 << 8) | (255u64 << 20)),
                     0x5c58000000070000 | 0x5c68000000070000
@@ -1414,7 +1432,8 @@ impl Program {
                             || multiply_result[second as usize]
                             || multiply_result[third as usize]
                     }
-                    Operation::Float {
+                    Operation::MultiplyRtz { .. }
+                    | Operation::Float {
                         operator: FloatOperator::Multiply,
                         ..
                     }
@@ -1516,6 +1535,7 @@ impl Program {
                 | Operation::Select {
                     dst, left, right, ..
                 }
+                | Operation::MultiplyRtz { dst, left, right }
                 | Operation::Float {
                     dst, left, right, ..
                 }
@@ -1656,6 +1676,9 @@ impl Program {
                 Operation::Select { dst, left, right, invert } => {
                     let condition = if invert { "!p0" } else { "p0" };
                     writeln!(s, "r[{dst}]=select(r[{right}],r[{left}],{condition});").unwrap();
+                }
+                Operation::MultiplyRtz { dst, left, right } => {
+                    writeln!(s,"r[{dst}]=mul_ftz_rtz(r[{left}],r[{right}]);").unwrap();
                 }
                 Operation::Float {
                     dst,
@@ -1880,6 +1903,9 @@ impl VertexProgram {
                     let condition = if invert { "!p0" } else { "p0" };
                     writeln!(s, "r[{dst}]=select(r[{right}],r[{left}],{condition});").unwrap();
                 }
+                Operation::MultiplyRtz { dst, left, right } => {
+                    writeln!(s, "r[{dst}]=mul_ftz_rtz(r[{left}],r[{right}]);").unwrap();
+                }
                 Operation::Float {
                     dst,
                     left,
@@ -2069,6 +2095,12 @@ fn stage_source(operations: &[Operation], header: &str) -> String {
     let mut source = String::with_capacity(helper.len() + permutation.len() + header.len());
     source.push_str(helper);
     source.push_str(permutation);
+    if operations
+        .iter()
+        .any(|op| matches!(op, Operation::MultiplyRtz { .. }))
+    {
+        source.push_str(include_str!("fmul_rtz.wgsl"));
+    }
     source.push_str(header);
     source
 }

@@ -2500,3 +2500,134 @@ fn pixel_sph_single_output_metadata_is_not_an_extra_render_target() {
     );
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+// Independent reference: binary64 holds the exact product of two binary32
+// significands; truncate a nearest binary32 result toward zero, then flush.
+fn reference_mul_ftz_rtz(a: u32, b: u32) -> u32 {
+    let flush = |v: u32| {
+        if v & 0x7f800000 == 0 {
+            v & 0x80000000
+        } else {
+            v
+        }
+    };
+    let a = f32::from_bits(flush(a));
+    let b = f32::from_bits(flush(b));
+    let exact = f64::from(a) * f64::from(b);
+    if exact.is_nan() {
+        return 0x7fc00000;
+    }
+    let nearest = exact as f32;
+    let bits = if f64::from(nearest).abs() > exact.abs() {
+        nearest.to_bits() - 1
+    } else {
+        nearest.to_bits()
+    };
+    flush(bits)
+}
+
+#[test]
+#[ignore = "requires actual GPU; guest FMUL.FTZ.RZ compared bitwise against independent exact binary64 products"]
+fn multiply_ftz_rtz_dynamic_bits_and_rounding_edges() {
+    let (mut data, mut words, image) = fixture();
+    let bin = include_bytes!("fixtures/maxwell/multiply-rtz.bin");
+    data[0x4800..0x4800 + bin.len()].copy_from_slice(bin);
+    let draw = words.split_off(words.len() - 8);
+    method(&mut words, 0x2144, 0x800);
+    words.extend_from_slice(&draw);
+    let (mut d, _, c, backing, _) = setup_driver();
+    let mut pairs = vec![
+        (0x3f800001, 0x3f800001),
+        (0xbf800001, 0x3f800001),
+        (0x7f7fffff, 0x40000000),
+        (0xff7fffff, 0x40000000),
+        (0x00800000, 0x3f000000),
+        (0x80800000, 0x3f000000),
+        (1, 0x7f7fffff),
+        (0x80000001, 0x3f800000),
+        (0, 0xbf800000),
+        (0x80000000, 0xbf800000),
+        (0x7f800000, 0x3f800000),
+        (0x7f800000, 0),
+        (0x7fa00001, 0x3f800000),
+        (0x3fffffff, 0x3fffffff),
+    ];
+    let mut seed = 0x46545a52u32;
+    for _ in 0..96 {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        let a = seed;
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        pairs.push((a, seed));
+    }
+    let mut warm = None;
+    for (i, &(a, b)) in pairs.iter().enumerate() {
+        let expected = reference_mul_ftz_rtz(a, b);
+        let params: Vec<_> = [a, b, expected]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        d.write_backing(backing, 0x50, &params, &mut mem(&mut data))
+            .unwrap();
+        let commands = if i == 0 { &words } else { &draw };
+        let bytes: Vec<_> = commands.iter().flat_map(|v| v.to_le_bytes()).collect();
+        d.write_backing(backing, 0x10000, &bytes, &mut mem(&mut data))
+            .unwrap();
+        let r = d
+            .submit(
+                c,
+                KICKOFF_PB,
+                &header(1),
+                Some(&entry(0xb0000, commands.len())),
+                &mut mem(&mut data),
+            )
+            .unwrap();
+        assert!(r.fault.is_none(), "case {i}: {:?}", r.fault);
+        let frame = d.publish(c, &mut mem(&mut data)).unwrap().unwrap();
+        check(&frame.rgba, &image, Some([64, 128, 191, 255]), BG);
+        d.retire(r.token).unwrap();
+        if let Some((modules, pipelines)) = warm {
+            assert_eq!(d.graphics_counters().shader_module_allocations, modules);
+            assert_eq!(d.graphics_counters().pipeline_allocations, pipelines);
+        } else {
+            warm = Some((
+                d.graphics_counters().shader_module_allocations,
+                d.graphics_counters().pipeline_allocations,
+            ));
+        }
+    }
+    // A deliberately wrong reference must fail the shader's bit comparison.
+    d.write_backing(
+        backing,
+        0x58,
+        &0xdeadbeefu32.to_le_bytes(),
+        &mut mem(&mut data),
+    )
+    .unwrap();
+    let r = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, draw.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(r.fault.is_none());
+    check(
+        &d.publish(c, &mut mem(&mut data)).unwrap().unwrap().rgba,
+        &image,
+        Some([0, 128, 191, 255]),
+        BG,
+    );
+    d.retire(r.token).unwrap();
+    eprintln!(
+        "FMUL.FTZ.RZ: {} independent bitwise cases plus negative control; counters {:?}",
+        pairs.len(),
+        d.graphics_counters()
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
