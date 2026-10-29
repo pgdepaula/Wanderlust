@@ -41,7 +41,7 @@ pub enum ColorLayout {
     Pitch { bytes_per_row: u32 },
     BlockLinear { block_height_log2: u8 },
 }
-/// RGBA8_UNORM, single layer, depth one. Logical host pixels and guest storage
+/// Supported RGBA8/sRGB or packed HDR, single layer, depth one. Host pixels and guest storage
 /// are distinct. Pitch WIDTH retains the existing full-pitch pixel interpretation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColorTarget {
@@ -55,6 +55,7 @@ pub struct ColorTarget {
 pub enum ColorFormat {
     #[default]
     Rgba8,
+    Rgba8Srgb,
     Rg11b10Float,
 }
 impl ColorFormat {
@@ -62,13 +63,14 @@ impl ColorFormat {
     pub(crate) fn host(self) -> wgpu::TextureFormat {
         match self {
             Self::Rgba8 => wgpu::TextureFormat::Rgba8Unorm,
+            Self::Rgba8Srgb => wgpu::TextureFormat::Rgba8UnormSrgb,
             Self::Rg11b10Float => wgpu::TextureFormat::Rg11b10Ufloat,
         }
     }
     /// Display-only conversion after exact packed guest publication. HDR is
     /// clamped for the existing RGBA8 diagnostic image, never for guest storage.
     pub fn preview(self, bytes: &mut [u8]) {
-        if self == Self::Rgba8 {
+        if self != Self::Rg11b10Float {
             return;
         }
         for pixel in bytes.chunks_exact_mut(4) {
@@ -780,7 +782,7 @@ impl RasterRegisters {
             0x0850..=0x09d0 if (method - 0x0850) % 0x40 == 0 => {
                 // Per-target format selectors are configuration, not rendering.
                 // Inactive targets never fetch backing or authorize MRT output.
-                if !matches!(value, 0 | 0xd5 | 0xe0) {
+                if !matches!(value, 0 | 0xd5 | 0xd6 | 0xe0) {
                     return Err(bad());
                 }
                 self.inactive_color_formats[usize::from((method - 0x850) / 0x40)] = Some(value);
@@ -792,7 +794,7 @@ impl RasterRegisters {
                     1 => value % 256 == 0,
                     2 => value > 0 && value <= 0x0fffffff,
                     3 => value > 0 && value <= 0x1ffff,
-                    4 => matches!(value, 0 | 0xd5 | 0xe0),
+                    4 => matches!(value, 0 | 0xd5 | 0xd6 | 0xe0),
                     5 => value == 0x1000 || (value & !0x70 == 0 && (value >> 4) <= 5),
                     6 => value == 1,
                     7 => true, // DWORD array pitch is checked after complete geometry is known.
@@ -1050,10 +1052,10 @@ impl RasterRegisters {
             width,
             height: c[3],
             layout,
-            format: if c[4] == 0xe0 {
-                ColorFormat::Rg11b10Float
-            } else {
-                ColorFormat::Rgba8
+            format: match c[4] {
+                0xe0 => ColorFormat::Rg11b10Float,
+                0xd6 => ColorFormat::Rgba8Srgb,
+                _ => ColorFormat::Rgba8,
             },
         };
         let size = target.size()?;
@@ -1112,7 +1114,7 @@ impl RasterRegisters {
                     f32::from_bits(word.ok_or_else(|| invalid("incomplete color clear values"))?);
                 if !out.is_finite()
                     || *out < 0.
-                    || (target.format == ColorFormat::Rgba8 && *out > 1.)
+                    || (target.format != ColorFormat::Rg11b10Float && *out > 1.)
                 {
                     return Err(invalid("unsupported UNORM clear value"));
                 }

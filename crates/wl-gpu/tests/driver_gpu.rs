@@ -1886,3 +1886,93 @@ fn pixel_barrier_waits_without_publication_and_texture_wfi_invalidates() {
     );
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+#[test]
+#[ignore = "requires actual GPU; sRGB attachment encodes linear shader output and preserves uncovered storage"]
+fn srgb_target_encodes_rgb_preserves_alpha_and_separates_unorm_pipeline() {
+    let (mut data, mut words, image) = fixture();
+    let draw = words.split_off(words.len() - 8);
+    method(&mut words, 0x810, 0xd6);
+    method(&mut words, 0x2144, 0x100); // independently assembled quarters.bin
+    words.extend_from_slice(&draw);
+    let (mut d, _, c, b, _) = setup_driver();
+    put(&mut data, 0x10000, &words);
+    let first = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, words.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(first.fault.is_none(), "{:?}", first.fault);
+    let before = d.graphics_counters();
+    let bytes: Vec<_> = draw.iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let warm = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, draw.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(warm.fault.is_none());
+    let after = d.graphics_counters();
+    assert_eq!(after.pipeline_allocations, before.pipeline_allocations);
+    assert_eq!(
+        after.shader_module_allocations,
+        before.shader_module_allocations
+    );
+    assert_eq!(
+        after.render_target_allocations,
+        before.render_target_allocations
+    );
+    assert_eq!(after.readback_operations, before.readback_operations);
+    // IEC 61966-2-1: encode .25/.5/.75 -> 137/188/225; alpha stays linear.
+    let frame = d.publish(c, &mut mem(&mut data)).unwrap().unwrap();
+    // Host sRGB encoding may differ by one UNORM step. Only this RGB
+    // conversion gets tolerance; alpha, coverage and uncovered bytes stay exact.
+    let mut canonical = frame.rgba.clone();
+    for pixel in canonical.chunks_exact_mut(4) {
+        if pixel != BG {
+            for (actual, expected) in pixel[..3].iter().zip([137u8, 188, 225]) {
+                assert!(
+                    actual.abs_diff(expected) <= 1,
+                    "sRGB quantization {pixel:?}"
+                );
+            }
+            assert_eq!(pixel[3], 255);
+            pixel.copy_from_slice(&[137, 188, 225, 255]);
+        }
+    }
+    check(&canonical, &image, Some([137, 188, 225, 255]), BG);
+    assert_eq!(&data[RT..RT + SIZE], frame.rgba);
+    let mut next = Vec::new();
+    method(&mut next, 0x810, 0xd5);
+    next.extend_from_slice(&draw);
+    let bytes: Vec<_> = next.iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let changed = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, next.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(changed.fault.is_none());
+    assert_eq!(d.graphics_counters().shader_decodes, after.shader_decodes);
+    assert_eq!(
+        d.graphics_counters().vertex_shader_decodes,
+        after.vertex_shader_decodes
+    );
+    let frame = d.publish(c, &mut mem(&mut data)).unwrap().unwrap();
+    check(&frame.rgba, &image, Some([64, 128, 191, 255]), BG);
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

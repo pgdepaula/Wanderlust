@@ -4116,3 +4116,21 @@ without default features, and all 205 explicit Vulkan GPU scenarios. The new
 scenario also passed on WSL OpenGL; all 21 driver GPU scenarios passed on native
 Windows D3D12 and Vulkan. No executed case failed or skipped. Package all-target
 strict Clippy and workspace formatting passed.
+
+RGBA8 sRGB tests render an independently assembled .25/.5/.75/1 fragment through
+GPFIFO into `0xd6`, expecting encoded RGB 137/188/225 (one-step conversion
+tolerance) and alpha 255. The independent triangle oracle checks coverage and
+unchanged background exactly. A warm draw causes no target/pipeline/module
+allocation or readback; rebinding `0xd5` produces 64/128/191 with the same cached
+shader decode. Pitch and block-linear sRGB clear tests verify encoded storage,
+linear alpha, untouched GOB padding, exact CPU-after-GPU byte patches, failed
+atomic publication followed by successful retry without clear replay, and a
+subsequent GPU clear superseding the earlier CPU patch.
+The sRGB delivery passed 453 default-feature CPU tests, 448 without default
+features and all 207 explicit Vulkan GPU scenarios. Both new GPU scenarios also
+passed on WSL OpenGL. Native Windows executed all 22 driver and 11 clear scenarios
+on each of D3D12 and Vulkan, with no failures or skips. Strict all-target package
+Clippy and workspace formatting passed. An obsolete negative test was changed
+from now-supported `0xd6` to still-unsupported SNORM `0xd7`; the sRGB conversion
+oracle retains the independent transfer values and its documented one-step RGB
+tolerance rather than adopting backend readback values as expectations.

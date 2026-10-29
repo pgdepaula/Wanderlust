@@ -2501,3 +2501,17 @@ the no-WFI form and an implicit WFI. Its comment labels that interpretation
 “theoretical”; this is reference-based compatibility evidence, not a public
 NVIDIA timing specification. Only operand-zero whole-cache invalidation is
 accepted, with a real conservative host wait followed by cache-stamp invalidation.
+
+RGBA8 sRGB target encoding combines NVIDIA `clb197.h`
+`9fdf5c4062007929d9f4e6cbad9c9771fe61b880` format
+`SET_COLOR_TARGET_FORMAT_V_A8BL8GL8RL8=0xd6` with independent format mappings:
+Mesa revision `e7959c6009d85d278585b2896495b2b3046d461b`,
+[`nv50_formats.c`](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nv50/nv50_formats.c)
+maps R8G8B8A8_SRGB to RGBA8_SRGB surfaces;
+MIT Ryujinx revision `4930dced25c0d9ec33096b0f2601d262daa477bf`,
+[`ColorFormat.cs`](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Gpu/Engine/Types/ColorFormat.cs)
+independently identifies `0xd6` as R8G8B8A8Srgb, four bytes per texel.
+No source implementation was copied. The host uses `Rgba8UnormSrgb`; the
+independent output oracle uses the IEC 61966-2-1 transfer curve with at most one
+8-bit RGB quantization step of tolerance. Alpha, coverage, guest byte identity
+and padding assertions remain exact.

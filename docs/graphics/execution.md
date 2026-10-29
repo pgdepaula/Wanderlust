@@ -2860,3 +2860,14 @@ Vertex-cull, tessellation-init, tessellation and geometry pipeline slots accept
 only their correctly typed disabled encodings. This does not provide executable
 shaders for those stages. Vertex and fragment selection keep their existing
 strict validation and resource fetching.
+
+Color target format `0xd6` (`A8BL8GL8RL8`) uses RGBA8 sRGB attachments.
+Guest storage remains four encoded bytes per texel in the selected pitch or
+block-linear layout; uploads and publication copy those storage bytes. Host
+attachment conversion encodes linear shader/clear RGB and decodes destination
+RGB for blending. Alpha remains linear UNORM. Diagnostic RGBA output preserves
+the encoded bytes instead of interpreting them as packed HDR. Compatible warm
+draws reuse the target and pipeline; switching between linear and sRGB formats
+requires distinct attachment/pipeline interpretation, while binary decoding stays
+cached. The legacy `SET_SRGB_WRITE` override is not implemented or silently
+accepted. Partial-channel B197 clear operands remain unsupported.

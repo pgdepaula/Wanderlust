@@ -1022,3 +1022,74 @@ fn initialized_context_allows_clear_before_window_and_multisample_writes() {
         d.close(c, &mut mem(&mut data)).unwrap();
     }
 }
+
+#[test]
+#[ignore = "requires actual GPU; encoded sRGB target publication, padding, CPU patches and failed writeback"]
+fn srgb_clear_storage_cpu_patch_and_retry() {
+    for bh in [None, Some(1u8)] {
+        let (width, height) = (7usize, 9usize);
+        let mut data = vec![0xa5; 0x20000];
+        let (mut d, c, _, b, _) = driver();
+        let mut words = clear_setup(width as u32, height as u32, bh);
+        method(&mut words, 0x810, 0xd6);
+        clear_values(&mut words, [0.25, 0.5, 0.75, 0.5]);
+        method(&mut words, 0x19d0, 0x3c);
+        let r = submit(&mut d, c, b, &mut data, &words);
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert!(d.has_pending_output());
+        let patched = texel(width, 1, 1, bh) + 2;
+        d.write_backing(b, (RT + patched) as u64, &[7], &mut mem(&mut data))
+            .unwrap();
+        let before = data.clone();
+        assert!(d.publish(c, &mut FailAt(&mut data, RT as u64)).is_err());
+        assert_eq!(data, before);
+        assert!(d.has_pending_output());
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        let size = storage(width, height, bh);
+        let mut touched = vec![false; size];
+        for y in 0..height {
+            for x in 0..width {
+                let a = texel(width, x, y, bh);
+                touched[a..a + 4].fill(true);
+                let pixel = &data[RT + a..RT + a + 4];
+                for (component, expected) in [137u8, 188, 225].into_iter().enumerate() {
+                    if a + component == patched {
+                        assert_eq!(pixel[component], 7);
+                    } else {
+                        assert!(
+                            pixel[component].abs_diff(expected) <= 1,
+                            "{x},{y} {pixel:?}"
+                        );
+                    }
+                }
+                assert_eq!(pixel[3], 128);
+            }
+        }
+        for (i, valid) in touched.iter().enumerate() {
+            if !valid {
+                assert_eq!(data[RT + i], 0xa5, "padding {i}");
+            }
+        }
+        let mut next = Vec::new();
+        clear_values(&mut next, [0.5, 0., 1., 0.25]);
+        method(&mut next, 0x19d0, 0x3c);
+        let r = submit(&mut d, c, b, &mut data, &next);
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        for y in 0..height {
+            for x in 0..width {
+                let a = texel(width, x, y, bh);
+                let pixel = &data[RT + a..RT + a + 4];
+                assert!(pixel[0].abs_diff(188) <= 1);
+                assert_eq!(&pixel[1..], [0, 255, 64]);
+            }
+        }
+        for (i, valid) in touched.iter().enumerate() {
+            if !valid {
+                assert_eq!(data[RT + i], 0xa5, "second-clear padding {i}");
+            }
+        }
+        assert_eq!(d.graphics_counters().clear_commands, 2);
+        d.close(c, &mut mem(&mut data)).unwrap();
+    }
+}

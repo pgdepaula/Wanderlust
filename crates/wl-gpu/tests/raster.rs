@@ -84,7 +84,7 @@ fn raster_invalid_incomplete_bounds_and_unsupported_formats() {
         (0x804, 1),
         (0x808, 0),
         (0x80c, 0),
-        (0x810, 0xd6),
+        (0x810, 0xd7),
         (0x814, 0x60),
         (0x818, 2),
         (0x820, 1),
@@ -480,4 +480,24 @@ fn neutral_depth_bias_coefficients_preserve_raster_and_reject_active_values() {
         assert!(set(&mut e, method + 1, 0).is_err());
     }
     assert!(set(&mut e, 0xdc8, 1).is_err());
+}
+
+#[test]
+fn srgb_color_target_retains_encoded_storage_and_distinct_host_interpretation() {
+    let mut e = ready();
+    let linear = e.rasterization().unwrap().0;
+    set(&mut e, 0x810, 0xd6).unwrap();
+    let srgb = e.rasterization().unwrap().0;
+    assert_eq!(srgb.format, ColorFormat::Rgba8Srgb);
+    assert_ne!(linear, srgb);
+    assert_eq!(linear.size().unwrap(), srgb.size().unwrap());
+    assert_eq!(linear.linear_pitch().unwrap(), srgb.linear_pitch().unwrap());
+    let mut pixels = [137, 188, 225, 128, 11, 17, 23, 255];
+    let expected = pixels;
+    srgb.format.preview(&mut pixels);
+    assert_eq!(pixels, expected);
+    // No unverified legacy sRGB-write override is silently accepted.
+    assert!(set(&mut e, 0x15b8, 1).is_err());
+    set(&mut e, 0x850, 0xd6).unwrap();
+    assert_eq!(e.color_target_format(1), Some(0xd6));
 }
