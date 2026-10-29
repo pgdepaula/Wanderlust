@@ -1684,3 +1684,48 @@ fn mme_color_reads_observe_validated_b197_state_and_not_rejected_writes() {
         ))
     );
 }
+
+#[test]
+fn pure_fixed_and_disabled_raster_controls_replay_only_valid_captured_values() {
+    let mut e = Maxwell3d::default();
+    e.apply(write(0, CLASS)).unwrap();
+    let mut pure: Vec<_> = wl_gpu::raster::FIXED_RASTER_STATE
+        .iter()
+        .copied()
+        .filter(|v| v.0 >= 0x200)
+        .collect();
+    pure.extend([0x02ec, 0x0fb4, 0x0fd8, 0x1148, 0x11f8].map(|m| (m, 0)));
+    e.apply(write(0x124, 0)).unwrap();
+    for &(m, v) in &pure {
+        e.apply(write(m, v)).unwrap();
+        assert_eq!(e.shadow_value(m), Some(ShadowValue::Known(v)));
+    }
+    // Unsupported TIR cannot poison an earlier valid unfiltered capture.
+    assert!(e.apply(write(0xfb4, 1)).is_err());
+    assert_eq!(e.shadow_value(0xfb4), Some(ShadowValue::Known(0)));
+    e.apply(write(0x124, 3)).unwrap();
+    for &(m, v) in &pure {
+        e.apply(write(m, u32::MAX)).unwrap();
+        assert_eq!(e.shadow_value(m), Some(ShadowValue::Known(v)));
+    }
+    e.apply(write(0x124, 1)).unwrap();
+    e.apply(write(0xfb4, 0)).unwrap();
+    assert_eq!(e.shadow_value(0xfb4), Some(ShadowValue::Known(0)));
+    e.apply(write(0x1a00, 1)).unwrap(); // Previously known mask was 0x1111.
+    e.apply(write(0x124, 3)).unwrap();
+    e.apply(write(0xfb4, u32::MAX)).unwrap();
+    assert_eq!(
+        e.apply(write(0x1a00, 0)),
+        Err(MethodError::FilteredShadowValue(0x1a00))
+    );
+    let mut other = Maxwell3d::default();
+    other.apply(write(0, CLASS)).unwrap();
+    other.apply(write(0x124, 3)).unwrap();
+    assert_eq!(
+        other.apply(write(0xfb4, 0)),
+        Err(MethodError::MissingShadowValue(0xfb4))
+    );
+    for action in [0x1214, 0x19d0, 0x1b00, 0x800, 0x2380] {
+        assert_eq!(e.shadow_value(action), None);
+    }
+}

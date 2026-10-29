@@ -2121,9 +2121,11 @@ from the shadow bank, and bypass of control methods below `0x200`. Its MME
 register read uses current state rather than a separate invented shadow read.
 
 This reference treats filtered capture like ordinary capture. Wanderlust does
-not assume that equivalence: successful live writes in filtered mode mark the
-eligible shadow word `FilteredUnverified`. Attempting to replay such a word
-fails before live mutation. Unfiltered capture can establish a known word again;
+not assume that equivalence: a changed or previously unknown successful live
+write in filtered mode marks the eligible shadow word `FilteredUnverified`.
+An identical write to a previously known word preserves that known value under
+both capture and exclusion, without deciding filter membership. Attempting to
+replay an unverified word fails before live mutation. Unfiltered capture can establish a known word again;
 passthrough never changes it. No unspecified power-on shadow value is inferred.
 
 Replay is restricted to side-effect-free viewport/scissor, depth-selection and
@@ -2423,3 +2425,13 @@ image remains unverified. The pinned B197 context table separately specifies
 [base layer zero for all eight color targets](https://github.com/torvalds/linux/blob/b562e44f507e863c6792946e4e1b1449fbbac85d/drivers/gpu/drm/nouveau/nvkm/engine/gr/ctxgm204.c#L304-L315),
 which justifies target-zero base-layer initialization. Raw interpreter state and
 unsupported conditional operations are kept distinct from this driver policy.
+
+
+The pinned B197 header defines `SET_TIR` (`0x0fb4`) mode DISABLED as zero,
+`SET_TIR_MODULATION_FUNCTION` (`0x0fd8`) LINEAR as zero, and separate disabled
+conservative-raster, raster-bounding-box and coverage-to-color controls. These
+are validated state writes, not draw triggers, memory operations or fences. The
+same pinned shadow-state reference justifies applying known unfiltered captures
+to these methods and to the supported fixed-raster method set. This extension
+retains the rejection of active unsupported raster modes and unverified changed
+filtered captures; it does not treat arbitrary methods as shadow-safe.

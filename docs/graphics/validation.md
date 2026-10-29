@@ -3989,3 +3989,21 @@ Vulkan each executed 10 clear and 15 driver scenarios, all passing with zero
 skips. Package strict all-target Clippy and workspace formatting passed. The
 global TRUE starting policy is explicit software-driver initialization, not
 independent evidence of a Switch firmware reset value.
+
+
+Pure-raster shadow replay is tested through literal B06F writes for the supported
+fixed-state set and five disabled auxiliary controls. CPU tests cover known
+capture, invalid-write preservation, replay substitution, same-value filtered
+capture, changed filtered rejection and independent-channel missing history.
+The GpuDriver GPU test replays deliberately invalid incoming words from earlier
+valid captures, restores a red-only color mask, and executes a real indexed
+Maxwell draw. The independent coverage/color oracle expects covered pixels
+`[255,17,23,255]` and background `[11,17,23,255]`. A later changed filtered-mask
+fault leaves exactly one draw and one final readback, with no command replay.
+The CPU suites passed 440 default-feature tests (199 GPU scenarios ignored in
+that ordinary run) and 435 without default features. All 199 GPU scenarios
+executed on WSL Vulkan with zero failures/skips; the new scenario also executed
+on WSL OpenGL. Native Windows D3D12 and Vulkan each executed all 16 driver GPU
+scenarios, with zero failures/skips. Package strict all-target Clippy and
+workspace formatting passed. No original-game frame is inferred from these
+synthetic pixel comparisons.

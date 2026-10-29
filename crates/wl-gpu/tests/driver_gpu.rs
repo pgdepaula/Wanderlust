@@ -1394,3 +1394,74 @@ fn mme_live_color_state_controls_pixels_and_faults_without_default_registers() {
     assert_eq!(d.graphics_counters().draw_commands, 1);
     assert_eq!(d.graphics_counters().readback_operations, 1);
 }
+
+#[test]
+#[ignore = "requires actual GPU; literal shadow replay of validated raster state controls indexed pixels"]
+fn pure_raster_shadow_replay_renders_and_filtered_fault_preserves_output() {
+    let (mut data, mut words, image) = fixture();
+    let draw = words.split_off(words.len() - 8);
+    let mut pure: Vec<_> = wl_gpu::raster::FIXED_RASTER_STATE
+        .iter()
+        .copied()
+        .filter(|v| v.0 >= 0x200)
+        .collect();
+    pure.extend([0x02ec, 0x0fb4, 0x0fd8, 0x1148, 0x11f8].map(|m| (m, 0)));
+    method(&mut words, 0x124, 0);
+    for &(m, v) in &pure {
+        method(&mut words, u32::from(m), v);
+    }
+    method(&mut words, 0x1a00, 1); // Capture red-only export.
+    method(&mut words, 0x124, 2);
+    method(&mut words, 0x1a00, 0x1111); // Passthrough must not replace capture.
+    method(&mut words, 0x124, 3);
+    for &(m, _) in &pure {
+        method(&mut words, u32::from(m), u32::MAX);
+    }
+    method(&mut words, 0x124, 2); // Actions/resource selection remain outside replay.
+    method(&mut words, 0x2144, 0x400);
+    words.extend(draw);
+    let (mut d, _, c, b, _) = setup_driver();
+    put(&mut data, 0x10000, &words);
+    let first = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, words.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(first.fault.is_none(), "{:?}", first.fault);
+    assert_eq!(first.progress.draws_submitted, 1);
+    assert_eq!(d.graphics_counters().readback_operations, 0);
+    let mut filtered = Vec::new();
+    for (m, v) in [(0x124, 1), (0x1a00, 0x1111), (0x124, 3), (0x1a00, 0)] {
+        method(&mut filtered, m, v);
+    }
+    let bytes: Vec<_> = filtered.iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let second = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, filtered.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(
+        second
+            .fault
+            .as_ref()
+            .unwrap()
+            .to_string()
+            .contains("FilteredShadowValue")
+    );
+    assert_eq!(second.progress.draws_submitted, 0);
+    let frame = d.publish(c, &mut mem(&mut data)).unwrap().unwrap();
+    check(&frame.rgba, &image, Some([255, 17, 23, 255]), BG);
+    assert_eq!(d.graphics_counters().draw_commands, 1);
+    assert_eq!(d.graphics_counters().readback_operations, 1);
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

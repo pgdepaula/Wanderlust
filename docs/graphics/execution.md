@@ -2763,3 +2763,15 @@ starts without a global predicate; FALSE and conditional global requests remain
 explicitly unsupported rather than being coerced to TRUE. Raw `Channel` engines
 retain their explicit-global-gate requirement. The initialized base layer is also
 visible to supported MME reads; no unrelated method-read values are synthesized.
+
+
+Unfiltered shadow capture/replay includes the validated fixed-raster method set
+above `0x200` and disabled conservative-raster, raster-bounding-box, TIR,
+modulation-function and coverage-to-color controls (`0x1148`, `0x02ec`, `0x0fb4`,
+`0x0fd8`, `0x11f8`). Replay substitutes a previously captured valid value before
+normal live-state validation; incoming replacement bits are not reinterpreted as
+new state. Actions, attachment addresses and resource selectors remain excluded.
+Filtered capture retains a previously known identical word: whether the filter
+captures or excludes that write, the stored result is unchanged. Changed or
+previously unknown filtered words remain unverified and cannot be replayed. No
+initial shadow contents or hardware filter membership is inferred.

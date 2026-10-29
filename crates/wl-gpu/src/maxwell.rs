@@ -167,31 +167,40 @@ impl ShadowRam {
     // Bounded, side-effect-free raster register subset. Attachment addresses,
     // resource selectors, actions, scratch and unknown methods are not replayed.
     fn eligible(method: u16) -> bool {
-        method % 4 == 0
-            && (match method {
-                0xa00..=0xbfc => (method - 0xa00) % 32 < 28,
-                0xc00..=0xcfc => true,
-                0xe00..=0xef8 => (method - 0xe00) % 16 < 12,
-                0x1e00..=0x1efc => (method - 0x1e00) % 32 < 28,
-                _ => matches!(
-                    method,
-                    0xd7c
-                        | 0x12cc
-                        | 0x12e4
-                        | 0x12e8
-                        | 0x130c
-                        | 0x133c
-                        | 0x1340
-                        | 0x1344
-                        | 0x1348
-                        | 0x134c
-                        | 0x1350
-                        | 0x1358
-                        | 0x1360
-                        | 0x193c
-                        | 0x1a00
-                ),
-            })
+        method >= 0x200
+            && method % 4 == 0
+            && (crate::raster::FIXED_RASTER_STATE
+                .iter()
+                .any(|v| v.0 == method)
+                || match method {
+                    0xa00..=0xbfc => (method - 0xa00) % 32 < 28,
+                    0xc00..=0xcfc => true,
+                    0xe00..=0xef8 => (method - 0xe00) % 16 < 12,
+                    0x1e00..=0x1efc => (method - 0x1e00) % 32 < 28,
+                    _ => matches!(
+                        method,
+                        0x02ec
+                            | 0x0fb4
+                            | 0x0fd8
+                            | 0x1148
+                            | 0x11f8
+                            | 0xd7c
+                            | 0x12cc
+                            | 0x12e4
+                            | 0x12e8
+                            | 0x130c
+                            | 0x133c
+                            | 0x1340
+                            | 0x1344
+                            | 0x1348
+                            | 0x134c
+                            | 0x1350
+                            | 0x1358
+                            | 0x1360
+                            | 0x193c
+                            | 0x1a00
+                    ),
+                })
     }
     fn value(&self, method: u16) -> ShadowValue {
         self.words
@@ -221,7 +230,13 @@ impl ShadowRam {
         }
         let value = match self.mode {
             Some(ShadowMode::Track) => ShadowValue::Known(write.value),
-            Some(ShadowMode::TrackWithFilter) => ShadowValue::FilteredUnverified,
+            Some(ShadowMode::TrackWithFilter) => match self.value(write.method) {
+                // Whether the filter captures this write or excludes it, an
+                // identical previously known value remains known. Never infer
+                // an initial shadow value or eligibility for a changed word.
+                ShadowValue::Known(old) if old == write.value => ShadowValue::Known(old),
+                _ => ShadowValue::FilteredUnverified,
+            },
             _ => return,
         };
         if self.words.is_empty() {
