@@ -2143,3 +2143,93 @@ fn half_position_unused_inputs_and_vertex_data_coherence() {
     assert_eq!(d.graphics_counters().draw_commands, before.draw_commands);
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+#[test]
+#[ignore = "requires actual GPU; verified initialized raster profile, full sample masks and inert subtile tuning"]
+fn initialized_context_defaults_and_subtile_hints_preserve_real_draws() {
+    let (mut data, words, image) = fixture();
+    let mut decoder = wl_gpu::fifo::Decoder::default();
+    let mut filtered = Vec::new();
+    // Omit only source-verified initialized registers, preserving all explicit
+    // guest geometry, programs, textures, viewport, scissor and draw methods.
+    let defaults = [
+        0x138, 0x37c, 0xa18, 0xdf8, 0xdfc, 0xfa4, 0x12e8, 0x1360, 0x135c, 0x1924, 0x1a00, 0x19c4,
+        0x19bc, 0xdb4, 0x168c,
+    ];
+    for word in words {
+        if let Some(w) = decoder.push_word(word).unwrap() {
+            if !defaults.contains(&w.method) {
+                filtered.extend([
+                    0x20010000 | (u32::from(w.subchannel) << 13) | u32::from(w.method / 4),
+                    w.value,
+                ]);
+            }
+        }
+    }
+    let draw = filtered.split_off(filtered.len() - 8);
+    filtered.extend([0x200200d8, 0x40302010, 0x7f]);
+    filtered.extend_from_slice(&draw);
+    let (mut d, _, c, b, _) = setup_driver();
+    put(&mut data, 0x10000, &filtered);
+    let first = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, filtered.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(first.fault.is_none(), "{:?}", first.fault);
+    let before = d.graphics_counters();
+    let mut next = vec![0x200200d8, 0xffffffff, 255];
+    next.extend_from_slice(&draw);
+    let bytes: Vec<_> = next.iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let r = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, next.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(r.fault.is_none());
+    assert_eq!(
+        d.graphics_counters().pipeline_allocations,
+        before.pipeline_allocations
+    );
+    assert_eq!(
+        d.graphics_counters().shader_module_allocations,
+        before.shader_module_allocations
+    );
+    assert_eq!(
+        d.graphics_counters().readback_operations,
+        before.readback_operations
+    );
+    let mut bad = vec![0x200103ef, 0];
+    bad.extend_from_slice(&draw);
+    let bytes: Vec<_> = bad.iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let r = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, bad.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(r.fault.unwrap().to_string().contains("all-covered masks"));
+    assert_eq!(d.graphics_counters().draw_commands, 2);
+    check(
+        &d.publish(c, &mut mem(&mut data)).unwrap().unwrap().rgba,
+        &image,
+        None,
+        BG,
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

@@ -94,6 +94,8 @@ pub struct AuxiliaryRasterControls {
     pub iterated_blend_pass: Option<u8>,
     /// Raw RGBA fixed-blend constants. Constant blend factors remain unsupported.
     pub blend_constant_bits: [Option<u32>; 4],
+    /// Subtile resource allocation hints, not a host scheduling implementation.
+    pub subtile_performance: [Option<u32>; 2],
     /// Supported disabled pixel controls; active variants require new semantics.
     pub api_mandated_early_z: Option<bool>,
     pub post_z_pixel_sample_mask: Option<bool>,
@@ -195,7 +197,7 @@ impl ShadowRam {
                     0x1e00..=0x1efc => (method - 0x1e00) % 32 < 28,
                     0x1364..=0x137c | 0x1a04..=0x1a1c => true,
                     0x131c..=0x1328 => true,
-                    0x156c | 0x15bc | 0x187c => true,
+                    0x156c | 0x15bc | 0x187c | 0x0360 | 0x0364 => true,
                     0x0210 | 0x0f1c | 0x0f40 | 0x1224 | 0x11f0 | 0x0754 => true,
                     _ => matches!(
                         method,
@@ -635,7 +637,25 @@ impl Maxwell3d {
     pub(crate) fn initialize_driver_context(&mut self) -> Result<()> {
         // The driver starts without a global predicate. Base layer zero is
         // independently listed by the pinned B197 context initialization table.
-        for (method, value) in [(0x0138, 1), (0x0820, 0)] {
+        for (method, value) in [
+            (0x0138, 1),
+            (0x0820, 0),
+            // Source-verified B197 context initialization, not wishful draw defaults.
+            (0x037c, 1),
+            (0x0a18, 0x6420),
+            (0x0df8, 0),
+            (0x0dfc, 0),
+            (0x0fa4, 1),
+            (0x12e8, 0),
+            (0x1360, 0),
+            (0x135c, 0),
+            (0x1924, 0),
+            (0x1a00, 0x1111),
+            (0x19c4, 0),
+            (0x19bc, 0),
+            (0x0db4, 0),
+            (0x168c, 0),
+        ] {
             self.raster
                 .apply(method, value)
                 .map_err(|error| invalid(&format!("driver context initialization: {error:?}")))?;
@@ -645,6 +665,7 @@ impl Maxwell3d {
         self.auxiliary_raster.iterated_blend = Some((false, false));
         self.auxiliary_raster.iterated_blend_pass = Some(1);
         self.auxiliary_raster.blend_constant_bits = [Some(0); 4];
+        self.auxiliary_raster.sample_masks = [Some(0xffff); 4];
         Ok(())
     }
     /// Configured A-stream address. Only stream zero can supply vertex fetches
@@ -1101,6 +1122,13 @@ impl Maxwell3d {
                     usize::from(stage - 1)
                 };
                 self.auxiliary_raster.disabled_pipeline_types[index] = Some(stage);
+            }
+            0x0360 => self.auxiliary_raster.subtile_performance[0] = Some(value),
+            0x0364 => {
+                if value > 255 {
+                    return Err(bad());
+                }
+                self.auxiliary_raster.subtile_performance[1] = Some(value);
             }
             0x0de0 => {
                 // SYSMEMBAR_ENABLE=false only. A full host queue wait is a
@@ -1895,6 +1923,13 @@ impl Maxwell3d {
     pub fn rasterization(
         &self,
     ) -> Result<(crate::raster::ColorTarget, crate::raster::Rasterization)> {
+        if self.raster.sample_mask_enabled()
+            && self.auxiliary_raster.sample_masks != [Some(0xffff); 4]
+        {
+            return Err(invalid(
+                "enabled raster sample mask requires all-covered masks",
+            ));
+        }
         if self.auxiliary_raster.iterated_blend_pass.is_some()
             && self.auxiliary_raster.iterated_blend != Some((false, false))
         {

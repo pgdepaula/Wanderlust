@@ -501,3 +501,28 @@ fn srgb_color_target_retains_encoded_storage_and_distinct_host_interpretation() 
     set(&mut e, 0x850, 0xd6).unwrap();
     assert_eq!(e.color_target_format(1), Some(0xd6));
 }
+
+#[test]
+fn enabled_raster_sample_mask_requires_all_covered_single_sample_state() {
+    let mut e = ready();
+    let expected = e.rasterization().unwrap();
+    set(&mut e, 0xfa4, 1).unwrap();
+    assert!(e.rasterization().is_err());
+    for method in [0xfbc, 0xfc0, 0xfc4, 0xfc8] {
+        set(&mut e, method, 0xffff).unwrap();
+    }
+    assert_eq!(e.rasterization().unwrap(), expected);
+    for method in [0xfbc, 0xfc0, 0xfc4, 0xfc8] {
+        set(&mut e, method, 0xfffe).unwrap();
+        assert!(e.rasterization().is_err());
+        set(&mut e, method, 0xffff).unwrap();
+        assert_eq!(e.rasterization().unwrap(), expected);
+    }
+    for value in [2, 0x10, 0x11, u32::MAX] {
+        assert!(set(&mut e, 0xfa4, value).is_err());
+    }
+    assert_eq!(e.rasterization().unwrap(), expected);
+    set(&mut e, 0xfa4, 0).unwrap();
+    set(&mut e, 0xfbc, 0).unwrap();
+    assert_eq!(e.rasterization().unwrap(), expected);
+}

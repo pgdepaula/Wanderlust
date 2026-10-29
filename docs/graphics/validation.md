@@ -4154,3 +4154,21 @@ vertex uploads, readbacks or waits. Caller-thread allocations/reallocations in
 this debug workload were 1574/33 on WSL Vulkan, 1568/128 on WSL OpenGL, 1427/39 on
 Windows D3D12 and 1589/39 on Windows Vulkan. These are observed host API costs,
 not allocation-free rendering, combined GPU batching or game performance data.
+
+The initialized-context fixture deliberately omits source-verified baseline
+register writes while retaining guest programs, resources, geometry, viewport,
+scissor and draw commands. Indexed textured pixels still match the independent
+oracle. Changing subtile fractions does not recreate pipelines/modules or force
+readback. A later partial sample mask faults without losing either earlier draw;
+publication after that fault preserves the valid prefix. CPU tests challenge
+all four masks, absent masks, color-target enable/reserved bits, subtile width
+bounds, shadow replay and unaligned offsets. An opt-in shader diagnostic run
+produced byte-identical copies of the independently assembled vertex/texture
+fixtures; injecting a non-directory destination left the same GPU test passing.
+The initialized raster/subtile validation passed 457 default-feature CPU tests,
+452 without default features and all 209 explicit Vulkan GPU scenarios. The new
+scenario passed on WSL OpenGL; all 24 driver GPU scenarios passed on each native
+Windows D3D12 and Vulkan backend, without failures or skips. Strict package
+all-target Clippy, workspace formatting and `cargo check -p wl-nvdrv --locked`
+passed. These package results do not establish original-game shader or frame
+compatibility.

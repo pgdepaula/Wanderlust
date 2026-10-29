@@ -1962,3 +1962,33 @@ fn inactive_pixel_controls_and_disabled_optional_stages_remain_strict() {
     assert!(e.apply(write(0xde0, 0)).is_err());
     assert!(e.apply(write(0xf74, 0)).is_err());
 }
+
+#[test]
+fn subtile_performance_hints_retain_documented_fields_without_pixel_semantics() {
+    let mut e = Maxwell3d::default();
+    e.apply(write(0, CLASS)).unwrap();
+    for value in [0, 0x40302010, u32::MAX] {
+        e.apply(write(0x360, value)).unwrap();
+        e.apply(write(0x364, 255)).unwrap();
+        assert_eq!(
+            e.auxiliary_raster_controls().subtile_performance,
+            [Some(value), Some(255)]
+        );
+        assert!(e.apply(write(0x364, 256)).is_err());
+        assert_eq!(
+            e.auxiliary_raster_controls().subtile_performance,
+            [Some(value), Some(255)]
+        );
+    }
+    e.apply(write(0x124, 0)).unwrap();
+    e.apply(write(0x360, 0x10203040)).unwrap();
+    e.apply(write(0x124, 3)).unwrap();
+    e.apply(write(0x360, 0xffffffff)).unwrap();
+    assert_eq!(
+        e.auxiliary_raster_controls().subtile_performance[0],
+        Some(0x10203040)
+    );
+    for m in [0x361, 0x365] {
+        assert!(e.apply(write(m, 0)).is_err());
+    }
+}

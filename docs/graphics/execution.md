@@ -2888,3 +2888,34 @@ retain their documented stride/enable fields without resolving or fetching those
 streams. Unsupported optional shader stages can retain program offsets while
 their correctly typed disabled state is enforced. These configuration writes do
 not implement extra vertex streams, tessellation, geometry or vertex-cull shaders.
+
+The initialized GpuDriver context additionally seeds only supported B197 raster
+values corroborated by the pinned Nouveau GM204 context method table: raster
+enablement, identity viewport-zero swizzle, zero window offsets, disabled depth
+writes/global blend/logic operations/line smoothing/raster variants, full RGBA
+write mask, and the raster-out sample-mask profile. This is an explicit software
+initialization profile, not proof of the exact Switch firmware context image.
+Raw channels still require their explicit state. Guest method writes override
+this state, and channel submissions do not reinitialize it.
+
+Raster-out sample masking (`0x0fa4=1`) is accepted only when all four sample masks
+are explicitly full `0xffff`; the driver seeds those source-verified values.
+The supported single-sample/SPH subset therefore has identical coverage to
+masking disabled. Partial or missing masks reject a draw rather than being
+ignored; color-target sample masking remains unsupported. Clear operations keep
+their separate mask-independent semantics.
+
+Subtile performance controls (`0x0360`, four eight-bit fractions; `0x0364`, one
+eight-bit fraction) retain validated tuning data without specializing pixel
+pipelines or claiming host scheduling equivalence. MME emissions use the normal
+validated method boundary. The reserved neighboring control remains unsupported.
+
+`WL_GPU_SHADER_DIAGNOSTICS_DIR` optionally stores cold acquired shader bytes,
+including rejected programs, in private files. It performs no additional guest
+read, translation fallback or GPU operation. The process-wide cap is 64 attempts
+of at most 4,176 program bytes each. Names distinguish process, stage, GPU address
+and whether a canonical EXIT was found within the existing fetch budget. Files
+are published completely without replacement; I/O errors do not change execution.
+These are acquisition evidence, not proof of successful shader execution. Keep
+commercial program diagnostics private and distinguish the actual original
+process ID from synthetic initialization probes.

@@ -406,6 +406,7 @@ pub(crate) struct RasterRegisters {
     scissor_enable: [Option<u32>; 16],
     fixed: u64,
     blend_enabled: bool,
+    sample_mask_enabled: bool,
     inactive_blend_enabled: [Option<bool>; 7],
     inactive_write_masks: [Option<u8>; 7],
     blend_per_target: bool,
@@ -450,6 +451,7 @@ impl Default for RasterRegisters {
             scissor_enable: Default::default(),
             fixed: Default::default(),
             blend_enabled: Default::default(),
+            sample_mask_enabled: false,
             inactive_blend_enabled: Default::default(),
             inactive_write_masks: Default::default(),
             blend_per_target: Default::default(),
@@ -543,6 +545,9 @@ impl RasterRegisters {
             alpha_operation,
         }))
     }
+    pub(crate) fn sample_mask_enabled(&self) -> bool {
+        self.sample_mask_enabled
+    }
     pub fn apply(&mut self, method: u16, value: u32) -> std::result::Result<bool, MethodError> {
         if method % 4 != 0 {
             return Err(MethodError::InvalidMethod(method));
@@ -586,6 +591,13 @@ impl RasterRegisters {
                     0x12e8 => self.depth_write = value != 0,
                     _ => self.depth_select = value != 0,
                 }
+            } else if method == 0x0fa4 {
+                // Raster-out mask only. Color-target sample masking remains
+                // unsupported. Maxwell3d validates all four masks at draw time.
+                if value > 1 {
+                    return Err(bad());
+                }
+                self.sample_mask_enabled = value != 0;
             } else if method == 0x121c {
                 // NVB197_SET_CT_SELECT: count bits3:0, TARGET0 bits6:4,
                 // TARGET1..7 bits27:7. Inactive target selectors cannot alter

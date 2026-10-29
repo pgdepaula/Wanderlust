@@ -2527,3 +2527,18 @@ profile is exactly `0x3a400040`; it is not interpreted as a fabricated constant.
 varying, EXIT. Its 80-byte synthetic SPH matches the established vertex fixture.
 The unmodified envydis disassembly independently confirms the operands and the
 ALD write-barrier/wait. No original-game program is included.
+
+The initialization profile uses Nouveau `ctxgm204.c` at Linux revision
+`b562e44f507e863c6792946e4e1b1449fbbac85d`, whose B197 table lists the supported
+raster baseline, `0x0fa4=1`, and four `0x0fbc..0x0fc8=0xffff` mask words.
+NVIDIA B197 revision `9fdf5c4062007929d9f4e6cbad9c9771fe61b880` separates
+`SET_SAMPLE_MASK.RASTER_OUT_ENABLE` bit 0 from `COLOR_TARGET_ENABLE` bit 4.
+Only the raster-out/full-mask profile is implemented; no partial coverage or
+sample-mask shader export is inferred. The software global-unconditional gate
+policy remains distinct from source-derived context values.
+
+The same NVIDIA header names `SET_SUBTILING_PERF_KNOB_A` (`0x0360`), with four
+8-bit SPM/subtile allocation fractions, and `SET_SUBTILING_PERF_KNOB_B`
+(`0x0364`), with an 8-bit primitive fraction. Keeping tuning data under the
+existing serialized execution model does not emulate physical tiling budgets,
+GPU performance counters or scheduling timing.

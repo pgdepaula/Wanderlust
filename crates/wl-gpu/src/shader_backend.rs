@@ -425,8 +425,57 @@ pub(crate) fn read_program(
             break;
         }
     }
+    capture_shader_diagnostic(source, &binary, vertex, terminated);
     if !terminated {
         return Err(invalid("shader has no EXIT within 4 KiB code budget"));
     }
     Ok(binary)
+}
+
+/// Private, opt-in acquisition evidence, never executable shader cache state.
+/// At most 64 already-bounded programs/prefixes per process. Failures cannot
+/// affect guest execution; no guest borrows or host GPU resources are retained.
+fn capture_shader_diagnostic(source: GpuAddress, binary: &[u8], vertex: bool, terminated: bool) {
+    use std::{
+        fs,
+        io::Write,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
+    static ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+    let Some(directory) = std::env::var_os("WL_GPU_SHADER_DIAGNOSTICS_DIR") else {
+        return;
+    };
+    let Ok(index) = ATTEMPTS.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+        (n < 64).then_some(n + 1)
+    }) else {
+        return;
+    };
+    let directory = std::path::PathBuf::from(directory);
+    if fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    let name = format!(
+        "{}-{index:02}-{}-{:010x}-{}.gm107",
+        std::process::id(),
+        if vertex { "vertex" } else { "pixel" },
+        source.0,
+        if terminated { "exit" } else { "prefix" }
+    );
+    let final_path = directory.join(name);
+    let temporary = final_path.with_extension("part");
+    let _ = (|| -> std::io::Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(binary)?;
+        file.flush()?;
+        drop(file);
+        fs::hard_link(&temporary, &final_path)
+    })();
+    let _ = fs::remove_file(temporary);
 }
