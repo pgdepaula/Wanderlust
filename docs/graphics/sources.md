@@ -2515,3 +2515,15 @@ No source implementation was copied. The host uses `Rgba8UnormSrgb`; the
 independent output oracle uses the IEC 61966-2-1 transfer curve with at most one
 8-bit RGB quantization step of tolerance. Alpha, coverage, guest byte identity
 and padding assertions remain exact.
+
+NVIDIA B197 header revision `9fdf5c4062007929d9f4e6cbad9c9771fe61b880`
+defines attribute A/B SOURCE at bit 6, COMPONENT_BIT_WIDTHS at 26:21,
+R16_G16_B16_A16=3, FLOAT numerical type=7, and stream stride/enable at 11:0/12.
+The half-position implementation uses native `Float16x4`, with an independently
+specified eight-byte little-endian input and float4 shader interface. The inactive
+profile is exactly `0x3a400040`; it is not interpreted as a fabricated constant.
+`vertex-constant-uv.asm` was assembled with pinned envytools
+`f102b82381f3f11cee113d16374c87091db039d9`: ALD position, two MOV32I UV constants, AST position and
+varying, EXIT. Its 80-byte synthetic SPH matches the established vertex fixture.
+The unmodified envydis disassembly independently confirms the operands and the
+ALD write-barrier/wait. No original-game program is included.

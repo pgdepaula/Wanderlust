@@ -2871,3 +2871,20 @@ draws reuse the target and pipeline; switching between linear and sRGB formats
 requires distinct attachment/pipeline interpretation, while binary decoding stays
 cached. The legacy `SET_SRGB_WRITE` override is not implemented or silently
 accepted. Partial-channel B197 clear operands remain unsupported.
+
+Vertex position attribute zero additionally accepts native FLOAT16x4 fetch
+(`R16_G16_B16_A16`, numerical type FLOAT). Its guest footprint is eight bytes;
+wgpu converts the vertex input to the shader's float4 without a CPU expansion.
+UV attribute one can retain the exact inactive FLOAT/R32 zero-offset profile
+when the decoded vertex program does not read that input. Such shaders omit the
+unused WGSL entry argument and host attribute rather than injecting UV values.
+A shader which does read inactive UV fails before draw submission; constant
+vertex-attribute emulation is not provided. Shader-produced varying exports keep
+their existing validation.
+
+The other thirty generic input descriptors retain only that inactive profile;
+active inputs beyond the current interface fail. Unreferenced streams 1–15 can
+retain their documented stride/enable fields without resolving or fetching those
+streams. Unsupported optional shader stages can retain program offsets while
+their correctly typed disabled state is enforced. These configuration writes do
+not implement extra vertex streams, tessellation, geometry or vertex-cull shaders.

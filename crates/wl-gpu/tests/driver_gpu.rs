@@ -1976,3 +1976,170 @@ fn srgb_target_encodes_rgb_preserves_alpha_and_separates_unorm_pipeline() {
     check(&frame.rgba, &image, Some([64, 128, 191, 255]), BG);
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+#[test]
+#[ignore = "requires actual GPU; native half-float fetch with no synthetic UV source, warm reuse and strict shader interface"]
+fn half_position_unused_inputs_and_vertex_data_coherence() {
+    let (mut data, mut words, image) = fixture();
+    let draw = words.split_off(words.len() - 8);
+    let binary = include_bytes!("fixtures/maxwell/vertex-constant-uv.bin");
+    data[0x4800..0x4800 + binary.len()].copy_from_slice(binary);
+    // Exact binary16 values: positions (-.75,-.5),(.5,-.25),(-.25,.75).
+    for (n, components) in [
+        [0xba00u16, 0xb800, 0, 0x3c00],
+        [0x3800, 0xb400, 0, 0x3c00],
+        [0xb400, 0x3a00, 0, 0x3c00],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (c, v) in components.into_iter().enumerate() {
+            data[0x3000 + n * 8 + c * 2..0x3002 + n * 8 + c * 2].copy_from_slice(&v.to_le_bytes());
+        }
+    }
+    for (m, v) in [
+        (0x2044, 0x800),
+        (0x1c00, 0x1008),
+        (0x1160, 0x38600000),
+        (0x1164, 0x3a400040),
+    ] {
+        method(&mut words, m, v);
+    }
+    for slot in 2..32u32 {
+        method(&mut words, 0x1160 + slot * 4, 0x3a400040);
+    }
+    for slot in 1..16u32 {
+        method(&mut words, 0x1c00 + slot * 16, 0x1000);
+    }
+    words.extend_from_slice(&draw);
+    let (mut d, _, c, b, _) = setup_driver();
+    put(&mut data, 0x10000, &words);
+    let first = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, words.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(first.fault.is_none(), "{:?}", first.fault);
+    let before = d.graphics_counters();
+    assert_eq!(before.vertex_upload_bytes, 24);
+    let bytes: Vec<_> = draw.iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let allocation_scope = measured_alloc::Region::new();
+    for _ in 0..32 {
+        let r = d
+            .submit(
+                c,
+                KICKOFF_PB,
+                &header(1),
+                Some(&entry(0xb0000, draw.len())),
+                &mut mem(&mut data),
+            )
+            .unwrap();
+        assert!(r.fault.is_none());
+    }
+    let allocations = allocation_scope.finish();
+    let after = d.graphics_counters();
+    assert_eq!(after.draw_commands, before.draw_commands + 32);
+    assert_eq!(after.submissions, before.submissions + 32);
+    eprintln!(
+        "half warm: draws=32 queue_submissions={} vertex_upload_bytes={} readbacks={} waits={} caller_allocations={} caller_reallocations={}",
+        after.submissions - before.submissions,
+        after.vertex_upload_bytes - before.vertex_upload_bytes,
+        after.readback_operations - before.readback_operations,
+        after.synchronization_points - before.synchronization_points,
+        allocations.allocations,
+        allocations.reallocations
+    );
+    assert_eq!(after.vertex_upload_bytes, before.vertex_upload_bytes);
+    assert_eq!(after.pipeline_allocations, before.pipeline_allocations);
+    assert_eq!(
+        after.shader_module_allocations,
+        before.shader_module_allocations
+    );
+    assert_eq!(after.readback_operations, before.readback_operations);
+    assert_eq!(after.synchronization_points, before.synchronization_points);
+    let old = [[-0.75f64, -0.5], [0.5, -0.25], [-0.25, 0.75]];
+    let mut moved = old;
+    moved[0][0] = -1.;
+    let sample: &[u8] = &image[(14 * 37 + 9) * 4..(14 * 37 + 9) * 4 + 4];
+    let verify = |pixels: &[u8], triangles: &[[[f64; 2]; 3]]| {
+        for y in 0..29 {
+            for x in 0..52 {
+                let p = [
+                    (x as f64 + 0.5) * 2. / 47. - 1.,
+                    1. - (y as f64 + 0.5) * 2. / 29.,
+                ];
+                let mut inside = false;
+                let mut edge_pixel = false;
+                for &t in triangles {
+                    let a = edge(t[0], t[1], t[2]);
+                    let weights = [
+                        edge(t[1], t[2], p) / a,
+                        edge(t[2], t[0], p) / a,
+                        edge(t[0], t[1], p) / a,
+                    ];
+                    edge_pixel |= weights.iter().any(|v| v.abs() < 0.005);
+                    inside |= weights.iter().all(|v| *v >= 0.);
+                }
+                if x < 47 && edge_pixel {
+                    continue;
+                }
+                assert_eq!(
+                    &pixels[(y * 52 + x) * 4..(y * 52 + x + 1) * 4],
+                    if x < 47 && inside { sample } else { &BG },
+                    "half pixel {x},{y}"
+                );
+            }
+        }
+    };
+    verify(
+        &d.publish(c, &mut mem(&mut data)).unwrap().unwrap().rgba,
+        &[old],
+    );
+    d.write_backing(b, 0x3000, &0xbc00u16.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let moved_draw = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, draw.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(moved_draw.fault.is_none());
+    assert_eq!(d.graphics_counters().vertex_upload_bytes, 48);
+    assert_eq!(
+        d.graphics_counters().vertex_shader_decodes,
+        after.vertex_shader_decodes
+    );
+    verify(
+        &d.publish(c, &mut mem(&mut data)).unwrap().unwrap().rgba,
+        &[old, moved],
+    );
+    // Restoring a shader which actually reads UV cannot consume an inactive input.
+    let mut bad = Vec::new();
+    method(&mut bad, 0x2044, 0x200);
+    bad.extend_from_slice(&draw);
+    let bytes: Vec<_> = bad.iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, bad.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(r.fault.unwrap().to_string().contains("inactive UV"));
+    assert_eq!(d.graphics_counters().draw_commands, before.draw_commands);
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

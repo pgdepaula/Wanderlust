@@ -508,10 +508,12 @@ pub type FragmentSource = ProgramSource;
 pub enum PositionFormat {
     Float32x3,
     Float32x4,
+    Float16x4,
 }
 impl PositionFormat {
     pub fn byte_size(self) -> u16 {
         match self {
+            Self::Float16x4 => 8,
             Self::Float32x3 => 12,
             Self::Float32x4 => 16,
         }
@@ -524,6 +526,8 @@ pub struct VertexArray {
     pub stride: u16,
     pub offsets: [u16; 2],
     pub position_format: PositionFormat,
+    /// Inactive UV inputs may be omitted only if the shader never reads them.
+    pub uv_active: bool,
 }
 impl VertexArray {
     pub fn size(&self, first: u32, count: u32) -> Result<usize> {
@@ -600,6 +604,9 @@ pub struct Maxwell3d {
     vertex_frequency: Option<u32>,
     vertex_instance: [Option<u32>; 16],
     vertex_attributes: [Option<u32>; 2],
+    inactive_vertex_attributes: [Option<u32>; 30],
+    inactive_vertex_formats: [Option<u16>; 15],
+    inactive_pipeline_programs: [Option<u32>; 4],
     fragment_enabled: bool,
     fragment_offset: Option<u32>,
     fragment_registers: Option<u8>,
@@ -642,6 +649,26 @@ impl Maxwell3d {
     }
     /// Configured A-stream address. Only stream zero can supply vertex fetches
     /// in the supported attribute subset; inactive addresses are not read.
+    pub fn vertex_stream_format(&self, slot: usize) -> Option<u16> {
+        if slot == 0 {
+            self.vertex_format.map(|v| v as u16)
+        } else {
+            self.inactive_vertex_formats
+                .get(slot - 1)
+                .copied()
+                .flatten()
+        }
+    }
+    pub fn vertex_attribute(&self, slot: usize) -> Option<u32> {
+        if slot < 2 {
+            self.vertex_attributes[slot]
+        } else {
+            self.inactive_vertex_attributes
+                .get(slot - 2)
+                .copied()
+                .flatten()
+        }
+    }
     pub fn vertex_stream_address(&self, slot: usize) -> Option<GpuAddress> {
         let (hi, lo) = if slot == 0 {
             (self.vertex_upper?, self.vertex_lower?)
@@ -1578,6 +1605,26 @@ impl Maxwell3d {
                 }
                 self.vertex_group = Some(value as u8);
             }
+            0x2004 | 0x2084 | 0x20c4 | 0x2104 => {
+                let stage = ((method - 0x2004) / 64) as usize;
+                self.inactive_pipeline_programs[if stage == 0 { 0 } else { stage - 1 }] =
+                    Some(value);
+            }
+            0x1c10..=0x1cf0 if method % 16 == 0 => {
+                if value & !0x1fff != 0 {
+                    return Err(bad());
+                }
+                self.inactive_vertex_formats[usize::from((method - 0x1c10) / 16)] =
+                    Some(value as u16);
+            }
+            0x1168..=0x11dc => {
+                // Exact inactive FLOAT/R32, stream zero, offset zero profile.
+                // Active inputs beyond the supported interface remain rejected.
+                if value != 0x3a400040 {
+                    return Err(bad());
+                }
+                self.inactive_vertex_attributes[usize::from((method - 0x1168) / 4)] = Some(value);
+            }
             0x1c14..=0x1cf8 if matches!(method % 16, 4 | 8) => {
                 let slot = usize::from((method - 0x1c00) / 16 - 1);
                 let half = usize::from((method % 16 - 4) / 4);
@@ -1628,9 +1675,9 @@ impl Maxwell3d {
             0x1160 | 0x1164 => {
                 let fields = value & !(0x3fffu32 << 7);
                 let valid = if method == 0x1160 {
-                    matches!(fields, 0x38200000 | 0x38400000)
+                    matches!(fields, 0x38200000 | 0x38400000 | 0x38600000)
                 } else {
-                    fields == 0x38800000
+                    fields == 0x38800000 || value == 0x3a400040
                 };
                 if !valid {
                     return Err(bad());
@@ -1908,11 +1955,12 @@ impl Maxwell3d {
         };
         let stride = (format & 4095) as u16;
         let offsets = [((a0 >> 7) & 0x3fff) as u16, ((a1 >> 7) & 0x3fff) as u16];
-        let position_format = if (a0 >> 21) & 0x3f == 2 {
-            PositionFormat::Float32x3
-        } else {
-            PositionFormat::Float32x4
+        let position_format = match (a0 >> 21) & 0x3f {
+            2 => PositionFormat::Float32x3,
+            3 => PositionFormat::Float16x4,
+            _ => PositionFormat::Float32x4,
         };
+        let uv_active = a1 & 0x40 == 0;
         let address = (u64::from(hi) << 32) | u64::from(lo);
         let limit = (u64::from(lhi) << 32) | u64::from(llo);
         if format & 0x1000 == 0
@@ -1920,7 +1968,7 @@ impl Maxwell3d {
             || stride % 4 != 0
             || offsets.iter().any(|v| v % 4 != 0)
             || u32::from(offsets[0]) + u32::from(position_format.byte_size()) > u32::from(stride)
-            || u32::from(offsets[1]) + 8 > u32::from(stride)
+            || uv_active && u32::from(offsets[1]) + 8 > u32::from(stride)
             || address % 4 != 0
             || limit < address
         {
@@ -1932,6 +1980,7 @@ impl Maxwell3d {
             stride,
             offsets,
             position_format,
+            uv_active,
         })
     }
     pub fn constant_buffer(&self, group: u8, slot: u8) -> Result<ConstantBuffer> {

@@ -120,7 +120,7 @@ impl Renderer {
             || offsets[0]
                 .checked_add(u64::from(position_format.byte_size()))
                 .is_none_or(|n| n > stride)
-            || offsets[1].checked_add(8).is_none_or(|n| n > stride)
+            || program.needs_uv_input() && offsets[1].checked_add(8).is_none_or(|n| n > stride)
         {
             self.vertex = None;
             return Err(invalid("unsupported vertex layout"));
@@ -179,6 +179,7 @@ impl Renderer {
         let attributes = [
             wgpu::VertexAttribute {
                 format: match position_format {
+                    PositionFormat::Float16x4 => wgpu::VertexFormat::Float16x4,
                     PositionFormat::Float32x3 => wgpu::VertexFormat::Float32x3,
                     PositionFormat::Float32x4 => wgpu::VertexFormat::Float32x4,
                 },
@@ -203,7 +204,7 @@ impl Renderer {
                     buffers: &[wgpu::VertexBufferLayout {
                         array_stride: stride,
                         step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &attributes,
+                        attributes: &attributes[..if program.needs_uv_input() { 2 } else { 1 }],
                     }],
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -355,6 +356,11 @@ impl Renderer {
             self.counters.shader_cache_hits += 1;
         }
         let selected = self.selected_vertex.as_ref().unwrap();
+        if selected.program.needs_uv_input() && !array.uv_active {
+            return Err(invalid(
+                "shader reads inactive UV; constant vertex attributes unsupported",
+            ));
+        }
         if selected.program.required_registers() > u16::from(source.registers) {
             return Err(invalid("vertex register allocation insufficient"));
         }

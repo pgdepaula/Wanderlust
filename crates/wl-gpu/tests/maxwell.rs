@@ -905,6 +905,7 @@ fn vertex_substitute_address_is_40_bit_partial_persistent_and_channel_local() {
         stride: 24,
         offsets: [0, 16],
         position_format: PositionFormat::Float32x4,
+        uv_active: true,
     };
     assert_eq!(bounded.span(0, 3).unwrap(), 72);
     assert!(bounded.span(1, 3).is_err());

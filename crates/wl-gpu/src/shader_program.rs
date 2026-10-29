@@ -1770,6 +1770,11 @@ impl VertexProgram {
     pub fn operations(&self) -> &[Operation] {
         self.0.operations()
     }
+    pub fn needs_uv_input(&self) -> bool {
+        self.operations().iter().any(
+            |op| matches!(op, Operation::AttributeRead { attribute, .. } if *attribute >= 0x90),
+        )
+    }
     pub fn wgsl(&self) -> String {
         self.wgsl_for_raster(false, false, crate::raster::DepthClipRange::ZeroToOne)
     }
@@ -1780,10 +1785,12 @@ impl VertexProgram {
         depth_clip: crate::raster::DepthClipRange,
     ) -> String {
         use std::fmt::Write;
-        let mut s = stage_source(
-            self.operations(),
-            "struct Vertex { @builtin(position) position:vec4<f32>, @location(0) @interpolate(linear) uv:vec2<f32> };\n@vertex fn vs_main(@location(0) a0:vec4<f32>,@location(1) a1:vec2<f32>)->Vertex {var r:array<u32,256>;var v:Vertex;\n",
-        );
+        let interface = if self.needs_uv_input() {
+            "struct Vertex { @builtin(position) position:vec4<f32>, @location(0) @interpolate(linear) uv:vec2<f32> };\n@vertex fn vs_main(@location(0) a0:vec4<f32>,@location(1) a1:vec2<f32>)->Vertex {var r:array<u32,256>;var v:Vertex;\n"
+        } else {
+            "struct Vertex { @builtin(position) position:vec4<f32>, @location(0) @interpolate(linear) uv:vec2<f32> };\n@vertex fn vs_main(@location(0) a0:vec4<f32>)->Vertex {var r:array<u32,256>;var v:Vertex;\n"
+        };
+        let mut s = stage_source(self.operations(), interface);
         if self.operations().iter().any(|op| {
             matches!(
                 op,

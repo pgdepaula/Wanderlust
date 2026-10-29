@@ -53,6 +53,7 @@ fn literal_float3_position_and_uv_use_exact_twenty_byte_vertex_storage() {
             stride: 20,
             offsets: [0, 12],
             position_format: PositionFormat::Float32x3,
+            uv_active: true,
         }
     );
     assert_eq!(PositionFormat::Float32x3.byte_size(), 12);
@@ -168,7 +169,7 @@ fn unsupported_attribute_modifiers_and_direct_writes_preserve_valid_state() {
         (0x1160, 0x20400800), // UINT rather than FLOAT.
         (0x1160, 0xb8400800), // R/B swap.
         (0x1160, 0x38800800), // Position FLOAT2, unsupported.
-        (0x1160, 0x38600800), // Position half-float4, unsupported.
+        (0x1160, 0x38a00800), // Position half-float3, unsupported.
         (0x1160, 0x38400820), // Reserved bit5.
         (0x1164, 0x38400200), // UV FLOAT3, unsupported.
         (0x1164, 0x38800201),
@@ -287,4 +288,69 @@ fn assembled_vertex_program_really_reads_position_w_and_exports_it_as_a_varying(
     assert!(FragmentProgram::decode(binary).is_err());
     // CPU decoding establishes the W dependency; actual FLOAT3 fetch filling W
     // with1 must be demonstrated by the separate GPU execution test.
+}
+
+#[test]
+fn half_position_can_omit_an_inactive_unread_uv_input() {
+    let mut e = tight_float3();
+    set(&mut e, 0x1160, 0x38600000).unwrap();
+    set(&mut e, 0x1164, 0x3a400040).unwrap();
+    set(&mut e, 0x1c00, 0x1008).unwrap();
+    set(&mut e, 0x1f04, 0x70017).unwrap();
+    let a = e.vertex_array().unwrap();
+    assert_eq!(a.position_format, PositionFormat::Float16x4);
+    assert_eq!(a.position_format.byte_size(), 8);
+    assert!(!a.uv_active);
+    assert_eq!(a.size(0, 3).unwrap(), 24);
+    assert!(a.size(1, 3).is_err());
+    // Activating UV cannot make an eight-byte stream support two more floats.
+    set(&mut e, 0x1164, 0x38800400).unwrap();
+    assert!(e.vertex_array().is_err());
+    let p =
+        VertexProgram::decode(include_bytes!("fixtures/maxwell/vertex-constant-uv.bin")).unwrap();
+    assert!(!p.needs_uv_input());
+    assert!(!p.wgsl().contains("a1"));
+    let module = naga::front::wgsl::parse_str(&p.wgsl()).unwrap();
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap();
+    assert!(
+        VertexProgram::decode(include_bytes!("fixtures/maxwell/vertex.bin"))
+            .unwrap()
+            .needs_uv_input()
+    );
+}
+
+#[test]
+fn unused_attribute_and_stream_banks_are_bounded_and_do_not_alias_zero() {
+    let mut e = tight_float3();
+    let expected = e.vertex_array().unwrap();
+    for slot in 2..32usize {
+        let m = 0x1160 + slot as u16 * 4;
+        set(&mut e, m, 0x3a400040).unwrap();
+        assert_eq!(e.vertex_attribute(slot), Some(0x3a400040));
+        for bad in [0x3a400000, 0x3a400041, 0x7a400040] {
+            assert!(set(&mut e, m, bad).is_err());
+        }
+        assert_eq!(e.vertex_array().unwrap(), expected);
+    }
+    assert_eq!(e.vertex_attribute(32), None);
+    for slot in 1..16usize {
+        let m = 0x1c00 + slot as u16 * 16;
+        for word in [0x1000, 0, 0x1fff] {
+            set(&mut e, m, word).unwrap();
+            assert_eq!(e.vertex_stream_format(slot), Some(word as u16));
+        }
+        assert!(set(&mut e, m, 0x2000).is_err());
+        assert_eq!(e.vertex_array().unwrap(), expected);
+    }
+    assert_eq!(e.vertex_stream_format(16), None);
+    for (m, type_bits) in [(0x2004, 0), (0x2084, 0x20), (0x20c4, 0x30), (0x2104, 0x40)] {
+        set(&mut e, m - 4, type_bits).unwrap();
+        set(&mut e, m, u32::MAX).unwrap();
+        assert!(set(&mut e, m - 4, type_bits | 1).is_err());
+    }
 }

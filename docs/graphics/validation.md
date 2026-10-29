@@ -4134,3 +4134,23 @@ Clippy and workspace formatting passed. An obsolete negative test was changed
 from now-supported `0xd6` to still-unsupported SNORM `0xd7`; the sRGB conversion
 oracle retains the independent transfer values and its documented one-step RGB
 tolerance rather than adopting backend readback values as expectations.
+
+The FLOAT16x4 fixture uses exact independent binary16 positions and a separately
+assembled vertex shader exporting constant UV through guest instructions. An
+analytic triangle/nearest-texel oracle verifies coverage and sampled color, then
+checks accumulated coverage after a guest position mutation. Cold vertex upload
+is 24 bytes; 32 unchanged draws add no vertex upload, pipeline/module creation,
+readback or completion wait. The mutation uploads another 24 bytes without
+redecoding the shader. Rebinding a vertex program which reads inactive UV faults
+without drawing from the previous pipeline. CPU tests additionally check all
+thirty inactive generic descriptors and fifteen unreferenced stream formats,
+reserved bits, strict active-profile rejection, eight-byte bounds and Naga
+validation of the omitted-input interface.
+The half-position delivery passed 455 default-feature CPU tests, 450 without
+default features and all 208 explicit Vulkan GPU scenarios. The new fixture also
+passed on WSL OpenGL and all 23 driver scenarios ran on each native Windows
+backend. The 32-draw warm measurement used 32 queue submissions and zero added
+vertex uploads, readbacks or waits. Caller-thread allocations/reallocations in
+this debug workload were 1574/33 on WSL Vulkan, 1568/128 on WSL OpenGL, 1427/39 on
+Windows D3D12 and 1589/39 on Windows Vulkan. These are observed host API costs,
+not allocation-free rendering, combined GPU batching or game performance data.
