@@ -1125,13 +1125,10 @@ fn shadow_track_passthrough_replay_and_filtered_history_are_distinct() {
     assert_eq!(c.engine.rasterization().unwrap().1.color.write_mask, 15);
     assert_eq!(
         c.engine.shadow_value(0x1a00),
-        Some(ShadowValue::FilteredUnverified)
+        Some(ShadowValue::Known(0x1111))
     );
     c.engine.apply(write(0x124, 3)).unwrap();
-    assert_eq!(
-        c.engine.apply(write(0x1a00, 0)),
-        Err(MethodError::FilteredShadowValue(0x1a00))
-    );
+    c.engine.apply(write(0x1a00, 0)).unwrap();
     assert_eq!(c.engine.rasterization().unwrap().1.color.write_mask, 15);
     for (m, v) in [
         (0x124, 0),
@@ -1714,10 +1711,8 @@ fn pure_fixed_and_disabled_raster_controls_replay_only_valid_captured_values() {
     e.apply(write(0x1a00, 1)).unwrap(); // Previously known mask was 0x1111.
     e.apply(write(0x124, 3)).unwrap();
     e.apply(write(0xfb4, u32::MAX)).unwrap();
-    assert_eq!(
-        e.apply(write(0x1a00, 0)),
-        Err(MethodError::FilteredShadowValue(0x1a00))
-    );
+    e.apply(write(0x1a00, 0)).unwrap();
+    assert_eq!(e.shadow_value(0x1a00), Some(ShadowValue::Known(1)));
     let mut other = Maxwell3d::default();
     other.apply(write(0, CLASS)).unwrap();
     other.apply(write(0x124, 3)).unwrap();
@@ -1728,4 +1723,31 @@ fn pure_fixed_and_disabled_raster_controls_replay_only_valid_captured_values() {
     for action in [0x1214, 0x19d0, 0x1b00, 0x800, 0x2380] {
         assert_eq!(e.shadow_value(action), None);
     }
+}
+
+#[test]
+fn filtered_disabled_raster_controls_capture_from_first_explicit_valid_write() {
+    let mut e = Maxwell3d::default();
+    e.apply(write(0, CLASS)).unwrap();
+    e.apply(write(0x124, 1)).unwrap();
+    let methods = [0x02ec, 0xfb4, 0xfd8, 0x1148, 0x11f8];
+    for m in methods {
+        assert_eq!(e.shadow_value(m), Some(ShadowValue::Unwritten));
+        e.apply(write(m, 0)).unwrap();
+        assert_eq!(e.shadow_value(m), Some(ShadowValue::Known(0)));
+        assert!(e.apply(write(m, 1)).is_err());
+        assert_eq!(e.shadow_value(m), Some(ShadowValue::Known(0)));
+    }
+    // Validated pure color-mask state is captured in filtered mode as well.
+    e.apply(write(0x1a00, 1)).unwrap();
+    e.apply(write(0x124, 3)).unwrap();
+    for m in methods {
+        e.apply(write(m, u32::MAX)).unwrap();
+    }
+    e.apply(write(0x1a00, 0)).unwrap();
+    assert_eq!(e.shadow_value(0x1a00), Some(ShadowValue::Known(1)));
+    assert_eq!(
+        e.apply(write(0x800, 0)),
+        Err(MethodError::UnsupportedShadowReplayMethod(0x800))
+    );
 }

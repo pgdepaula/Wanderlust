@@ -2120,13 +2120,19 @@ corroborates capture plus live forwarding, passthrough without capture, replay
 from the shadow bank, and bypass of control methods below `0x200`. Its MME
 register read uses current state rather than a separate invented shadow read.
 
-This reference treats filtered capture like ordinary capture. Wanderlust does
-not assume that equivalence: a changed or previously unknown successful live
-write in filtered mode marks the eligible shadow word `FilteredUnverified`.
-An identical write to a previously known word preserves that known value under
-both capture and exclusion, without deciding filter membership. Attempting to
-replay an unverified word fails before live mutation. Unfiltered capture can establish a known word again;
-passthrough never changes it. No unspecified power-on shadow value is inferred.
+Wanderlust adopts the reference's live forwarding and capture in both track
+modes only for its explicit pure-raster whitelist. Changed masks and initial
+disabled TIR writes are captured after ordinary field validation succeeds.
+Passthrough does not alter history, and missing captures still fail on replay.
+The reference does not specify a complete physical filter, so actions, resource
+addresses and other methods remain excluded rather than becoming replayable
+merely because TRACK_WITH_FILTER was selected. No initial shadow value is inferred.
+
+A later independent [Ryujinx blend-state correction, 9e896b8f7edab528fca590351ff41c0176a465fa](https://git.h3cjp.net/H3cJP/ryujinx/commit/9e896b8f7edab528fca590351ff41c0176a465fa)
+reports an observed rendering regression caused by bypassing shadow updates and
+explicitly describes capture in both track modes. This corroborates the ordinary
+raster-state model; it is not a register-by-register Maxwell hardware filter
+specification. No implementation code from that change is imported.
 
 Replay is restricted to side-effect-free viewport/scissor, depth-selection and
 blend/color-mask register subsets. Attachment/resource addresses, actions,
@@ -2395,7 +2401,7 @@ color-target fields occupy nine words per target at word `0x200 + target*16`.
 Thus word `0x206` reads the explicitly written third-dimension register at
 byte `0x0818`; it is not a GPU-memory load or a scratch alias. The separate
 bank is updated only after a successful B197 state write, including writes
-emitted by macros. Filtered/unwritten shadow-replay values and other engine
+emitted by macros. Unwritten/unsupported shadow-replay values and other engine
 classes cannot supply a live value.
 
 `color-state-read.asm` was independently assembled/disassembled with pinned
@@ -2433,5 +2439,6 @@ conservative-raster, raster-bounding-box and coverage-to-color controls. These
 are validated state writes, not draw triggers, memory operations or fences. The
 same pinned shadow-state reference justifies applying known unfiltered captures
 to these methods and to the supported fixed-raster method set. This extension
-retains the rejection of active unsupported raster modes and unverified changed
-filtered captures; it does not treat arbitrary methods as shadow-safe.
+retains rejection of active unsupported raster modes, absent captures and
+methods outside the pure-state whitelist; it does not treat arbitrary methods
+as shadow-safe.

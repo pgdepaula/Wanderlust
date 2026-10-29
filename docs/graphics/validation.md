@@ -4007,3 +4007,21 @@ on WSL OpenGL. Native Windows D3D12 and Vulkan each executed all 16 driver GPU
 scenarios, with zero failures/skips. Package strict all-target Clippy and
 workspace formatting passed. No original-game frame is inferred from these
 synthetic pixel comparisons.
+
+
+Filtered capture of the supported pure-raster whitelist is validated against the
+pinned reference semantics. The indexed driver pixel test now starts in
+TRACK_WITH_FILTER, captures fixed raster controls and a changed red-only mask,
+and replays them despite invalid incoming replacements. Changed filtered mask
+history also survives passthrough writes. Missing viewport history still faults
+after that accepted draw and publication preserves its pixels without replay.
+The earlier filtered-mask rejection case is superseded by this supported capture
+behavior; negative GPFIFO cases retain uncaptured-state, excluded attachment
+address and excluded action failures. No capture defaults or general physical
+filter membership are inferred. CPU tests passed 441 with default features (199
+GPU scenarios ignored by that ordinary run) and 436 without default features.
+All 199 GPU scenarios executed on WSL Vulkan. WSL OpenGL additionally executed
+the driver replay scenario and two GPFIFO shadow scenarios. Native Windows
+D3D12 and Vulkan each executed 16 driver and 45 GPFIFO GPU scenarios. These
+explicit GPU runs had zero failures/skips. Strict package all-target Clippy and
+workspace formatting passed.

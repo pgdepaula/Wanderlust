@@ -2463,8 +2463,9 @@ fn gpfifo_shadow_unknown_replay_preserves_pending_draw_and_latches_fault() {
     for (capture, writes, expected_error) in [
         (
             true,
-            vec![(0x124, 1), (0x1a00, 1), (0x124, 3), (0x1a00, 0)],
-            "FilteredShadowValue",
+            // Filtered mode cannot make attachment addresses replayable.
+            vec![(0x124, 1), (0x800, 0), (0x124, 3), (0x800, 0)],
+            "UnsupportedShadowReplayMethod",
         ),
         (false, vec![(0x124, 3), (0x1a00, 0)], "MissingShadowValue"),
         (

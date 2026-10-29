@@ -155,7 +155,8 @@ pub enum ShadowValue {
     #[default]
     Unwritten,
     Known(u32),
-    /// Live state was applied, but hardware filter eligibility is unverified.
+    /// Retained diagnostic classification for unverified filtered extensions.
+    /// The supported pure-state capture subset records validated known words.
     FilteredUnverified,
 }
 #[derive(Debug, Default)]
@@ -229,14 +230,13 @@ impl ShadowRam {
             return;
         }
         let value = match self.mode {
-            Some(ShadowMode::Track) => ShadowValue::Known(write.value),
-            Some(ShadowMode::TrackWithFilter) => match self.value(write.method) {
-                // Whether the filter captures this write or excludes it, an
-                // identical previously known value remains known. Never infer
-                // an initial shadow value or eligibility for a changed word.
-                ShadowValue::Known(old) if old == write.value => ShadowValue::Known(old),
-                _ => ShadowValue::FilteredUnverified,
-            },
+            // Source-pinned DeviceStateWithShadow captures ordinary validated
+            // state in both track modes. Limit this behavior to eligible pure
+            // state above; actions/resources and unspecified initial contents
+            // do not become replayable by selecting the filtered mode.
+            Some(ShadowMode::Track | ShadowMode::TrackWithFilter) => {
+                ShadowValue::Known(write.value)
+            }
             _ => return,
         };
         if self.words.is_empty() {

@@ -2771,7 +2771,11 @@ modulation-function and coverage-to-color controls (`0x1148`, `0x02ec`, `0x0fb4`
 `0x0fd8`, `0x11f8`). Replay substitutes a previously captured valid value before
 normal live-state validation; incoming replacement bits are not reinterpreted as
 new state. Actions, attachment addresses and resource selectors remain excluded.
-Filtered capture retains a previously known identical word: whether the filter
-captures or excludes that write, the stored result is unchanged. Changed or
-previously unknown filtered words remain unverified and cannot be replayed. No
-initial shadow contents or hardware filter membership is inferred.
+For this bounded pure-state whitelist, TRACK and TRACK_WITH_FILTER both capture
+successful validated writes, matching the pinned independent implementation.
+This includes changed color masks and first writes of disabled TIR. It is a
+reference-based compatibility subset, not a reconstruction of the physical
+filter's complete membership. Unsupported methods remain excluded and absent
+shadow words remain absent; replay cannot invent initial values. The earlier
+unverified-filter diagnostic classification remains available for compatibility,
+but is not produced by these supported pure-state captures.

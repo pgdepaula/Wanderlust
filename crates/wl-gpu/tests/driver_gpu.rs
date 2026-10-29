@@ -1397,7 +1397,7 @@ fn mme_live_color_state_controls_pixels_and_faults_without_default_registers() {
 
 #[test]
 #[ignore = "requires actual GPU; literal shadow replay of validated raster state controls indexed pixels"]
-fn pure_raster_shadow_replay_renders_and_filtered_fault_preserves_output() {
+fn pure_raster_shadow_replay_renders_and_missing_capture_preserves_output() {
     let (mut data, mut words, image) = fixture();
     let draw = words.split_off(words.len() - 8);
     let mut pure: Vec<_> = wl_gpu::raster::FIXED_RASTER_STATE
@@ -1406,7 +1406,8 @@ fn pure_raster_shadow_replay_renders_and_filtered_fault_preserves_output() {
         .filter(|v| v.0 >= 0x200)
         .collect();
     pure.extend([0x02ec, 0x0fb4, 0x0fd8, 0x1148, 0x11f8].map(|m| (m, 0)));
-    method(&mut words, 0x124, 0);
+    // Capture the entire supported pure-state subset in TRACK_WITH_FILTER.
+    method(&mut words, 0x124, 1);
     for &(m, v) in &pure {
         method(&mut words, u32::from(m), v);
     }
@@ -1435,7 +1436,15 @@ fn pure_raster_shadow_replay_renders_and_filtered_fault_preserves_output() {
     assert_eq!(first.progress.draws_submitted, 1);
     assert_eq!(d.graphics_counters().readback_operations, 0);
     let mut filtered = Vec::new();
-    for (m, v) in [(0x124, 1), (0x1a00, 0x1111), (0x124, 3), (0x1a00, 0)] {
+    for (m, v) in [
+        (0x124, 1),
+        (0x1a00, 0x1111), // Changed filtered capture must be retained.
+        (0x124, 2),
+        (0x1a00, 1),
+        (0x124, 3),
+        (0x1a00, 0),
+        (0xa00, 0), // Viewport scale was never captured in this channel.
+    ] {
         method(&mut filtered, m, v);
     }
     let bytes: Vec<_> = filtered.iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -1456,7 +1465,7 @@ fn pure_raster_shadow_replay_renders_and_filtered_fault_preserves_output() {
             .as_ref()
             .unwrap()
             .to_string()
-            .contains("FilteredShadowValue")
+            .contains("MissingShadowValue")
     );
     assert_eq!(second.progress.draws_submitted, 0);
     let frame = d.publish(c, &mut mem(&mut data)).unwrap().unwrap();
