@@ -240,8 +240,9 @@ fn missing_descriptor_fields_rejected() {
 fn unsupported_formats_and_non_zero_restrictions() {
     let mut e = setup_u16_engine();
 
-    // Format 0 is U8 (defined in hardware, but unsupported in Wanderlust subset)
-    assert!(!try_send(&mut e, 0x17d8, 0));
+    // Format zero is the documented one-byte input, widened only by the host backend.
+    assert!(try_send(&mut e, 0x17d8, 0));
+    assert_eq!(e.index_buffer(0, 3).unwrap().width, 1);
 
     // Format 3 or higher is undefined in Maxwell
     assert!(!try_send(&mut e, 0x17d8, 3));

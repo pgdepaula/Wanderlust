@@ -2919,3 +2919,13 @@ are published completely without replacement; I/O errors do not change execution
 These are acquisition evidence, not proof of successful shader execution. Keep
 commercial program diagnostics private and distinguish the actual original
 process ID from synthetic initialization probes.
+
+B197 index-size zero now resolves one-byte guest elements in addition to two-
+and four-byte formats. FIRST, inclusive limits, guest mapping spans, alias stamps
+and dirty ranges use the original element width. WebGPU exposes no byte index
+format, so dirty byte indices are checked and widened into little-endian Uint16
+upload data, padded only for host transfer alignment. The bounded temporary copy
+is discarded after queue upload; unchanged resources reuse the resident index
+buffer without another guest read, widening or upload. Existing signed base,
+triangle-list, single-instance and disabled-restart restrictions still apply.
+With restart disabled, byte `255` is an ordinary index and is bounds-checked.

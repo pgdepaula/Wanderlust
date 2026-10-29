@@ -65,7 +65,9 @@ impl Renderer {
             let mut min = u32::MAX;
             let mut max = 0;
             for b in bytes.chunks_exact(source.width as usize) {
-                let n = if source.width == 2 {
+                let n = if source.width == 1 {
+                    u32::from(b[0])
+                } else if source.width == 2 {
                     u32::from(u16::from_le_bytes(b.try_into().unwrap()))
                 } else {
                     u32::from_le_bytes(b.try_into().unwrap())
@@ -86,7 +88,14 @@ impl Renderer {
         engine.vertex_array()?.span(0, vertices)?;
         if cached.is_none() {
             let bytes = bytes.unwrap();
-            let allocated = (source.bytes as u64 + 3) & !3;
+            // WebGPU has no Uint8 index format. Widen only dirty byte indices,
+            // keeping guest bounds/stamps in original byte coordinates.
+            let host_bytes = if source.width == 1 {
+                u64::from(count) * 2
+            } else {
+                source.bytes as u64
+            };
+            let allocated = (host_bytes + 3) & !3;
             if allocated > self.capabilities.device_limits.max_buffer_size {
                 return Err(invalid("index resource exceeds device limit"));
             }
@@ -102,14 +111,20 @@ impl Renderer {
                     mapped_at_creation: false,
                 })
             };
-            if allocated == bytes.len() as u64 {
+            if source.width != 1 && allocated == bytes.len() as u64 {
                 self.queue.write_buffer(&buffer, 0, bytes);
             } else {
                 let mut padded = Vec::new();
                 padded
                     .try_reserve_exact(allocated as usize)
                     .map_err(|e| crate::Error(e.to_string()))?;
-                padded.extend_from_slice(bytes);
+                if source.width == 1 {
+                    for &index in bytes {
+                        padded.extend_from_slice(&u16::from(index).to_le_bytes());
+                    }
+                } else {
+                    padded.extend_from_slice(bytes);
+                }
                 padded.resize(allocated as usize, 0);
                 self.queue.write_buffer(&buffer, 0, &padded);
                 self.counters.temporary_allocations += 1;
@@ -121,7 +136,7 @@ impl Renderer {
             self.counters.staging_allocations += 1;
             self.indices = Some(ResidentIndex {
                 buffer,
-                format: if source.width == 2 {
+                format: if source.width <= 2 {
                     wgpu::IndexFormat::Uint16
                 } else {
                     wgpu::IndexFormat::Uint32

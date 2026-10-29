@@ -2542,3 +2542,10 @@ The same NVIDIA header names `SET_SUBTILING_PERF_KNOB_A` (`0x0360`), with four
 (`0x0364`), with an 8-bit primitive fraction. Keeping tuning data under the
 existing serialized execution model does not emulate physical tiling budgets,
 GPU performance counters or scheduling timing.
+
+NVIDIA `clb197.h` revision `9fdf5c4062007929d9f4e6cbad9c9771fe61b880`
+defines `SET_INDEX_BUFFER_E` (`0x17d8`) INDEX_SIZE values 0/1/2 for one/two/four
+bytes. `SET_INDEX_BUFFER_F` FIRST counts elements, not words or host upload bytes.
+The existing checked decoder and inclusive range calculations retain those guest
+units; only the backend converts byte elements to the host Uint16 index format.
+This is a measured CPU widening/upload boundary, not zero-copy index execution.

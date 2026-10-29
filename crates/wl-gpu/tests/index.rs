@@ -62,7 +62,6 @@ fn literal_index_descriptor_bounds_and_begin_first_count_end() {
 fn unsupported_index_modes_alignment_and_40_bit_bounds() {
     let mut e = configured();
     for (m, v) in [
-        (0x17d8, 0),
         (0x17d8, 3),
         (0x17c8, 256),
         (0x17d0, 256),
@@ -129,4 +128,21 @@ fn array_restart_policy_requires_disabled_global_restart_only_when_it_can_apply(
         independent.apply(draw),
         Ok(MethodEffect::Draw { first: 0, count: 3 })
     );
+}
+
+#[test]
+fn byte_index_format_uses_byte_offsets_and_exact_inclusive_bounds() {
+    let mut e = configured();
+    assert!(set(&mut e, 0x17d8, 0));
+    assert!(set(&mut e, 0x17d4, 0x80006));
+    let b = e.index_buffer(1, 6).unwrap();
+    assert_eq!((b.address, b.width, b.bytes), (GpuAddress(0x80001), 1, 6));
+    assert!(e.index_buffer(2, 6).is_err());
+    assert!(set(&mut e, 0x17cc, 0x80001));
+    assert_eq!(e.index_buffer(0, 6).unwrap().bytes, 6);
+    assert!(set(&mut e, 0x17c8, 255));
+    assert!(set(&mut e, 0x17cc, 0xfffffffc));
+    assert!(set(&mut e, 0x17d0, 255));
+    assert!(set(&mut e, 0x17d4, u32::MAX));
+    assert!(e.index_buffer(0, 6).is_err());
 }

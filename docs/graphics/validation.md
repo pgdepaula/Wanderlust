@@ -4172,3 +4172,21 @@ Windows D3D12 and Vulkan backend, without failures or skips. Strict package
 all-target Clippy, workspace formatting and `cargo check -p wl-nvdrv --locked`
 passed. These package results do not establish original-game shader or frame
 compatibility.
+
+Byte-index tests submit a textured shared-vertex quad through GpuDriver/GPFIFO,
+with a skipped `255` prefix, nonzero FIRST, signed-base machinery and an exact
+seven-byte inclusive descriptor range. An independent rectangle/diagonal/UV
+oracle validates the full quad, then a half-quad after mutating index bytes.
+Six guest bytes become twelve host upload bytes; 32 unchanged draws add no index
+reads, uploads, temporary conversion allocations or readbacks. Mutation adds
+another six-byte read/twelve-byte upload without recompiling shaders/pipelines.
+GPU-VA aliasing and remapping to different canonical bytes produce the correct
+half-quad; an actual `255` reference beyond vertex bounds faults before index
+upload or draw. CPU tests additionally distinguish byte offsets, unaligned byte
+starts, inclusive limits and 40-bit overflow. Previous U16/U32 tests remain active.
+
+This delivery passed 458 default-feature CPU tests, 453 without default features,
+all 210 explicit Vulkan GPU scenarios, the new scenario on WSL OpenGL, and all
+25 driver GPU scenarios on each native Windows D3D12/Vulkan backend. No executed
+case failed or skipped. Package all-target strict Clippy and workspace formatting
+passed. Synthetic indexed pixels remain distinct from original-game frames.

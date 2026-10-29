@@ -40,7 +40,7 @@ impl IndexRegisters {
             }
             0x17c8..=0x17d8 => {
                 let n = ((method - 0x17c8) / 4) as usize;
-                if (n == 0 || n == 2) && value > 255 || n == 4 && !matches!(value, 1 | 2) {
+                if (n == 0 || n == 2) && value > 255 || n == 4 && !matches!(value, 0..=2) {
                     return Err(bad());
                 }
                 self.words[n] = Some(value);
@@ -93,7 +93,7 @@ impl IndexRegisters {
             return Err(invalid("missing explicit index restart/instance state"));
         }
         let base = self.base.ok_or_else(|| invalid("missing base vertex"))?;
-        let width = if w[4] == 1 { 2 } else { 4 };
+        let width = 1u64 << w[4];
         let start = (u64::from(w[0]) << 32) | u64::from(w[1]);
         let limit = (u64::from(w[2]) << 32) | u64::from(w[3]);
         let bytes = u64::from(count)

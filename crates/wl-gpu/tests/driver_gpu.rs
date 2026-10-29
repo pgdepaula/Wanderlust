@@ -2233,3 +2233,201 @@ fn initialized_context_defaults_and_subtile_hints_preserve_real_draws() {
     );
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+#[test]
+#[ignore = "requires actual GPU; guest byte indices, nonzero first/base, dirty widening and retained valid output"]
+fn byte_indexed_quad_first_base_mutation_and_warm_reuse() {
+    let (mut data, mut words, image) = fixture();
+    let _old_draw = words.split_off(words.len() - 8);
+    for (n, (p, uv)) in [
+        ([8f32, 8.], [0., 0.]),
+        ([-0.75, -0.5], [0., 1.]),
+        ([0.5, -0.5], [1., 1.]),
+        ([0.5, 0.75], [1., 0.]),
+        ([-0.75, 0.75], [0., 0.]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        for (c, v) in [p[0], p[1], 0., 1., uv[0], uv[1]].into_iter().enumerate() {
+            data[0x3000 + n * 24 + c * 4..0x3004 + n * 24 + c * 4]
+                .copy_from_slice(&v.to_le_bytes());
+        }
+    }
+    data[0x6000..0x6007].copy_from_slice(&[255, 0, 1, 2, 0, 2, 3]);
+    for (m, v) in [
+        (0x1f04, 0x70077),
+        (0x17d4, 0x80006),
+        (0x17d8, 0),
+        (0x1434, 1),
+    ] {
+        method(&mut words, m, v);
+    }
+    let draw = [0x20010586, 4, 0x200105f7, 1, 0x200105f8, 6, 0x20010585, 0];
+    words.extend(draw);
+    let (mut d, space, c, b, _) = setup_driver();
+    put(&mut data, 0x10000, &words);
+    let r = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, words.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    let before = d.graphics_counters();
+    assert_eq!(before.index_guest_bytes, 6);
+    assert_eq!(before.index_upload_bytes, 12);
+    let bytes: Vec<_> = draw.iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    for _ in 0..32 {
+        let r = d
+            .submit(
+                c,
+                KICKOFF_PB,
+                &header(1),
+                Some(&entry(0xb0000, draw.len())),
+                &mut mem(&mut data),
+            )
+            .unwrap();
+        assert!(r.fault.is_none());
+    }
+    let after = d.graphics_counters();
+    assert_eq!(after.index_guest_bytes, before.index_guest_bytes);
+    assert_eq!(after.index_upload_bytes, before.index_upload_bytes);
+    assert_eq!(after.temporary_allocations, before.temporary_allocations);
+    assert_eq!(after.readback_operations, before.readback_operations);
+    let verify = |pixels: &[u8], mode: u8| {
+        let mut inside = 0;
+        for y in 0..29 {
+            for x in 0..52 {
+                let px = (x as f64 + 0.5) * 2. / 47. - 1.;
+                let py = 1. - (y as f64 + 0.5) * 2. / 29.;
+                if [px + 0.75, px - 0.5, py + 0.5, py - 0.75, py - px - 0.25]
+                    .iter()
+                    .any(|v| v.abs() < 0.01)
+                {
+                    continue;
+                }
+                let covered = x < 47
+                    && px > -0.75
+                    && px < 0.5
+                    && py > -0.5
+                    && py < 0.75
+                    && (mode == 0
+                        || mode == 1 && py - px - 0.25 < 0.
+                        || mode == 2 && py - px - 0.25 > 0.);
+                let mut expected = BG;
+                if covered {
+                    let u = (px + 0.75) / 1.25 * 37.;
+                    let v = (0.75 - py) / 1.25 * 19.;
+                    if [u, v].iter().any(|v| v.fract().min(1. - v.fract()) < 0.005) {
+                        continue;
+                    }
+                    expected.copy_from_slice(
+                        &image[(v.floor() as usize * 37 + u.floor() as usize) * 4
+                            ..(v.floor() as usize * 37 + u.floor() as usize + 1) * 4],
+                    );
+                    inside += 1;
+                }
+                assert_eq!(
+                    &pixels[(y * 52 + x) * 4..(y * 52 + x + 1) * 4],
+                    expected,
+                    "byte quad {x},{y}"
+                );
+            }
+        }
+        assert!(inside > 100);
+    };
+    verify(&d.publish(c, &mut mem(&mut data)).unwrap().unwrap().rgba, 0);
+    d.write_backing(b, 0x6004, &[0, 1, 2], &mut mem(&mut data))
+        .unwrap();
+    let background: Vec<_> = (0..SIZE / 4).flat_map(|_| BG).collect();
+    d.write_backing(b, RT as u64, &background, &mut mem(&mut data))
+        .unwrap();
+    let r = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, draw.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(r.fault.is_none());
+    assert_eq!(d.graphics_counters().index_guest_bytes, 12);
+    assert_eq!(d.graphics_counters().index_upload_bytes, 24);
+    assert_eq!(
+        d.graphics_counters().pipeline_allocations,
+        after.pipeline_allocations
+    );
+    assert_eq!(
+        d.graphics_counters().shader_module_allocations,
+        after.shader_module_allocations
+    );
+    verify(&d.publish(c, &mut mem(&mut data)).unwrap().unwrap().rgba, 1);
+    // A GPU-VA alias resolves to the same canonical byte-index data.
+    let reserve = d.reserve_fixed(space, GpuAddress(0xc0000), 4096).unwrap();
+    let mapping = d.map(space, reserve, b, 0x6000).unwrap();
+    let mut alias = Vec::new();
+    method(&mut alias, 0x17cc, 0xc0000);
+    method(&mut alias, 0x17d4, 0xc0006);
+    alias.extend_from_slice(&draw);
+    let bytes: Vec<_> = alias.iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let r = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, alias.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(r.fault.is_none());
+    verify(&d.publish(c, &mut mem(&mut data)).unwrap().unwrap().rgba, 1);
+    d.unmap(space, mapping).unwrap();
+    d.write_backing(b, 0x7000, &[255, 0, 2, 3, 0, 2, 3], &mut mem(&mut data))
+        .unwrap();
+    d.map(space, reserve, b, 0x7000).unwrap();
+    d.write_backing(b, RT as u64, &background, &mut mem(&mut data))
+        .unwrap();
+    let bytes: Vec<_> = draw.iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let r = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, draw.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(r.fault.is_none());
+    verify(&d.publish(c, &mut mem(&mut data)).unwrap().unwrap().rgba, 2);
+    // 255 is an ordinary value with restart disabled, and must be bounds-checked.
+    d.write_backing(b, 0x7001, &[255], &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters();
+    let r = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, draw.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(r.fault.is_some());
+    assert_eq!(d.graphics_counters().draw_commands, before.draw_commands);
+    assert_eq!(
+        d.graphics_counters().index_upload_bytes,
+        before.index_upload_bytes
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
