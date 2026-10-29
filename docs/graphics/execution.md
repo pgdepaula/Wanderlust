@@ -2724,3 +2724,10 @@ R11G11B10 rendering requires the adapter's `RG11B10UFLOAT_RENDERABLE` feature.
 Unsupported adapters reject the actual draw before pipeline creation rather than
 substituting UNORM storage. The tested OpenGL backend lacks this feature; native
 D3D12/Vulkan and WSL Vulkan support the tested HDR path.
+
+Color FORMAT zero explicitly disables an attachment. Secondary FORMAT selectors
+can be initialized without providing their addresses, dimensions or backing;
+those targets remain inactive under the supported one-output routing. State is
+retained per slot and channel. Rendering through a disabled active slot fails
+before resource resolution or queue submission. Unsupported formats and active
+MRT routing still fail explicitly, with earlier accepted GPU output preserved.

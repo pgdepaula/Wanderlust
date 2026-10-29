@@ -2355,3 +2355,13 @@ format identity is separate from GOB addressing. Guest publication retains those
 native bits. Only the public diagnostic image is converted in place to clamped
 linear RGBA8, with implicit alpha one. This preview is not HDR display output,
 tone mapping or a VI presentation event.
+
+### Disabled and inactive attachment formats
+
+NVIDIA B197 defines color-target FORMAT at byte `0x0810 + target*0x40` and value
+zero as DISABLED. The backend retains disabled, RGBA8 and R11G11B10 format
+selectors for all eight targets, independently of the active target count.
+Only target zero can be rendered. An inactive format write never allocates a
+host image or resolves guest backing, and does not imply multiple render targets.
+Disabling target zero is valid configuration, but a subsequent color draw/clear
+must reject it rather than treating zero as RGBA8 or using the previous target.

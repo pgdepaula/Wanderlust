@@ -1252,3 +1252,83 @@ fn native_hdr_targets_preserve_float_guest_pixels_and_deferred_residency() {
         );
     }
 }
+
+#[test]
+#[ignore = "requires actual GPU; secondary disabled target formats permit real single-target rendering, but disabling the active target cannot reuse old pixels"]
+fn disabled_color_bindings_do_not_activate_mrt_or_reuse_a_stale_active_target() {
+    let (mut data, mut words, image) = fixture();
+    let draw = words.split_off(words.len() - 8);
+    for slot in 1..8 {
+        method(&mut words, 0x810 + slot * 0x40, 0);
+    }
+    words.extend(draw);
+    let (mut d, _, c, b, _) = setup_driver();
+    put(&mut data, 0x10000, &words);
+    let first = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, words.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(first.fault.is_none(), "{:?}", first.fault);
+    assert_eq!(first.progress.draws_submitted, 1);
+    assert_eq!(d.graphics_counters().readback_operations, 0);
+    check(
+        &d.publish(c, &mut mem(&mut data)).unwrap().unwrap().rgba,
+        &image,
+        None,
+        BG,
+    );
+    d.retire(first.token).unwrap();
+    let words = [
+        0x20010204u32,
+        0,
+        0x20010586,
+        4,
+        0x200105f7,
+        0,
+        0x200105f8,
+        3,
+        0x20010585,
+        0,
+    ];
+    let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let old = data.clone();
+    let second = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, words.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(
+        second
+            .fault
+            .as_ref()
+            .unwrap()
+            .to_string()
+            .contains("selected color target is disabled")
+    );
+    assert_eq!(second.progress.draws_submitted, 0);
+    assert_eq!(data, old);
+    assert!(!d.has_pending_output());
+    assert_eq!(d.graphics_counters().draw_commands, 1);
+    assert_eq!(d.graphics_counters().readback_operations, 1);
+    assert!(
+        d.submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, words.len())),
+            &mut mem(&mut data)
+        )
+        .is_err()
+    );
+}

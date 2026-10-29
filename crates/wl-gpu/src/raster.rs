@@ -392,6 +392,7 @@ fn depth_compare(value: u32) -> Option<DepthCompare> {
 #[derive(Debug, Default)]
 pub(crate) struct RasterRegisters {
     color: [Option<u32>; 9],
+    inactive_color_formats: [Option<u32>; 7],
     viewports: [[Option<u32>; 6]; 16],
     viewport_swizzles: [Option<u32>; 16],
     viewport_depth: [[Option<u32>; 2]; 16],
@@ -428,6 +429,13 @@ pub(crate) struct RasterRegisters {
     window_clip_disabled: bool,
 }
 impl RasterRegisters {
+    pub fn color_target_format(&self, slot: usize) -> Option<u32> {
+        if slot == 0 {
+            self.color[4]
+        } else {
+            self.inactive_color_formats.get(slot - 1).copied().flatten()
+        }
+    }
     fn resolve_blend(&self) -> Result<Option<BlendState>> {
         if !self.blend_enabled {
             return Ok(None);
@@ -690,6 +698,14 @@ impl RasterRegisters {
                 }
                 self.blend[n] = Some(value);
             }
+            0x0850..=0x09d0 if (method - 0x0850) % 0x40 == 0 => {
+                // Per-target format selectors are configuration, not rendering.
+                // Inactive targets never fetch backing or authorize MRT output.
+                if !matches!(value, 0 | 0xd5 | 0xe0) {
+                    return Err(bad());
+                }
+                self.inactive_color_formats[usize::from((method - 0x850) / 0x40)] = Some(value);
+            }
             0x0800..=0x0820 => {
                 let n = ((method - 0x0800) / 4) as usize;
                 let valid = match n {
@@ -697,7 +713,7 @@ impl RasterRegisters {
                     1 => value % 256 == 0,
                     2 => value > 0 && value <= 0x0fffffff,
                     3 => value > 0 && value <= 0x1ffff,
-                    4 => matches!(value, 0xd5 | 0xe0),
+                    4 => matches!(value, 0 | 0xd5 | 0xe0),
                     5 => value == 0x1000 || (value & !0x70 == 0 && (value >> 4) <= 5),
                     6 => value == 1,
                     7 => true, // DWORD array pitch is checked after complete geometry is known.
@@ -907,6 +923,9 @@ impl RasterRegisters {
         let mut c = [0u32; 9];
         for (out, v) in c.iter_mut().zip(self.color) {
             *out = v.ok_or_else(|| invalid("incomplete color target"))?;
+        }
+        if c[4] == 0 {
+            return Err(invalid("selected color target is disabled"));
         }
         let address = (u64::from(c[0]) << 32) | u64::from(c[1]);
         // WIDTH is byte pitch for PITCH, pixels for BLOCKLINEAR (Mesa FB setup).

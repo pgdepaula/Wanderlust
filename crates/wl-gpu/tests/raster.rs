@@ -378,3 +378,46 @@ fn target_zero_selection_ignores_only_documented_inactive_target_fields() {
     assert!(set(&mut e, 0x121d, identity).is_err());
     assert_eq!(e.rasterization().unwrap(), expected);
 }
+
+#[test]
+fn all_color_format_selectors_retain_disabled_state_without_activating_outputs() {
+    let mut e = ready();
+    let active = e.rasterization().unwrap();
+    for slot in 1..8 {
+        let method = 0x810 + slot as u16 * 0x40;
+        assert_eq!(e.color_target_format(slot), None);
+        for format in [0xd5, 0xe0, 0] {
+            assert_eq!(set(&mut e, method, format), Ok(MethodEffect::State));
+            assert_eq!(e.color_target_format(slot), Some(format));
+            assert_eq!(e.rasterization().unwrap(), active);
+        }
+        for format in [0xcf, 0xff, u32::MAX] {
+            assert_eq!(
+                set(&mut e, method, format),
+                Err(MethodError::UnsupportedValue {
+                    method,
+                    value: format
+                })
+            );
+            assert_eq!(e.color_target_format(slot), Some(0));
+        }
+        assert!(set(&mut e, method + 1, 0).is_err());
+    }
+    assert_eq!(e.color_target_format(8), None);
+    assert_eq!(e.color_target_format(usize::MAX), None);
+    set(&mut e, 0x810, 0).unwrap();
+    assert_eq!(e.color_target_format(0), Some(0));
+    assert!(
+        e.rasterization()
+            .unwrap_err()
+            .to_string()
+            .contains("disabled")
+    );
+    set(&mut e, 0x810, 0xd5).unwrap();
+    assert_eq!(e.rasterization().unwrap(), active);
+    set(&mut e, 0, EngineClass::Compute as u32).unwrap();
+    assert!(set(&mut e, 0x850, 0xe0).is_err());
+    set(&mut e, 0, CLASS).unwrap();
+    assert_eq!(e.color_target_format(1), Some(0));
+    assert_eq!(Maxwell3d::default().color_target_format(0), None);
+}

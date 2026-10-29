@@ -1700,6 +1700,11 @@ impl Maxwell3d {
     pub fn index_buffer(&self, first: u32, count: u32) -> Result<crate::index::IndexBuffer> {
         self.indices.resolve(first, count)
     }
+    /// Retained B197 format selector; zero explicitly disables the target.
+    /// A configured inactive format does not authorize another color output.
+    pub fn color_target_format(&self, slot: usize) -> Option<u32> {
+        self.raster.color_target_format(slot)
+    }
     pub fn rasterization(
         &self,
     ) -> Result<(crate::raster::ColorTarget, crate::raster::Rasterization)> {

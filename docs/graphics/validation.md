@@ -3924,3 +3924,11 @@ and a live all-target workspace check. Explicit execution passed all 194 GPU
 scenarios on WSL Vulkan and all 13 driver scenarios on native Windows D3D12 and
 Vulkan. OpenGL passed the other 12 driver scenarios; the unsupported HDR case was
 explicitly excluded after its capability failure, not counted as passed.
+
+Disabled-attachment tests initialize every secondary FORMAT, check stored state
+and unchanged primary rasterization, reject unsupported formats and unaligned
+writes, and verify engine/channel isolation. Disabling then re-enabling target
+zero does not restore stale renderability while disabled. The corresponding
+GPFIFO driver scenario renders one indexed textured image after all secondary
+targets are disabled, then rejects a color draw after disabling target zero,
+without changing guest bytes, submitting another draw, or replaying work on retry.
