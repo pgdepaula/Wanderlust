@@ -2,7 +2,10 @@
 mod common;
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 use std::alloc::System;
+#[path = "common/scoped_alloc.rs"]
+mod measured_alloc;
 #[global_allocator]
+static SCOPED_ALLOCATOR: measured_alloc::Allocator = measured_alloc::Allocator;
 static ALLOCATOR: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 use common::{maxwell::*, *};
 use wl_gpu::{
@@ -312,11 +315,13 @@ fn external_cpu_notification_bounds_lifetime_and_bookkeeping() {
     }
     d.notify_cpu_write(b, PAGE_SIZE - 4, 4).unwrap();
     let region = Region::new(ALLOCATOR);
+    let caller = measured_alloc::Region::new();
     let start = std::time::Instant::now();
     for _ in 0..1000 {
         d.notify_cpu_write(b, 0, 4).unwrap();
     }
     let elapsed = start.elapsed();
+    let caller = caller.finish();
     let stats = region.change();
     assert_eq!(d.counters.cpu_write_notifications, 1001);
     assert_eq!(d.counters.cpu_notified_bytes, 4004);
@@ -327,8 +332,12 @@ fn external_cpu_notification_bounds_lifetime_and_bookkeeping() {
         "1000 CPU notifications: {elapsed:?}, allocations {}, reallocations {}",
         stats.allocations, stats.reallocations
     );
-    assert_eq!(stats.allocations, 0);
-    assert_eq!(stats.reallocations, 0);
+    eprintln!(
+        "caller-thread allocations {}, reallocations {}; process-wide values above include asynchronous backend threads",
+        caller.allocations, caller.reallocations
+    );
+    assert_eq!(caller.allocations, 0);
+    assert_eq!(caller.reallocations, 0);
     // The registry owns identities, not bytes: a huge canonical range tests
     // overflow without allocating an enormous synthetic guest memory buffer.
     let huge = d
@@ -606,6 +615,7 @@ fn driver_nop_bookkeeping_capacity_and_independent_packet_state() {
     let e = entry(0xb0000, 1);
     let mut data = vec![0; 0x18000];
     let region = Region::new(ALLOCATOR);
+    let caller = measured_alloc::Region::new();
     let start = std::time::Instant::now();
     for _ in 0..1000 {
         let r = d
@@ -615,6 +625,7 @@ fn driver_nop_bookkeeping_capacity_and_independent_packet_state() {
         d.retire(r.token).unwrap();
     }
     let elapsed = start.elapsed();
+    let caller = caller.finish();
     let stats = region.change();
     eprintln!(
         "1000 NOP channel submit+retire: {elapsed:?}, allocations {}, reallocations {}, borrowed {}, queue submissions {}",
@@ -623,8 +634,12 @@ fn driver_nop_bookkeeping_capacity_and_independent_packet_state() {
         d.graphics_counters().gpfifo_borrowed_bytes,
         d.graphics_counters().submissions
     );
-    assert_eq!(stats.allocations, 0);
-    assert_eq!(stats.reallocations, 0);
+    eprintln!(
+        "caller-thread allocations {}, reallocations {}; process-wide values above include asynchronous backend threads",
+        caller.allocations, caller.reallocations
+    );
+    assert_eq!(caller.allocations, 0);
+    assert_eq!(caller.reallocations, 0);
     assert_eq!(d.graphics_counters().submissions, 0);
     let mut tokens = Vec::new();
     for _ in 0..MAX_COMPLETIONS {
@@ -703,4 +718,36 @@ fn driver_nop_bookkeeping_capacity_and_independent_packet_state() {
     );
     d.close(b, &mut mem(&mut data)).unwrap();
     d.close(a, &mut mem(&mut data)).unwrap();
+}
+#[test]
+#[ignore = "requires actual GPU; channel-owned semaphore publication retains the real image without another readback"]
+fn semaphore_publication_reaches_the_existing_driver_frame_boundary_once() {
+    let (mut data, mut words, image) = fixture();
+    let (mut d, space, c, b, _) = setup_driver();
+    let reserve = d.reserve_fixed(space, GpuAddress(0xe0000), 0x1000).unwrap();
+    d.map(space, reserve, b, 0xf000).unwrap();
+    words.extend([0x20040004, 0, 0xe0000, 77, 0x01000002]);
+    put(&mut data, 0x10000, &words);
+    let r = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, words.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(r.fault.is_none());
+    assert_eq!(r.progress.draws_submitted, 1);
+    assert_eq!(&data[0xf000..0xf004], &77u32.to_le_bytes());
+    check(&data[RT..RT + SIZE], &image, None, BG);
+    let before = d.graphics_counters().readback_operations;
+    assert_eq!(before, 1);
+    let other = d.create_channel(space).unwrap();
+    assert!(d.publish(other, &mut mem(&mut data)).unwrap().is_none());
+    let frame = d.publish(c, &mut mem(&mut data)).unwrap().unwrap();
+    check(&frame.rgba, &image, None, BG);
+    assert!(d.publish(c, &mut mem(&mut data)).unwrap().is_none());
+    assert_eq!(d.graphics_counters().readback_operations, before);
+    assert!(d.query(r.token).unwrap().guest_visible);
 }

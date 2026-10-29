@@ -252,6 +252,17 @@ pub enum MethodEffect {
         value: u32,
     },
     WaitIdle,
+    /// B06F four-byte release with WFI enabled; completion and guest visibility
+    /// precede payload publication. Not a Host1x syncpoint.
+    SemaphoreRelease {
+        address: GpuAddress,
+        payload: u32,
+    },
+    /// Only an already-satisfied equality acquire is currently executable.
+    SemaphoreAcquire {
+        address: GpuAddress,
+        payload: u32,
+    },
     /// Conservative guest visibility barrier, not a Switch fence.
     HostCacheMaintenance,
     ShaderCachesInvalidated(u32),
@@ -395,6 +406,9 @@ impl VertexArray {
 #[derive(Debug, Default)]
 pub struct Maxwell3d {
     method_writes: u64,
+    semaphore_upper: Option<u8>,
+    semaphore_lower: Option<u32>,
+    semaphore_payload: Option<u32>,
     raster: crate::raster::RasterRegisters,
     indices: crate::index::IndexRegisters,
     bound: [Option<EngineClass>; 8],
@@ -661,6 +675,50 @@ impl Maxwell3d {
         // It is distinct from engine NO_OPERATION at byte offset 0x100.
         if method == 8 {
             return Ok(MethodEffect::State);
+        }
+        // NVIDIA clb06f.h (9fdf5c4): these are channel methods, regardless
+        // of the selected engine/subchannel. Selectors have no memory effect.
+        match method {
+            0x10 => {
+                if value > 255 {
+                    return Err(bad());
+                }
+                self.semaphore_upper = Some(value as u8);
+                return Ok(MethodEffect::State);
+            }
+            0x14 => {
+                if value & 3 != 0 {
+                    return Err(bad());
+                }
+                self.semaphore_lower = Some(value);
+                return Ok(MethodEffect::State);
+            }
+            0x18 => {
+                self.semaphore_payload = Some(value);
+                return Ok(MethodEffect::State);
+            }
+            0x1c => {
+                // Exact EQ acquire or four-byte RELEASE, WFI enabled. Sixteen
+                // byte timestamp reports, reductions, switch and WFI-disable
+                // require independent semantics and remain explicit errors.
+                if !matches!(value, 1 | 0x0100_0002) {
+                    return Err(bad());
+                }
+                let (Some(hi), Some(lo), Some(payload)) = (
+                    self.semaphore_upper,
+                    self.semaphore_lower,
+                    self.semaphore_payload,
+                ) else {
+                    return Err(bad());
+                };
+                let address = GpuAddress((u64::from(hi) << 32) | u64::from(lo));
+                return Ok(if value == 1 {
+                    MethodEffect::SemaphoreAcquire { address, payload }
+                } else {
+                    MethodEffect::SemaphoreRelease { address, payload }
+                });
+            }
+            _ => {}
         }
         // Switch Maxwell host MEM_OP_B (word 0x0b); only operand-free
         // L2 dirty flush/system invalidation. Other operations remain unsupported.

@@ -3829,3 +3829,21 @@ The first WSL launcher failed before process startup (`UtilAcceptVsock`);
 selecting the working `/run/WSL/1_interop` socket allowed the actual native runs.
 The launch failure is not included in the GPU pass count. No independent peer
 review is claimed for this batch.
+
+B06F semaphore coverage includes literal selector/control boundaries, missing
+state, malformed alignment/reserved bits and unsupported operations. GPU tests
+submit an indexed textured draw followed by release, verify guest framebuffer
+pixels before observing the payload, and confirm the following equality acquire.
+Another release overwrites an unread GPFIFO packet header; execution must consume
+the new header. Unsatisfied acquire preserves the earlier submitted draw and
+permits separate publication without replay. A driver test retrieves the
+semaphore-published image once, rejects another channel taking it and measures no
+additional readback at diagnostic retrieval.
+
+Allocation benchmarks distinguish caller-thread bookkeeping from process-wide
+Rust allocation events, which may include asynchronous graphics-driver threads.
+The scoped test allocator delegates to the existing process-wide instrumented
+System allocator; both scopes are reported. A positive test explicitly allocates
+and reallocates to verify that caller-thread accounting is active. Zero caller
+allocations must not be presented as zero total process allocations or zero-copy
+GPU transfers.

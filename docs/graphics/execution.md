@@ -2635,3 +2635,30 @@ The remaining padding cannot be fetched or published and faults on access.
 This does not pin adjacent CPU memory, fabricate padding bytes or expose a
 fragmented guest borrow. Larger excess, unsupported alignment and out-of-range
 offsets still reject. Automatic mappings retain their exact backing extent.
+
+### B06F semaphore subset
+
+Channel methods `0x10/0x14/0x18` retain the 40-bit semaphore address and payload,
+independently of engine/subchannel binding. All selectors must be initialized;
+upper reserved bits and a non-word-aligned lower address fail explicitly.
+`0x1c = 0x01000002` performs four-byte RELEASE with WFI enabled. It validates the
+mapped destination, observes actual host GPU completion, publishes prior resident
+color/depth output, and only then writes the little-endian payload and journals
+the canonical guest write. Publication can advance the journal, so write capacity
+is checked again before the payload mutation. This is an explicit visibility
+boundary, not an unconditional readback after every draw.
+
+`0x1c = 1` admits an already-satisfied equality ACQUIRE. Pending output aliasing
+the source is synchronized before its checked read. An unsatisfied condition
+fails with the explicit channel-suspension limitation; it does not busy-wait,
+fabricate a completed fence or replay an earlier draw. GEQ/AND/reduction,
+acquire-switch, WFI-disabled release and sixteen-byte timestamp reports remain
+unsupported. This subset is not general Host1x syncpoint/PBDMA scheduling.
+
+The GPFIFO executor drops its guest command borrow before semaphore effects and
+reacquires an unread suffix afterward. A semaphore may therefore update command
+storage without stale snapshot execution. A release retains one latest published
+image for the existing driver diagnostic-frame boundary, moving its pixel vector
+without another readback/copy. It cannot be taken by another channel, and an
+accepted channel switch may supersede the old diagnostic image without changing
+already-published guest RAM. This remains diagnostic output, not VI presentation.

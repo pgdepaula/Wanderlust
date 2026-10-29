@@ -1342,3 +1342,47 @@ fn inactive_triangle_initialization_fields_validate_before_mutating() {
     assert!(e.apply(write(0x1380, 1)).is_err()); // No stencil enable.
     assert!(e.apply(write(0x15dc, 0)).is_err()); // No statistics report.
 }
+#[test]
+fn b06f_semaphore_selectors_are_channel_wide_checked_and_snapshot_actions() {
+    let mut state = Maxwell3d::default();
+    assert!(state.apply(write(0x1c, 0x01000002)).is_err());
+    for (m, v) in [(0x10, 0x12), (0x14, 0x12345678), (0x18, 0x89abcdef)] {
+        assert_eq!(
+            state
+                .apply(MethodWrite {
+                    subchannel: 7,
+                    method: m,
+                    value: v
+                })
+                .unwrap(),
+            MethodEffect::State
+        );
+    }
+    assert!(state.apply(write(0x10, 256)).is_err());
+    assert!(state.apply(write(0x14, 3)).is_err());
+    let expected = GpuAddress(0x1212345678);
+    assert_eq!(
+        state.apply(write(0x1c, 0x01000002)).unwrap(),
+        MethodEffect::SemaphoreRelease {
+            address: expected,
+            payload: 0x89abcdef
+        }
+    );
+    assert_eq!(
+        state.apply(write(0x1c, 1)).unwrap(),
+        MethodEffect::SemaphoreAcquire {
+            address: expected,
+            payload: 0x89abcdef
+        }
+    );
+    for value in [2, 4, 8, 16, 0x01100002, 0x1001, 0x81000002] {
+        assert_eq!(
+            state.apply(write(0x1c, value)),
+            Err(MethodError::UnsupportedValue {
+                method: 0x1c,
+                value
+            })
+        );
+    }
+    assert!(Maxwell3d::default().apply(write(0x1c, 1)).is_err());
+}

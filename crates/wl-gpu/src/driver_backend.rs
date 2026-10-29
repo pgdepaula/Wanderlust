@@ -285,6 +285,11 @@ impl GpuDriver {
             .checked_add(1)
             .ok_or_else(|| invalid("channel sequence exhausted"))?;
         // All metadata/identity errors above are preflight, do not consume state.
+        if self.active != Some(channel) {
+            // Guest RAM publication is already complete. The bounded diagnostic
+            // image may be superseded, but never attributed to another channel.
+            self.renderer.semaphore_frame = None;
+        }
         self.active = Some(channel);
         self.channels[n].sequence = sequence;
         let token = SubmissionToken { channel, sequence };
@@ -392,8 +397,11 @@ impl GpuDriver {
         }
         let pending = self.renderer.target_pending;
         let frame = if self.active == Some(channel) {
-            self.renderer
-                .synchronize_target(memory, &mut self.changes)?
+            let latest = self
+                .renderer
+                .synchronize_target(memory, &mut self.changes)?;
+            let semaphore = self.renderer.semaphore_frame.take();
+            latest.or(semaphore)
         } else {
             None
         };

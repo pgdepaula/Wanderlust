@@ -2235,3 +2235,17 @@ attachment formats or sample counts.
 [MacNativeGames at 66b89f3](https://github.com/ly05010419/MacNativeGames/tree/66b89f3a7338e165d145ff8f33e2690ff758fe7d) executes ARM64 on Apple ARM and implements NVN over Metal. Its runtime and NVN source are MIT-licensed, with separately licensed dependencies. Its CPU execution path cannot run unchanged on x86-64.
 
 [UltraTears at 1970c7a](https://github.com/kuraeow/ultratears/tree/1970c7ad35b3f239aa6e99ab8b4d6663c55860f3) translates ARM64 into C for x86-64 and replaces NVN with a Vulkan implementation. Its `tools/lifter/gen.py` uses unwind/symbol/relocation roots, bounded jump-table emulation and advisory table scanning; its loader installs host implementations by symbol. This differs from executing the original NVN implementation through GPFIFO/B197. The Vulkan backend requires host-memory import and shader-object capabilities, and uses direct guest addresses; it is not a drop-in wgpu backend. The root license is GPL-3.0-or-later. Explicitly attributed LASRecomp lifter/runtime portions and MacNativeGames NVN/shader-translator portions have MIT notices, while other files retain their stated licenses. No source implementation from these references is incorporated here. Portability and provenance must be assessed per component rather than inferred from the repository license or gameplay claims.
+
+### B06F semaphore selector and operation fields
+
+NVIDIA MIT-licensed `open-gpu-doc` revision
+`9fdf5c4062007929d9f4e6cbad9c9771fe61b880`,
+[clb06f.h](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/host/clb06f.h),
+defines SEMAPHOREA/B/C/D at byte offsets `0x10/0x14/0x18/0x1c`.
+Address upper is bits 7:0, lower bits 31:2; payload is 32 bits. D operation
+ACQUIRE=1, RELEASE=2, ACQ_GEQ=4, ACQ_AND=8, REDUCTION=16. Acquire-switch is
+bit 12. RELEASE_WFI enabled is zero at bit 20; size-four is one at bit 24,
+whereas size-sixteen is zero. Reduction/format fields do not justify accepting
+unverified general reduction, timestamps or suspension behavior. Wanderlust
+currently executes only satisfied equality acquires and size-four/WFI-enabled
+releases with conservative host completion and guest publication.

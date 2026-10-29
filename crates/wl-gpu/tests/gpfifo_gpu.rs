@@ -3,7 +3,10 @@ mod common;
 use common::{maxwell::*, *};
 use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
 use std::alloc::System;
+#[path = "common/scoped_alloc.rs"]
+mod measured_alloc;
 #[global_allocator]
+static SCOPED_ALLOCATOR: measured_alloc::Allocator = measured_alloc::Allocator;
 static ALLOCATOR: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
 use wl_gpu::{
     backend::Renderer,
@@ -874,14 +877,23 @@ fn gpfifo_preflight_fetch_and_engine_faults_are_distinct() {
     let entries = entry(0xb0000, 2);
     let mut channel = Channel::default();
     let region = Region::new(ALLOCATOR);
+    let caller = measured_alloc::Region::new();
     let start = std::time::Instant::now();
     for _ in 0..1000 {
         submit(&mut r, &mut channel, &entries, &m, &mut d, &mut t).unwrap();
     }
     let elapsed = start.elapsed();
     let a = region.change();
-    assert_eq!((a.allocations, a.reallocations), (0, 0));
-    println!("1000 NOP GPFIFO submissions: {elapsed:?},zero Rust allocations,8000 consumed bytes");
+    let caller = caller.finish();
+    eprintln!(
+        "caller-thread allocations {}, reallocations {}; process-wide NOP statistics include asynchronous backend activity",
+        caller.allocations, caller.reallocations
+    );
+    assert_eq!((caller.allocations, caller.reallocations), (0, 0));
+    println!(
+        "1000 NOP GPFIFO submissions: {elapsed:?},zero caller-thread allocations,8000 consumed bytes; process allocations {}, reallocations {}",
+        a.allocations, a.reallocations
+    );
 }
 struct ShortRead<'a>(&'a mut [u8]);
 impl GuestMemory for ShortRead<'_> {
@@ -2671,4 +2683,111 @@ fn gpfifo_public_initialization_cache_actions_and_privileged_tile_baseline() {
     assert_eq!(renderer.counters.readback_operations, 1);
     assert_eq!(renderer.counters.draw_commands, before.draw_commands + 1);
     check(&data[RT..RT + SIZE], &image, None, BG);
+}
+fn semaphore_release(words: &mut Vec<u32>, address: u64, payload: u32) {
+    // Literal B06F incrementing methods10,14,18,1c. RELEASE_SIZE4,WFI enabled.
+    words.extend([
+        0x20040004,
+        (address >> 32) as u32,
+        address as u32,
+        payload,
+        0x01000002,
+    ]);
+}
+#[test]
+#[ignore = "requires actual GPU; B06F release follows real indexed draw completion and publication"]
+fn b06f_release_publishes_real_pixels_before_payload_and_equality_acquire() {
+    let (mut data, mut map, mut words, image) = fixture();
+    map.map(GpuAddress(0xe0000), GuestAddress(0xf000), 4)
+        .unwrap();
+    semaphore_release(&mut words, 0xe0000, 0xaabbccdd);
+    method(&mut words, 0x1c, 1);
+    put(&mut data, 0x10000, &words);
+    let mut renderer = Renderer::new().unwrap();
+    let mut channel = Channel::default();
+    let mut changes = TextureChanges::new(1);
+    let p = submit(
+        &mut renderer,
+        &mut channel,
+        &entry(0xb0000, words.len()),
+        &map,
+        &mut data,
+        &mut changes,
+    )
+    .unwrap();
+    assert_eq!(p.draws_submitted, 1);
+    assert_eq!(p.entries_completed, 1);
+    assert_eq!(&data[0xf000..0xf004], &0xaabbccddu32.to_le_bytes());
+    check(&data[RT..RT + SIZE], &image, None, BG);
+    assert_eq!(renderer.counters.readback_operations, 1);
+    assert!(
+        renderer
+            .synchronize_target(
+                &mut SliceMemoryMut {
+                    base: GuestAddress(0),
+                    bytes: &mut data
+                },
+                &mut changes
+            )
+            .unwrap()
+            .is_none()
+    );
+}
+#[test]
+#[ignore = "requires actual GPU; semaphore command overwrite requires releasing and reacquiring the guest borrow"]
+fn b06f_release_reacquires_an_overwritten_unread_command_suffix() {
+    let (mut data, mut map, mut words, image) = fixture();
+    let suffix = (words.len() + 5) * 4;
+    map.map(
+        GpuAddress(0xd0000),
+        GuestAddress(0x10000 + suffix as u64),
+        4,
+    )
+    .unwrap();
+    semaphore_release(&mut words, 0xd0000, 0x20010002);
+    words.extend([0xffffffff, 0x76543210]);
+    put(&mut data, 0x10000, &words);
+    let mut r = Renderer::new().unwrap();
+    let mut c = Channel::default();
+    let mut t = TextureChanges::new(1);
+    let p = submit(
+        &mut r,
+        &mut c,
+        &entry(0xb0000, words.len()),
+        &map,
+        &mut data,
+        &mut t,
+    )
+    .unwrap();
+    assert_eq!(p.entries_completed, 1);
+    assert_eq!(p.words_consumed, words.len() as u64);
+    check(&data[RT..RT + SIZE], &image, None, BG);
+}
+#[test]
+#[ignore = "requires actual GPU; unsatisfied acquire faults preserve a previously submitted real draw"]
+fn b06f_unsatisfied_acquire_preserves_prior_draw_without_false_completion() {
+    let (mut data, mut map, mut words, image) = fixture();
+    map.map(GpuAddress(0xe0000), GuestAddress(0xf000), 4)
+        .unwrap();
+    words.extend([0x20040004, 0, 0xe0000, 99, 1]);
+    put(&mut data, 0x10000, &words);
+    let mut r = Renderer::new().unwrap();
+    let mut c = Channel::default();
+    let mut t = TextureChanges::new(1);
+    let error = submit(
+        &mut r,
+        &mut c,
+        &entry(0xb0000, words.len()),
+        &map,
+        &mut data,
+        &mut t,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("channel suspension"));
+    assert_eq!(error.progress.draws_submitted, 1);
+    assert!(c.is_faulted());
+    assert_eq!(&data[0xf000..0xf004], &[0; 4]);
+    let frame = sync(&mut r, &mut data, &mut t);
+    check(&frame.rgba, &image, None, BG);
+    assert_eq!(r.counters.draw_commands, 1);
 }

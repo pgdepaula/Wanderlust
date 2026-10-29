@@ -73,6 +73,9 @@ pub struct Renderer {
     pub(crate) queue: wgpu::Queue,
     pub(crate) completion: crate::completion::CompletionWatchdog,
     pub(crate) last_submission: Option<wgpu::SubmissionIndex>,
+    /// Latest channel-ordered semaphore publication, moved without a pixel copy
+    /// into the driver's existing diagnostic publication boundary.
+    pub(crate) semaphore_frame: Option<Frame>,
     pipeline: wgpu::RenderPipeline,
     default_pipeline: wgpu::RenderPipeline,
     indexed_shader: wgpu::ShaderModule,
@@ -188,6 +191,7 @@ impl Renderer {
             device,
             queue,
             last_submission: None,
+            semaphore_frame: None,
             completion: Default::default(),
             default_pipeline: pipeline.clone(),
             pipeline,

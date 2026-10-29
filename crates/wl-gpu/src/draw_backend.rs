@@ -128,6 +128,8 @@ impl Renderer {
                             | MethodEffect::ConstantWrite { .. }
                             | MethodEffect::InlineUploadStart { .. }
                             | MethodEffect::InlineWrite { .. }
+                            | MethodEffect::SemaphoreAcquire { .. }
+                            | MethodEffect::SemaphoreRelease { .. }
                             | MethodEffect::WaitIdle
                             | MethodEffect::HostCacheMaintenance
                             | MethodEffect::ShaderCachesInvalidated(_)
@@ -429,6 +431,45 @@ impl Renderer {
                 }
                 // Completion is not guest RAM publication. Keep resident color
                 // and depth output pending; no readback or draw replay occurs.
+                Ok(None)
+            }
+            MethodEffect::SemaphoreAcquire { address, payload } => {
+                if self.poisoned {
+                    return Err(invalid("renderer unavailable after backend failure"));
+                }
+                let source = map.resolve(address, 4)?;
+                self.synchronize_command_source(source, 4, memory, changes)?;
+                let bytes = memory.read(source, 4)?;
+                if bytes.len() != 4 {
+                    return Err(invalid("short B06F semaphore read"));
+                }
+                let actual = u32::from_le_bytes(bytes.try_into().expect("checked semaphore word"));
+                if actual != payload {
+                    return Err(invalid(
+                        "unsatisfied B06F equality acquire requires channel suspension",
+                    ));
+                }
+                Ok(None)
+            }
+            MethodEffect::SemaphoreRelease { address, payload } => {
+                if self.poisoned {
+                    return Err(invalid("renderer unavailable after backend failure"));
+                }
+                let destination = map.resolve(address, 4)?;
+                memory.validate_write(destination, 4)?;
+                changes.can_mark_write_at(destination, 4)?;
+                // WFI enabled means prior actual host GPU work must finish.
+                // Publish prior output before making this CPU-visible payload
+                // observable, including targets that alias the semaphore.
+                self.guest_effect(engine, MethodEffect::WaitIdle, map, memory, changes, false)?;
+                if let Some(frame) = self.synchronize_target(memory, changes)? {
+                    self.semaphore_frame = Some(frame);
+                }
+                // Publication can advance the journal; recheck its capacity
+                // before the semaphore's own guest mutation.
+                changes.can_mark_write_at(destination, 4)?;
+                memory.write(destination, &payload.to_le_bytes())?;
+                changes.mark_write(destination, 4)?;
                 Ok(None)
             }
             MethodEffect::InlineUploadStart { address, length } => {

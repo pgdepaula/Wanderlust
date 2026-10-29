@@ -78,6 +78,8 @@ impl Renderer {
                                     | MethodEffect::ConstantWrite { .. }
                                     | MethodEffect::InlineUploadStart { .. }
                                     | MethodEffect::InlineWrite { .. }
+                                    | MethodEffect::SemaphoreAcquire { .. }
+                                    | MethodEffect::SemaphoreRelease { .. }
                                     | MethodEffect::WaitIdle
                                     | MethodEffect::HostCacheMaintenance
                                     | MethodEffect::ShaderCachesInvalidated(_)
