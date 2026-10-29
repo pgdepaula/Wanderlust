@@ -3940,3 +3940,16 @@ B197 writes do not corrupt the live read bank. The actual GPU driver scenario
 reads the guest-written target dimension, emits a red-only color mask, renders
 an indexed triangle with independently predicted pixels, then rejects an
 uninitialized read while preserving the prior pending draw for publication.
+
+
+Empty exclusive window rectangles are validated independently from enable/reset
+state. The CPU regression covers all eight initialized rectangles, missing
+bounds, an empty X or Y interval, one nonempty exclusion, and incompatible modes.
+The GpuDriver/GPFIFO clear regression verifies pitch and block-linear RGBA8 guest
+bytes and padding against the scalar oracle; a subsequent unsupported active clip
+fault leaves the earlier pending clear publishable without replay. Nine clear
+scenarios executed on each of WSL Vulkan, WSL OpenGL, native Windows D3D12 and
+native Windows Vulkan (36 actual passes). The package CPU suites passed 439 tests
+with default features (197 GPU scenarios ignored by that ordinary run) and 434
+without default features. Package strict all-target Clippy and formatting passed.
+These synthetic clear results do not establish an original-game draw or frame.

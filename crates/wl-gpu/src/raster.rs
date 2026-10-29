@@ -824,9 +824,21 @@ impl RasterRegisters {
             || self.window_clip.iter().flatten().any(Option::is_some))
             && !self.window_clip_disabled
         {
-            return Err(invalid(
-                "window clip state requires explicit disabled window clipping",
-            ));
+            // Exclusive half-open rectangles reject only samples inside their
+            // union. Eight explicitly empty rectangles therefore cannot clip,
+            // regardless of the unobserved enable bit. Do not infer reset
+            // values for missing bounds or the inclusive/exclusive mode.
+            let empty_exclusive = self.window_clip_type == Some(1)
+                && self.window_clip.iter().all(|axes| {
+                    axes.iter().all(Option::is_some)
+                        && axes.iter().flatten().any(|v| v & 0xffff >= v >> 16)
+                });
+            if !empty_exclusive {
+                return Err(invalid(&format!(
+                    "unsupported active or incomplete window clip state: mode={:?}, rectangles={:x?}",
+                    self.window_clip_type, self.window_clip
+                )));
+            }
         }
         Ok(())
     }

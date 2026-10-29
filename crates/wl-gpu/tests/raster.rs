@@ -421,3 +421,29 @@ fn all_color_format_selectors_retain_disabled_state_without_activating_outputs()
     assert_eq!(e.color_target_format(1), Some(0));
     assert_eq!(Maxwell3d::default().color_target_format(0), None);
 }
+
+#[test]
+fn explicitly_empty_exclusive_window_rectangles_cannot_reject_samples() {
+    let mut engine = ready();
+    let expected = engine.rasterization().unwrap();
+    set(&mut engine, 0x1950, 1).unwrap();
+    for index in 0..8 {
+        // Half-open X interval [7,7) is empty even with nonempty Y.
+        set(&mut engine, 0xd00 + index * 8, (7 << 16) | 7).unwrap();
+        set(&mut engine, 0xd04 + index * 8, 29 << 16).unwrap();
+        if index != 7 {
+            assert!(engine.rasterization().is_err());
+        }
+    }
+    assert_eq!(engine.rasterization().unwrap(), expected);
+    // One nonempty exclusion rectangle must not be discarded.
+    set(&mut engine, 0xd00 + 7 * 8, (8 << 16) | 7).unwrap();
+    assert!(engine.rasterization().is_err());
+    // Empty Y alone is sufficient; inclusive empty union is not equivalent.
+    set(&mut engine, 0xd04 + 7 * 8, 0).unwrap();
+    assert_eq!(engine.rasterization().unwrap(), expected);
+    for mode in [0, 2] {
+        set(&mut engine, 0x1950, mode).unwrap();
+        assert!(engine.rasterization().is_err());
+    }
+}

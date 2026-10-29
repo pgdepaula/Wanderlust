@@ -1695,8 +1695,15 @@ controls; they do not establish implementation of active reduction or coverage.
 NVIDIA's pinned B197 header independently defines window clip pairs from `0x0d00`,
 the separate enable at `0x194c`, and inclusive/exclusive/clip-all values at `0x1950`.
 Pinned [NVK discard-rectangle state](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/nouveau/vulkan/nvk_cmd_draw.c#L2760-L2826)
-corroborates rectangle programming separately from enable/mode. Only explicitly
-disabled window clipping is admitted by this subset.
+corroborates rectangle programming separately from enable/mode. The pinned
+[Nouveau rectangle validation](https://github.com/chaotic-cx/mesa-mirror/blob/e7959c6009d85d278585b2896495b2b3046d461b/src/gallium/drivers/nouveau/nvc0/nvc0_state_validate.c#L438-L461)
+programs min/max bounds and zeroes unused rectangles. The NVIDIA-authored
+[Khronos EXT_window_rectangles, revision 3 (2017-11-03)](https://registry.khronos.org/OpenGL/extensions/EXT/EXT_window_rectangles.txt)
+defines half-open rectangle membership, exclusive rejection, and application to
+framebuffer clears. Together these justify admitting explicitly empty exclusive
+rectangles without implementing an active clip. Neither API initial state nor
+missing guest writes establishes Maxwell register reset values. Other window
+clipping still requires explicit disablement in this subset.
 
 The same NVIDIA clear definitions distinguish state programming from triggering,
 and make scissor-zero and respect-stencil-mask separate bits. The supported clear
