@@ -3883,3 +3883,11 @@ submits a guest indexed/textured draw with maximum selectors, changes all scratc
 selectors to zero and submits another draw. Both images match the independent
 pixel oracle; the second draw requires no additional pipeline/module allocation
 or shader-code read. No scratch allocation or scratch-access shader is implied.
+
+Engine-report CPU tests cover partial selectors, upper-field limits, alignment,
+independent engine state and rejection of counter/acquire/reduction/event forms.
+`graphics_engine_reports_follow_real_pixels_and_write_exact_records` submits
+literal B197 A/B/C/D packets after a real indexed/textured driver draw. It checks
+four-byte release and 16-byte payload/timestamp records, untouched surrounding
+bytes, nonzero time, independent framebuffer pixels and exactly one GPU readback
+with no draw replay during the subsequent capture call.

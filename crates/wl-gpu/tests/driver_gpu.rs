@@ -958,3 +958,43 @@ fn graphics_scratch_configuration_preserves_real_pixels_and_warm_pipeline() {
         BG,
     );
 }
+
+#[test]
+#[ignore = "requires actual GPU; B197 payload/timestamp reports observe prior real draws and preserve checked guest visibility"]
+fn graphics_engine_reports_follow_real_pixels_and_write_exact_records() {
+    for control in [0x1000f010, 0x0000f012] {
+        let (mut data, mut words, image) = fixture();
+        let (mut d, space, c, b, _) = setup_driver();
+        let reserve = d.reserve_fixed(space, GpuAddress(0xe0000), 0x1000).unwrap();
+        d.map(space, reserve, b, 0xf000).unwrap();
+        data[0xf000..0xf020].fill(0xa5);
+        // One incrementing literal B197 packet: A/B/C/D, unlike B06F's 0x10.
+        words.extend([0x200406c0, 0, 0xe0000, 0x12345678, control]);
+        put(&mut data, 0x10000, &words);
+        let r = d
+            .submit(
+                c,
+                KICKOFF_PB,
+                &header(1),
+                Some(&entry(0xb0000, words.len())),
+                &mut mem(&mut data),
+            )
+            .unwrap();
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert_eq!(r.progress.draws_submitted, 1);
+        assert!(!d.has_pending_output());
+        assert_eq!(&data[0xf000..0xf004], &0x12345678u32.to_le_bytes());
+        if control & 3 == 2 {
+            assert_eq!(&data[0xf004..0xf008], &[0; 4]);
+            assert!(u64::from_le_bytes(data[0xf008..0xf010].try_into().unwrap()) > 0);
+            assert_eq!(&data[0xf010..0xf020], &[0xa5; 16]);
+        } else {
+            assert_eq!(&data[0xf004..0xf020], &[0xa5; 28]);
+        }
+        check(&data[RT..RT + SIZE], &image, None, BG);
+        let frame = d.publish(c, &mut mem(&mut data)).unwrap().unwrap();
+        check(&frame.rgba, &image, None, BG);
+        assert_eq!(d.graphics_counters().readback_operations, 1);
+        assert_eq!(d.graphics_counters().draw_commands, 1);
+    }
+}

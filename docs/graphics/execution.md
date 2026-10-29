@@ -2695,3 +2695,11 @@ other halves and survive engine rebinding. They do not alter pipeline identity
 for the supported shaders without local-memory accesses. Reserved field bits
 fail before mutation; no unmapped scratch address is silently translated to a
 host pointer or used to authorize an unsupported shader instruction.
+
+Engine reports use separate initialized B197/B1C0 A/B/C selector state; they
+cannot inherit a B06F payload or another engine's address. Supported actions
+require a four-byte-aligned destination, a fully mapped four/16-byte range and
+checked atomic publication. Invalid selectors/actions fail without a report
+write. Completion/publication failure retains earlier GPU output and latches the
+channel, avoiding whole-request replay. These ordered memory reports are not
+Host1x syncpoint or guest event implementations.

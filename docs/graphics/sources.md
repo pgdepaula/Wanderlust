@@ -2304,3 +2304,24 @@ These widths differ from the B1C0 size/SM-count configuration and are validated
 independently. The backend retains the fields without dereferencing or allocating
 scratch storage. The admitted shader header/instruction subset still rejects
 local-memory use; accepting configuration is not local-memory shader support.
+
+### Engine payload semaphore reports
+
+NVIDIA's pinned B197 and B1C0 headers define report A/B/C/D at
+`0x1b00/0x1b04/0x1b08/0x1b0c`: eight-bit upper address, 32-bit lower address,
+32-bit payload, and action. These engine registers are distinct from B06F's
+front-end semaphore selectors and are retained independently for each engine.
+B197 operation bits 1:0 select release/acquire/report-only/trap; structure bit
+28 selects four/one word. Report bits 27:23 equal zero select the plain payload.
+The MIT [SemaphoreUpdater reference](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Gpu/Engine/Threed/SemaphoreUpdater.cs)
+corroborates four-byte payload release and the four-word report containing a
+zero-extended payload and timestamp.
+
+The admitted B197 subset is one-word release or four-word payload report-only,
+with pipeline location NONE/ALL, either preceding-read/write release selection,
+flush enabled and no reduction/awaken/sub-report. B1C0 admits only plain one-word
+release. The backend conservatively completes prior host work and publishes
+attachments before the atomic report write. The timestamp uses the established
+monotonic virtual Maxwell 614.4-MHz clock. Other stage locations, acquire,
+statistics counters, traps and notification events remain unsupported; no samples
+passed, invocation count or guest fence result is fabricated.

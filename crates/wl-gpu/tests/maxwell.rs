@@ -1561,3 +1561,85 @@ fn graphics_scratch_selectors_use_40_bit_address_and_38_bit_size_fields() {
         GraphicsLocalMemory::default()
     );
 }
+
+#[test]
+fn engine_reports_require_own_selectors_and_reject_unimplemented_counters() {
+    let mut e = Maxwell3d::default();
+    e.apply(write(0, CLASS)).unwrap();
+    assert_eq!(
+        e.apply(write(0x1b0c, 0x1000f010)),
+        Err(MethodError::IncompleteReport)
+    );
+    for (m, v) in [(0x1b00, 255), (0x1b04, 0xfffffffc), (0x1b08, 77)] {
+        e.apply(write(m, v)).unwrap();
+    }
+    assert!(e.apply(write(0x1b00, 256)).is_err());
+    for control in [
+        0x10000000, 0x10000010, 0x1000f000, 0x1000f010, 2, 0xf002, 0xf012,
+    ] {
+        let effect = e.apply(write(0x1b0c, control)).unwrap();
+        assert_eq!(
+            effect,
+            MethodEffect::SemaphoreRelease {
+                address: GpuAddress(0xfffffffffc),
+                payload: 77,
+                long: control & 3 == 2,
+                wait: true,
+            }
+        );
+    }
+    for control in [
+        0,
+        1,
+        3,
+        0x10000002,
+        0x10000004,
+        0x10000008,
+        0x10010000,
+        0x10100000,
+        0x00800002,
+        0x10002000,
+        0x20000000,
+        u32::MAX,
+    ] {
+        assert_eq!(
+            e.apply(write(0x1b0c, control)),
+            Err(MethodError::UnsupportedValue {
+                method: 0x1b0c,
+                value: control
+            })
+        );
+    }
+    e.apply(write(0x1b04, 3)).unwrap();
+    assert!(e.apply(write(0x1b0c, 2)).is_err());
+    // Engine report selectors are separate from B06F and the other engine.
+    e.apply(write(0, EngineClass::Compute as u32)).unwrap();
+    assert_eq!(
+        e.apply(write(0x1b0c, 0x10000000)),
+        Err(MethodError::IncompleteReport)
+    );
+    for (m, v) in [(0x1b00, 0), (0x1b04, 0x1234), (0x1b08, 99)] {
+        e.apply(write(m, v)).unwrap();
+    }
+    assert_eq!(
+        e.apply(write(0x1b0c, 0x10000000)),
+        Ok(MethodEffect::SemaphoreRelease {
+            address: GpuAddress(0x1234),
+            payload: 99,
+            long: false,
+            wait: true,
+        })
+    );
+    assert!(e.apply(write(0x1b0c, 2)).is_err());
+    e.apply(write(0, CLASS)).unwrap();
+    e.apply(write(0x1b04, 0xfffffffc)).unwrap();
+    assert_eq!(
+        e.apply(write(0x1b0c, 2)),
+        Ok(MethodEffect::SemaphoreRelease {
+            address: GpuAddress(0xfffffffffc),
+            payload: 77,
+            long: true,
+            wait: true,
+        })
+    );
+}

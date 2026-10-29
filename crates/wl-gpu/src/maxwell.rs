@@ -244,6 +244,7 @@ pub enum MethodError {
     EpochOverflow,
     IncompleteConstantBuffer,
     IncompleteInlineUpload,
+    IncompleteReport,
     InlineUploadActive,
     UnsupportedShadowReplayMethod(u16),
     MissingShadowValue(u16),
@@ -313,6 +314,69 @@ struct InlineUpload {
     upper: Option<u8>,
     lower: Option<u32>,
     active: Option<(GpuAddress, u32)>,
+}
+#[derive(Debug, Default)]
+struct ReportSelector {
+    upper: Option<u8>,
+    lower: Option<u32>,
+    payload: Option<u32>,
+}
+impl ReportSelector {
+    fn apply(
+        &mut self,
+        method: u16,
+        value: u32,
+        graphics: bool,
+    ) -> std::result::Result<MethodEffect, MethodError> {
+        let bad = || MethodError::UnsupportedValue { method, value };
+        match method {
+            0x1b00 => {
+                if value > 255 {
+                    return Err(bad());
+                }
+                self.upper = Some(value as u8);
+                Ok(MethodEffect::State)
+            }
+            0x1b04 => {
+                self.lower = Some(value);
+                Ok(MethodEffect::State)
+            }
+            0x1b08 => {
+                self.payload = Some(value);
+                Ok(MethodEffect::State)
+            }
+            0x1b0c => {
+                // Plain payload release (one word), or B197 payload/timestamp
+                // REPORT_ONLY (four words). No counters, traps, reductions,
+                // awaken events, acquire, or per-stage pipeline observations.
+                let mask = if graphics { 0x1000f010 } else { 0x10000000 };
+                let long = graphics && value & 3 == 2;
+                let allowed = if long { mask | 2 } else { mask };
+                if value & !allowed != 0
+                    || (graphics && !matches!((value >> 12) & 15, 0 | 15))
+                    || (!long && value & 0x10000000 == 0)
+                    || (long && value & 0x10000000 != 0)
+                {
+                    return Err(bad());
+                }
+                let (Some(upper), Some(lower), Some(payload)) =
+                    (self.upper, self.lower, self.payload)
+                else {
+                    return Err(MethodError::IncompleteReport);
+                };
+                if lower % 4 != 0 {
+                    return Err(bad());
+                }
+                Ok(MethodEffect::SemaphoreRelease {
+                    address: GpuAddress((u64::from(upper) << 32) | u64::from(lower)),
+                    payload,
+                    long,
+                    wait: true,
+                })
+            }
+            _ => unreachable!("report method range is checked by the engine dispatcher"),
+        }
+    }
 }
 #[derive(Debug, Clone, Copy, Default)]
 struct Pool {
@@ -445,6 +509,8 @@ pub struct Maxwell3d {
     semaphore_upper: Option<u8>,
     semaphore_lower: Option<u32>,
     semaphore_payload: Option<u32>,
+    graphics_report: ReportSelector,
+    compute_report: ReportSelector,
     raster: crate::raster::RasterRegisters,
     indices: crate::index::IndexRegisters,
     bound: [Option<EngineClass>; 8],
@@ -780,6 +846,9 @@ impl Maxwell3d {
             .ok_or(MethodError::UnboundSubchannel(subchannel))?;
         if class != EngineClass::ThreeD {
             if class == EngineClass::Compute {
+                if (0x1b00..=0x1b0c).contains(&method) {
+                    return self.compute_report.apply(method, value, false);
+                }
                 match method {
                     0x100 => {}
                     0x1528 if value <= 1 => self.compute.shader_exceptions = Some(value != 0),
@@ -893,6 +962,7 @@ impl Maxwell3d {
             return Ok(MethodEffect::State);
         }
         match method {
+            0x1b00..=0x1b0c => return self.graphics_report.apply(method, value, true),
             0x07a4 | 0x07a8 => {
                 // All 15 hardware ZBC slots disabled. Compressed ZBC surfaces
                 // and enabling an individual slot remain unsupported.
