@@ -2383,3 +2383,47 @@ fn corrupted_second_adpcm_buffer_does_not_consume_the_first_on_a_failed_tick() {
         assert_eq!(p.load(DATA + 0x24080 + k * 4, 4).unwrap(), 8191);
     }
 }
+#[test]
+fn unused_duplicate_voice_ids_do_not_receive_an_active_voices_counters() {
+    let (mut p, mut c) = process();
+    p.memory.split_at(DATA + 0x20000);
+    p.memory.split_at(DATA + 0x30000);
+    p.memory.split_at(DATA + 0x34000);
+    for at in [DATA + 0x20000, DATA + 0x30000] {
+        let i = p.memory.region_index(at).unwrap();
+        p.memory.regions[i].state = state::NORMAL;
+    }
+    let m = manager(&mut p, &mut c);
+    let mut params = graph_parameters();
+    params[16..20].copy_from_slice(&2u32.to_le_bytes());
+    params[36..40].copy_from_slice(&1u32.to_le_bytes());
+    params[40..44].copy_from_slice(&1u32.to_le_bytes());
+    let r = open_renderer(&mut p, &mut c, m, params);
+    put_encoded_voice(&mut p);
+    let mut input = queued_graph_input();
+    let mut pools = vec![0u8; 128];
+    for i in 0..4 {
+        pools[i * 32 + 16..i * 32 + 20].copy_from_slice(&1u32.to_le_bytes());
+    }
+    input.splice(336..336, pools);
+    input.splice(832..832, vec![0; 368]);
+    input[8..12].copy_from_slice(&384u32.to_le_bytes());
+    input[12..16].copy_from_slice(&736u32.to_le_bytes());
+    let len = input.len() as u32;
+    input[60..64].copy_from_slice(&len.to_le_bytes());
+    graph_update(&mut p, &input, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    wire(&mut p, 5, false, &[], &[]);
+    call(&mut p, &mut c, r);
+    p.kernel.as_mut().unwrap().time_ns = 5_000_000;
+    wl_runtime::audio::poll(&mut p.memory, p.kernel.as_mut().unwrap()).unwrap();
+    input[464 + 8] = 0;
+    for i in 0..4 {
+        input[464 + 96 + i * 56 + 26] = 1;
+    }
+    graph_update(&mut p, &input, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    assert_eq!(p.load(DATA + 0x6000 + 256, 8).unwrap(), 28);
+    assert_eq!(p.load(DATA + 0x6000 + 264, 4).unwrap(), 2);
+    assert_eq!(p.read_bytes(DATA + 0x6000 + 272, 16).unwrap(), vec![0; 16]);
+}

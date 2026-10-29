@@ -526,7 +526,9 @@ impl Renderer {
             at += 0x10;
         }
         for voice in parts[3].chunks_exact(stride) {
-            if let Some(state) = graph.as_ref().and_then(|g| g.voices.get(&word(voice, 0))) {
+            if voice[9] != 0
+                && let Some(state) = graph.as_ref().and_then(|g| g.voices.get(&word(voice, 0)))
+            {
                 output[at..at + 8].copy_from_slice(&state.queue.played.to_le_bytes());
                 output[at + 8..at + 12].copy_from_slice(&state.queue.consumed.to_le_bytes());
             }
