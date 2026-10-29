@@ -3953,3 +3953,15 @@ native Windows Vulkan (36 actual passes). The package CPU suites passed 439 test
 with default features (197 GPU scenarios ignored by that ordinary run) and 434
 without default features. Package strict all-target Clippy and formatting passed.
 These synthetic clear results do not establish an original-game draw or frame.
+
+
+The initialized B197 window-clip disable state is separately tested with eight
+zeroed rectangles and no enable/mode writes before a guest clear. The supported
+active empty-exclusive case now explicitly enables clipping; nonempty active
+rectangles still fault and retain earlier accepted output. Ten clear scenarios
+executed on each of WSL Vulkan, WSL OpenGL, native Windows D3D12 and native Windows
+Vulkan (40 passes, zero skips). The CPU suites passed 439 tests with default
+features (198 GPU scenarios ignored in that ordinary run) and 434 without default
+features. Strict package all-target Clippy and whole-workspace formatting passed.
+This models a source-backed initialized-context value, not unspecified power-on
+state or general active window clipping.

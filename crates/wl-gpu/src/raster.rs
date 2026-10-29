@@ -426,7 +426,9 @@ pub(crate) struct RasterRegisters {
     alpha_coverage_disabled: bool,
     window_clip: [[Option<u32>; 2]; 8],
     window_clip_type: Option<u8>,
-    window_clip_disabled: bool,
+    // B197 initialized-context method list seeds 0x194c to FALSE. This is
+    // context initialization, not an inferred hardware power-on value.
+    window_clip_enabled: bool,
 }
 impl RasterRegisters {
     pub fn color_target_format(&self, slot: usize) -> Option<u32> {
@@ -595,10 +597,10 @@ impl RasterRegisters {
                 self.window_clip[index][axis] = Some(value);
             }
             0x194c => {
-                if value != 0 {
+                if value > 1 {
                     return Err(bad());
                 }
-                self.window_clip_disabled = true;
+                self.window_clip_enabled = value != 0;
             }
             0x1950 => {
                 if value > 2 {
@@ -820,10 +822,7 @@ impl RasterRegisters {
         Ok(())
     }
     fn validate_window_clip_state(&self) -> Result<()> {
-        if (self.window_clip_type.is_some()
-            || self.window_clip.iter().flatten().any(Option::is_some))
-            && !self.window_clip_disabled
-        {
+        if self.window_clip_enabled {
             // Exclusive half-open rectangles reject only samples inside their
             // union. Eight explicitly empty rectangles therefore cannot clip,
             // regardless of the unobserved enable bit. Do not infer reset

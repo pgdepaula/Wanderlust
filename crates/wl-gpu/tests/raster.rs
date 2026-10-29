@@ -304,16 +304,18 @@ fn alpha_fraction_is_only_usable_with_explicit_disabled_alpha_coverage() {
 }
 
 #[test]
-fn inactive_window_rectangles_retain_all_slots_without_guessing_enable_state() {
+fn initialized_context_disables_window_clipping_until_explicitly_enabled() {
     let mut engine = ready();
     let before = engine.rasterization().unwrap();
     for index in 0..8 {
         for axis in 0..2 {
             set(&mut engine, 0xd00 + index * 8 + axis * 4, u32::MAX).unwrap();
-            assert!(engine.rasterization().is_err());
+            assert_eq!(engine.rasterization().unwrap(), before);
         }
     }
-    assert!(set(&mut engine, 0x194c, 1).is_err());
+    set(&mut engine, 0x194c, 1).unwrap();
+    assert!(engine.rasterization().is_err());
+    assert!(set(&mut engine, 0x194c, 2).is_err());
     assert!(engine.rasterization().is_err());
     set(&mut engine, 0x194c, 0).unwrap();
     for mode in 0..=2 {
@@ -427,6 +429,7 @@ fn explicitly_empty_exclusive_window_rectangles_cannot_reject_samples() {
     let mut engine = ready();
     let expected = engine.rasterization().unwrap();
     set(&mut engine, 0x1950, 1).unwrap();
+    set(&mut engine, 0x194c, 1).unwrap();
     for index in 0..8 {
         // Half-open X interval [7,7) is empty even with nonempty Y.
         set(&mut engine, 0xd00 + index * 8, (7 << 16) | 7).unwrap();

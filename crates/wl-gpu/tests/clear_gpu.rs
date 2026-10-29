@@ -956,6 +956,7 @@ fn empty_exclusive_window_rectangles_clear_and_nonempty_rectangles_fault() {
         let mut words = clear_setup(7, 9, bh);
         clear_values(&mut words, [0.25, 0.5, 0.75, 1.]);
         method(&mut words, 0x1950, 1);
+        method(&mut words, 0x194c, 1);
         for index in 0..8 {
             method(&mut words, 0xd00 + index * 8, 0);
             method(&mut words, 0xd04 + index * 8, 9 << 16);
@@ -975,6 +976,29 @@ fn empty_exclusive_window_rectangles_clear_and_nonempty_rectangles_fault() {
         let expected = expected_color(7, 9, bh, [64, 128, 191, 255]);
         assert_eq!(&data[RT..RT + expected.len()], &expected);
         assert_eq!(d.graphics_counters().clear_commands, 1);
+        d.close(c, &mut mem(&mut data)).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "requires actual GPU; B197 initialized context keeps window clipping disabled"]
+fn initialized_window_clip_context_allows_clear_before_enable_or_mode_writes() {
+    for bh in [None, Some(1)] {
+        let mut data = vec![0xa5; 0x20000];
+        let (mut d, c, _, b, _) = driver();
+        let mut words = clear_setup(7, 9, bh);
+        clear_values(&mut words, [0.25, 0.5, 0.75, 1.]);
+        for index in 0..8 {
+            method(&mut words, 0xd00 + index * 8, 0);
+            method(&mut words, 0xd04 + index * 8, 0);
+        }
+        method(&mut words, 0x19d0, 0x3c);
+        let accepted = submit(&mut d, c, b, &mut data, &words);
+        assert!(accepted.fault.is_none(), "{:?}", accepted.fault);
+        assert_eq!(d.graphics_counters().clear_commands, 1);
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        let expected = expected_color(7, 9, bh, [64, 128, 191, 255]);
+        assert_eq!(&data[RT..RT + expected.len()], &expected);
         d.close(c, &mut mem(&mut data)).unwrap();
     }
 }

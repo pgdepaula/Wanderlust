@@ -2175,16 +2175,16 @@ supported state. These register-only writes can precede the disabling controls,
 but rendering before the required controls have been established fails explicitly.
 
 Window clip parameters at `0x0d00 + index*8` and `+4` retain eight supported
-horizontal/vertical pairs. Inclusive, exclusive and clip-all mode encodings are
-retained by `0x1950`. Rendering or clearing after these parameters are programmed
-requires explicit `SET_WINDOW_CLIP_ENABLE=FALSE` (`0x194c=0`), except for an
-explicit exclusive mode with all eight rectangles explicitly empty. A rectangle
-with an empty half-open X or Y interval cannot reject a sample; consequently an
-empty exclusive union is equivalent to no clipping regardless of the unobserved
-enable bit. Missing bounds or mode do not imply empty or disabled defaults.
-Other enabled window clipping remains unsupported, including for clears. This
-retains initialization state without applying a host scissor as an incorrect
-substitute.
+horizontal/vertical pairs. The initialized B197 context disables window clipping,
+matching the Nouveau B197 method-initialization table (`0x194c=0`); programming
+rectangle bounds or mode alone does not enable it. `0x194c` accepts FALSE/TRUE
+and `0x1950` retains inclusive, exclusive and clip-all modes. When enabled,
+execution currently accepts only an explicit exclusive mode with all eight
+rectangles explicitly empty. An empty half-open X or Y interval cannot reject a
+sample. Other enabled modes fail before drawing or clearing. Invalid enable
+values do not mutate the previous state. This initialized-context value is not a
+claim about hardware power-on state, other register defaults, or complete window
+clipping support.
 
 Clear controls are latched independently from the `CLEAR_SURFACE` trigger.
 All defined configuration bits can be programmed, including combinations that

@@ -1702,8 +1702,19 @@ programs min/max bounds and zeroes unused rectangles. The NVIDIA-authored
 defines half-open rectangle membership, exclusive rejection, and application to
 framebuffer clears. Together these justify admitting explicitly empty exclusive
 rectangles without implementing an active clip. Neither API initial state nor
-missing guest writes establishes Maxwell register reset values. Other window
-clipping still requires explicit disablement in this subset.
+missing guest writes establishes Maxwell register reset values.
+
+The source-pinned Nouveau [B197 context method table](https://github.com/torvalds/linux/blob/b562e44f507e863c6792946e4e1b1449fbbac85d/drivers/gpu/drm/nouveau/nvkm/engine/gr/ctxgm204.c#L530-L538)
+contains `{0x00194c, 2, 0x04, 0}`: initialization writes zero to both window-clip
+enable and mode. Its [class association](https://github.com/torvalds/linux/blob/b562e44f507e863c6792946e4e1b1449fbbac85d/drivers/gpu/drm/nouveau/nvkm/engine/gr/ctxgm204.c#L646-L650)
+identifies B197 specifically. This independently implemented context initialization
+supports the bounded initialized-disable state, rather than interpreting every
+unobserved register as zero. The table is MIT-licensed; only the register-value
+fact is used here. The [GM20B context generator](https://github.com/torvalds/linux/blob/b562e44f507e863c6792946e4e1b1449fbbac85d/drivers/gpu/drm/nouveau/nvkm/engine/gr/ctxgm20b.c#L78-L81)
+likewise initializes methods through its context method image, but does not expose
+the image values in that source; this is not a full reconstruction of Switch
+firmware context images. Other active clipping remains rejected unless the
+explicit empty-exclusive equivalence applies.
 
 The same NVIDIA clear definitions distinguish state programming from triggering,
 and make scissor-zero and respect-stencil-mask separate bits. The supported clear
