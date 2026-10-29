@@ -839,3 +839,54 @@ fn tile_cache_operations_publish_real_pixels_and_preserve_driver_capture() {
         d.retire(r.token).unwrap();
     }
 }
+
+#[test]
+#[ignore = "requires actual GPU; B1C0 selectors stay isolated from real B197 graphics and unsupported dispatch faults preserve accepted draws"]
+fn compute_resource_selectors_preserve_graphics_and_reject_dispatch() {
+    let (mut data, graphics, image) = fixture();
+    let (mut d, _, c, _, _) = setup_driver();
+    // Subchannel one is B1C0. Register selectors persist without fetching memory
+    // or being confused with the B197 pools on subchannel zero.
+    let mut words = vec![0x20012000, 0xb1c0];
+    for (method, value) in [
+        (0x155c, 0),
+        (0x1560, 0x31020),
+        (0x1564, 17),
+        (0x1574, 0),
+        (0x1578, 0x30000),
+        (0x157c, 33),
+        (0x790, 255),
+        (0x794, u32::MAX),
+        (0x2e4, 255),
+        (0x2e8, u32::MAX),
+        (0x2ec, 511),
+        (0x2f0, 0),
+        (0x2f4, 0),
+        (0x2f8, 1),
+    ] {
+        words.extend([0x20012000 | (method / 4), value]);
+    }
+    words.extend(graphics);
+    // The unsupported launch must never be mistaken for a successful compute job.
+    words.extend([0x200120ad, 1]);
+    put(&mut data, 0x10000, &words);
+    let result = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, words.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert_eq!(result.progress.draws_submitted, 1);
+    let fault = result.fault.as_ref().expect("unsupported compute launch");
+    assert!(fault.to_string().contains("method=0x02b4"), "{fault}");
+    assert!(d.has_pending_output());
+    assert_eq!(d.graphics_counters().readback_operations, 0);
+    assert!(data[RT..RT + SIZE].chunks_exact(4).all(|p| p == BG));
+    let frame = d.publish(c, &mut mem(&mut data)).unwrap().unwrap();
+    check(&frame.rgba, &image, None, BG);
+    assert_eq!(d.graphics_counters().draw_commands, 1);
+    assert_eq!(d.graphics_counters().readback_operations, 1);
+}

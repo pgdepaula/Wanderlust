@@ -3866,3 +3866,12 @@ checks independently calculated covered/uncovered pixels in guest RAM, and check
 one coherence barrier/readback. Subsequent publication returns the same completed
 image exactly once with no draw replay or second readback. Both tile methods were
 executed on WSL OpenGL and native Windows D3D12/Vulkan.
+
+Compute selector tests check exact NVIDIA field maxima, first-invalid values,
+misaligned direct offsets, partial selectors, channel defaults and separation
+from graphics pool writes. `compute_resource_selectors_preserve_graphics_and_reject_dispatch`
+submits literal subchannel-one B1C0 selectors, a real indexed/textured B197 draw,
+and an unsupported compute launch through the driver/GPFIFO boundary. It checks
+one accepted draw, a launch-specific fault, deferred guest visibility, and exact
+reference pixels after publication without replay. This verifies graphics
+isolation and failure semantics; it does not claim compute shader execution.

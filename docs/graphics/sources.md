@@ -2276,3 +2276,21 @@ that they are register-only no-ops. This implementation establishes stronger
 CPU visibility than tiled-cache scheduling alone; it does not model tile
 execution, tile dimensions, tile-cache enablement or alternative flush semantics.
 No deko3d implementation code is incorporated.
+
+### Independent compute resource selectors
+
+NVIDIA's pinned [B1C0 header](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/compute/clb1c0.h)
+defines compute sampler-pool A/B/C at `0x155c/0x1560/0x1564` and header-pool
+A/B/C at `0x1574/0x1578/0x157c`. Upper addresses use eight bits, lower addresses
+32 bits, and the inclusive maximum-index widths are respectively 20 and 22 bits.
+These compute selectors are retained independently of the identically numbered
+B197 selectors.
+
+The same header defines local-memory address A/B at `0x0790/0x0794` (eight/32
+bits), non-throttled size A/B/C at `0x02e4/0x02e8/0x02ec`, and throttled size
+A/B/C at `0x02f0/0x02f4/0x02f8`. Each size upper field is eight bits, lower field
+32 bits, and maximum-SM-count field nine bits. The implementation retains each
+partial selector without dereferencing it or treating it as an allocation.
+Actual compute execution, QMD launch, scratch access, memory throttling and SM
+scheduling remain unsupported. No valid address or launch is inferred from
+selectors alone.

@@ -1459,3 +1459,61 @@ fn tile_cache_barrier_and_flush_are_ordered_effects_not_noops() {
     assert!(error.contains("method=0x0f80 value=0x00000001"));
     assert!(channel.is_faulted());
 }
+
+#[test]
+fn compute_pool_and_local_memory_fields_are_bounded_partial_and_engine_local() {
+    let mut e = Maxwell3d::default();
+    e.apply(write(0, EngineClass::Compute as u32)).unwrap();
+    // Literal NVB1C0 field maxima, not B197's sampler/header widths inferred
+    // from a shared descriptor consumer. No address is dereferenced here.
+    for (method, maximum) in [
+        (0x155c, 255),
+        (0x1564, 0xfffff),
+        (0x1574, 255),
+        (0x157c, 0x3fffff),
+        (0x790, 255),
+        (0x2e4, 255),
+        (0x2ec, 511),
+        (0x2f0, 255),
+        (0x2f8, 511),
+    ] {
+        e.apply(write(method, maximum)).unwrap();
+        let before = e.compute_configuration();
+        assert_eq!(
+            e.apply(write(method, maximum + 1)),
+            Err(MethodError::UnsupportedValue {
+                method,
+                value: maximum + 1
+            })
+        );
+        assert_eq!(e.compute_configuration(), before);
+        assert!(e.apply(write(method + 1, 0)).is_err());
+        assert_eq!(e.compute_configuration(), before);
+    }
+    let partial = e.compute_configuration();
+    assert_eq!(partial.sampler_pool.lower, None);
+    assert_eq!(partial.header_pool.lower, None);
+    for method in [0x1560, 0x1578, 0x794, 0x2e8, 0x2f4] {
+        e.apply(write(method, u32::MAX)).unwrap();
+    }
+    let filled = e.compute_configuration();
+    assert_eq!(filled.sampler_pool.maximum_index, Some(0xfffff));
+    assert_eq!(filled.header_pool.maximum_index, Some(0x3fffff));
+    assert_eq!(filled.local_memory_lower, Some(u32::MAX));
+    assert_eq!(filled.non_throttled.lower, Some(u32::MAX));
+    assert_eq!(filled.throttled.max_sm_count, Some(511));
+    // Binding graphics and writing identical pool ports cannot mutate compute.
+    e.apply(write(0, CLASS)).unwrap();
+    for method in [0x155c, 0x1560, 0x1564, 0x1574, 0x1578, 0x157c] {
+        e.apply(write(method, 0)).unwrap();
+    }
+    assert_eq!(e.compute_configuration(), filled);
+    e.apply(write(0, EngineClass::Compute as u32)).unwrap();
+    assert_eq!(e.compute_configuration(), filled);
+    // QMD launch/PCAS is still unsupported: retaining selectors is not compute.
+    assert!(e.apply(write(0x2b4, 1)).is_err());
+    assert_eq!(
+        Maxwell3d::default().compute_configuration(),
+        ComputeConfiguration::default()
+    );
+}

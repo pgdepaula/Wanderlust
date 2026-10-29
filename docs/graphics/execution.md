@@ -2681,3 +2681,10 @@ flush value one, fault explicitly. Deferred cache-maintenance publication retain
 one owning-channel diagnostic image for the next driver publication/capture call;
 that call does not perform a second readback. This image is not a VI presentation
 event or a guest synchronization fence.
+
+B1C0 sampler/header-pool and local-memory address/size selectors have their own
+channel-local compute configuration. Their fields are checked before mutation;
+partial writes persist across submissions and engine rebinding. Configuration
+does not fetch guest descriptors, map scratch memory, alter B197 bindings or
+execute compute shaders. Unsupported launch methods continue to latch faults
+while preserving previously submitted graphics work for explicit publication.

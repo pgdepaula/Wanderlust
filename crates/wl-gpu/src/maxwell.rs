@@ -22,6 +22,22 @@ pub struct TwoDConfiguration {
 
 /// Configuration only. Compute dispatch and shader execution remain unsupported.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ComputeDescriptorPool {
+    pub upper: Option<u8>,
+    pub lower: Option<u32>,
+    pub maximum_index: Option<u32>,
+}
+
+/// Retained B1C0 local-memory size and SM-count fields, not allocated host memory.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ComputeLocalMemorySize {
+    pub upper: Option<u8>,
+    pub lower: Option<u32>,
+    pub max_sm_count: Option<u16>,
+}
+
+/// Configuration only. Compute dispatch and shader execution remain unsupported.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ComputeConfiguration {
     pub shader_exceptions: Option<bool>,
     pub bindless_constant_slot: Option<u8>,
@@ -30,6 +46,12 @@ pub struct ComputeConfiguration {
     pub program_upper: Option<u8>,
     pub program_lower: Option<u32>,
     pub spa_version: Option<u16>,
+    pub sampler_pool: ComputeDescriptorPool,
+    pub header_pool: ComputeDescriptorPool,
+    pub local_memory_upper: Option<u8>,
+    pub local_memory_lower: Option<u32>,
+    pub non_throttled: ComputeLocalMemorySize,
+    pub throttled: ComputeLocalMemorySize,
 }
 
 /// Configuration whose observations are restricted by the admitted shader and
@@ -754,8 +776,31 @@ impl Maxwell3d {
                     0x0214 => self.compute.shared_memory_window = Some(value),
                     0x1608 if value <= 255 => self.compute.program_upper = Some(value as u8),
                     0x160c => self.compute.program_lower = Some(value),
+                    0x155c if value <= 255 => self.compute.sampler_pool.upper = Some(value as u8),
+                    0x1560 => self.compute.sampler_pool.lower = Some(value),
+                    0x1564 if value <= 0xfffff => {
+                        self.compute.sampler_pool.maximum_index = Some(value)
+                    }
+                    0x1574 if value <= 255 => self.compute.header_pool.upper = Some(value as u8),
+                    0x1578 => self.compute.header_pool.lower = Some(value),
+                    0x157c if value <= 0x3fffff => {
+                        self.compute.header_pool.maximum_index = Some(value)
+                    }
+                    0x0790 if value <= 255 => self.compute.local_memory_upper = Some(value as u8),
+                    0x0794 => self.compute.local_memory_lower = Some(value),
+                    0x02e4 if value <= 255 => self.compute.non_throttled.upper = Some(value as u8),
+                    0x02e8 => self.compute.non_throttled.lower = Some(value),
+                    0x02ec if value <= 511 => {
+                        self.compute.non_throttled.max_sm_count = Some(value as u16)
+                    }
+                    0x02f0 if value <= 255 => self.compute.throttled.upper = Some(value as u8),
+                    0x02f4 => self.compute.throttled.lower = Some(value),
+                    0x02f8 if value <= 511 => {
+                        self.compute.throttled.max_sm_count = Some(value as u16)
+                    }
                     0x0310 if value == 0x503 => self.compute.spa_version = Some(value as u16),
-                    0x1528 | 0x2608 | 0x1608 | 0x0310 => return Err(bad()),
+                    0x1528 | 0x2608 | 0x1608 | 0x0310 | 0x155c | 0x1564 | 0x1574 | 0x157c
+                    | 0x0790 | 0x02e4 | 0x02ec | 0x02f0 | 0x02f8 => return Err(bad()),
                     _ => {
                         return Err(MethodError::UnsupportedEngineMethod {
                             class: class as u32,
