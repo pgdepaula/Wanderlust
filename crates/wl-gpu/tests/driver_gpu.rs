@@ -2431,3 +2431,72 @@ fn byte_indexed_quad_first_base_mutation_and_warm_reuse() {
     );
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+#[test]
+#[ignore = "requires actual GPU; equivalent single-output pixel SPH metadata preserves pixels and cached pipeline"]
+fn pixel_sph_single_output_metadata_is_not_an_extra_render_target() {
+    let (mut data, mut words, image) = fixture();
+    // Independent canonical parked footer in the synthetic quarters program.
+    let control = u64::from_le_bytes(data[0x4170..0x4178].try_into().unwrap());
+    data[0x4170..0x4178]
+        .copy_from_slice(&((control & !(0x1fffffu64 << 42)) | (0x7ffu64 << 42)).to_le_bytes());
+    data[0x4188..0x4190].copy_from_slice(&0xe2400fffff87000fu64.to_le_bytes());
+    let draw = words.split_off(words.len() - 8);
+    data[0x4100..0x4104].copy_from_slice(&0x65462u32.to_le_bytes());
+    data[0x4110..0x4114].fill(0);
+    method(&mut words, 0x2144, 0x100);
+    words.extend_from_slice(&draw);
+    let (mut d, _, c, b, _) = setup_driver();
+    put(&mut data, 0x10000, &words);
+    let first = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, words.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(first.fault.is_none(), "{:?}", first.fault);
+    check(
+        &d.publish(c, &mut mem(&mut data)).unwrap().unwrap().rgba,
+        &image,
+        Some([64, 128, 191, 255]),
+        BG,
+    );
+    let before = d.graphics_counters();
+    d.write_backing(b, 0x4110, &0x21011000u32.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let bytes: Vec<_> = draw.iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let next = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, draw.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(next.fault.is_none());
+    assert_eq!(
+        d.graphics_counters().shader_decodes,
+        before.shader_decodes + 1
+    );
+    assert_eq!(
+        d.graphics_counters().pipeline_allocations,
+        before.pipeline_allocations
+    );
+    assert_eq!(
+        d.graphics_counters().shader_module_allocations,
+        before.shader_module_allocations
+    );
+    check(
+        &d.publish(c, &mut mem(&mut data)).unwrap().unwrap().rgba,
+        &image,
+        Some([64, 128, 191, 255]),
+        BG,
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

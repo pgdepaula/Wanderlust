@@ -329,6 +329,18 @@ impl Program {
                 header[24] = 10;
             }
         }
+        if !vertex {
+            // NVIDIA SPH: MRT_ENABLE only selects per-target versus broadcast
+            // exports. With our sole target-zero OMAP=0xf both are identical.
+            header[1] |= input[1] & 0x40;
+            // StoreReqStart/End are explicitly ignored for pixel shaders, unlike
+            // VTG ALD.O. Keep max-output-vertex/reserved fields strict.
+            let requests = u32::from_le_bytes(input[16..20].try_into().unwrap());
+            if requests & !0xff0ff000 != 0 {
+                return Err(invalid("unsupported pixel SPH common-word-four fields"));
+            }
+            header[16..20].copy_from_slice(&requests.to_le_bytes());
+        }
         if input[..80] != header {
             return Err(invalid("unsupported shader stage/SPH interface"));
         }
@@ -363,6 +375,17 @@ impl Program {
                 let schedule = (control >> (slot * 21)) & 0x1fffff;
                 let wait = (schedule >> 11) & 63;
                 let write_barrier = (schedule >> 5) & 7;
+                let word = u64::from_le_bytes(b.try_into().unwrap());
+                if exited {
+                    // Only unreachable canonical padding after unconditional EXIT.
+                    // The parked self-branch is not executable control-flow support.
+                    if (word == 0x50b0000000070f00 && schedule == 0x7e6)
+                        || (word == 0xe2400fffff87000f && schedule == 0x7ff)
+                    {
+                        continue;
+                    }
+                    return Err(fail("invalid EXIT padding"));
+                }
                 if !matches!(schedule & 31, 6 | 13)
                     || (schedule >> 8) & 7 != 7
                     || schedule >> 17 != 0
@@ -374,7 +397,6 @@ impl Program {
                 if wait == 1 {
                     pending.fill(false);
                 }
-                let word = u64::from_le_bytes(b.try_into().unwrap());
                 // Predicate-producing SETP has its own conservative fixed latency.
                 // Do not generalize the new stall encoding to other instructions.
                 if schedule & 31
@@ -385,12 +407,6 @@ impl Program {
                     }
                 {
                     return Err(fail("unsupported instruction fixed-latency schedule"));
-                }
-                if exited {
-                    if word != 0x50b0000000070f00 || schedule != 0x7e6 {
-                        return Err(fail("invalid EXIT padding"));
-                    }
-                    continue;
                 }
                 if word == 0xe30000000007000f {
                     if write_barrier != 7

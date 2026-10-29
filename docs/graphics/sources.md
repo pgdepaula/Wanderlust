@@ -2554,3 +2554,15 @@ and `0x2150=4`, index base/base instance `0x1434/0x1438=0`, restart `0x1644=0`,
 stream frequency `0x1c0c=0`, and instance selects beginning at `0x1880=0`.
 These initialize the bounded software context without resetting state at each
 submission. No undefined program region, offset or allocation is synthesized.
+
+NVIDIA Shader Program Header specification, version 1, CommonWord0 explains
+MrtEnable's per-target versus broadcast behavior, conditional on effective
+SetCtMrtEnable. Its CommonWord4 discussion explicitly excludes geometry/pixel
+shaders from StoreReqStart/End semantics. The pixel validator therefore accepts
+those request fields without changing the supported target-zero OMAP or other
+header constraints. Source:
+[SPH version 1](https://download.nvidia.com/open-gpu-doc/Shader-Program-Header/1/Shader-Program-Header.html).
+The unreachable self-branch encoding is corroborated by the pinned envytools
+GM107 BRA decoder and disassembler. Its relative target is the same instruction;
+it is admitted solely as padding after unconditional EXIT. This does not infer
+instruction execution, timing or dynamic control flow from padding bytes.

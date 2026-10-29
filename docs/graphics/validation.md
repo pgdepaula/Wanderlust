@@ -4199,3 +4199,18 @@ formatting passed. Native Windows was attempted but the WSL interop launcher
 failed before process startup (`UtilAcceptVsock:273`, `accept4 failed 110`);
 this extension has no new native Windows pass claim. The preceding byte-index
 revision did run all 25 driver cases on both native backends.
+
+Pixel-SPH metadata tests independently vary MRT_ENABLE and ignored StoreReqStart/
+End around the assembled constant-color fixture. They preserve decoded operations
+and WGSL while rejecting new side effects, extra outputs, reserved bits and VTG
+request-field changes. A GPFIFO GPU fixture verifies exact quarter-color pixels
+with those metadata values, then changes only ignored request fields: shader
+acquisition is revalidated without creating another compatible shader module or
+pipeline. No commercial program bytes are included in these tests.
+The pixel-SPH/footer delivery passed 462 default-feature CPU tests, 457 without
+default features and all 211 explicit Vulkan GPU scenarios, plus its new scenario
+on WSL OpenGL. The synthetic GPU fixture uses canonical parked padding after
+unconditional EXIT; moving that branch before EXIT or changing its target fails
+CPU validation. Strict Clippy and formatting passed. Windows native execution
+remains unavailable because the WSL interop launcher fails before test startup;
+no native pass or skipped-as-pass is claimed for this delivery.

@@ -2935,3 +2935,14 @@ non-instanced stream frequency. Zero/one frequency values are admitted only
 under the existing non-instanced stream restriction. Guest program addresses,
 register counts, resources and draw parameters remain required; raw channels
 retain explicit-state validation.
+
+The pixel SPH validator admits MRT_ENABLE with only target-zero RGBA OMAP. In
+that bounded interface, per-target and broadcast exports both reach the same
+single attachment. Pixel StoreReqStart/End fields are ignored as specified by
+NVIDIA, while common-word-four reserved/vertex-count bits remain constrained.
+This does not enable extra render targets, depth/sample-mask exports, global
+stores or arbitrary shader-header flags. Vertex SPH validation is unchanged.
+Canonical self-parking BRA padding is accepted only after the already decoded
+unconditional EXIT, with its exact inert control profile. It does not add
+executable branching, loops or relaxed dependency checks to live instructions.
+All other unsupported footer encodings remain rejected.
