@@ -982,11 +982,14 @@ fn empty_exclusive_window_rectangles_clear_and_nonempty_rectangles_fault() {
 
 #[test]
 #[ignore = "requires actual GPU; B197 initialized context keeps window clipping disabled"]
-fn initialized_window_clip_context_allows_clear_before_enable_or_mode_writes() {
+fn initialized_context_allows_clear_before_window_and_multisample_writes() {
     for bh in [None, Some(1)] {
         let mut data = vec![0xa5; 0x20000];
         let (mut d, c, _, b, _) = driver();
         let mut words = clear_setup(7, 9, bh);
+        // Remove the explicit single-sample write: initial B197 context supplies it.
+        let index = words.windows(2).position(|v| v == [0x20010574, 0]).unwrap();
+        words.drain(index..index + 2);
         clear_values(&mut words, [0.25, 0.5, 0.75, 1.]);
         for index in 0..8 {
             method(&mut words, 0xd00 + index * 8, 0);

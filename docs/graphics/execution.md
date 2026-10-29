@@ -2744,3 +2744,10 @@ word offsets; state writes use byte offsets. Rejected writes, other engine
 classes, reserved holes and fields never initialized cannot contribute values.
 The observation order includes macro-emitted state changes before execution
 resumes, preserving live-state reads without relaxing shadow replay restrictions.
+
+
+The initialized B197 context supplies single-sample mode (`0x15d0=0`) from the
+source-pinned Nouveau method list. This narrow initialization does not populate
+unrelated absent raster state. Clear failures identify the missing fixed-state
+method and include bounded control, attachment and clipping register values;
+these diagnostics allocate only on failure and do not expose shader binaries.

@@ -3965,3 +3965,13 @@ features (198 GPU scenarios ignored in that ordinary run) and 434 without defaul
 features. Strict package all-target Clippy and whole-workspace formatting passed.
 This models a source-backed initialized-context value, not unspecified power-on
 state or general active window clipping.
+
+
+Initialized single-sample mode is covered by the channel clear scenario with the
+literal `0x15d0` write removed. Other missing controls still fail and diagnostics
+include the precise required method plus bounded clear state. The CPU suites
+passed 439 default-feature tests (198 GPU scenarios ignored in that ordinary run)
+and 434 without default features. Ten clear GPU scenarios passed on each of WSL
+Vulkan/OpenGL and native Windows D3D12/Vulkan (40 actual passes, zero skips).
+Package all-target strict Clippy and workspace formatting passed. Initialization
+still leaves unrelated absent fixed controls unresolved.

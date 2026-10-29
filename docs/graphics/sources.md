@@ -2402,3 +2402,10 @@ emits it to the color mask. The retained words are `01a00021 00000a15
 000010c0 00000011`; reconstructed 16-byte code SHA-256 is
 `4038b9caeb84f0b70e066f2cdc95cbf33b84d80cdd4a52bd8ee1920c9d1d2e64`. No default register contents are inferred. Uninitialized admitted
 fields and unsupported method-bank addresses have distinct errors.
+
+
+The same pinned [B197 context table](https://github.com/torvalds/linux/blob/b562e44f507e863c6792946e4e1b1449fbbac85d/drivers/gpu/drm/nouveau/nvkm/engine/gr/ctxgm204.c#L390-L402)
+initializes multisample mode `0x15d0` to zero. This supports initialized single
+sampling without requiring a redundant guest write; it does not justify enabling
+multisample rendering, guessing other missing controls, or changing the initial
+conditional-render mode without separate evidence.

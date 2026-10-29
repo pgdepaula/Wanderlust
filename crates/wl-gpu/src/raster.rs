@@ -389,7 +389,7 @@ fn depth_compare(value: u32) -> Option<DepthCompare> {
         _ => return None,
     })
 }
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct RasterRegisters {
     color: [Option<u32>; 9],
     inactive_color_formats: [Option<u32>; 7],
@@ -430,6 +430,56 @@ pub(crate) struct RasterRegisters {
     // context initialization, not an inferred hardware power-on value.
     window_clip_enabled: bool,
 }
+impl Default for RasterRegisters {
+    fn default() -> Self {
+        let mut state = Self {
+            color: Default::default(),
+            inactive_color_formats: Default::default(),
+            viewports: Default::default(),
+            viewport_swizzles: Default::default(),
+            viewport_depth: Default::default(),
+            depth_clip: Default::default(),
+            clip_profile: Default::default(),
+            surface: Default::default(),
+            clips: Default::default(),
+            scissor: Default::default(),
+            scissor_enable: Default::default(),
+            fixed: Default::default(),
+            blend_enabled: Default::default(),
+            blend_per_target: Default::default(),
+            target_blend: Default::default(),
+            blend_separate: Default::default(),
+            blend: Default::default(),
+            write_mask: Default::default(),
+            depth_test: Default::default(),
+            depth_write: Default::default(),
+            depth_select: Default::default(),
+            depth_func: Default::default(),
+            zt: Default::default(),
+            clear_control: Default::default(),
+            clear_color: Default::default(),
+            clear_depth: Default::default(),
+            cull_enabled: Default::default(),
+            front_face: Default::default(),
+            cull_face: Default::default(),
+            reduction_thresholds: Default::default(),
+            reduction_disabled: Default::default(),
+            alpha_fraction: Default::default(),
+            alpha_coverage_disabled: Default::default(),
+            window_clip: Default::default(),
+            window_clip_type: Default::default(),
+            window_clip_enabled: Default::default(),
+        };
+        // Source-pinned B197 initialized-context method list (Nouveau) seeds
+        // multisample mode to single sample. Other absent fixed state remains
+        // absent; this is not an assumption that all registers reset to zero.
+        state
+            .apply(0x15d0, 0)
+            .expect("supported B197 initial multisample mode");
+        state
+    }
+}
+
 impl RasterRegisters {
     pub fn color_target_format(&self, slot: usize) -> Option<u32> {
         if slot == 0 {
@@ -978,6 +1028,15 @@ impl RasterRegisters {
         Ok(target)
     }
     pub fn resolve_clear(&self, color: bool, depth: bool) -> Result<ClearSurface> {
+        self.resolve_clear_inner(color, depth).map_err(|error| {
+            invalid(&format!(
+                "{error}; clear context: control={:x?}, surface={:x?}, scissor_enable={:?}, scissor={:x?}, color={:x?}, depth={:x?}",
+                self.clear_control, self.surface, self.scissor_enable[0],
+                self.scissor[0], self.color, self.zt
+            ))
+        })
+    }
+    fn resolve_clear_inner(&self, color: bool, depth: bool) -> Result<ClearSurface> {
         self.validate_reduction_state()?;
         self.validate_window_clip_state()?;
         for method in [0x0138, 0x15d0] {
@@ -986,9 +1045,10 @@ impl RasterRegisters {
                 .position(|v| v.0 == method)
                 .unwrap();
             if self.fixed & (1 << n) == 0 {
-                return Err(invalid(
-                    "clear requires explicit unconditional single-sample state",
-                ));
+                return Err(invalid(&format!(
+                    "clear missing supported context state at B197 {method:#06x} (observed fixed mask {:#x})",
+                    self.fixed
+                )));
             }
         }
         let control = self
