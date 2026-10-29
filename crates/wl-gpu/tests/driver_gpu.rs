@@ -2154,7 +2154,7 @@ fn initialized_context_defaults_and_subtile_hints_preserve_real_draws() {
     // guest geometry, programs, textures, viewport, scissor and draw methods.
     let defaults = [
         0x138, 0x37c, 0xa18, 0xdf8, 0xdfc, 0xfa4, 0x12e8, 0x1360, 0x135c, 0x1924, 0x1a00, 0x19c4,
-        0x19bc, 0xdb4, 0x168c,
+        0x19bc, 0xdb4, 0x168c, 0x2050, 0x2150, 0x1434, 0x1438, 0x1644, 0x1c0c, 0x1880,
     ];
     for word in words {
         if let Some(w) = decoder.push_word(word).unwrap() {

@@ -2929,3 +2929,9 @@ is discarded after queue upload; unchanged resources reuse the resident index
 buffer without another guest read, widening or upload. Existing signed base,
 triangle-list, single-instance and disabled-restart restrictions still apply.
 With restart disabled, byte `255` is an ordinary index and is bounds-checked.
+The supported initialized profile also supplies source-derived vertex/pixel
+constant-binding groups 0/4 and zero index base, base instance, restart and
+non-instanced stream frequency. Zero/one frequency values are admitted only
+under the existing non-instanced stream restriction. Guest program addresses,
+register counts, resources and draw parameters remain required; raw channels
+retain explicit-state validation.

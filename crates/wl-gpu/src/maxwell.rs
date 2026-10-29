@@ -666,6 +666,18 @@ impl Maxwell3d {
         self.auxiliary_raster.iterated_blend_pass = Some(1);
         self.auxiliary_raster.blend_constant_bits = [Some(0); 4];
         self.auxiliary_raster.sample_masks = [Some(0xffff); 4];
+        // Same pinned context table: vertex-B/pixel constant groups are 0/4;
+        // index base, base instance and restart are zero. Program addresses,
+        // register allocations and buffer bindings still come from guest methods.
+        self.vertex_group = Some(0);
+        self.fragment_group = Some(4);
+        self.vertex_frequency = Some(0);
+        self.vertex_instance[0] = Some(0);
+        for method in [0x1434, 0x1438, 0x1644] {
+            self.indices
+                .apply(method, 0)
+                .map_err(|e| invalid(&format!("driver index initialization: {e}")))?;
+        }
         Ok(())
     }
     /// Configured A-stream address. Only stream zero can supply vertex fetches
@@ -1688,7 +1700,9 @@ impl Maxwell3d {
             0x1c08 => self.vertex_lower = Some(value),
             0x1f04 => self.vertex_limit_lower = Some(value),
             0x1c0c => {
-                if value != 1 {
+                // Frequency is inert in the supported non-instanced stream.
+                // Both documented initialized zero and existing one are admitted.
+                if value > 1 {
                     return Err(bad());
                 }
                 self.vertex_frequency = Some(value);
@@ -1972,7 +1986,7 @@ impl Maxwell3d {
             Some(lo),
             Some(lhi),
             Some(llo),
-            Some(1),
+            Some(0 | 1),
             Some(0),
             [Some(a0), Some(a1)],
         ) = (

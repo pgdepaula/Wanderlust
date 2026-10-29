@@ -2549,3 +2549,8 @@ bytes. `SET_INDEX_BUFFER_F` FIRST counts elements, not words or host upload byte
 The existing checked decoder and inclusive range calculations retain those guest
 units; only the backend converts byte elements to the host Uint16 index format.
 This is a measured CPU widening/upload boundary, not zero-copy index execution.
+Nouveau's same pinned B197 context table initializes pipeline bindings `0x2050=0`
+and `0x2150=4`, index base/base instance `0x1434/0x1438=0`, restart `0x1644=0`,
+stream frequency `0x1c0c=0`, and instance selects beginning at `0x1880=0`.
+These initialize the bounded software context without resetting state at each
+submission. No undefined program region, offset or allocation is synthesized.

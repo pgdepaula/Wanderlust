@@ -354,3 +354,15 @@ fn unused_attribute_and_stream_banks_are_bounded_and_do_not_alias_zero() {
         assert!(set(&mut e, m - 4, type_bits | 1).is_err());
     }
 }
+
+#[test]
+fn zero_noninstanced_frequency_retains_the_exact_guest_layout() {
+    let mut e = tight_float3();
+    let before = e.vertex_array().unwrap();
+    set(&mut e, 0x1c0c, 0).unwrap();
+    assert_eq!(e.vertex_array().unwrap(), before);
+    assert!(set(&mut e, 0x1c0c, 2).is_err());
+    assert_eq!(e.vertex_array().unwrap(), before);
+    assert!(set(&mut e, 0x1880, 1).is_err());
+    assert_eq!(e.vertex_array().unwrap(), before);
+}

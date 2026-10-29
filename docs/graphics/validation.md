@@ -4190,3 +4190,12 @@ all 210 explicit Vulkan GPU scenarios, the new scenario on WSL OpenGL, and all
 25 driver GPU scenarios on each native Windows D3D12/Vulkan backend. No executed
 case failed or skipped. Package all-target strict Clippy and workspace formatting
 passed. Synthetic indexed pixels remain distinct from original-game frames.
+The binding/default extension passed 459 default-feature CPU tests, 454 without
+default features, all 210 explicit Vulkan GPU scenarios and the extended
+initialized-context fixture on WSL OpenGL. That fixture omits explicit shader
+group, index base/instance/restart and stream frequency/instance writes, while
+still validating independently specified textured pixels. Strict Clippy and
+formatting passed. Native Windows was attempted but the WSL interop launcher
+failed before process startup (`UtilAcceptVsock:273`, `accept4 failed 110`);
+this extension has no new native Windows pass claim. The preceding byte-index
+revision did run all 25 driver cases on both native backends.
