@@ -751,3 +751,57 @@ fn semaphore_publication_reaches_the_existing_driver_frame_boundary_once() {
     assert_eq!(d.graphics_counters().readback_operations, before);
     assert!(d.query(r.token).unwrap().guest_visible);
 }
+#[test]
+#[ignore = "requires actual GPU; sixteen-byte front-end release reports time without claiming completion or reading back each draw"]
+fn long_frontend_release_keeps_gpu_output_deferred_and_reports_real_monotonic_time() {
+    let began = std::time::Instant::now();
+    let (mut data, mut words, image) = fixture();
+    let (mut d, space, c, b, _) = setup_driver();
+    let reserve = d.reserve_fixed(space, GpuAddress(0xe0000), 0x1000).unwrap();
+    d.map(space, reserve, b, 0xf000).unwrap();
+    data[0xf000..0xf020].fill(0xa5);
+    words.extend([0x20040004, 0, 0xe0000, 77, 0x00100002]);
+    put(&mut data, 0x10000, &words);
+    let r = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, words.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(r.fault.is_none());
+    assert!(d.has_pending_output());
+    assert!(!d.query(r.token).unwrap().guest_visible);
+    assert_eq!(d.graphics_counters().readback_operations, 0);
+    assert_eq!(&data[0xf000..0xf004], &77u32.to_le_bytes());
+    assert_eq!(&data[0xf004..0xf008], &[0; 4]);
+    assert_eq!(&data[0xf010..0xf020], &[0xa5; 16]);
+    let first = u64::from_le_bytes(data[0xf008..0xf010].try_into().unwrap());
+    assert!(first > 0);
+    assert!(u128::from(first) <= began.elapsed().as_nanos() * 384 / 625);
+    let words = [0x20010006u32, 88, 0x20010007, 0x00100002];
+    let bytes: Vec<_> = words.iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let r = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, 4)),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(r.fault.is_none());
+    assert_eq!(r.progress.draws_submitted, 0);
+    assert!(d.has_pending_output());
+    assert_eq!(d.graphics_counters().readback_operations, 0);
+    assert_eq!(&data[0xf000..0xf004], &88u32.to_le_bytes());
+    let second = u64::from_le_bytes(data[0xf008..0xf010].try_into().unwrap());
+    assert!(second >= first);
+    let frame = d.publish(c, &mut mem(&mut data)).unwrap().unwrap();
+    check(&frame.rgba, &image, None, BG);
+    assert_eq!(d.graphics_counters().readback_operations, 1);
+}

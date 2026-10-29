@@ -351,10 +351,19 @@ impl GpuDriver {
     pub fn query(&mut self, token: SubmissionToken) -> Result<CompletionStatus> {
         let n = self.record(token)?;
         self.counters.completion_queries += 1;
-        self.renderer
-            .device
-            .poll(wgpu::PollType::Poll)
-            .map_err(|e| Error(e.to_string()))?;
+        // A CPU-only prefix has no host work to poll. An already-signalled
+        // fence is also complete; do not run unrelated backend maintenance
+        // (and its allocations) while retiring these bookkeeping tokens.
+        if self.records[n]
+            .host
+            .as_ref()
+            .is_some_and(|h| !h.done.load(Ordering::Acquire))
+        {
+            self.renderer
+                .device
+                .poll(wgpu::PollType::Poll)
+                .map_err(|e| Error(e.to_string()))?;
+        }
         let r = &self.records[n];
         Ok(CompletionStatus {
             host_completed: r

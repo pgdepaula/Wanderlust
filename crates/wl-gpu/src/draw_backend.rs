@@ -361,7 +361,9 @@ impl Renderer {
             .any(|p| address.0 < p.guest.0 + p.size as u64 && p.guest.0 < end)
         {
             self.counters.coherence_barriers += 1;
-            self.synchronize_target(memory, changes)?;
+            if let Some(frame) = self.synchronize_target(memory, changes)? {
+                self.semaphore_frame = Some(frame);
+            }
         }
         Ok(())
     }
@@ -451,25 +453,41 @@ impl Renderer {
                 }
                 Ok(None)
             }
-            MethodEffect::SemaphoreRelease { address, payload } => {
+            MethodEffect::SemaphoreRelease {
+                address,
+                payload,
+                long,
+                wait,
+            } => {
                 if self.poisoned {
                     return Err(invalid("renderer unavailable after backend failure"));
                 }
-                let destination = map.resolve(address, 4)?;
-                memory.validate_write(destination, 4)?;
-                changes.can_mark_write_at(destination, 4)?;
-                // WFI enabled means prior actual host GPU work must finish.
-                // Publish prior output before making this CPU-visible payload
-                // observable, including targets that alias the semaphore.
-                self.guest_effect(engine, MethodEffect::WaitIdle, map, memory, changes, false)?;
-                if let Some(frame) = self.synchronize_target(memory, changes)? {
-                    self.semaphore_frame = Some(frame);
+                let length = if long { 16 } else { 4 };
+                let destination = map.resolve(address, length)?;
+                memory.validate_write(destination, length)?;
+                changes.can_mark_write_at(destination, length)?;
+                if wait {
+                    self.guest_effect(engine, MethodEffect::WaitIdle, map, memory, changes, false)?;
+                    if let Some(frame) = self.synchronize_target(memory, changes)? {
+                        self.semaphore_frame = Some(frame);
+                    }
+                } else {
+                    // Front-end release is not completion. Only a real backing
+                    // alias hazard forces publication of prior attachment data.
+                    self.synchronize_command_source(destination, length, memory, changes)?;
                 }
-                // Publication can advance the journal; recheck its capacity
-                // before the semaphore's own guest mutation.
-                changes.can_mark_write_at(destination, 4)?;
-                memory.write(destination, &payload.to_le_bytes())?;
-                changes.mark_write(destination, 4)?;
+                let mut report = [0u8; 16];
+                report[..4].copy_from_slice(&payload.to_le_bytes());
+                if long {
+                    let ns = u64::try_from(self.timestamp_origin.elapsed().as_nanos())
+                        .map_err(|_| invalid("GPU timestamp domain exhausted"))?;
+                    report[8..].copy_from_slice(&crate::maxwell::timestamp_ticks(ns).to_le_bytes());
+                }
+                changes.can_mark_write_at(destination, length)?;
+                // One checked atomic report write; payload/reserved/timestamp
+                // cannot be partially published by the supported memory adapter.
+                memory.write(destination, &report[..length])?;
+                changes.mark_write(destination, length)?;
                 Ok(None)
             }
             MethodEffect::InlineUploadStart { address, length } => {

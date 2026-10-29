@@ -2641,7 +2641,8 @@ offsets still reject. Automatic mappings retain their exact backing extent.
 Channel methods `0x10/0x14/0x18` retain the 40-bit semaphore address and payload,
 independently of engine/subchannel binding. All selectors must be initialized;
 upper reserved bits and a non-word-aligned lower address fail explicitly.
-`0x1c = 0x01000002` performs four-byte RELEASE with WFI enabled. It validates the
+RELEASE operation 2 supports four- and sixteen-byte reports, with WFI enabled
+or disabled. `0x1c = 0x01000002` is the four-byte/WFI-enabled form. It validates the
 mapped destination, observes actual host GPU completion, publishes prior resident
 color/depth output, and only then writes the little-endian payload and journals
 the canonical guest write. Publication can advance the journal, so write capacity
@@ -2651,9 +2652,7 @@ boundary, not an unconditional readback after every draw.
 `0x1c = 1` admits an already-satisfied equality ACQUIRE. Pending output aliasing
 the source is synchronized before its checked read. An unsatisfied condition
 fails with the explicit channel-suspension limitation; it does not busy-wait,
-fabricate a completed fence or replay an earlier draw. GEQ/AND/reduction,
-acquire-switch, WFI-disabled release and sixteen-byte timestamp reports remain
-unsupported. This subset is not general Host1x syncpoint/PBDMA scheduling.
+fabricate a completed fence or replay an earlier draw. GEQ/AND/reduction and acquire-switch remain unsupported. This subset is not general Host1x syncpoint/PBDMA scheduling.
 
 The GPFIFO executor drops its guest command borrow before semaphore effects and
 reacquires an unread suffix afterward. A semaphore may therefore update command
@@ -2662,3 +2661,14 @@ image for the existing driver diagnostic-frame boundary, moving its pixel vector
 without another readback/copy. It cannot be taken by another channel, and an
 accepted channel switch may supersede the old diagnostic image without changing
 already-published guest RAM. This remains diagnostic output, not VI presentation.
+
+Sixteen-byte reports store little-endian payload at +0, zero reserved word at +4
+and a 64-bit timestamp at +8, in one checked guest write. The bounded virtual GPU
+clock uses real monotonic host elapsed time and 614,400,000 ticks/s (384/625 ticks
+per nanosecond), corroborated by the pinned reference; it is not the CPU's
+19.2 MHz counter or a zero placeholder. It is not claimed to reproduce physical
+GPU timestamp-query precision. WFI-disabled release reports front-end progress
+without a host completion wait or unconditional framebuffer publication. Actual
+backing overlap may still require the existing conservative alias barrier.
+Completion queries skip host polling only when no host fence exists or its real
+completion callback has already signalled; unresolved fences still poll normally.

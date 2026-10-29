@@ -3847,3 +3847,11 @@ System allocator; both scopes are reported. A positive test explicitly allocates
 and reallocates to verify that caller-thread accounting is active. Zero caller
 allocations must not be presented as zero total process allocations or zero-copy
 GPU transfers.
+
+Sixteen-byte release validation checks exact payload/reserved words, untouched
+adjacent bytes, monotonic nonzero timestamps bounded by independently measured
+host elapsed time, and the exact rational timer conversion including the u64
+boundary. An indexed textured draw followed by WFI-disabled timestamp reports
+retains pending GPU output, performs no readback at those reports and only
+publishes pixels at a later explicit visibility boundary. The NOP retirement
+benchmark also verifies that CPU-only completion records avoid backend polling.

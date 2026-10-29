@@ -2247,5 +2247,13 @@ ACQUIRE=1, RELEASE=2, ACQ_GEQ=4, ACQ_AND=8, REDUCTION=16. Acquire-switch is
 bit 12. RELEASE_WFI enabled is zero at bit 20; size-four is one at bit 24,
 whereas size-sixteen is zero. Reduction/format fields do not justify accepting
 unverified general reduction, timestamps or suspension behavior. Wanderlust
-currently executes only satisfied equality acquires and size-four/WFI-enabled
-releases with conservative host completion and guest publication.
+executes satisfied equality acquires and both release sizes/order modes.
+WFI-enabled release uses conservative host completion and guest publication;
+WFI-disabled release is not treated as GPU completion.
+
+MIT-licensed Ryujinx revision `4930dced25c0d9ec33096b0f2601d262daa477bf`,
+[GPFifoClass.Semaphored](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Gpu/Engine/GPFifo/GPFifoClass.cs)
+corroborates the sixteen-byte payload/reserved/timestamp positions.
+[GpuContext](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Gpu/GpuContext.cs)
+corroborates the virtual Maxwell timer's 384/625 ratio from monotonic nanoseconds.
+No fast-time divisor or synthetic completion counter is applied.

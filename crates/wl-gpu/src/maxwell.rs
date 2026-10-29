@@ -252,11 +252,13 @@ pub enum MethodEffect {
         value: u32,
     },
     WaitIdle,
-    /// B06F four-byte release with WFI enabled; completion and guest visibility
-    /// precede payload publication. Not a Host1x syncpoint.
+    /// B06F release report. WFI-enabled reports observe prior GPU completion;
+    /// WFI-disabled reports do not promise it. Not a Host1x syncpoint.
     SemaphoreRelease {
         address: GpuAddress,
         payload: u32,
+        long: bool,
+        wait: bool,
     },
     /// Only an already-satisfied equality acquire is currently executable.
     SemaphoreAcquire {
@@ -698,10 +700,10 @@ impl Maxwell3d {
                 return Ok(MethodEffect::State);
             }
             0x1c => {
-                // Exact EQ acquire or four-byte RELEASE, WFI enabled. Sixteen
-                // byte timestamp reports, reductions, switch and WFI-disable
-                // require independent semantics and remain explicit errors.
-                if !matches!(value, 1 | 0x0100_0002) {
+                // Exact EQ acquire or RELEASE, with independently decoded
+                // report size and WFI ordering. Reductions/acquire-switch and
+                // other acquire conditions remain explicit unsupported forms.
+                if !matches!(value, 1 | 2 | 0x0010_0002 | 0x0100_0002 | 0x0110_0002) {
                     return Err(bad());
                 }
                 let (Some(hi), Some(lo), Some(payload)) = (
@@ -715,7 +717,12 @@ impl Maxwell3d {
                 return Ok(if value == 1 {
                     MethodEffect::SemaphoreAcquire { address, payload }
                 } else {
-                    MethodEffect::SemaphoreRelease { address, payload }
+                    MethodEffect::SemaphoreRelease {
+                        address,
+                        payload,
+                        long: value & 0x0100_0000 == 0,
+                        wait: value & 0x0010_0000 == 0,
+                    }
                 });
             }
             _ => {}
@@ -1881,4 +1888,10 @@ impl Channel {
     pub fn is_faulted(&self) -> bool {
         self.faulted
     }
+}
+
+/// Maxwell timer ratio corroborated by MIT Ryujinx GpuContext 4930dced:
+/// 614,400,000 ticks/s. Wide intermediates preserve the full u64 ns domain.
+pub fn timestamp_ticks(nanoseconds: u64) -> u64 {
+    (u128::from(nanoseconds) * 384 / 625) as u64
 }

@@ -1365,7 +1365,9 @@ fn b06f_semaphore_selectors_are_channel_wide_checked_and_snapshot_actions() {
         state.apply(write(0x1c, 0x01000002)).unwrap(),
         MethodEffect::SemaphoreRelease {
             address: expected,
-            payload: 0x89abcdef
+            payload: 0x89abcdef,
+            long: false,
+            wait: true,
         }
     );
     assert_eq!(
@@ -1375,7 +1377,7 @@ fn b06f_semaphore_selectors_are_channel_wide_checked_and_snapshot_actions() {
             payload: 0x89abcdef
         }
     );
-    for value in [2, 4, 8, 16, 0x01100002, 0x1001, 0x81000002] {
+    for value in [4, 8, 16, 0x1001, 0x81000002] {
         assert_eq!(
             state.apply(write(0x1c, value)),
             Err(MethodError::UnsupportedValue {
@@ -1385,4 +1387,40 @@ fn b06f_semaphore_selectors_are_channel_wide_checked_and_snapshot_actions() {
         );
     }
     assert!(Maxwell3d::default().apply(write(0x1c, 1)).is_err());
+}
+
+#[test]
+fn b06f_reports_encode_all_release_sizes_and_ordering_without_fake_ticks() {
+    let mut state = Maxwell3d::default();
+    for (m, v) in [(0x10, 0), (0x14, 0x1000), (0x18, 77)] {
+        state.apply(write(m, v)).unwrap();
+    }
+    for (control, long, wait) in [
+        (2, true, true),
+        (0x00100002, true, false),
+        (0x01000002, false, true),
+        (0x01100002, false, false),
+    ] {
+        assert_eq!(
+            state.apply(write(0x1c, control)).unwrap(),
+            MethodEffect::SemaphoreRelease {
+                address: GpuAddress(0x1000),
+                payload: 77,
+                long,
+                wait
+            }
+        );
+    }
+    for (ns, expected) in [
+        (0, 0),
+        (625, 384),
+        (1250, 768),
+        (1_000_000_000, 614_400_000),
+        (
+            u64::MAX,
+            (u64::MAX / 625) * 384 + (u64::MAX % 625) * 384 / 625,
+        ),
+    ] {
+        assert_eq!(timestamp_ticks(ns), expected);
+    }
 }

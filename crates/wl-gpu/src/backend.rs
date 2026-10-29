@@ -76,6 +76,7 @@ pub struct Renderer {
     /// Latest channel-ordered semaphore publication, moved without a pixel copy
     /// into the driver's existing diagnostic publication boundary.
     pub(crate) semaphore_frame: Option<Frame>,
+    pub(crate) timestamp_origin: std::time::Instant,
     pipeline: wgpu::RenderPipeline,
     default_pipeline: wgpu::RenderPipeline,
     indexed_shader: wgpu::ShaderModule,
@@ -192,6 +193,7 @@ impl Renderer {
             queue,
             last_submission: None,
             semaphore_frame: None,
+            timestamp_origin: std::time::Instant::now(),
             completion: Default::default(),
             default_pipeline: pipeline.clone(),
             pipeline,
