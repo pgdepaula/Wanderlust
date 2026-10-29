@@ -998,3 +998,69 @@ fn graphics_engine_reports_follow_real_pixels_and_write_exact_records() {
         assert_eq!(d.graphics_counters().draw_commands, 1);
     }
 }
+
+#[test]
+#[ignore = "requires actual GPU; inactive CT mappings must not block or recompile a real single-output guest draw"]
+fn inactive_color_target_selectors_preserve_pixels_and_pipeline() {
+    let (mut data, mut words, image) = fixture();
+    let (mut d, _, c, b, _) = setup_driver();
+    method(&mut words, 0x121c, 0x0fac6881);
+    put(&mut data, 0x10000, &words);
+    let first = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, words.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(first.fault.is_none(), "{:?}", first.fault);
+    check(
+        &d.publish(c, &mut mem(&mut data)).unwrap().unwrap().rgba,
+        &image,
+        None,
+        BG,
+    );
+    d.retire(first.token).unwrap();
+    let before = d.graphics_counters();
+    let words = [
+        0x20010487u32,
+        0x0fffff81,
+        0x20010586,
+        4,
+        0x200105f7,
+        0,
+        0x200105f8,
+        3,
+        0x20010585,
+        0,
+    ];
+    let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let second = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, words.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(second.fault.is_none(), "{:?}", second.fault);
+    assert_eq!(second.progress.draws_submitted, 1);
+    let after = d.graphics_counters();
+    assert_eq!(after.pipeline_allocations, before.pipeline_allocations);
+    assert_eq!(
+        after.shader_module_allocations,
+        before.shader_module_allocations
+    );
+    assert_eq!(after.shader_binary_bytes, before.shader_binary_bytes);
+    check(
+        &d.publish(c, &mut mem(&mut data)).unwrap().unwrap().rgba,
+        &image,
+        None,
+        BG,
+    );
+}

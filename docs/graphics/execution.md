@@ -2703,3 +2703,9 @@ checked atomic publication. Invalid selectors/actions fail without a report
 write. Completion/publication failure retains earlier GPU output and latches the
 channel, avoiding whole-request replay. These ordered memory reports are not
 Host1x syncpoint or guest event implementations.
+
+Single-output `SET_CT_SELECT` validation checks its active fields rather than
+requiring one full-register literal. Inactive TARGET1..7 mappings do not affect
+attachment selection or host pipeline identity. Reserved bits, target count
+other than one and an active TARGET0 remap are rejected before state mutation;
+this does not enable multiple color attachments.

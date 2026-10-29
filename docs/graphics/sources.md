@@ -2325,3 +2325,14 @@ attachments before the atomic report write. The timestamp uses the established
 monotonic virtual Maxwell 614.4-MHz clock. Other stage locations, acquire,
 statistics counters, traps and notification events remain unsupported; no samples
 passed, invocation count or guest fence result is fabricated.
+
+### Inactive color-target selectors
+
+NVIDIA B197 `SET_CT_SELECT` at `0x121c` encodes target count in bits 3:0 and
+TARGET0..7 in successive three-bit fields beginning at bits 4, 7, 10, 13, 16,
+19, 22 and 25. Bits 31:28 are reserved. The admitted single-output subset
+requires count one and TARGET0 zero, but accepts all documented values in the
+seven inactive selectors. The independently constructed identity mapping is
+`0x0fac6881`; requiring the whole register to equal one would incorrectly reject
+that equivalent single-target configuration. Multiple outputs and active target
+remapping remain unsupported.

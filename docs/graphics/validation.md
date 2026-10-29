@@ -3891,3 +3891,12 @@ literal B197 A/B/C/D packets after a real indexed/textured driver draw. It check
 four-byte release and 16-byte payload/timestamp records, untouched surrounding
 bytes, nonzero time, independent framebuffer pixels and exactly one GPU readback
 with no draw replay during the subsequent capture call.
+
+`target_zero_selection_ignores_only_documented_inactive_target_fields` tests the
+independently encoded identity mapping, all-inactive-seven mapping and 1024
+bounded deterministic inactive mappings. It also tests all unsupported counts,
+active remaps, reserved bits and an unaligned offset without changing valid state.
+`inactive_color_target_selectors_preserve_pixels_and_pipeline` exercises literal
+GPFIFO/B197 commands and two indexed textured draws with different inactive
+mappings. Both outputs match the independent pixel oracle, with no extra shader
+read, shader module or pipeline allocation on the second draw.

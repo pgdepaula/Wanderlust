@@ -345,3 +345,36 @@ fn clear_configuration_is_separate_from_clear_execution_and_draw_state() {
         assert_eq!(engine.rasterization().unwrap(), before);
     }
 }
+
+#[test]
+fn target_zero_selection_ignores_only_documented_inactive_target_fields() {
+    let mut e = ready();
+    let expected = e.rasterization().unwrap();
+    // Independently construct the documented identity target mapping.
+    let identity = (1..8).fold(1u32, |v, n| v | n << (4 + 3 * n));
+    assert_eq!(identity, 0x0fac6881);
+    let mut seed = 0x51a7f00du32;
+    for n in 0..1026 {
+        seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+        let value = match n {
+            0 => identity,
+            1 => 0x0fffff81,
+            _ => (seed & 0x0fffff80) | 1,
+        };
+        assert_eq!(set(&mut e, 0x121c, value), Ok(MethodEffect::State));
+        assert_eq!(e.rasterization().unwrap(), expected);
+    }
+    for count in 0..16 {
+        if count != 1 {
+            assert!(set(&mut e, 0x121c, (identity & !15) | count).is_err());
+        }
+    }
+    for target in 1..8 {
+        assert!(set(&mut e, 0x121c, identity | (target << 4)).is_err());
+    }
+    for bit in 28..32 {
+        assert!(set(&mut e, 0x121c, identity | (1 << bit)).is_err());
+    }
+    assert!(set(&mut e, 0x121d, identity).is_err());
+    assert_eq!(e.rasterization().unwrap(), expected);
+}

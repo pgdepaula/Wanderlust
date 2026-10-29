@@ -468,6 +468,13 @@ impl RasterRegisters {
                     0x12e8 => self.depth_write = value != 0,
                     _ => self.depth_select = value != 0,
                 }
+            } else if method == 0x121c {
+                // NVB197_SET_CT_SELECT: count bits3:0, TARGET0 bits6:4,
+                // TARGET1..7 bits27:7. Inactive target selectors cannot alter
+                // a one-output draw; reserved bits and active remaps still fail.
+                if value & !0x0fff_ff80 != 1 {
+                    return Err(bad());
+                }
             } else if method == 0x1918 {
                 if value > 1 {
                     return Err(bad());
