@@ -1751,3 +1751,43 @@ fn filtered_disabled_raster_controls_capture_from_first_explicit_valid_write() {
         Err(MethodError::UnsupportedShadowReplayMethod(0x800))
     );
 }
+
+#[test]
+fn disabled_iterated_blending_retains_pass_fields_without_enabling_iterations() {
+    let mut c = Channel::default();
+    for word in common::hardware::setup() {
+        c.push_word(word).unwrap();
+    }
+    let expected = c.engine.rasterization().unwrap();
+    c.engine.apply(write(0xdd4, 255)).unwrap();
+    assert!(c.engine.rasterization().is_err());
+    c.engine.apply(write(0xdd0, 0)).unwrap();
+    assert_eq!(c.engine.rasterization().unwrap(), expected);
+    let old = c.engine.auxiliary_raster_controls();
+    assert_eq!(old.iterated_blend, Some((false, false)));
+    assert_eq!(old.iterated_blend_pass, Some(255));
+    for (m, v) in [
+        (0xdd0, 1),
+        (0xdd0, 2),
+        (0xdd0, 3),
+        (0xdd0, 4),
+        (0xdd4, 256),
+        (0xdd4, u32::MAX),
+        (0xdd1, 0),
+    ] {
+        assert!(c.engine.apply(write(m, v)).is_err());
+        assert_eq!(c.engine.auxiliary_raster_controls(), old);
+        assert_eq!(c.engine.rasterization().unwrap(), expected);
+    }
+    for count in [0, 1, 255] {
+        c.engine.apply(write(0x124, 1)).unwrap();
+        c.engine.apply(write(0xdd4, count)).unwrap();
+        c.engine.apply(write(0x124, 3)).unwrap();
+        c.engine.apply(write(0xdd4, u32::MAX)).unwrap();
+        assert_eq!(
+            c.engine.auxiliary_raster_controls().iterated_blend_pass,
+            Some(count as u8)
+        );
+        assert_eq!(c.engine.rasterization().unwrap(), expected);
+    }
+}

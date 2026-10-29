@@ -2779,3 +2779,14 @@ filter's complete membership. Unsupported methods remain excluded and absent
 shadow words remain absent; replay cannot invent initial values. The earlier
 unverified-filter diagnostic classification remains available for compatibility,
 but is not produced by these supported pure-state captures.
+
+
+B197 `SET_ITERATED_BLEND` (`0x0dd0`) supports explicit disabled color and alpha
+iteration (both enable bits zero). Active color/alpha requests remain unsupported.
+`SET_ITERATED_BLEND_PASS` (`0x0dd4`) retains its eight-bit count without executing
+extra draws while iteration is disabled. Count state can precede disablement,
+but a draw requires established disabled controls. GpuDriver's initialized
+context uses the source-listed disabled controls and count one. Both registers
+participate in the bounded pure-state shadow capture/replay path; invalid writes
+cannot poison an earlier captured count. Disabled count changes do not specialize
+shaders or pipelines. Dedicated clears do not use this blending control.

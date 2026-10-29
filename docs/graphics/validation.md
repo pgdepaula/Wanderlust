@@ -4025,3 +4025,19 @@ the driver replay scenario and two GPFIFO shadow scenarios. Native Windows
 D3D12 and Vulkan each executed 16 driver and 44 GPFIFO GPU scenarios. These
 explicit GPU runs had zero failures/skips. Strict package all-target Clippy and
 workspace formatting passed.
+
+
+The disabled iterated-blending regression validates both enable bits, byte-wide
+count bounds, count-before-disable ordering, invalid-write preservation and
+filtered shadow capture/replay. The indexed textured GPU scene changes the
+inactive pass count from 255 to one without changing pixels, shader modules,
+pipelines or texture uploads. An active-iteration request faults without
+replaying or discarding the previous pending draw. CPU suites passed 442 tests
+with default features (200 GPU scenarios ignored in that ordinary run) and 437
+without default features. All 200 GPU scenarios executed on WSL Vulkan, and the
+new scenario also passed on WSL OpenGL. Native Windows D3D12 and Vulkan each
+executed 17 driver scenarios successfully. The initial Windows launch attempt
+failed in WSL interoperability before test startup (`UtilAcceptVsock`, 110);
+a subsequent launch through the live interoperability endpoint executed the
+actual binaries, with zero GPU failures/skips. Strict package all-target Clippy
+and workspace formatting passed. Active iterated blending remains unsupported.

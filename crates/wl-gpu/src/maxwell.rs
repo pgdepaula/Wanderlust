@@ -88,6 +88,10 @@ pub struct AuxiliaryRasterControls {
     pub tir_mode: Option<u8>,
     pub tir_modulation: Option<u8>,
     pub coverage_to_color: Option<bool>,
+    /// Iterated blending (color, alpha); only disabled controls execute.
+    pub iterated_blend: Option<(bool, bool)>,
+    /// Eight-bit pass count, inert while iterated blending is disabled.
+    pub iterated_blend_pass: Option<u8>,
     pub alpha_coverage_qualifier: Option<u8>,
     /// Disabled tile cache and exact public-driver baseline tuning words only.
     pub tile_cache_profile: [Option<u32>; 7],
@@ -183,6 +187,8 @@ impl ShadowRam {
                         0x02ec
                             | 0x0fb4
                             | 0x0fd8
+                            | 0x0dd0
+                            | 0x0dd4
                             | 0x1148
                             | 0x11f8
                             | 0xd7c
@@ -600,6 +606,9 @@ impl Maxwell3d {
                 .map_err(|error| invalid(&format!("driver context initialization: {error:?}")))?;
             self.macros.observe_color_target(method, value);
         }
+        // The pinned B197 context method table initializes these to 0 and 1.
+        self.auxiliary_raster.iterated_blend = Some((false, false));
+        self.auxiliary_raster.iterated_blend_pass = Some(1);
         Ok(())
     }
     /// Configured A-stream address. Only stream zero can supply vertex fetches
@@ -1179,6 +1188,20 @@ impl Maxwell3d {
                 // responsibility, not an emulated timing/completion primitive.
                 self.auxiliary_raster.pixel_warp_watermarks = Some((low, high));
             }
+            0x0dd0 => {
+                // Color/alpha enables occupy bits 0/1. Active requests remain
+                // unsupported, rather than being silently disabled.
+                if value != 0 {
+                    return Err(bad());
+                }
+                self.auxiliary_raster.iterated_blend = Some((false, false));
+            }
+            0x0dd4 => {
+                if value > 0xff {
+                    return Err(bad());
+                }
+                self.auxiliary_raster.iterated_blend_pass = Some(value as u8);
+            }
             0x0fbc..=0x0fc8 => {
                 if value > 0xffff {
                     return Err(bad());
@@ -1742,6 +1765,13 @@ impl Maxwell3d {
     pub fn rasterization(
         &self,
     ) -> Result<(crate::raster::ColorTarget, crate::raster::Rasterization)> {
+        if self.auxiliary_raster.iterated_blend_pass.is_some()
+            && self.auxiliary_raster.iterated_blend != Some((false, false))
+        {
+            return Err(invalid(
+                "iterated blend passes require established disabled color and alpha enables",
+            ));
+        }
         self.raster.resolve()
     }
     pub fn depth_target(&self) -> Result<Option<crate::raster::DepthTarget>> {

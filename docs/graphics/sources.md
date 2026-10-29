@@ -2442,3 +2442,12 @@ to these methods and to the supported fixed-raster method set. This extension
 retains rejection of active unsupported raster modes, absent captures and
 methods outside the pure-state whitelist; it does not treat arbitrary methods
 as shadow-safe.
+
+
+The pinned NVIDIA B197 header defines `SET_ITERATED_BLEND` at `0x0dd0`, with
+independent color ENABLE bit 0 and ALPHA_ENABLE bit 1, both FALSE zero/TRUE one.
+`SET_ITERATED_BLEND_PASS` at `0x0dd4` defines COUNT at bits 7:0. The pinned
+[Nouveau B197 initialized-context table](https://github.com/torvalds/linux/blob/b562e44f507e863c6792946e4e1b1449fbbac85d/drivers/gpu/drm/nouveau/nvkm/engine/gr/ctxgm204.c#L590-L591)
+independently programs zero enables and count one. These justify the disabled
+iteration subset and retaining bounded inactive count state, not emulation of
+active iteration, alpha iteration or an arbitrary number of host draws.
