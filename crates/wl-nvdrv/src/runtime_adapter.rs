@@ -43,6 +43,12 @@ impl Capture {
             .and_then(|n| n.checked_mul(4))
             .filter(|n| *n != 0 && *n == frame.rgba.len() as u64)
             .ok_or_else(|| std::io::Error::other("invalid published color image extent"))?;
+        // Before the first guest draw, initialization clears are genuine GPU
+        // writes but not evidence of shader execution. Preserve capture budget
+        // for later output. This counter is cumulative, not a VI/frame identity.
+        if draws == 0 {
+            return Ok(false);
+        }
         if size > (1 << 30) - self.bytes {
             self.remaining = 0;
             return Ok(false);
@@ -501,6 +507,13 @@ mod capture_tests {
     fn capture_exact_bytes_metadata_and_limit() {
         let mut capture = Capture::create(&std::env::temp_dir(), 1).unwrap();
         let directory = capture.directory.clone();
+        for _ in 0..128 {
+            assert!(!capture.write(&frame(), 0).unwrap());
+        }
+        assert_eq!(capture.remaining, 1);
+        assert_eq!(capture.index, 0);
+        assert_eq!(capture.bytes, 0);
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 0);
         assert!(capture.write(&frame(), 42).unwrap());
         assert_eq!(
             std::fs::read(directory.join("color-0001.rgba")).unwrap(),
@@ -538,7 +551,7 @@ mod capture_tests {
         let directory = capture.directory.clone();
         assert!(Capture::create(&directory.join("missing").join("file"), 0).is_err());
         std::fs::remove_dir(&directory).unwrap();
-        assert!(capture.write(&frame(), 0).is_err());
+        assert!(capture.write(&frame(), 1).is_err());
         assert_eq!(capture.remaining, 1);
         assert_eq!(capture.index, 0);
         assert!(!directory.exists());
