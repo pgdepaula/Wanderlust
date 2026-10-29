@@ -4022,6 +4022,6 @@ filter membership are inferred. CPU tests passed 441 with default features (199
 GPU scenarios ignored by that ordinary run) and 436 without default features.
 All 199 GPU scenarios executed on WSL Vulkan. WSL OpenGL additionally executed
 the driver replay scenario and two GPFIFO shadow scenarios. Native Windows
-D3D12 and Vulkan each executed 16 driver and 45 GPFIFO GPU scenarios. These
+D3D12 and Vulkan each executed 16 driver and 44 GPFIFO GPU scenarios. These
 explicit GPU runs had zero failures/skips. Strict package all-target Clippy and
 workspace formatting passed.
