@@ -411,7 +411,18 @@ impl Renderer {
                 if self.target_pending {
                     self.counters.coherence_barriers += 1;
                 }
-                self.synchronize_target(memory, changes)
+                let frame = self.synchronize_target(memory, changes)?;
+                if synchronous {
+                    Ok(frame)
+                } else {
+                    // Deferred GPFIFO callers do not return per-method images.
+                    // Retain the already-published image for the owning driver's
+                    // visibility/capture call, without a second GPU readback.
+                    if frame.is_some() {
+                        self.semaphore_frame = frame;
+                    }
+                    Ok(None)
+                }
             }
             MethodEffect::ShaderCachesInvalidated(flags) => {
                 self.invalidate_shader_caches(flags);

@@ -1424,3 +1424,38 @@ fn b06f_reports_encode_all_release_sizes_and_ordering_without_fake_ticks() {
         assert_eq!(timestamp_ticks(ns), expected);
     }
 }
+
+#[test]
+fn tile_cache_barrier_and_flush_are_ordered_effects_not_noops() {
+    let mut engine = Maxwell3d::default();
+    for method in [0x0f7c, 0x0f80] {
+        assert!(engine.apply(write(method, 0)).is_err());
+    }
+    engine.apply(write(0, 0xb197)).unwrap();
+    for method in [0x0f7c, 0x0f80] {
+        assert_eq!(
+            engine.apply(write(method, 0)),
+            Ok(MethodEffect::HostCacheMaintenance)
+        );
+        for value in [1, 2, 0x80000000, u32::MAX] {
+            assert_eq!(
+                engine.apply(write(method, value)),
+                Err(MethodError::UnsupportedValue { method, value })
+            );
+        }
+        assert_eq!(
+            engine.apply(write(method + 1, 0)),
+            Err(MethodError::InvalidMethod(method + 1))
+        );
+    }
+    // Real literal B06F methods, including the exact rejected operand in diagnostics.
+    let mut channel = Channel::default();
+    channel.push_word(0x20010000).unwrap();
+    channel.push_word(0xb197).unwrap();
+    channel.push_word(0x200103e0).unwrap();
+    assert_eq!(channel.push_word(0), Ok(MethodEffect::HostCacheMaintenance));
+    channel.push_word(0x200103e0).unwrap();
+    let error = channel.push_word(1).unwrap_err().to_string();
+    assert!(error.contains("method=0x0f80 value=0x00000001"));
+    assert!(channel.is_faulted());
+}

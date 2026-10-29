@@ -2672,3 +2672,12 @@ without a host completion wait or unconditional framebuffer publication. Actual
 backing overlap may still require the existing conservative alias barrier.
 Completion queries skip host polling only when no host fence exists or its real
 completion callback has already signalled; unresolved fences still poll normally.
+
+B197 tile-cache barrier `0x0f7c=0` and ordinary flush `0x0f80=0` use the
+existing conservative attachment publication boundary. They release command
+borrows before publication, preserve accepted draws on failure, and reacquire the
+unread command suffix afterward. Unsupported operands, including the alternative
+flush value one, fault explicitly. Deferred cache-maintenance publication retains
+one owning-channel diagnostic image for the next driver publication/capture call;
+that call does not perform a second readback. This image is not a VI presentation
+event or a guest synchronization fence.

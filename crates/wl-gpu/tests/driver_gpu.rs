@@ -805,3 +805,37 @@ fn long_frontend_release_keeps_gpu_output_deferred_and_reports_real_monotonic_ti
     check(&frame.rgba, &image, None, BG);
     assert_eq!(d.graphics_counters().readback_operations, 1);
 }
+
+#[test]
+#[ignore = "requires actual GPU; tile cache flush publishes indexed pixels and retains one driver-visible image"]
+fn tile_cache_operations_publish_real_pixels_and_preserve_driver_capture() {
+    for method_offset in [0x0f7c, 0x0f80] {
+        let (mut data, mut words, image) = fixture();
+        let (mut d, _, c, _, _) = setup_driver();
+        method(&mut words, method_offset, 0);
+        put(&mut data, 0x10000, &words);
+        let r = d
+            .submit(
+                c,
+                KICKOFF_PB,
+                &header(1),
+                Some(&entry(0xb0000, words.len())),
+                &mut mem(&mut data),
+            )
+            .unwrap();
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        assert_eq!(r.progress.draws_submitted, 1);
+        assert!(!d.has_pending_output());
+        check(&data[RT..RT + SIZE], &image, None, BG);
+        let counters = d.graphics_counters();
+        assert_eq!(counters.readback_operations, 1);
+        assert_eq!(counters.coherence_barriers, 1);
+        // Already-published bytes must still reach the runtime capture boundary.
+        let frame = d.publish(c, &mut mem(&mut data)).unwrap().unwrap();
+        check(&frame.rgba, &image, None, BG);
+        assert!(d.publish(c, &mut mem(&mut data)).unwrap().is_none());
+        assert_eq!(d.graphics_counters().readback_operations, 1);
+        assert_eq!(d.graphics_counters().draw_commands, 1);
+        d.retire(r.token).unwrap();
+    }
+}

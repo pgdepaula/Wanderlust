@@ -924,6 +924,16 @@ impl Maxwell3d {
                 };
                 return Ok(MethodEffect::InlineWrite { address, value });
             }
+            // deko3d 373bfd4 engine_3d.def uses word offsets 0x3df/0x3e0.
+            // Only its operand-zero tile barrier/flush forms are established.
+            // Publish conservatively through the existing coherence boundary;
+            // this does not emulate tile scheduling or the unknown flush-alt.
+            0x0f7c | 0x0f80 => {
+                if value != 0 {
+                    return Err(bad());
+                }
+                return Ok(MethodEffect::HostCacheMaintenance);
+            }
             0x0f84 => {
                 if value > 0xff {
                     return Err(bad());
@@ -1860,10 +1870,12 @@ impl Channel {
             .push_word(word)
             .map_err(|e| crate::Error(e.to_string()))?
         {
-            Some(method) => self
-                .engine
-                .apply(method)
-                .map_err(|e| crate::Error(e.to_string())),
+            Some(method) => self.engine.apply(method).map_err(|e| {
+                crate::Error(format!(
+                    "{e}; subchannel={} method={:#06x} value={:#010x}",
+                    method.subchannel, method.method, method.value
+                ))
+            }),
             None => Ok(MethodEffect::State),
         })();
         if result.is_err() {

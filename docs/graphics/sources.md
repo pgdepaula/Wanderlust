@@ -2257,3 +2257,22 @@ corroborates the sixteen-byte payload/reserved/timestamp positions.
 [GpuContext](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Gpu/GpuContext.cs)
 corroborates the virtual Maxwell timer's 384/625 ratio from monotonic nanoseconds.
 No fast-time divisor or synthetic completion counter is applied.
+
+### Tile-cache flush and barrier
+
+The pinned [deko3d engine definition](https://github.com/devkitPro/deko3d/blob/373bfd43d8b2d805fa2eb7d406dbb823032df958/source/maxwell/engine_3d.def)
+identifies word methods `0x3df` and `0x3e0` as tile-cache barrier and flush
+(byte offsets `0x0f7c` and `0x0f80`). These methods are omitted from the pinned
+public NVIDIA B197 header; their identification comes from deko3d, rather than
+an inferred NVIDIA field definition.
+[`dkCmdBufTiledCacheOp`](https://github.com/devkitPro/deko3d/blob/373bfd43d8b2d805fa2eb7d406dbb823032df958/source/maxwell/gpu_3d_state.cpp)
+emits zero for ordinary flush and one for the separately named alternative.
+[`dkCmdBufBarrier`](https://github.com/devkitPro/deko3d/blob/373bfd43d8b2d805fa2eb7d406dbb823032df958/source/maxwell/gpu_base.cpp)
+emits operand zero for the tile barrier and follows it with an idle wait.
+
+Only the verified operand-zero forms are accepted. Both conservatively publish
+pending attachments through checked existing coherence, rather than pretending
+that they are register-only no-ops. This implementation establishes stronger
+CPU visibility than tiled-cache scheduling alone; it does not model tile
+execution, tile dimensions, tile-cache enablement or alternative flush semantics.
+No deko3d implementation code is incorporated.

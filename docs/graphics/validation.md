@@ -3855,3 +3855,14 @@ boundary. An indexed textured draw followed by WFI-disabled timestamp reports
 retains pending GPU output, performs no readback at those reports and only
 publishes pixels at a later explicit visibility boundary. The NOP retirement
 benchmark also verifies that CPU-only completion records avoid backend polling.
+
+Tile-cache CPU tests exercise literal B06F packet dispatch, missing engine binding,
+operand-zero barrier/flush effects, malformed offsets and unsupported operands.
+Rejected channel methods include subchannel, byte method and raw operand in their
+diagnostics, preserving the channel fault latch.
+The `tile_cache_operations_publish_real_pixels_and_preserve_driver_capture`
+GPU case submits an indexed textured triangle through `GpuDriver` and GPFIFO,
+checks independently calculated covered/uncovered pixels in guest RAM, and checks
+one coherence barrier/readback. Subsequent publication returns the same completed
+image exactly once with no draw replay or second readback. Both tile methods were
+executed on WSL OpenGL and native Windows D3D12/Vulkan.
