@@ -48,6 +48,7 @@ pub enum MacroError {
     UnsupportedOutput(u16),
     UnsupportedRead(u32),
     UninitializedScratch(u16),
+    UninitializedMethod(u16),
     ActiveInvocation,
     MissingParameter,
     UnexpectedParameter,
@@ -161,6 +162,7 @@ pub struct MacroEngine {
     code_pointer: Option<usize>,
     entry_pointer: Option<usize>,
     scratch: [Option<u32>; 256],
+    color_targets: [[Option<u32>; 9]; 8],
     privileged: [PrivilegedBits; PRIVILEGED_ADDRESSES.len()],
 }
 impl Default for MacroEngine {
@@ -171,11 +173,23 @@ impl Default for MacroEngine {
             code_pointer: None,
             entry_pointer: None,
             scratch: [None; 256],
+            color_targets: [[None; 9]; 8],
             privileged: [PrivilegedBits::default(); PRIVILEGED_ADDRESSES.len()],
         }
     }
 }
 impl MacroEngine {
+    /// Live B197 state only, observed AFTER the owning engine validates a write.
+    /// No shadow-replay value, power-on default, or guest memory is inferred.
+    pub(crate) fn observe_color_target(&mut self, method: u16, value: u32) {
+        if method % 4 == 0 && (0x800..0xa00).contains(&method) {
+            let slot = usize::from((method - 0x800) / 0x40);
+            let field = usize::from((method % 0x40) / 4);
+            if field < 9 {
+                self.color_targets[slot][field] = Some(value);
+            }
+        }
+    }
     /// Bounded firmware function 4 HLE: an actual masked context write, followed
     /// by acknowledgement. The owning channel must first complete its WFI.
     /// No firmware machine code, physical MMIO, or unknown mode is emulated.
@@ -265,7 +279,7 @@ impl MacroEngine {
         Ok(true)
     }
     /// Preflight a complete supported program before exposing its one write.
-    /// Reads are limited to explicitly written scratch registers. Missing
+    /// Reads require explicitly written scratch/color-target registers. Missing
     /// parameters, ADC, firmware replies, and draw emission are not inferred.
     pub fn execute(&self, slot: u16, parameter: u32) -> Result<(u16, u32), MacroError> {
         let mut invocation = self.begin(slot, parameter)?;
@@ -452,11 +466,15 @@ impl MacroEngine {
                     // READ addresses are method WORD offsets, unlike apply's
                     // byte offsets. Reject every other register/read behavior.
                     let method = registers[source].wrapping_add(((word as i32) >> 14) as u32);
-                    if !(0xd00..0xe00).contains(&method) {
+                    if (0x200..0x280).contains(&method) && method % 16 < 9 {
+                        self.color_targets[((method - 0x200) / 16) as usize][(method % 16) as usize]
+                            .ok_or(MacroError::UninitializedMethod((method * 4) as u16))?
+                    } else if (0xd00..0xe00).contains(&method) {
+                        self.scratch[(method - 0xd00) as usize]
+                            .ok_or(MacroError::UninitializedScratch((method * 4) as u16))?
+                    } else {
                         return Err(MacroError::UnsupportedRead(method));
                     }
-                    self.scratch[(method - 0xd00) as usize]
-                        .ok_or(MacroError::UninitializedScratch((method * 4) as u16))?
                 }
                 _ => return Err(MacroError::UnsupportedInstruction(word)),
             };
@@ -1219,5 +1237,50 @@ mod streaming_tests {
                 .is_err()
         );
         assert_eq!(engine.scratch[0], Some(0));
+    }
+}
+
+#[cfg(test)]
+mod color_read_tests {
+    use super::*;
+    fn program() -> MacroEngine {
+        let mut e = MacroEngine::default();
+        e.upload(0x114, 0).unwrap();
+        for word in
+            include_str!("../tests/fixtures/mme/color-state-read.words").split_ascii_whitespace()
+        {
+            e.upload(0x118, u32::from_str_radix(word, 16).unwrap())
+                .unwrap();
+        }
+        e.upload(0x11c, 0).unwrap();
+        e.upload(0x120, 0).unwrap();
+        e
+    }
+    #[test]
+    fn independently_assembled_reads_use_word_offsets_and_initialized_live_fields() {
+        let mut e = program();
+        for slot in 0..8 {
+            for field in 0..9 {
+                let word = 0x200 + slot * 16 + field;
+                assert_eq!(
+                    e.execute(0, word),
+                    Err(MacroError::UninitializedMethod((word * 4) as u16))
+                );
+                let value = 0xa5a50000 | (slot << 8) | field;
+                e.observe_color_target((word * 4) as u16, value);
+                assert_eq!(e.execute(0, word), Ok((0x1a00, value)));
+                e.observe_color_target((word * 4) as u16, !value);
+                assert_eq!(e.execute(0, word), Ok((0x1a00, !value)));
+            }
+        }
+        for word in [0x1ff, 0x209, 0x20f, 0x279, 0x27f, 0x280, u32::MAX] {
+            assert_eq!(e.execute(0, word), Err(MacroError::UnsupportedRead(word)));
+        }
+        let mut fresh = program();
+        fresh.observe_color_target(0x819, 99);
+        assert_eq!(
+            fresh.execute(0, 0x206),
+            Err(MacroError::UninitializedMethod(0x818))
+        );
     }
 }

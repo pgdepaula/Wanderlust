@@ -738,6 +738,11 @@ impl Maxwell3d {
             self.shadow.prepare(&mut write)?;
         }
         let effect = self.apply_inner(write)?;
+        if effect == MethodEffect::State
+            && self.bound_class(write.subchannel) == Some(EngineClass::ThreeD)
+        {
+            self.macros.observe_color_target(write.method, write.value);
+        }
         if routed && effect == MethodEffect::State {
             self.shadow.capture(write);
         }

@@ -2731,3 +2731,11 @@ those targets remain inactive under the supported one-output routing. State is
 retained per slot and channel. Rendering through a disabled active slot fails
 before resource resolution or queue submission. Unsupported formats and active
 MRT routing still fail explicitly, with earlier accepted GPU output preserved.
+
+MME READ admits the nine validated color-target fields for each of eight targets,
+besides the existing scratch bank. A bounded inline bank tracks successful B197
+writes without allocating or retaining guest memory. Addresses in READ are method
+word offsets; state writes use byte offsets. Rejected writes, other engine
+classes, reserved holes and fields never initialized cannot contribute values.
+The observation order includes macro-emitted state changes before execution
+resumes, preserving live-state reads without relaxing shadow replay restrictions.

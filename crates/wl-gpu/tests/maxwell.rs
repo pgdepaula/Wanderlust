@@ -1643,3 +1643,44 @@ fn engine_reports_require_own_selectors_and_reject_unimplemented_counters() {
         })
     );
 }
+
+#[test]
+fn mme_color_reads_observe_validated_b197_state_and_not_rejected_writes() {
+    let mut c = Channel::default();
+    for word in common::hardware::setup() {
+        c.push_word(word).unwrap();
+    }
+    c.engine.apply(write(0x114, 0)).unwrap();
+    for word in include_str!("fixtures/mme/color-state-read.words").split_ascii_whitespace() {
+        c.engine
+            .apply(write(0x118, u32::from_str_radix(word, 16).unwrap()))
+            .unwrap();
+    }
+    c.engine.apply(write(0x11c, 0)).unwrap();
+    c.engine.apply(write(0x120, 0)).unwrap();
+    c.push_word(0x20010e00).unwrap();
+    assert_eq!(c.push_word(0x206), Ok(MethodEffect::State));
+    assert_eq!(c.engine.rasterization().unwrap().1.color.write_mask, 1);
+    // Invalid layer count cannot poison the live read bank with rejected data.
+    assert!(c.engine.apply(write(0x818, 2)).is_err());
+    c.engine.apply(write(0x1a00, 0x1111)).unwrap();
+    c.push_word(0x20010e00).unwrap();
+    c.push_word(0x206).unwrap();
+    assert_eq!(c.engine.rasterization().unwrap().1.color.write_mask, 1);
+    let mut independent = Maxwell3d::default();
+    independent.apply(write(0, CLASS)).unwrap();
+    independent.apply(write(0x114, 0)).unwrap();
+    for word in include_str!("fixtures/mme/color-state-read.words").split_ascii_whitespace() {
+        independent
+            .apply(write(0x118, u32::from_str_radix(word, 16).unwrap()))
+            .unwrap();
+    }
+    independent.apply(write(0x11c, 0)).unwrap();
+    independent.apply(write(0x120, 0)).unwrap();
+    assert_eq!(
+        independent.apply(write(0x3800, 0x206)),
+        Err(MethodError::Macro(
+            wl_gpu::mme::MacroError::UninitializedMethod(0x818)
+        ))
+    );
+}

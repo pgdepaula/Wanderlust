@@ -1647,8 +1647,9 @@ corroborates 256 entries. The pinned envytools macro ISA documents READ operand
 method-word addressing; its signed immediate and register source fields were
 verified by assembling `maddr 0x680; read $r2 0xd1a; exit send (add $r2 0); nop;`
 into words `01a00021 03468215 000010c0 00000011`. Tests retain these independent
-words; no commercial program is included. Only explicitly initialized scratch
-reads are supported, independently of shadow track/filter/replay behavior.
+words; no commercial program is included. Reads require explicitly initialized
+scratch or admitted live color-target fields, independently of shadow
+track/filter/replay capture eligibility.
 
 The pinned NVIDIA B197 header defines `SET_ANTI_ALIAS_ENABLE` at byte `0x1534`,
 bit zero, with FALSE zero and TRUE one. The supported implementation admits only
@@ -2365,3 +2366,21 @@ Only target zero can be rendered. An inactive format write never allocates a
 host image or resolves guest backing, and does not imply multiple render targets.
 Disabling target zero is valid configuration, but a subsequent color draw/clear
 must reject it rather than treating zero as RGBA8 or using the previous target.
+
+### MME reads of validated color-target state
+
+The same pinned envytools MME READ opcode adds its signed immediate to a
+register source and addresses the engine method bank in words. NVIDIA B197
+color-target fields occupy nine words per target at word `0x200 + target*16`.
+Thus word `0x206` reads the explicitly written third-dimension register at
+byte `0x0818`; it is not a GPU-memory load or a scratch alias. The separate
+bank is updated only after a successful B197 state write, including writes
+emitted by macros. Filtered/unwritten shadow-replay values and other engine
+classes cannot supply a live value.
+
+`color-state-read.asm` was independently assembled/disassembled with pinned
+`envyas/envydis -m macro`. It reads the parameter-selected word into R2 and
+emits it to the color mask. The retained words are `01a00021 00000a15
+000010c0 00000011`; reconstructed 16-byte code SHA-256 is
+`4038b9caeb84f0b70e066f2cdc95cbf33b84d80cdd4a52bd8ee1920c9d1d2e64`. No default register contents are inferred. Uninitialized admitted
+fields and unsupported method-bank addresses have distinct errors.

@@ -1332,3 +1332,65 @@ fn disabled_color_bindings_do_not_activate_mrt_or_reuse_a_stale_active_target() 
         .is_err()
     );
 }
+
+#[test]
+#[ignore = "requires actual GPU; MME reads live target dimensions and emits color mask; an uninitialized later read preserves the prior draw"]
+fn mme_live_color_state_controls_pixels_and_faults_without_default_registers() {
+    let (mut data, mut words, image) = fixture();
+    let draw = words.split_off(words.len() - 8);
+    let code: Vec<u32> = include_str!("fixtures/mme/color-state-read.words")
+        .split_ascii_whitespace()
+        .map(|w| u32::from_str_radix(w, 16).unwrap())
+        .collect();
+    method(&mut words, 0x114, 0);
+    words.push(0x60000046 | ((code.len() as u32) << 16));
+    words.extend_from_slice(&code);
+    method(&mut words, 0x11c, 0);
+    method(&mut words, 0x120, 0);
+    method(&mut words, 0x2144, 0x400); // independent red fragment
+    method(&mut words, 0x3800, 0x206); // word offset of explicitly written 0x818=1
+    words.extend(draw);
+    let (mut d, _, c, b, _) = setup_driver();
+    put(&mut data, 0x10000, &words);
+    let first = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, words.len())),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(first.fault.is_none(), "{:?}", first.fault);
+    assert_eq!(first.progress.draws_submitted, 1);
+    assert_eq!(d.graphics_counters().readback_operations, 0);
+    let bytes = [0x20010e00u32, 0x210]
+        .into_iter()
+        .flat_map(|w| w.to_le_bytes())
+        .collect::<Vec<_>>();
+    d.write_backing(b, 0x10000, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let second = d
+        .submit(
+            c,
+            KICKOFF_PB,
+            &header(1),
+            Some(&entry(0xb0000, 2)),
+            &mut mem(&mut data),
+        )
+        .unwrap();
+    assert!(
+        second
+            .fault
+            .as_ref()
+            .unwrap()
+            .to_string()
+            .contains("UninitializedMethod")
+    );
+    assert_eq!(second.progress.draws_submitted, 0);
+    assert!(d.has_pending_output());
+    let frame = d.publish(c, &mut mem(&mut data)).unwrap().unwrap();
+    check(&frame.rgba, &image, Some([255, 17, 23, 255]), BG);
+    assert_eq!(d.graphics_counters().draw_commands, 1);
+    assert_eq!(d.graphics_counters().readback_operations, 1);
+}

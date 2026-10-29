@@ -3932,3 +3932,11 @@ zero does not restore stale renderability while disabled. The corresponding
 GPFIFO driver scenario renders one indexed textured image after all secondary
 targets are disabled, then rejects a color draw after disabling target zero,
 without changing guest bytes, submitting another draw, or replaying work on retry.
+
+MME color-state tests use independently assembled register-derived READ operands,
+all 72 admitted field locations, overwritten values, uninitialized fields,
+reserved holes and boundary addresses. Integration checks verify that rejected
+B197 writes do not corrupt the live read bank. The actual GPU driver scenario
+reads the guest-written target dimension, emits a red-only color mask, renders
+an indexed triangle with independently predicted pixels, then rejects an
+uninitialized read while preserving the prior pending draw for publication.
