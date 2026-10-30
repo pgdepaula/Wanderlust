@@ -668,6 +668,9 @@ impl Maxwell3d {
         // Same pinned context table: vertex-B/pixel constant groups are 0/4;
         // index base, base instance and restart are zero. Program addresses,
         // register allocations and buffer bindings still come from guest methods.
+        // gm204 B197 context table programs PIPELINE_SHADER(1)=0x11.
+        // This enables the stage, without inventing a program address or code.
+        self.vertex_enabled = true;
         self.vertex_group = Some(0);
         self.fragment_group = Some(4);
         self.vertex_frequency = Some(0);
@@ -1956,25 +1959,31 @@ impl Maxwell3d {
     pub fn depth_target(&self) -> Result<Option<crate::raster::DepthTarget>> {
         self.raster.depth_target()
     }
-    pub fn vertex_program(&self) -> Result<ProgramSource> {
+    /// Selected code address is independent of execution register allocation.
+    pub(crate) fn vertex_program_address(&self) -> Result<GpuAddress> {
         if !self.bound.contains(&Some(EngineClass::ThreeD)) || !self.vertex_enabled {
             return Err(invalid("vertex program disabled or B197 unbound"));
         }
-        let (Some(hi), Some(lo), Some(offset), Some(registers), Some(group)) = (
-            self.program_upper,
-            self.program_lower,
-            self.vertex_offset,
-            self.vertex_registers,
-            self.vertex_group,
-        ) else {
-            return Err(invalid("incomplete vertex program state"));
+        let (Some(hi), Some(lo), Some(offset)) =
+            (self.program_upper, self.program_lower, self.vertex_offset)
+        else {
+            return Err(invalid("incomplete vertex program address"));
         };
-        let address = ((u64::from(hi) << 32) | u64::from(lo))
+        ((u64::from(hi) << 32) | u64::from(lo))
             .checked_add(u64::from(offset))
             .filter(|a| *a < 1 << 40)
-            .ok_or_else(|| invalid("vertex program address overflow"))?;
+            .map(GpuAddress)
+            .ok_or_else(|| invalid("vertex program address overflow"))
+    }
+    pub fn vertex_program(&self) -> Result<ProgramSource> {
+        let address = self.vertex_program_address()?;
+        let (Some(registers), Some(group)) = (self.vertex_registers, self.vertex_group) else {
+            return Err(invalid(
+                "incomplete vertex program register allocation/binding",
+            ));
+        };
         Ok(ProgramSource {
-            address: GpuAddress(address),
+            address,
             registers,
             group,
         })
@@ -2100,12 +2109,26 @@ impl Maxwell3d {
             ))
         })?;
         let sampler_words = read_descriptor(self.samplers.descriptor(sampler_index)?, map, memory)?;
-        let sampler = TextureSampler::decode(sampler_words).map_err(|error| {
+        let sampler = if image.mip_count == 1 {
+            TextureSampler::decode_single_mip(sampler_words)
+        } else {
+            TextureSampler::decode(sampler_words)
+        }
+        .map_err(|error| {
             crate::Error(format!(
                 "TSC index={sampler_index} words={sampler_words:08x?}: {error}"
             ))
         })?;
-        let desc = image.with_sampler(sampler);
+        let mut desc = image.with_sampler(sampler);
+        // The sampler gates the TIC's sRGB conversion; alpha is unaffected.
+        if sampler_words[0] & (1 << 13) == 0 {
+            desc.format = match desc.format {
+                Format::Rgba8Srgb => Format::Rgba8Unorm,
+                Format::Bc1RgbaSrgb => Format::Bc1Rgba,
+                Format::Astc4x4Srgb => Format::Astc4x4,
+                other => other,
+            };
+        }
         Ok(desc)
     }
 }
@@ -2226,8 +2249,39 @@ pub struct TextureSampler {
     pub filter: Filter,
 }
 impl TextureSampler {
+    /// One normalized 2D mip, clamp-to-edge, non-comparison and anisotropy one.
+    /// Font-filter sizes/cube seams/border colors cannot affect this subset.
+    fn decode_single_mip(words: [u32; 8]) -> Result<Self> {
+        if words[0] & !0x000fe000 != 0x92
+            || (words[0] >> 14) & 7 > 1
+            || (words[0] >> 17) & 7 > 1
+            || words[1] & !0x3f7 != 0
+            || words[2] & 0xfff != 0
+            || words[3] & !0x0ffff000 != 0
+        {
+            return Err(invalid(
+                "unsupported single-mip TSC address, comparison, anisotropy, bias or coordinate state",
+            ));
+        }
+        let mag = words[1] & 7;
+        let min = (words[1] >> 4) & 3;
+        let mip = (words[1] >> 6) & 3;
+        if mag != min || !matches!(mip, 1..=3) {
+            return Err(invalid("unsupported single-mip TSC filters"));
+        }
+        let filter = match mag {
+            1 => Filter::Nearest,
+            2 => Filter::Linear,
+            _ => return Err(invalid("unsupported single-mip TSC spatial filter")),
+        };
+        Ok(Self { filter })
+    }
+
     pub fn decode(words: [u32; 8]) -> Result<Self> {
-        if words[0] != 0x92 || words[1] & !0xf7 != 0 || words[2..].iter().any(|&v| v != 0) {
+        if words[0] & !(1 << 13) != 0x92
+            || words[1] & !0xf7 != 0
+            || words[2..].iter().any(|&v| v != 0)
+        {
             return Err(invalid(
                 "unsupported TSC wrap, compare, LOD, bias, anisotropy or border fields",
             ));

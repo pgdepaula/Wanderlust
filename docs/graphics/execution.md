@@ -2998,3 +2998,27 @@ reads contribute guest/shader-byte counters and use a separate protected source:
 a GPU-newer overlap is skipped without signaling an execution coherence barrier.
 The existing 4-KiB-code and 64-file capture bounds apply. Disabled diagnostics do
 not fetch guest programs; file errors cannot change draw validity.
+
+Image-aware single-mip TSC decoding supports equal point or linear min/mag
+filters, mip NONE/POINT/LINEAR, zero minimum LOD and bias, normalized coordinates,
+clamp-to-edge in all axes and anisotropy one. With one exposed mip, the nonnegative
+maximum-LOD clamp and mip interpolation cannot change the selected level.
+Cube-seam settings and border colors are inactive for this normalized 2D clamp
+subset. The inherited font-filter sizes one/two used by public drivers are
+admitted only with ordinary point/linear filters; font/VCAA filtering remains
+unsupported. Extended TSC state on multilevel images is still rejected.
+
+TSC bit13 gates a TIC's sRGB interpretation. Hardware resource resolution chooses
+an encoded-linear view when that sampler bit is clear, while preserving alpha.
+`TextureImage::with_sampler` remains a typed host-description helper; joint raw
+TIC/TSC interpretation is performed by `resolve_handle`/`resolve_texture`.
+Implicit-LOD TEXS requires one guest mip because the resident texture binding
+currently exposes a single-level view. It must not silently turn a multilevel
+implicit sample into base-level sampling. Explicit zero-LOD TEX.B remains separate.
+
+The software driver initializes B197 vertex B enabled (`0x2040=0x11`), matching
+the pinned gm204 context table. Raw channels retain explicit stage setup; shader
+addresses, offsets, register allocation, inputs and constants still come from
+guest state. Diagnostic code acquisition separates a selected vertex program's
+address from its execution register budget; incomplete allocation never authorizes
+a draw or invents shader code.

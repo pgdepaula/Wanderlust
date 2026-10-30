@@ -92,8 +92,11 @@ fn binary_tex_uses_ldc_handle_and_literal_pools() {
         let mut data = vec![0; 0x1000 + surface.len()];
         data[0x1000..].copy_from_slice(&surface);
         words(&mut data, 32, &tic);
-        words(&mut data, 64, &TSC_NEAREST);
-        words(&mut data, 96, &[0x92, 0x62, 0, 0, 0, 0, 0, 0]);
+        let conversion = if srgb { 1 << 13 } else { 0 };
+        let mut nearest = TSC_NEAREST;
+        nearest[0] |= conversion;
+        words(&mut data, 64, &nearest);
+        words(&mut data, 96, &[0x92 | conversion, 0x62, 0, 0, 0, 0, 0, 0]);
         words(&mut data, 128, &[1]); // TIC1, TSC0: deliberately different indices
         let mut map = AddressMap::default();
         for (gpu, guest, size) in [

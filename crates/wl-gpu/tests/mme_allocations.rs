@@ -1,12 +1,14 @@
-use stats_alloc::{INSTRUMENTED_SYSTEM, Region, StatsAlloc};
-use std::alloc::System;
+#[path = "common/scoped_alloc.rs"]
+mod measured_alloc;
 use wl_gpu::mme::MacroEngine;
 #[global_allocator]
-static ALLOCATOR: &StatsAlloc<System> = &INSTRUMENTED_SYSTEM;
+static ALLOCATOR: measured_alloc::Allocator = measured_alloc::Allocator;
 
 #[test]
 fn repeated_macro_invocations_reuse_uploaded_owned_instruction_ram() {
-    let cold_region = Region::new(ALLOCATOR);
+    // Only this caller's work is measured. The Rust harness may allocate on
+    // another thread while it coordinates test execution/results.
+    let cold_region = measured_alloc::Region::new();
     let mut mme = MacroEngine::default();
     mme.upload(0x11c, 0).unwrap();
     mme.upload(0x120, 0).unwrap();
@@ -15,21 +17,21 @@ fn repeated_macro_invocations_reuse_uploaded_owned_instruction_ram() {
         mme.upload(0x118, u32::from_le_bytes(bytes.try_into().unwrap()))
             .unwrap();
     }
-    let cold = cold_region.change();
-    assert_eq!(cold.allocations, 1);
-    let region = Region::new(ALLOCATOR);
+    let cold = cold_region.finish();
+    assert_eq!((cold.allocations, cold.reallocations), (1, 0));
     let start = std::time::Instant::now();
+    let region = measured_alloc::Region::new();
     for parameter in 0..10000 {
         assert_eq!(
             std::hint::black_box(mme.execute(0, parameter)).unwrap(),
             (0x1a00, parameter)
         );
     }
+    let stats = region.finish();
     let elapsed = start.elapsed();
-    let stats = region.change();
     assert_eq!((stats.allocations, stats.reallocations), (0, 0));
     eprintln!(
-        "MME upload allocations={}, bytes={}; 10000 invocations: {elapsed:?}, zero measured Rust allocations/reallocations",
-        cold.allocations, cold.bytes_allocated
+        "MME upload caller allocations={}; 10000 invocations: {elapsed:?}, zero caller Rust allocations/reallocations",
+        cold.allocations
     );
 }

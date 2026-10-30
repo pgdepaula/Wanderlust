@@ -176,6 +176,15 @@ fn check_texels(
     perspective: bool,
     texel: impl Fn(u8, u8) -> [u8; 4],
 ) {
+    check_texels_tolerance(data, clip_w, perspective, texel, 0);
+}
+fn check_texels_tolerance(
+    data: &[u8],
+    clip_w: [f32; 3],
+    perspective: bool,
+    texel: impl Fn(u8, u8) -> [u8; 4],
+    tolerance: u8,
+) {
     let v = POS.map(|p| p.map(f64::from));
     let area = edge(v[0], v[1], v[2]);
     let mut checked = 0;
@@ -218,11 +227,14 @@ fn check_texels(
             } else {
                 BG
             };
-            assert_eq!(
-                &data[RT + (y * W + x) * 4..RT + (y * W + x) * 4 + 4],
-                &expected,
-                "{x},{y} perspective={perspective}"
-            );
+            let actual = &data[RT + (y * W + x) * 4..RT + (y * W + x) * 4 + 4];
+            for component in 0..4 {
+                let allowed = if component == 3 { 0 } else { tolerance };
+                assert!(
+                    actual[component].abs_diff(expected[component]) <= allowed,
+                    "{x},{y} component{component} actual={actual:?} expected={expected:?}"
+                );
+            }
         }
     }
     assert!(checked > 200);
@@ -519,6 +531,11 @@ fn bound_texs_missing_selector_binding_and_short_range_are_not_defaults() {
 fn packed_hdr_bound_texs_pixels_padding_mutation_and_warm_resources() {
     let (mut data, mut words, _) = fixture();
     words.drain(2..4); // no Maxwell A compatibility selection on B197
+    // Source-verified driver context enables vertex B; guest still supplies code.
+    let start = words.iter().position(|w| *w == 0x20020810).unwrap();
+    assert_eq!(words[start + 1], 0x11);
+    words[start] = 0x20010811;
+    words.remove(start + 1);
     let (mut d, c, _, b, _) = driver();
     let bin = include_bytes!("fixtures/maxwell/texs-perspective.bin");
     data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
@@ -630,5 +647,142 @@ fn packed_hdr_bound_texs_pixels_padding_mutation_and_warm_resources() {
         warm.synchronization_points - before.synchronization_points,
         d.graphics_counters()
     );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+
+#[test]
+#[ignore = "requires actual GPU; native single-level sampler bilinear/clamp/border and sRGB conversion gating"]
+fn native_single_level_sampler_linear_clamp_and_srgb_gate() {
+    let (mut data, mut words, _) = fixture();
+    words.drain(2..4);
+    let (mut d, c, _, b, _) = driver();
+    let program = include_bytes!("fixtures/maxwell/texs-perspective.bin");
+    data[0x4600..0x4600 + program.len()].copy_from_slice(program);
+    let tic = [
+        0x78d7ffa1, 0x10000, 0x00600000, 0x00070000, 0xe8800001, 0x80000001, 0x03000000, 0,
+    ];
+    let sampler = [
+        0x92 | (1 << 13) | (1 << 14) | (1 << 17),
+        2 | (2 << 4) | (3 << 6) | (3 << 8),
+        15 << 20,
+        0,
+        0x3f800000,
+        0,
+        0x3f800000,
+        0x3e800000,
+    ];
+    let desc = descriptor_bytes(tic, sampler);
+    data[0x20..0x40].copy_from_slice(&desc[..32]);
+    data[0x60..0x80].copy_from_slice(&desc[32..]);
+    data[0x50..0x54].copy_from_slice(&0x00200001u32.to_le_bytes());
+    let f11 = [13u32 << 6, (14 << 6) | 32]; // exact .25 and .75
+    for y in 0..2 {
+        for x in 0..2 {
+            let packed = f11[x] | (f11[y] << 11) | ((14 << 5) << 22);
+            let at = 0x1000 + gob_address(x * 4, y, 8, 1);
+            data[at..at + 4].copy_from_slice(&packed.to_le_bytes());
+        }
+    }
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x2144, 0x600),
+        (0x214c, 12),
+        (0x2490, 0x21),
+        (0x2608, 2),
+        (0x157c, 1),
+        (0x1564, 2),
+    ] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let mut pipelines = None;
+    for (i, (uv, color)) in [
+        ([0.25f32, 0.25], [64, 64, 128, 255]),
+        ([0.75, 0.25], [191, 64, 128, 255]),
+        ([0.5, 0.5], [128, 128, 128, 255]),
+        ([-0.5, 1.5], [64, 191, 128, 255]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut vertices = vertex_bytes([1.; 3]);
+        for vertex in vertices.chunks_exact_mut(24) {
+            vertex[16..20].copy_from_slice(&uv[0].to_le_bytes());
+            vertex[20..24].copy_from_slice(&uv[1].to_le_bytes());
+        }
+        d.write_backing(b, 0x3000, &vertices, &mut mem(&mut data))
+            .unwrap();
+        let commands = if i == 0 { words.clone() } else { draw() };
+        let r = submit(&mut d, c, b, &mut data, &commands);
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        check_texels_tolerance(&data, [1.; 3], true, |_, _| color, 1);
+        d.retire(r.token).unwrap();
+        if let Some((p, m)) = pipelines {
+            assert_eq!(d.graphics_counters().pipeline_allocations, p);
+            assert_eq!(d.graphics_counters().shader_module_allocations, m);
+        } else {
+            pipelines = Some((
+                d.graphics_counters().pipeline_allocations,
+                d.graphics_counters().shader_module_allocations,
+            ));
+        }
+    }
+    // A one-texel sRGB image independently distinguishes texture conversion from
+    // alpha handling and from the sampler's inactive border conversion fields.
+    let srgb = [
+        0x58d24908, 0x10000, 0x00600000, 0, 0x00c00000, 0x80000000, 0, 0,
+    ];
+    let bytes: Vec<_> = srgb.into_iter().flat_map(u32::to_le_bytes).collect();
+    d.write_backing(b, 0x20, &bytes, &mut mem(&mut data))
+        .unwrap();
+    d.write_backing(b, 0x1000, &[128, 64, 192, 123], &mut mem(&mut data))
+        .unwrap();
+    for (enabled, color) in [(true, [55, 13, 134, 123]), (false, [128, 64, 192, 123])] {
+        let word = if enabled {
+            sampler[0]
+        } else {
+            sampler[0] & !(1 << 13)
+        };
+        d.write_backing(b, 0x60, &word.to_le_bytes(), &mut mem(&mut data))
+            .unwrap();
+        let r = submit(&mut d, c, b, &mut data, &draw());
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        check_texels_tolerance(&data, [1.; 3], true, |_, _| color, 1);
+        d.retire(r.token).unwrap();
+        assert_eq!(
+            d.graphics_counters().pipeline_allocations,
+            pipelines.unwrap().0
+        );
+        assert_eq!(
+            d.graphics_counters().shader_module_allocations,
+            pipelines.unwrap().1
+        );
+    }
+    // The host view currently exposes one mip. Never silently replace implicit
+    // LOD semantics by sampling base zero for a multilevel guest texture.
+    let multilevel = [
+        0x58d24908,
+        0x10000,
+        0x00600000,
+        1 << 28,
+        0x00800003,
+        0x80000003,
+        0,
+        0x10,
+    ];
+    let bytes: Vec<_> = multilevel.into_iter().flat_map(u32::to_le_bytes).collect();
+    d.write_backing(b, 0x20, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let bytes: Vec<_> = TSC_NEAREST.into_iter().flat_map(u32::to_le_bytes).collect();
+    d.write_backing(b, 0x60, &bytes, &mut mem(&mut data))
+        .unwrap();
+    let before = d.graphics_counters().draw_commands;
+    let saved = data[RT..RT + SIZE].to_vec();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_some());
+    assert_eq!(d.graphics_counters().draw_commands, before);
+    assert_eq!(&data[RT..RT + SIZE], saved);
     d.close(c, &mut mem(&mut data)).unwrap();
 }

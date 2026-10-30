@@ -2027,7 +2027,7 @@ fn b197_native_tic_does_not_require_b097_header_selection_write() {
 #[test]
 fn invalid_descriptor_reports_acquired_metadata_without_relaxing_validation() {
     let engine = configured();
-    for (at, kind) in [(0usize, "TIC"), (60, "TSC")] {
+    for (at, kind) in [(0usize, "TIC"), (44, "TSC")] {
         let mut bytes = descriptor_bytes(TIC_RGBA, TSC_NEAREST);
         bytes[at] ^= 1;
         let memory = SliceMemory {
@@ -2078,4 +2078,83 @@ fn native_packed_float_tic_and_inert_single_mip_header_hints() {
     mip[3] |= 1 << 28;
     mip[7] = 0x10;
     assert!(TextureImage::decode(mip).is_err());
+}
+
+#[test]
+fn single_level_native_sampler_fields_and_srgb_gate_are_image_aware() {
+    let engine = configured();
+    let sampler = [
+        0x92 | (1 << 13) | (1 << 14) | (1 << 17),
+        2 | (2 << 4) | (3 << 6) | (3 << 8),
+        15 << 20,
+        0,
+        0,
+        0,
+        0,
+        0x3f800000,
+    ];
+    let resolve = |image: [u32; 8], sampler: [u32; 8]| {
+        let bytes = descriptor_bytes(image, sampler);
+        engine.resolve_handle(
+            0,
+            0,
+            &pools(),
+            &SliceMemory {
+                base: GuestAddress(0x80000),
+                bytes: &bytes,
+            },
+        )
+    };
+    let expected = resolve(TIC_RGBA, sampler).unwrap();
+    assert_eq!(expected.filter, Filter::Linear);
+    let mut unused = sampler;
+    unused[1] &= !0x300;
+    unused[2] = 0xfffff000;
+    unused[3] = 0x0ffff000;
+    unused[4..].copy_from_slice(&[0x7fc00000, 0xff800000, 0x3f800000, 0x80000000]);
+    assert_eq!(resolve(TIC_RGBA, unused).unwrap(), expected);
+    for (word, bit) in [
+        (0, 0),
+        (0, 9),
+        (0, 10),
+        (0, 15),
+        (0, 18),
+        (0, 20),
+        (1, 3),
+        (1, 10),
+        (1, 12),
+        (1, 25),
+        (2, 0),
+        (3, 0),
+        (3, 31),
+    ] {
+        let mut bad = sampler;
+        bad[word] ^= 1 << bit;
+        assert!(resolve(TIC_RGBA, bad).is_err(), "{word}/{bit}");
+    }
+    let mut mip = TIC_RGBA;
+    mip[3] |= 1 << 28;
+    mip[7] = 0x10;
+    assert!(resolve(mip, sampler).is_err());
+    let mut srgb = TIC_RGBA;
+    srgb[4] |= 1 << 22;
+    assert_eq!(resolve(srgb, sampler).unwrap().format, Format::Rgba8Srgb);
+    let mut off = sampler;
+    off[0] &= !(1 << 13);
+    assert_eq!(resolve(srgb, off).unwrap().format, Format::Rgba8Unorm);
+    assert_eq!(
+        resolve(TIC_RGBA, sampler).unwrap().format,
+        Format::Rgba8Unorm
+    );
+    for mut image in [TIC_BC1, TIC_ASTC] {
+        image[4] |= 1 << 22;
+        assert_eq!(
+            resolve(image, off).unwrap().format,
+            if image[0] == TIC_BC1[0] {
+                Format::Bc1Rgba
+            } else {
+                Format::Astc4x4
+            }
+        );
+    }
 }

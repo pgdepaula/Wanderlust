@@ -4275,3 +4275,22 @@ proves diagnostic overlap cannot read GPU-older RAM or set the execution source'
 barrier flag. These are acquisition diagnostics, not proof of shader execution.
 Strict package Clippy and workspace formatting checks passed. Workspace tests
 were not run for this delivery.
+
+Native single-level sampler and initialized vertex B: 472 CPU tests with the
+backend, 466 without, and 216 explicitly executed Vulkan llvmpipe GPU scenarios
+passed. Five perspective cases plus the existing binary TEX case ran natively on
+Windows D3D12 and Vulkan, six passes per backend; the new sampler case also passed
+on OpenGL. Independent checks cover bilinear texel centers/averages, clamp beyond
+the image, unused nonzero border colors, and sRGB-on/off values [55,13,134,123]
+versus [128,64,192,123] without pipeline recreation. Multilevel implicit TEXS
+faults before drawing; framebuffer bytes remain unchanged. The packed HDR case
+omits the guest stage-enable packet and still requires guest-selected vertex code.
+
+MME allocation assertions now use the existing caller-thread allocator scope.
+A process-wide observation included four test-harness allocations during an
+otherwise allocation-free invocation loop; the isolated loop reproduced zero.
+The scoped measurement preserves one cold upload allocation and zero allocation/
+reallocation for 10,000 real macro invocations, independently of harness threads.
+No GPU transfer or process-wide zero-allocation claim follows from that result.
+Strict package Clippy and workspace formatting passed; workspace tests were not
+run for this delivery.

@@ -344,6 +344,11 @@ impl Renderer {
                 self.counters.descriptor_reads += 2;
                 engine.resolve_handle(subchannel, handle, map, memory)?
             };
+            if f.program.bound_texture_offset().is_some() && desc.mip_count != 1 {
+                return Err(invalid(
+                    "implicit-LOD TEXS requires one mip in the supported texture-view subset",
+                ));
+            }
             Some((stamp, desc))
         } else {
             None
@@ -423,7 +428,7 @@ pub(crate) fn capture_selected_program_diagnostics(
         return;
     }
     for (source, vertex) in [
-        (engine.vertex_program().map(|s| s.address), true),
+        (engine.vertex_program_address(), true),
         (engine.fragment_program().map(|s| s.address), false),
     ] {
         if let Ok(address) = source {

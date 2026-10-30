@@ -2607,3 +2607,17 @@ bits156..155, border bits159..157 and fine/coarse spread functions bits216..215
 and218..217. Existing masks continue rejecting sparse/depth/array/multisample,
 nonzero maximum anisotropy, bias and reserved fields. The native host format
 preserves the defined unsigned packed RGB representation.
+
+Native sampler state: pinned NVIDIA `clb197tex.h` specifies sampler address,
+filter, LOD and conversion fields. The older shared `cl9097tex.h` names bits16:14
+and19:17 as font-filter width/height. Pinned NVK `nvk_sampler.c` initializes these
+to SIZE_2 and enables sampler sRGB conversion across supported classes; this
+corroborates the inherited ordinary-filter profile despite their reserved names
+in the newer class header. Maximum LOD uses unsigned fixed point with eight
+fractional bits. Cube-interface flags do not apply to the admitted 2D texture.
+MIT Ryujinx at `4930dced25c0d9ec33096b0f2601d262daa477bf`,
+`TextureBindingsManager.cs` and `TexturePool.cs::GetForBinding`, independently
+corroborates that a sampler without its sRGB bit selects the non-sRGB view of an
+sRGB TIC. NVIDIA/Nouveau's pinned gm204 B197 method initialization explicitly
+contains `0x002040 = 0x00000011` for vertex B; no shader address is supplied by
+that initialization entry.
