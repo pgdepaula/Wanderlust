@@ -364,6 +364,9 @@ fn guest_perspective_interpolation_and_stage_cache_identity() {
 #[ignore = "requires actual GPU; bound TEXS reads B197-selected CB handles and independently checked perspective pixels"]
 fn bound_texs_multibarrier_perspective_runtime_handle_and_cache() {
     let (mut data, mut words, _) = fixture();
+    // B197 natively interprets Maxwell TICs; the B097 selection write is absent.
+    assert_eq!(&words[2..4], &[0x200103c4, 1]);
+    words.drain(2..4);
     let (mut d, c, _, b, _) = driver();
     let bin = include_bytes!("fixtures/maxwell/texs-perspective.bin");
     data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);

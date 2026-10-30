@@ -1992,3 +1992,52 @@ fn subtile_performance_hints_retain_documented_fields_without_pixel_semantics() 
         assert!(e.apply(write(m, 0)).is_err());
     }
 }
+
+#[test]
+fn b197_native_tic_does_not_require_b097_header_selection_write() {
+    let mut engine = Maxwell3d::default();
+    let mut fifo = Decoder::default();
+    for &word in POOL_PACKETS[..2].iter().chain(&POOL_PACKETS[4..]) {
+        if let Some(w) = fifo.push_word(word).unwrap() {
+            engine.apply(w).unwrap();
+        }
+    }
+    fifo.finish().unwrap();
+    let bytes = descriptor_bytes(TIC_RGBA, TSC_NEAREST);
+    let memory = SliceMemory {
+        base: GuestAddress(0x80000),
+        bytes: &bytes,
+    };
+    let actual = engine.resolve_handle(0, 0, &pools(), &memory).unwrap();
+    let expected = configured()
+        .resolve_handle(0, 0, &pools(), &memory)
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert!(engine.resolve_handle(1, 0, &pools(), &memory).is_err());
+    // Legacy selection remains unsupported; rejection cannot alter native TICs.
+    assert!(engine.apply(write(0xf10, 0)).is_err());
+    assert_eq!(
+        engine.resolve_handle(0, 0, &pools(), &memory).unwrap(),
+        expected
+    );
+    let empty = Maxwell3d::default();
+    assert!(empty.resolve_handle(0, 0, &pools(), &memory).is_err());
+}
+
+#[test]
+fn invalid_descriptor_reports_acquired_metadata_without_relaxing_validation() {
+    let engine = configured();
+    for (at, kind) in [(0usize, "TIC"), (60, "TSC")] {
+        let mut bytes = descriptor_bytes(TIC_RGBA, TSC_NEAREST);
+        bytes[at] ^= 1;
+        let memory = SliceMemory {
+            base: GuestAddress(0x80000),
+            bytes: &bytes,
+        };
+        let error = engine
+            .resolve_handle(0, 0, &pools(), &memory)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(&format!("{kind} index=0 words=")), "{error}");
+    }
+}

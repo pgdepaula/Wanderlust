@@ -2970,3 +2970,10 @@ word, which supplies independent TIC/TSC indices through the existing descriptor
 path. There is no default CB slot, handle, image or sampler. Changing the slot,
 backing, or handle does not specialize shader code. A missing selector, unbound
 CB, invalid range or invalid descriptor makes the fragment unready before drawing.
+
+B197 texture resolution uses its native Maxwell TIC format without requiring an
+explicit `0x0f10=1` write. The legacy format remains unsupported, including an
+explicit zero write. Engine binding, descriptor pool bounds, mapping validation
+and all TIC/TSC field checks remain mandatory. Decode failures identify the
+actual descriptor index and little-endian words, using the already acquired
+metadata without reading texture contents or adding guest reads.

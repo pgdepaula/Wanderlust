@@ -2589,3 +2589,11 @@ implicit LOD) and `Gpu/Shader/GpuAccessor.cs::GetTextureDescriptor` (handle word
 offset and runtime texture-buffer selector). No translator implementation code
 was copied. The synthetic `texs-perspective` fixture uses independently assembled
 registers and immediate values with unmodified pinned envyas.
+
+B197 native TIC selection is corroborated by pinned NVK
+`nvk_cmd_draw.c::nvk_push_draw_state_init`: `SET_SELECT_MAXWELL_TEXTURE_HEADERS`
+is emitted only for `MAXWELL_A` (B097), not `MAXWELL_B` (B197). This establishes
+that the B097 compatibility-selection write cannot be required to execute native
+B197 descriptors; it is not a claim of arbitrary register reset values or legacy
+header support. B197's published class header still defines explicit selector
+writes; this backend admits only the native-format value one.

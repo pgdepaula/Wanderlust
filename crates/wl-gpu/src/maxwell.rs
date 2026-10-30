@@ -586,7 +586,6 @@ pub struct Maxwell3d {
     api_call_limit: Option<u16>,
     attribute_defaults: Option<u8>,
     blend_other_formats: Option<bool>,
-    modern_headers: bool,
     images: Pool,
     program_upper: Option<u32>,
     program_lower: Option<u32>,
@@ -1819,7 +1818,8 @@ impl Maxwell3d {
                 if value != 1 {
                     return Err(bad());
                 }
-                self.modern_headers = true;
+                // Only B197's native Maxwell TIC layout is supported. NVK
+                // emits this selection for B097, not as a B197 prerequisite.
             }
             0x155c | 0x1574 => {
                 if value & !0xff != 0 {
@@ -2066,7 +2066,7 @@ impl Maxwell3d {
         map: &AddressMap,
         changes: &TextureChanges,
     ) -> Result<DescriptorStamp> {
-        if self.bound_class(subchannel) != Some(EngineClass::ThreeD) || !self.modern_headers {
+        if self.bound_class(subchannel) != Some(EngineClass::ThreeD) {
             return Err(invalid("texture engine not configured"));
         }
         let image = map.resolve(self.images.descriptor(handle & 0xfffff)?, 32)?;
@@ -2081,7 +2081,7 @@ impl Maxwell3d {
         })
     }
     /// Descriptor indices are supplied by a caller, not a fabricated bind method.
-    /// Original shader handle/constant-buffer decoding is not implemented.
+    /// Shader handles resolve through their explicit or runtime-selected CB data.
     pub fn resolve_texture(
         &self,
         subchannel: u8,
@@ -2090,21 +2090,21 @@ impl Maxwell3d {
         map: &AddressMap,
         memory: &impl GuestMemory,
     ) -> Result<TextureDesc> {
-        if self.bound_class(subchannel) != Some(EngineClass::ThreeD) || !self.modern_headers {
-            return Err(invalid(
-                "unbound engine or modern texture headers not selected",
-            ));
+        if self.bound_class(subchannel) != Some(EngineClass::ThreeD) {
+            return Err(invalid("unbound B197 texture engine"));
         }
-        let image = TextureImage::decode(read_descriptor(
-            self.images.descriptor(image_index)?,
-            map,
-            memory,
-        )?)?;
-        let sampler = TextureSampler::decode(read_descriptor(
-            self.samplers.descriptor(sampler_index)?,
-            map,
-            memory,
-        )?)?;
+        let image_words = read_descriptor(self.images.descriptor(image_index)?, map, memory)?;
+        let image = TextureImage::decode(image_words).map_err(|error| {
+            crate::Error(format!(
+                "TIC index={image_index} words={image_words:08x?}: {error}"
+            ))
+        })?;
+        let sampler_words = read_descriptor(self.samplers.descriptor(sampler_index)?, map, memory)?;
+        let sampler = TextureSampler::decode(sampler_words).map_err(|error| {
+            crate::Error(format!(
+                "TSC index={sampler_index} words={sampler_words:08x?}: {error}"
+            ))
+        })?;
         let desc = image.with_sampler(sampler);
         Ok(desc)
     }

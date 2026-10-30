@@ -4244,3 +4244,13 @@ unusable descriptor zero. Missing selectors, unbound slots and a handle at the
 end of a short CB are checked before any host queue submission. An interrupted
 WSL interop launch was retried only after a successful native transport probe;
 its failed startup is not counted as a GPU pass.
+
+Native B197 TIC selection regression: 468 CPU tests with the backend, 463 without,
+and 214 explicitly executed Vulkan llvmpipe GPU scenarios passed. The bound
+TEXS case omits the B097 header-selection packet and preserves independently
+verified pixels with TIC1/TSC2. All three perspective cases passed natively on
+Windows D3D12 and Vulkan, and the changed positive case passed on OpenGL.
+The CPU model checks descriptor resolution before any selection write, rejection
+of explicit legacy format without state mutation, unbound-engine rejection and
+acquired TIC/TSC failure metadata. Strict package Clippy and workspace formatting
+checks passed; a workspace test run was not performed for this change.
