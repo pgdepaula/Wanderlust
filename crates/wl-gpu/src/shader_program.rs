@@ -297,6 +297,17 @@ pub enum Operation {
         component: u8,
         multiplier: u8,
     },
+    /// Perspective IPA.PASS before explicit reciprocal multiplication.
+    PerspectivePass {
+        dst: u8,
+        component: u8,
+    },
+    /// Bound implicit-LOD RGBA TEXS with two independent destination pairs.
+    SampleBound2d {
+        destinations: [u8; 2],
+        u: u8,
+        v: u8,
+    },
     Sample2d {
         dst: u8,
         coordinates: u8,
@@ -309,6 +320,7 @@ struct Program {
     constants: Vec<ConstantRef>,
     constant_pairs: Vec<ConstantRef>,
     texture_input: Option<u8>,
+    bound_texture_offset: Option<u32>,
     perspective: bool,
 }
 impl Program {
@@ -355,11 +367,19 @@ impl Program {
             constants: Vec::new(),
             constant_pairs: Vec::new(),
             texture_input: None,
+            bound_texture_offset: None,
             perspective,
         };
         let mut initialized = [false; 256];
         initialized[255] = true; // RZ
         let mut pending = [false; 256];
+        let mut pending_barrier = [0u8; 256];
+        // A bounded straight-line IPA/RCP/FMUL/TEXS profile. Short delays and
+        // reuse/yield controls are accepted only with this complete operation
+        // ordering, never as general fixed-latency scheduling support.
+        let split_profile = perspective
+            && u64::from_le_bytes(input[80..88].try_into().unwrap()) & 0x1fffff == 0x711;
+        let split_schedule = [0x711, 0x731, 0x75f, 0xf3d, 0x217f1, 0x27f2, 0x407f1, 0x7ff];
         let mut provenance = [None; 256];
         let mut multiply_result = [false; 256];
         // Only the canonical position-W reciprocal used for perspective IPA is
@@ -392,27 +412,39 @@ impl Program {
                     }
                     return Err(fail("invalid EXIT padding"));
                 }
-                if !matches!(schedule & 31, 6 | 13)
-                    || (schedule >> 8) & 7 != 7
-                    || schedule >> 17 != 0
-                    || !matches!(wait, 0 | 1)
-                    || !matches!(write_barrier, 0 | 7)
-                {
-                    return Err(fail("unsupported scheduling dependency"));
-                }
-                if wait == 1 {
-                    pending.fill(false);
-                }
-                // Predicate-producing SETP has its own conservative fixed latency.
-                // Do not generalize the new stall encoding to other instructions.
-                if schedule & 31
-                    != if matches!(word >> 52, 0x5b6 | 0x5bb) {
-                        13
-                    } else {
-                        6
+                if split_profile {
+                    let index = bundle_index * 3 + slot;
+                    if split_schedule.get(index) != Some(&schedule) {
+                        return Err(fail("unsupported IPA/TEXS scheduling profile"));
                     }
-                {
-                    return Err(fail("unsupported instruction fixed-latency schedule"));
+                    for r in 0..256 {
+                        if pending[r] && wait & (1 << pending_barrier[r]) != 0 {
+                            pending[r] = false;
+                        }
+                    }
+                } else {
+                    if !matches!(schedule & 31, 6 | 13)
+                        || (schedule >> 8) & 7 != 7
+                        || schedule >> 17 != 0
+                        || !matches!(wait, 0 | 1)
+                        || !matches!(write_barrier, 0 | 7)
+                    {
+                        return Err(fail("unsupported scheduling dependency"));
+                    }
+                    if wait == 1 {
+                        pending.fill(false);
+                    }
+                    // Predicate-producing SETP has its own conservative fixed latency.
+                    // Do not generalize the new stall encoding to other instructions.
+                    if schedule & 31
+                        != if matches!(word >> 52, 0x5b6 | 0x5bb) {
+                            13
+                        } else {
+                            6
+                        }
+                    {
+                        return Err(fail("unsupported instruction fixed-latency schedule"));
+                    }
                 }
                 if word == 0xe30000000007000f {
                     if write_barrier != 7
@@ -574,6 +606,7 @@ impl Program {
                         let register = dst + lane as u8;
                         initialized[register as usize] = true;
                         pending[register as usize] = true;
+                        pending_barrier[register as usize] = write_barrier as u8;
                         provenance[register as usize] = Some(input);
                         multiply_result[register as usize] = false;
                         position_w[register as usize] = false;
@@ -601,6 +634,7 @@ impl Program {
                     for r in dst..dst + words {
                         initialized[r as usize] = true;
                         pending[r as usize] = true;
+                        pending_barrier[r as usize] = write_barrier as u8;
                         provenance[r as usize] = None;
                         multiply_result[r as usize] = false;
                         position_w[r as usize] = false;
@@ -1029,6 +1063,7 @@ impl Program {
                         ));
                     }
                     pending[dst as usize] = true;
+                    pending_barrier[dst as usize] = write_barrier as u8;
                     Operation::IntWiden {
                         dst,
                         src,
@@ -1048,6 +1083,7 @@ impl Program {
                         ));
                     }
                     pending[dst as usize] = true;
+                    pending_barrier[dst as usize] = write_barrier as u8;
                     Operation::IntToFloat {
                         dst,
                         src,
@@ -1064,6 +1100,7 @@ impl Program {
                         ));
                     }
                     pending[dst as usize] = true;
+                    pending_barrier[dst as usize] = write_barrier as u8;
                     Operation::LeadingBit {
                         dst,
                         src,
@@ -1082,6 +1119,7 @@ impl Program {
                         ));
                     }
                     pending[dst as usize] = true;
+                    pending_barrier[dst as usize] = write_barrier as u8;
                     Operation::CountBits {
                         dst,
                         src,
@@ -1178,6 +1216,7 @@ impl Program {
                         ));
                     }
                     pending[dst as usize] = true;
+                    pending_barrier[dst as usize] = write_barrier as u8;
                     // Signed/unsigned source interpretations have identical low
                     //32 product bits. HI and all other modes remain rejected.
                     Operation::Integer {
@@ -1266,22 +1305,28 @@ impl Program {
                     let index = constant_input(&mut out.constants, reference)
                         .ok_or_else(|| fail("too many constant references"))?;
                     pending[dst as usize] = true;
+                    pending_barrier[dst as usize] = write_barrier as u8;
                     Operation::Constant { dst, input: index }
                 } else if perspective && word & !255 == 0xe003ff87cff7ff00 {
                     if write_barrier != 0 || pending.iter().any(|v| *v) {
                         return Err(fail("PositionW requires unused barrier zero"));
                     }
                     pending[dst as usize] = true;
+                    pending_barrier[dst as usize] = write_barrier as u8;
                     Operation::PositionW { dst }
                 } else if perspective && word & !(255 | (255u64 << 8)) == 0x5080000000470000 {
                     let src = ((word >> 8) & 255) as u8;
-                    if write_barrier != 0 || pending.iter().any(|v| *v) || !position_w[src as usize]
+                    if (!split_profile && (write_barrier != 0 || pending.iter().any(|v| *v)))
+                        || !initialized[src as usize]
+                        || pending[src as usize]
+                        || !position_w[src as usize]
                     {
                         return Err(fail(
                             "MUFU.RCP requires ready PositionW provenance and barrier zero",
                         ));
                     }
                     pending[dst as usize] = true;
+                    pending_barrier[dst as usize] = write_barrier as u8;
                     Operation::Reciprocal { dst, src }
                 } else if perspective
                     && word & !(255 | (255u64 << 20) | (0x3ffu64 << 28)) == 0xe043ff800007ff00
@@ -1296,10 +1341,26 @@ impl Program {
                         return Err(fail("perspective IPA requires ready PositionW reciprocal"));
                     }
                     pending[dst as usize] = true;
+                    pending_barrier[dst as usize] = write_barrier as u8;
                     Operation::Perspective {
                         dst,
                         component: ((attribute - 0x80) / 4) as u8,
                         multiplier,
+                    }
+                } else if split_profile && word & !(255 | (0x3ffu64 << 28)) == 0xe003ff800ff7ff00 {
+                    let attribute = ((word >> 28) & 0x3ff) as u32;
+                    if !matches!(attribute, 0x80 | 0x84)
+                        || write_barrier > 2
+                        || dst == 255
+                        || pending[dst as usize]
+                    {
+                        return Err(fail("unsupported perspective PASS input or dependency"));
+                    }
+                    pending[dst as usize] = true;
+                    pending_barrier[dst as usize] = write_barrier as u8;
+                    Operation::PerspectivePass {
+                        dst,
+                        component: ((attribute - 0x80) / 4) as u8,
                     }
                 } else if !vertex && word & !(255 | (0x3ffu64 << 28)) == 0xe003ff800ff7ff00 {
                     let attribute = ((word >> 28) & 0x3ff) as u32;
@@ -1311,10 +1372,38 @@ impl Program {
                         return Err(fail("unsupported IPA input or scoreboard"));
                     }
                     pending[dst as usize] = true;
+                    pending_barrier[dst as usize] = write_barrier as u8;
                     Operation::Interpolate {
                         dst,
                         component: ((attribute - 0x80) / 4) as u8,
                     }
+                } else if split_profile
+                    && word
+                        & !(255
+                            | (255u64 << 8)
+                            | (255u64 << 20)
+                            | (255u64 << 28)
+                            | (0x1fffu64 << 36))
+                        == 0xd832000000070000
+                {
+                    let destinations = [dst, ((word >> 28) & 255) as u8];
+                    let u = ((word >> 8) & 255) as u8;
+                    let v = ((word >> 20) & 255) as u8;
+                    if destinations != [0, 2]
+                        || [u, v]
+                            .iter()
+                            .any(|r| !initialized[*r as usize] || pending[*r as usize])
+                        || out.texture_input.is_some()
+                        || out.bound_texture_offset.is_some()
+                    {
+                        return Err(fail("unsupported TEXS export pairs or unready coordinates"));
+                    }
+                    out.bound_texture_offset = Some((((word >> 36) & 0x1fff) as u32) * 4);
+                    for r in 0..4 {
+                        initialized[r] = true;
+                        pending[r] = false;
+                    }
+                    Operation::SampleBound2d { destinations, u, v }
                 } else if !vertex
                     && word & !(255 | (255u64 << 8) | (255u64 << 20)) == 0xdeb80027a0070000
                 {
@@ -1340,6 +1429,7 @@ impl Program {
                     for r in dst..dst + 4 {
                         initialized[r as usize] = true;
                         pending[r as usize] = true;
+                        pending_barrier[r as usize] = write_barrier as u8;
                         provenance[r as usize] = None;
                         multiply_result[r as usize] = false;
                         position_w[r as usize] = false;
@@ -1367,6 +1457,7 @@ impl Program {
                             }
                             | Operation::AttributeRead { .. }
                             | Operation::Interpolate { .. }
+                            | Operation::PerspectivePass { .. }
                             | Operation::PositionW { .. }
                             | Operation::Reciprocal { .. }
                             | Operation::Perspective { .. }
@@ -1477,6 +1568,54 @@ impl Program {
         if !exited {
             return Err(invalid("fragment missing EXIT"));
         }
+        if split_profile {
+            match out.operations.as_slice() {
+                [
+                    Operation::PositionW { dst: w },
+                    Operation::PerspectivePass {
+                        dst: u,
+                        component: 0,
+                    },
+                    Operation::PerspectivePass {
+                        dst: v,
+                        component: 1,
+                    },
+                    Operation::Reciprocal {
+                        dst: reciprocal,
+                        src,
+                    },
+                    Operation::MultiplyRtz {
+                        dst: ud,
+                        left: uw,
+                        right: ur,
+                    },
+                    Operation::MultiplyRtz {
+                        dst: vd,
+                        left: vw,
+                        right: vr,
+                    },
+                    Operation::SampleBound2d { u: su, v: sv, .. },
+                ] if w == reciprocal
+                    && src == w
+                    && uw == w
+                    && vw == w
+                    && u == ud
+                    && u == ur
+                    && u == su
+                    && v == vd
+                    && v == vr
+                    && v == sv
+                    && w != u
+                    && w != v
+                    && u != v
+                    && *w != 255 => {}
+                _ => {
+                    return Err(invalid(
+                        "unsupported IPA/TEXS operation ordering or register linkage",
+                    ));
+                }
+            }
+        }
         Ok(out)
     }
     pub fn required_registers(&self) -> u16 {
@@ -1512,7 +1651,8 @@ impl Program {
                 | Operation::ConditionalImmediate { dst, .. }
                 | Operation::Constant { dst, .. }
                 | Operation::PositionW { dst }
-                | Operation::Interpolate { dst, .. } => largest = largest.max(u16::from(dst)),
+                | Operation::Interpolate { dst, .. }
+                | Operation::PerspectivePass { dst, .. } => largest = largest.max(u16::from(dst)),
                 Operation::Reciprocal { dst, src } => {
                     largest = largest.max(u16::from(dst)).max(u16::from(src));
                 }
@@ -1598,6 +1738,16 @@ impl Program {
                         largest = largest.max(u16::from(src));
                     }
                 }
+                Operation::SampleBound2d { destinations, u, v } => {
+                    largest = largest
+                        .max(u16::from(destinations[0]) + 1)
+                        .max(u16::from(destinations[1]) + 1);
+                    for r in [u, v] {
+                        if r != 255 {
+                            largest = largest.max(u16::from(r));
+                        }
+                    }
+                }
                 Operation::Sample2d {
                     dst,
                     coordinates,
@@ -1615,6 +1765,9 @@ impl Program {
     pub fn texture_input(&self) -> Option<u8> {
         self.texture_input
     }
+    pub fn uses_texture(&self) -> bool {
+        self.texture_input.is_some() || self.bound_texture_offset.is_some()
+    }
     pub fn constants(&self) -> &[ConstantRef] {
         &self.constants
     }
@@ -1627,7 +1780,7 @@ impl Program {
             &self.operations,
             "struct Constants { words: array<vec4<u32>,16> };\n@group(0) @binding(0) var<uniform> cb: Constants;\n",
         );
-        if self.texture_input.is_some() {
+        if self.uses_texture() {
             s.push_str("@group(1) @binding(0) var image:texture_2d<f32>; @group(1) @binding(1) var image_sampler:sampler;\n");
         }
         s.push_str("struct Vertex { @builtin(position) position:vec4<f32>, @location(0) @interpolate(linear) uv:vec2<f32> };\n@vertex fn vs_main(@builtin(vertex_index) i:u32)->Vertex { let ps=array<vec2<f32>,3>(vec2(-1.,-1.),vec2(3.,-1.),vec2(-1.,3.));let p=ps[i];var v:Vertex;v.position=vec4(p,0.,1.);v.uv=vec2((p.x+1.)*.5,(1.-p.y)*.5);return v;}\n@fragment fn fs_main(v:Vertex)->@location(0) vec4<f32>{var r:array<u32,256>;\n");
@@ -1650,6 +1803,13 @@ impl Program {
                 }
                 Operation::Interpolate { dst, component } => {
                     writeln!(s, "r[{dst}]=bitcast<u32>(v.uv[{component}]);").unwrap()
+                }
+                Operation::PerspectivePass { dst, component } => {
+                    writeln!(s, "r[{dst}]=bitcast<u32>(v.uv[{component}] * v.position.w);").unwrap();
+                }
+                Operation::SampleBound2d { destinations, u, v } => {
+                    writeln!(s,"let sampled=textureSample(image,image_sampler,vec2(bitcast<f32>(r[{u}]),bitcast<f32>(r[{v}])));").unwrap();
+                    for c in 0..4 { writeln!(s,"r[{}]=bitcast<u32>(sampled[{c}]);", destinations[c/2] as usize + c%2).unwrap(); }
                 }
                 Operation::PositionW { dst } => {
                     writeln!(s, "r[{dst}]=bitcast<u32>(v.position.w);").unwrap()
@@ -1780,6 +1940,15 @@ impl FragmentProgram {
     pub fn texture_input(&self) -> Option<u8> {
         self.0.texture_input()
     }
+    /// Whether the interface requires a sampled texture, regardless of handle form.
+    pub fn uses_texture(&self) -> bool {
+        self.0.uses_texture()
+    }
+    /// Guest CB byte offset; the B197 selector is resolved at synchronization.
+    pub fn bound_texture_offset(&self) -> Option<u32> {
+        self.0.bound_texture_offset
+    }
+
     pub fn constants(&self) -> &[ConstantRef] {
         self.0.constants()
     }

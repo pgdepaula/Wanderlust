@@ -166,7 +166,7 @@ impl Renderer {
                 })
         });
         let mut groups = vec![&fragment.layout];
-        if fragment.program.texture_input().is_some() {
+        if fragment.program.uses_texture() {
             groups.push(&self.texture_layout);
         }
         let layout = self

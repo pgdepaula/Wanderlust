@@ -1310,7 +1310,7 @@ impl Maxwell3d {
                     return Err(bad());
                 }
                 // TEX.B obtains its handle from a GPR and explicit LDC dataflow,
-                // not this selector. Automatic CB handle forms remain rejected.
+                // not this selector. Bound TEXS resolves its handle through this slot.
                 self.bindless_texture_constant_slot = Some(value as u8);
             }
             0x1220 => {

@@ -2575,3 +2575,17 @@ Rounding and signed FTZ behavior follow NVIDIA
 The binary fixture is independently assembled with that unmodified envytools
 revision (`envyas -m gm107 -i`), using synthetic constants and registers.
 The WGSL integer significand algorithm is an independent implementation.
+
+Bound TEXS profile: the pinned envytools GM107 table defines the 13-bit word
+immediate, two destination pairs, independent coordinate GPRs, NODEP and 2D RGBA
+fields. Mesa NAK at `e7959c6009d85d278585b2896495b2b3046d461b`,
+`sm50.rs::set_instr_deps` and `calc_instr_deps.rs`, establishes the control-field
+positions and read/write/wait barrier distinction. NVIDIA B197 defines
+`SET_BINDLESS_TEXTURE` at byte offset `0x2608`, CB slot bits4:0. Independent
+semantic corroboration: MIT-licensed Ryujinx at
+`4930dced25c0d9ec33096b0f2601d262daa477bf`,
+`Instructions/InstEmitTexture.cs::EmitTexs` (coordinate sources, pair exports,
+implicit LOD) and `Gpu/Shader/GpuAccessor.cs::GetTextureDescriptor` (handle word
+offset and runtime texture-buffer selector). No translator implementation code
+was copied. The synthetic `texs-perspective` fixture uses independently assembled
+registers and immediate values with unmodified pinned envyas.

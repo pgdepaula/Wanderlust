@@ -4225,3 +4225,22 @@ alpha remain 128/191/255; independently calculated uncovered pixels retain the
 background. The 111 draws reuse shader modules and pipelines while constants
 change. Per-case explicit publication is intentional verification, not a frame
 batch benchmark. Vulkan llvmpipe passed the complete bitwise workload.
+
+`bound_texs_multibarrier_perspective_runtime_handle_and_cache` reaches real GPU
+rasterization through GpuDriver/GPFIFO/B197. Unequal clip W (1,2,4), asymmetric
+geometry, a scalar-addressed 4×4 texture and independent homogeneous interpolation
+check covered/uncovered pixels. Thirty-two warm draws perform 32 queue submissions
+but no additional uploads, descriptor/CB reads, readbacks, completion waits,
+shader modules or pipelines. Runtime B197 selector rebinding to another CB address
+preserves pixels and shader cache; an invalid guest handle faults without a stale
+draw. CPU tests mutate every live scheduling bit and unsupported TEXS fields.
+
+The bound-TEXS delivery passed 466 CPU tests with the backend and 461 without it,
+214 explicitly executed Vulkan llvmpipe GPU scenarios, and both new cases on
+OpenGL llvmpipe. The three perspective GPU scenarios (existing and new) also
+executed natively on Windows D3D12 and Vulkan: three passes per backend, zero
+failures or skips. The positive bound case uses distinct nonzero TIC1/TSC2 and
+unusable descriptor zero. Missing selectors, unbound slots and a handle at the
+end of a short CB are checked before any host queue submission. An interrupted
+WSL interop launch was retried only after a successful native transport probe;
+its failed startup is not counted as a GPU pass.

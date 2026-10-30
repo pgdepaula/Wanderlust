@@ -2954,3 +2954,19 @@ NaN results use a quiet canonical encoding; NVIDIA does not specify single-
 precision NaN payload preservation. Other rounding, saturation, negation and
 absolute-value modifiers remain unsupported by this form. Existing initialized-
 register, dependency and fixed-latency checks still apply.
+
+A bounded perspective pixel profile supports three `IPA.PASS` reads (position W
+and user UV), a position-W reciprocal, two `FMUL.FTZ.RZ` operations and one
+`TEXS.NODEP` 2D RGBA implicit-LOD sample immediately followed by unconditional
+EXIT. The two result pairs export RG and BA into R0..R3. The entire operation
+ordering, register linkage, three-barrier wait masks, delays, yield and reuse
+controls are validated; these controls do not enable arbitrary shader scheduling.
+Outstanding destination readiness is tracked by barrier identity. Unreachable
+canonical parked padding remains distinct from executable branches.
+
+The TEXS immediate is a constant-buffer word offset. `SET_BINDLESS_TEXTURE`
+selects its runtime B197 CB slot; the stage's actual binding resolves the guest
+word, which supplies independent TIC/TSC indices through the existing descriptor
+path. There is no default CB slot, handle, image or sampler. Changing the slot,
+backing, or handle does not specialize shader code. A missing selector, unbound
+CB, invalid range or invalid descriptor makes the fragment unready before drawing.

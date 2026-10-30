@@ -161,7 +161,7 @@ impl Renderer {
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("translated resource layout"),
-                bind_group_layouts: &if program.texture_input().is_some() {
+                bind_group_layouts: &if program.uses_texture() {
                     vec![&layout, &self.texture_layout]
                 } else {
                     vec![&layout]
@@ -274,7 +274,29 @@ impl Renderer {
         }
         let mut data = f.data;
         let mut stamps = f.stamps;
-        for (n, reference) in f.program.constants().iter().enumerate() {
+        let bound_reference = f
+            .program
+            .bound_texture_offset()
+            .map(|offset| {
+                Ok(crate::shader_program::ConstantRef {
+                    slot: engine
+                        .bindless_texture_constant_slot()
+                        .ok_or_else(|| invalid("missing bound-texture CB selector"))?,
+                    offset,
+                })
+            })
+            .transpose()?;
+        if f.program.constants().len() + usize::from(bound_reference.is_some()) > stamps.len() {
+            return Err(invalid("too many fragment resource words"));
+        }
+        for (n, reference) in f
+            .program
+            .constants()
+            .iter()
+            .copied()
+            .chain(bound_reference)
+            .enumerate()
+        {
             let cb = engine.constant_buffer(group, reference.slot)?;
             if reference
                 .offset
@@ -306,8 +328,13 @@ impl Renderer {
             stamps[n] = Some(stamp);
         }
         // Resolve the uniform handle through actual descriptor pools before uploads.
-        let texture = if let Some(input) = f.program.texture_input() {
-            let n = input as usize * 4;
+        let texture = if let Some(input) = f
+            .program
+            .texture_input()
+            .map(usize::from)
+            .or_else(|| bound_reference.map(|_| f.program.constants().len()))
+        {
+            let n = input * 4;
             let handle = u32::from_le_bytes(data[n..n + 4].try_into().unwrap());
             let subchannel = engine.texture_subchannel()?;
             let stamp = engine.descriptor_stamp(subchannel, handle, map, changes)?;

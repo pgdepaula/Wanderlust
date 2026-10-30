@@ -359,3 +359,144 @@ fn guest_perspective_interpolation_and_stage_cache_identity() {
     eprintln!("Perspective counters {:?}", d.graphics_counters());
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+#[test]
+#[ignore = "requires actual GPU; bound TEXS reads B197-selected CB handles and independently checked perspective pixels"]
+fn bound_texs_multibarrier_perspective_runtime_handle_and_cache() {
+    let (mut data, mut words, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/texs-perspective.bin");
+    data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
+    let clip_w = [1., 2., 4.];
+    data[0x3000..0x3048].copy_from_slice(&vertex_bytes(clip_w));
+    let mut tic = TIC_RGBA;
+    tic[4] = (tic[4] & !0xffff) | 3;
+    tic[5] = (tic[5] & !0xffff) | 3;
+    // Distinct nonzero TIC/TSC indices, with index zero deliberately unusable.
+    data[..32].fill(0);
+    let descriptors = descriptor_bytes(tic, TSC_NEAREST);
+    data[0x20..0x40].copy_from_slice(&descriptors[..32]);
+    data[0x60..0x80].copy_from_slice(&descriptors[32..]);
+    data[0x50..0x54].copy_from_slice(&0x00200001u32.to_le_bytes());
+    data[0x90..0x94].copy_from_slice(&0x00200001u32.to_le_bytes());
+    for y in 0..4 {
+        for x in 0..4 {
+            for (k, value) in [7 + x * 60, 11 + y * 50, 31 + x * 9 + y * 5, 255]
+                .into_iter()
+                .enumerate()
+            {
+                data[0x1000 + gob_address(x as usize * 4 + k, y as usize, 16, 1)] = value;
+            }
+        }
+    }
+    let end = words.split_off(words.len() - 8);
+    method(&mut words, 0x2144, 0x600);
+    method(&mut words, 0x214c, 12);
+    method(&mut words, 0x157c, 1);
+    method(&mut words, 0x1564, 2);
+    method(&mut words, 0x2490, 0x21); // snapshot current selector into pixel CB slot 2
+    method(&mut words, 0x2608, 2); // runtime bound-texture selector, not hidden slot zero
+    words.extend(end);
+    let report = submit(&mut d, c, b, &mut data, &words);
+    assert!(report.fault.is_none(), "{:?}", report.fault);
+    assert_eq!(
+        &data[RT + (16 * W + 19) * 4..RT + (16 * W + 19) * 4 + 4],
+        &BG
+    );
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, clip_w, true);
+    d.retire(report.token).unwrap();
+    let before = d.graphics_counters();
+    let region = Region::new(&INSTRUMENTED_SYSTEM);
+    let mut tokens = Vec::with_capacity(32);
+    for _ in 0..32 {
+        let report = submit(&mut d, c, b, &mut data, &draw());
+        assert!(report.fault.is_none(), "{:?}", report.fault);
+        tokens.push(report.token);
+    }
+    let allocations = region.change();
+    let warm = d.graphics_counters();
+    for (a, z) in [
+        (warm.upload_bytes, before.upload_bytes),
+        (warm.readback_operations, before.readback_operations),
+        (warm.synchronization_points, before.synchronization_points),
+        (
+            warm.shader_module_allocations,
+            before.shader_module_allocations,
+        ),
+        (warm.pipeline_allocations, before.pipeline_allocations),
+        (warm.constant_guest_bytes, before.constant_guest_bytes),
+        (warm.descriptor_reads, before.descriptor_reads),
+    ] {
+        assert_eq!(a, z);
+    }
+    assert_eq!(warm.draw_commands, before.draw_commands + 32);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, clip_w, true);
+    for t in tokens {
+        d.retire(t).unwrap();
+    }
+    // Rebind to a different CB slot/address through B197, preserving the binary.
+    let mut rebind = Vec::new();
+    method(&mut rebind, 0x2388, 0x40080);
+    method(&mut rebind, 0x2490, 0x31);
+    method(&mut rebind, 0x2608, 3);
+    rebind.extend(draw());
+    let report = submit(&mut d, c, b, &mut data, &rebind);
+    assert!(report.fault.is_none(), "{:?}", report.fault);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check(&data, clip_w, true);
+    d.retire(report.token).unwrap();
+    assert_eq!(d.graphics_counters().shader_decodes, before.shader_decodes);
+    assert_eq!(
+        d.graphics_counters().pipeline_allocations,
+        before.pipeline_allocations
+    );
+    // The selected guest word is live: an invalid TIC/TSC handle must fault,
+    // rather than draw using the prior resident texture or a default index.
+    d.write_backing(b, 0x90, &u32::MAX.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let draws = d.graphics_counters().draw_commands;
+    let saved = data[RT..RT + SIZE].to_vec();
+    let report = submit(&mut d, c, b, &mut data, &draw());
+    assert!(report.fault.is_some());
+    assert_eq!(d.graphics_counters().draw_commands, draws);
+    assert_eq!(&data[RT..RT + SIZE], saved);
+    eprintln!(
+        "Bound TEXS warm32 Rust {allocations:?}; queue submissions {}, readbacks {}, waits {}",
+        warm.submissions - before.submissions,
+        warm.readback_operations - before.readback_operations,
+        warm.synchronization_points - before.synchronization_points
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+
+#[test]
+#[ignore = "requires actual GPU; missing bound-TEXS selector, CB binding and range fail before draw"]
+fn bound_texs_missing_selector_binding_and_short_range_are_not_defaults() {
+    for mode in 0..3 {
+        let (mut data, mut words, _) = fixture();
+        let (mut d, c, _, b, _) = driver();
+        let bin = include_bytes!("fixtures/maxwell/texs-perspective.bin");
+        data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
+        let end = words.split_off(words.len() - 8);
+        method(&mut words, 0x2144, 0x600);
+        method(&mut words, 0x214c, 12);
+        if mode != 0 {
+            method(&mut words, 0x2608, 2);
+        }
+        if mode == 2 {
+            method(&mut words, 0x2380, 16); // handle read starts exactly at end
+            method(&mut words, 0x2490, 0x21);
+        }
+        words.extend(end);
+        let saved = data[RT..RT + SIZE].to_vec();
+        let r = submit(&mut d, c, b, &mut data, &words);
+        assert!(r.fault.is_some(), "mode {mode}");
+        assert_eq!(d.graphics_counters().draw_commands, 0);
+        assert_eq!(d.graphics_counters().submissions, 0);
+        assert_eq!(&data[RT..RT + SIZE], saved);
+        assert!(d.publish(c, &mut mem(&mut data)).unwrap().is_none());
+        d.close(c, &mut mem(&mut data)).unwrap();
+    }
+}

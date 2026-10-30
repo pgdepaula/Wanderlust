@@ -1,0 +1,12 @@
+sched (st 0x1 yl wr 0x0) (st 0x1 yl wr 0x1) (st 0xf yl wr 0x2);
+ipa pass $r7 a[0x7c] $r255 $r255 $p7;
+ipa pass $r10 a[0x80] $r255 $r255 $p7;
+ipa pass $r11 a[0x84] $r255 $r255 $p7;
+sched (st 0xd yl wr 0x1 wt 0x1) (st 0x1 yl wt 0x2 ru 0x1) (st 0x2 yl wt 0x4);
+mufu rcp $r7 $r7;
+fmul ftz rz $r10 $r7 $r10;
+fmul ftz rz $r11 $r7 $r11;
+sched (st 0x1 yl ru 0x2) (st 0xf yl) (st 0xf yl);
+texs nodep $r2 $r0 $r10 $r11 0x4 t2d rgba;
+exit;
+bra 0x58;
