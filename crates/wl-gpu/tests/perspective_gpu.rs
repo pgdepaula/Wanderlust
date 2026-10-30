@@ -786,3 +786,169 @@ fn native_single_level_sampler_linear_clamp_and_srgb_gate() {
     assert_eq!(&data[RT..RT + SIZE], saved);
     d.close(c, &mut mem(&mut data)).unwrap();
 }
+
+// Independent coverage and affine varying oracle. No production shader or
+// resource conversion code computes the expected geometry or sample address.
+fn check_vertex_constants(data: &[u8], image: &[u8], translation: [f32; 2], u_scale: f32) {
+    let v = POS.map(|p| {
+        [
+            f64::from(p[0] + translation[0]),
+            f64::from(p[1] + translation[1]),
+        ]
+    });
+    let area = edge(v[0], v[1], v[2]);
+    let mut inside = 0;
+    for y in 0..H {
+        for x in 0..W {
+            let p = [
+                (x as f64 + 0.5) * 2. / 47. - 1.,
+                1. - (y as f64 + 0.5) * 2. / 29.,
+            ];
+            let b = [
+                edge(v[1], v[2], p) / area,
+                edge(v[2], v[0], p) / area,
+                edge(v[0], v[1], p) / area,
+            ];
+            if b.iter().any(|v| v.abs() < 0.006) {
+                continue;
+            }
+            let expected = if x < 47 && b.iter().all(|v| *v >= 0.) {
+                let u = (0..3)
+                    .map(|n| b[n] * f64::from(UV[n][0] * u_scale))
+                    .sum::<f64>()
+                    * 37.;
+                let v = (0..3).map(|n| b[n] * f64::from(UV[n][1])).sum::<f64>() * 19.;
+                if (u > 0. && u < 37. && (u - u.round()).abs() < 0.025)
+                    || (v > 0. && v < 19. && (v - v.round()).abs() < 0.025)
+                {
+                    continue;
+                }
+                inside += 1;
+                let n = (v.floor().clamp(0., 18.) as usize * 37
+                    + u.floor().clamp(0., 36.) as usize)
+                    * 4;
+                <[u8; 4]>::try_from(&image[n..n + 4]).unwrap()
+            } else {
+                BG
+            };
+            let n = RT + (y * W + x) * 4;
+            assert_eq!(&data[n..n + 4], &expected, "vertex CB pixel {x},{y}");
+        }
+    }
+    assert!(inside > 100);
+}
+#[test]
+#[ignore = "requires actual GPU; stage-isolated guest vertex constants and buffer replacement"]
+fn guest_vertex_constants_mutation_stage_isolation_and_uniform_replacement() {
+    let (mut data, mut words, image) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/vertex-constant-alu.bin");
+    data[0x4700..0x4700 + bin.len()].copy_from_slice(bin);
+    data[0x98..0x9c].copy_from_slice(&1f32.to_le_bytes());
+    let end = words.split_off(words.len() - 8);
+    // Pixel CB0 stays at GPU40040; vertex group0 CB0 points at GPU40080.
+    for (m, v) in [(0x2044, 0x700), (0x2388, 0x40080), (0x2410, 1)] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let report = submit(&mut d, c, b, &mut data, &words);
+    assert!(report.fault.is_none(), "{:?}", report.fault);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_vertex_constants(&data, &image, [0., 0.], 1.);
+    d.retire(report.token).unwrap();
+    let cold = d.graphics_counters();
+    let mut tokens = Vec::new();
+    for _ in 0..32 {
+        let r = submit(&mut d, c, b, &mut data, &draw());
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        tokens.push(r.token);
+    }
+    let warm = d.graphics_counters();
+    assert_eq!(warm.constant_guest_bytes, cold.constant_guest_bytes);
+    assert_eq!(warm.upload_bytes, cold.upload_bytes);
+    assert_eq!(warm.readback_operations, cold.readback_operations);
+    assert_eq!(warm.synchronization_points, cold.synchronization_points);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    for t in tokens {
+        d.retire(t).unwrap();
+    }
+    let patch: Vec<_> = [0.25f32, -0.125, 0.5]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect();
+    d.write_backing(b, 0x90, &patch, &mut mem(&mut data))
+        .unwrap();
+    let bg: Vec<_> = (0..W * H).flat_map(|_| BG).collect();
+    d.write_backing(b, RT as u64, &bg, &mut mem(&mut data))
+        .unwrap();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_vertex_constants(&data, &image, [0.25, -0.125], 0.5);
+    d.retire(r.token).unwrap();
+    let changed = d.graphics_counters();
+    assert_eq!(changed.shader_decodes, cold.shader_decodes);
+    assert_eq!(changed.vertex_shader_decodes, cold.vertex_shader_decodes);
+    assert_eq!(changed.pipeline_allocations, cold.pipeline_allocations);
+    assert_eq!(changed.constant_guest_bytes, warm.constant_guest_bytes + 12);
+    // Replace PS + its shared uniform allocation, then return to textured PS.
+    // Unchanged vertex constants must be restored into the replacement buffer.
+    for offset in [0x400, 0] {
+        d.write_backing(b, RT as u64, &bg, &mut mem(&mut data))
+            .unwrap();
+        let mut commands = Vec::new();
+        method(&mut commands, 0x2144, offset);
+        commands.extend(draw());
+        let r = submit(&mut d, c, b, &mut data, &commands);
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        d.publish(c, &mut mem(&mut data)).unwrap();
+        if offset == 0 {
+            check_vertex_constants(&data, &image, [0.25, -0.125], 0.5);
+        }
+        d.retire(r.token).unwrap();
+    }
+    // A changed vertex binary now references zero-filled words. The new
+    // resident shadow is zero too: buffer identity still must force the upload.
+    let mut replacement = bin.to_vec();
+    for bundle in replacement[80..].chunks_exact_mut(32) {
+        for instruction in bundle[8..].chunks_exact_mut(8) {
+            let word = u64::from_le_bytes(instruction.try_into().unwrap());
+            if matches!(word >> 48, 0x4c58 | 0x4c68) {
+                instruction.copy_from_slice(&(word + (16u64 << 20)).to_le_bytes());
+            }
+        }
+    }
+    d.write_backing(b, 0x4700, &replacement, &mut mem(&mut data))
+        .unwrap();
+    d.write_backing(b, RT as u64, &bg, &mut mem(&mut data))
+        .unwrap();
+    let mut rebound = Vec::new();
+    method(&mut rebound, 0x2380, 128);
+    method(&mut rebound, 0x2410, 1);
+    rebound.extend(draw());
+    let r = submit(&mut d, c, b, &mut data, &rebound);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_vertex_constants(&data, &image, [0., 0.], 0.);
+    d.retire(r.token).unwrap();
+    // Failed new binding must not draw with previously resident constants.
+    let prior = d.graphics_counters().draw_commands;
+    let saved = data[RT..RT + SIZE].to_vec();
+    let mut unbound = Vec::new();
+    method(&mut unbound, 0x2410, 0);
+    unbound.extend(draw());
+    let r = submit(&mut d, c, b, &mut data, &unbound);
+    assert!(r.fault.is_some());
+    assert_eq!(d.graphics_counters().draw_commands, prior);
+    assert_eq!(&data[RT..RT + SIZE], &saved);
+    eprintln!(
+        "Vertex CB warm32: guest {} upload {} queues {} readbacks {} waits {}; mutation {} bytes",
+        warm.constant_guest_bytes - cold.constant_guest_bytes,
+        warm.upload_bytes - cold.upload_bytes,
+        warm.submissions - cold.submissions,
+        warm.readback_operations - cold.readback_operations,
+        warm.synchronization_points - cold.synchronization_points,
+        changed.constant_guest_bytes - warm.constant_guest_bytes
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}

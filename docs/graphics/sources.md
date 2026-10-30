@@ -2621,3 +2621,11 @@ corroborates that a sampler without its sRGB bit selects the non-sRGB view of an
 sRGB TIC. NVIDIA/Nouveau's pinned gm204 B197 method initialization explicitly
 contains `0x002040 = 0x00000011` for vertex B; no shader address is supplied by
 that initialization entry.
+
+Vertex direct-CB FADD/FMUL use the pinned envytools GM107 `0x4c58`/`0x4c68`
+operand definitions already used for pixel constant arithmetic. The independent
+`vertex-constant-alu.asm` fixture uses ordinary RN operations and the established
+VTG input/output maps; no FTZ, source modifiers or FMA are implied by this subset.
+The pinned B197 `BIND_GROUP_CONSTANT_BUFFER` stage-group definition controls
+resource selection. Host allocation size is an implementation packing choice,
+not an emulated hardware constant-buffer limit.

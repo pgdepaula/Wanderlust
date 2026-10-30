@@ -19,7 +19,7 @@ pub(crate) struct ResidentFragment {
     pub texture_binding: Option<wgpu::BindGroup>,
     texture_id: Option<crate::texture::TextureId>,
     descriptor: Option<(crate::maxwell::DescriptorStamp, crate::texture::TextureDesc)>,
-    buffer: wgpu::Buffer,
+    pub(crate) buffer: wgpu::Buffer,
     data: [u8; 256],
     stamps: [Option<Stamp>; 64],
 }
@@ -134,18 +134,18 @@ impl Renderer {
                 label: Some("translated constant reads"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: wgpu::BufferSize::new(256),
+                        min_binding_size: wgpu::BufferSize::new(512),
                     },
                     count: None,
                 }],
             });
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("packed Maxwell constant words"),
-            size: 256,
+            size: 512,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });

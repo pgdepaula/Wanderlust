@@ -184,7 +184,7 @@ fn both_operators_cover_slots_offset_boundaries_aliases_rz_and_high_registers() 
     );
 }
 #[test]
-fn only_fragment_unmodified_rn_positive_direct_constant_forms_are_accepted() {
+fn only_unmodified_rn_positive_direct_constant_forms_are_accepted() {
     for operator in [F::Add, F::Multiply] {
         // Bits39..50 are rounding/scales/FTZ/DNZ/ABS/NEG/CC/SAT, not offset payload.
         for bit in [
@@ -205,7 +205,7 @@ fn only_fragment_unmodified_rn_positive_direct_constant_forms_are_accepted() {
             VertexProgram::decode(&program(vertex, &code))
                 .unwrap_err()
                 .to_string()
-                .contains("unsupported instruction")
+                .contains("unready fragment exports")
         );
     }
 }

@@ -4294,3 +4294,15 @@ reallocation for 10,000 real macro invocations, independently of harness threads
 No GPU transfer or process-wide zero-allocation claim follows from that result.
 Strict package Clippy and workspace formatting passed; workspace tests were not
 run for this delivery.
+
+Vertex constant resources: 473 default-feature CPU tests and 467 without the
+backend passed. Six perspective/resource scenarios executed on Vulkan llvmpipe
+and six each on native Windows D3D12 and Vulkan, all passing; the new vertex-CB
+scenario also passed on OpenGL. An independent affine barycentric/nearest-sample
+oracle checks translated geometry and UVs. Changing 12 guest bytes changes
+position and sampling with no shader/pipeline recompilation. Thirty-two warm
+draws add 32 queue submissions, zero constant reads/uploads, readbacks or waits.
+Replacing the fragment uniform and switching vertex references to zero-filled
+words both preserve correct output; an unbound vertex CB faults before drawing.
+Stage-zero and pixel CB0 resolve separate guest addresses. Strict package Clippy
+and workspace formatting passed. Workspace tests were not executed for this unit.

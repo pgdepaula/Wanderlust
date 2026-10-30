@@ -3022,3 +3022,12 @@ addresses, offsets, register allocation, inputs and constants still come from
 guest state. Diagnostic code acquisition separates a selected vertex program's
 address from its execution register budget; incomplete allocation never authorizes
 a draw or invents shader code.
+
+Guest-selected vertex programs can read the same unmodified RN direct-CB FADD
+and FMUL forms as fragment programs. B197's vertex stage group determines the
+binding; pixel bindings cannot supply vertex constants. The shared uniform
+allocation reserves independent 256-byte word tables per stage. Mutable data
+stays outside shader/pipeline identities. Canonical backing stamps avoid warm
+reads/uploads; changed shader code or a replaced shared uniform allocation forces
+required vertex words to be uploaded, including zeros. The direct host vertex
+harness rejects resource-bearing programs without guest state synchronization.

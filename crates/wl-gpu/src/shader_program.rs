@@ -862,12 +862,10 @@ impl Program {
                         bits,
                         operator,
                     }
-                } else if !vertex
-                    && matches!(
-                        word & !0x0000007dfff0ffff,
-                        0x4c58000000070000 | 0x4c68000000070000
-                    )
-                {
+                } else if matches!(
+                    word & !0x0000007dfff0ffff,
+                    0x4c58000000070000 | 0x4c68000000070000
+                ) {
                     let src = ((word >> 8) & 255) as u8;
                     if write_barrier != 7 || !initialized[src as usize] || pending[src as usize] {
                         return Err(fail(
@@ -1779,6 +1777,7 @@ impl Program {
         let mut s = stage_source(
             &self.operations,
             "struct Constants { words: array<vec4<u32>,16> };\n@group(0) @binding(0) var<uniform> cb: Constants;\n",
+            false,
         );
         if self.uses_texture() {
             s.push_str("@group(1) @binding(0) var image:texture_2d<f32>; @group(1) @binding(1) var image_sampler:sampler;\n");
@@ -1856,7 +1855,7 @@ impl Program {
                     emit_float_immediate(&mut s, dst, src, bits, operator);
                 }
                 Operation::FloatConstant { dst, src, input, operator } => {
-                    emit_float_constant(&mut s, dst, src, input, operator);
+                    emit_float_constant(&mut s, dst, src, input, operator, false);
                 }
                 Operation::Integer { dst, left, right, operator } => {
                     emit_integer(&mut s, dst, left, right, operator);
@@ -1975,6 +1974,9 @@ impl VertexProgram {
     pub fn required_registers(&self) -> u16 {
         self.0.required_registers()
     }
+    pub fn constants(&self) -> &[ConstantRef] {
+        &self.0.constants
+    }
     pub fn operations(&self) -> &[Operation] {
         self.0.operations()
     }
@@ -1998,7 +2000,7 @@ impl VertexProgram {
         } else {
             "struct Vertex { @builtin(position) position:vec4<f32>, @location(0) @interpolate(linear) uv:vec2<f32> };\n@vertex fn vs_main(@location(0) a0:vec4<f32>)->Vertex {var r:array<u32,256>;var v:Vertex;\n"
         };
-        let mut s = stage_source(self.operations(), interface);
+        let mut s = stage_source(self.operations(), interface, !self.constants().is_empty());
         if self.operations().iter().any(|op| {
             matches!(
                 op,
@@ -2086,6 +2088,14 @@ impl VertexProgram {
                         FloatOperator::Multiply => "*",
                     };
                     writeln!(s,"r[{dst}]=bitcast<u32>(bitcast<f32>(r[{left}]) {symbol} bitcast<f32>(r[{right}]));").unwrap();
+                }
+                Operation::FloatConstant {
+                    dst,
+                    src,
+                    input,
+                    operator,
+                } => {
+                    emit_float_constant(&mut s, dst, src, input, operator, true);
                 }
                 Operation::FloatImmediate {
                     dst,
@@ -2242,7 +2252,7 @@ impl VertexProgram {
     }
 }
 
-fn stage_source(operations: &[Operation], header: &str) -> String {
+fn stage_source(operations: &[Operation], header: &str, vertex_constants: bool) -> String {
     // Global helper must precede both entry points; vertex headers already open
     // the function body. Existing shader text stays identical without helpers.
     let helper = if operations
@@ -2269,6 +2279,9 @@ fn stage_source(operations: &[Operation], header: &str) -> String {
         .any(|op| matches!(op, Operation::MultiplyRtz { .. }))
     {
         source.push_str(include_str!("fmul_rtz.wgsl"));
+    }
+    if vertex_constants {
+        source.push_str("struct VertexConstants { words:array<vec4<u32>,32> };\n@group(0) @binding(0) var<uniform> vertex_cb:VertexConstants;\n");
     }
     source.push_str(header);
     source
@@ -2674,16 +2687,24 @@ fn emit_add_immediate(s: &mut String, dst: u8, src: u8, bits: u32, negate_src: b
     }
 }
 
-fn emit_float_constant(s: &mut String, dst: u8, src: u8, input: u8, operator: FloatOperator) {
+fn emit_float_constant(
+    s: &mut String,
+    dst: u8,
+    src: u8,
+    input: u8,
+    operator: FloatOperator,
+    vertex: bool,
+) {
     use std::fmt::Write;
     let symbol = match operator {
         FloatOperator::Add => "+",
         FloatOperator::Multiply => "*",
     };
+    let name = if vertex { "vertex_cb" } else { "cb" };
+    let row = u16::from(input / 4) + if vertex { 16 } else { 0 };
     writeln!(
         s,
-        "r[{dst}]=bitcast<u32>(bitcast<f32>(r[{src}]) {symbol} bitcast<f32>(cb.words[{}][{}]));",
-        input / 4,
+        "r[{dst}]=bitcast<u32>(bitcast<f32>(r[{src}]) {symbol} bitcast<f32>({name}.words[{row}][{}]));",
         input % 4
     )
     .unwrap();

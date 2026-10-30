@@ -47,6 +47,11 @@ impl BackingStamp {
 pub(crate) struct SelectedVertex {
     stamp: BackingStamp,
     program: VertexProgram,
+    constant_data: [u8; 256],
+    constant_stamps: [Option<BackingStamp>; 64],
+    // Exact typed buffer identity. A changed program or replaced fragment
+    // uniform allocation must upload even when new constant values are zero.
+    constant_buffer: Option<wgpu::Buffer>,
 }
 
 pub(crate) struct ResidentVertex {
@@ -76,6 +81,13 @@ impl Renderer {
         stride: u64,
         offsets: [u64; 2],
     ) -> Result<()> {
+        self.vertex_ready = false;
+        if !program.constants().is_empty() {
+            self.vertex = None;
+            return Err(invalid(
+                "vertex constants require guest stage binding and synchronization",
+            ));
+        }
         self.set_vertex_program_raster(
             program,
             stride,
@@ -319,6 +331,85 @@ impl Renderer {
         }
         Ok(())
     }
+    fn sync_vertex_constants(
+        &mut self,
+        engine: &Maxwell3d,
+        group: u8,
+        map: &AddressMap,
+        memory: &impl GuestMemory,
+        changes: &TextureChanges,
+    ) -> Result<()> {
+        let selected = self
+            .selected_vertex
+            .as_mut()
+            .ok_or_else(|| invalid("no selected vertex constants"))?;
+        if selected.program.constants().is_empty() {
+            return Ok(());
+        }
+        let fragment = self
+            .resource_fragment
+            .as_ref()
+            .ok_or_else(|| invalid("missing shared constant buffer"))?;
+        let references = selected.program.constants();
+        if references.len() > 64 {
+            return Err(invalid("too many vertex constant words"));
+        }
+        let mut data = selected.constant_data;
+        let mut stamps = selected.constant_stamps;
+        for (n, reference) in references.iter().enumerate() {
+            let cb = engine.constant_buffer(group, reference.slot)?;
+            if reference
+                .offset
+                .checked_add(4)
+                .is_none_or(|end| end > cb.size)
+            {
+                return Err(invalid("vertex constant exceeds bound size"));
+            }
+            let address = cb
+                .address
+                .0
+                .checked_add(u64::from(reference.offset))
+                .map(GpuAddress)
+                .ok_or_else(|| invalid("vertex constant address overflow"))?;
+            let cached = stamps[n]
+                .as_mut()
+                .is_some_and(|stamp| stamp.matches(address, map, changes));
+            if !cached {
+                let word = cb.read_word(reference.offset, map, memory)?;
+                data[n * 4..n * 4 + 4].copy_from_slice(&word.to_le_bytes());
+                stamps[n] = Some(BackingStamp::new(address, 4, map, changes)?);
+                self.counters.constant_guest_bytes += 4;
+                self.counters.guest_to_host_bytes += 4;
+            }
+        }
+        let replaced = selected.constant_buffer.as_ref() != Some(&fragment.buffer);
+        let changed = |n: usize| data[n * 4..n * 4 + 4] != selected.constant_data[n * 4..n * 4 + 4];
+        let first = if replaced {
+            Some(0)
+        } else {
+            (0..references.len()).find(|n| changed(*n))
+        };
+        if let Some(first) = first {
+            let last = if replaced {
+                references.len() - 1
+            } else {
+                (first..references.len()).rfind(|n| changed(*n)).unwrap()
+            };
+            let bytes = &data[first * 4..(last + 1) * 4];
+            self.queue
+                .write_buffer(&fragment.buffer, 256 + (first * 4) as u64, bytes);
+            self.counters.constant_upload_bytes += bytes.len() as u64;
+            self.counters.upload_bytes += bytes.len() as u64;
+            self.counters.upload_calls += 1;
+            self.counters.staging_allocations += 1;
+        }
+        if replaced {
+            selected.constant_buffer = Some(fragment.buffer.clone());
+        }
+        selected.constant_data = data;
+        selected.constant_stamps = stamps;
+        Ok(())
+    }
     /// Resolve B197 vertex stage/stream through checked guest mappings. No host
     /// geometry or stage binary argument is accepted. Draw/target remain separate.
     pub fn sync_selected_vertices(
@@ -351,7 +442,13 @@ impl Renderer {
             self.counters.vertex_shader_decodes += 1;
             let program = VertexProgram::decode(&binary)?;
             let stamp = BackingStamp::new(source.address, binary.len(), map, changes)?;
-            self.selected_vertex = Some(SelectedVertex { stamp, program });
+            self.selected_vertex = Some(SelectedVertex {
+                stamp,
+                program,
+                constant_data: [0; 256],
+                constant_stamps: [None; 64],
+                constant_buffer: None,
+            });
         } else {
             self.counters.shader_cache_hits += 1;
         }
@@ -364,6 +461,8 @@ impl Renderer {
         if selected.program.required_registers() > u16::from(source.registers) {
             return Err(invalid("vertex register allocation insufficient"));
         }
+        self.sync_vertex_constants(engine, source.group, map, memory, changes)?;
+        let selected = self.selected_vertex.as_ref().unwrap();
         let fragment = self
             .resource_fragment
             .as_ref()
