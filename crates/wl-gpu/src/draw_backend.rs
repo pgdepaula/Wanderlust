@@ -778,6 +778,24 @@ impl Renderer {
                 d.version = changes.stamp(d.guest.0..d.guest.0 + d.size as u64);
             }
         }
+        // Diagnostic reads cannot request a coherence barrier: this source has
+        // its own discarded hazard flag and refuses GPU-newer backing reads.
+        {
+            let diagnostic_source = SourceMemory {
+                memory: &*memory,
+                pending: [
+                    self.guest_target.filter(|_| self.color_pending),
+                    self.guest_depth.filter(|_| self.depth_pending),
+                ],
+                hazard: Cell::new(false),
+            };
+            crate::shader_backend::capture_selected_program_diagnostics(
+                engine,
+                map,
+                &diagnostic_source,
+                &mut self.counters,
+            );
+        }
         self.hardware_raster = Some(raster);
         let result = (|| {
             let mut command = None;
@@ -972,5 +990,67 @@ impl Renderer {
             }
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_source_tests {
+    use super::*;
+    #[test]
+    fn diagnostic_overlap_cannot_signal_the_execution_barrier_or_read_stale_ram() {
+        struct Observed {
+            reads: Cell<usize>,
+            bytes: [u8; 16],
+        }
+        impl GuestMemory for Observed {
+            fn read(&self, address: GuestAddress, size: usize) -> Result<&[u8]> {
+                self.reads.set(self.reads.get() + 1);
+                let at = usize::try_from(address.0).unwrap();
+                self.bytes
+                    .get(at..at + size)
+                    .ok_or_else(|| invalid("test read bounds"))
+            }
+        }
+        let memory = Observed {
+            reads: Cell::new(0),
+            bytes: [0x55; 16],
+        };
+        let pending = [
+            Some(GuestTargetStamp {
+                guest: GuestAddress(4),
+                size: 4,
+                version: (0, 0),
+                surface: crate::raster::SurfaceStorage {
+                    address: GpuAddress(0x10000),
+                    width: 1,
+                    height: 1,
+                    layout: crate::raster::ColorLayout::Pitch { bytes_per_row: 4 },
+                    format: crate::raster::SurfaceFormat::Color(crate::raster::ColorFormat::Rgba8),
+                },
+            }),
+            None,
+        ];
+        let execution = SourceMemory {
+            memory: &memory,
+            pending,
+            hazard: Cell::new(false),
+        };
+        {
+            let diagnostic = SourceMemory {
+                memory: &memory,
+                pending,
+                hazard: Cell::new(false),
+            };
+            assert!(diagnostic.read(GuestAddress(4), 4).is_err());
+            assert!(diagnostic.hazard.get());
+        }
+        assert!(!execution.hazard.get());
+        assert_eq!(memory.reads.get(), 0);
+        assert_eq!(execution.read(GuestAddress(8), 4).unwrap(), [0x55; 4]);
+        assert!(!execution.hazard.get());
+        assert_eq!(memory.reads.get(), 1);
+        assert!(execution.read(GuestAddress(4), 4).is_err());
+        assert!(execution.hazard.get());
+        assert_eq!(memory.reads.get(), 1);
     }
 }

@@ -5,6 +5,8 @@ use crate::{Result, invalid};
 pub enum Format {
     Rgba8Unorm,
     Rgba8Srgb,
+    /// Unsigned 11/11/10-bit floating point RGB; sampled alpha is one.
+    Rg11b10Float,
     Bc1Rgba,
     Bc1RgbaSrgb,
     Bc3Rgba,
@@ -14,7 +16,7 @@ pub enum Format {
 impl Format {
     pub fn block(self) -> (u32, u32, u32) {
         match self {
-            Self::Rgba8Unorm | Self::Rgba8Srgb => (1, 1, 4),
+            Self::Rgba8Unorm | Self::Rgba8Srgb | Self::Rg11b10Float => (1, 1, 4),
             Self::Bc1Rgba | Self::Bc1RgbaSrgb => (4, 4, 8),
             Self::Bc3Rgba | Self::Astc4x4 | Self::Astc4x4Srgb => (4, 4, 16),
         }

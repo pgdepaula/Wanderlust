@@ -402,6 +402,38 @@ impl Renderer {
     }
 }
 
+/// Opt-in first-draw acquisition of both selected stages, before resource
+/// validation can stop normal execution. No decode, cache or GPU state changes.
+/// Caller must use a separate protected source whose hazard flag is discarded.
+pub(crate) fn capture_selected_program_diagnostics(
+    engine: &Maxwell3d,
+    map: &AddressMap,
+    memory: &impl GuestMemory,
+    counters: &mut crate::Counters,
+) {
+    use std::sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    };
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    static CLAIMED: AtomicBool = AtomicBool::new(false);
+    if !*ENABLED.get_or_init(|| std::env::var_os("WL_GPU_SHADER_DIAGNOSTICS_DIR").is_some())
+        || CLAIMED.swap(true, Ordering::Relaxed)
+    {
+        return;
+    }
+    for (source, vertex) in [
+        (engine.vertex_program().map(|s| s.address), true),
+        (engine.fragment_program().map(|s| s.address), false),
+    ] {
+        if let Ok(address) = source {
+            // Acquisition contributes to existing guest/shader-byte counters;
+            // file failures and unsupported headers never alter draw validity.
+            let _ = read_program(address, map, memory, counters, vertex);
+        }
+    }
+}
+
 pub(crate) fn read_program(
     source: GpuAddress,
     map: &AddressMap,

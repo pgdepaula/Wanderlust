@@ -2977,3 +2977,24 @@ explicit zero write. Engine binding, descriptor pool bounds, mapping validation
 and all TIC/TSC field checks remain mandatory. Decode failures identify the
 actual descriptor index and little-endian words, using the already acquired
 metadata without reading texture contents or adding guest reads.
+
+Sampled block-linear unsigned R11G11B10 float TICs use native
+`Rg11b10Ufloat` host textures: one four-byte texel, RGB identity swizzles and
+constant float-one alpha. Texture contents remain packed floating point through
+upload and sampling; no RGBA8 conversion is inserted. sRGB and other channel
+interpretations of this packed format remain unsupported.
+
+TIC sector promotion is accepted as a cache hint. The implemented border profiles
+are zero and sampler-color; only the already-supported clamp-to-edge samplers
+execute. LOD quality and fine/coarse anisotropic spread functions are admitted
+only with one mip and header/sampler anisotropy one, where they cannot affect
+level or footprint selection. Nonzero quality fields with multiple mips remain
+explicitly unsupported.
+
+With `WL_GPU_SHADER_DIAGNOSTICS_DIR`, the first hardware draw attempts bounded
+acquisition of both selected shader stages before resource validation. This is
+private acquisition evidence, not execution or shader-cache population. Diagnostic
+reads contribute guest/shader-byte counters and use a separate protected source:
+a GPU-newer overlap is skipped without signaling an execution coherence barrier.
+The existing 4-KiB-code and 64-file capture bounds apply. Disabled diagnostics do
+not fetch guest programs; file errors cannot change draw validity.

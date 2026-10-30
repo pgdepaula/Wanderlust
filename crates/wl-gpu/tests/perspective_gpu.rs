@@ -166,6 +166,16 @@ fn edge(a: [f64; 2], b: [f64; 2], p: [f64; 2]) -> f64 {
     (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
 }
 fn check(data: &[u8], clip_w: [f32; 3], perspective: bool) {
+    check_texels(data, clip_w, perspective, |tx, ty| {
+        [7 + tx * 60, 11 + ty * 50, 31 + tx * 9 + ty * 5, 255]
+    });
+}
+fn check_texels(
+    data: &[u8],
+    clip_w: [f32; 3],
+    perspective: bool,
+    texel: impl Fn(u8, u8) -> [u8; 4],
+) {
     let v = POS.map(|p| p.map(f64::from));
     let area = edge(v[0], v[1], v[2]);
     let mut checked = 0;
@@ -204,7 +214,7 @@ fn check(data: &[u8], clip_w: [f32; 3], perspective: bool) {
                 let tx = (uv[0] * 4.).floor().clamp(0., 3.) as u8;
                 let ty = (uv[1] * 4.).floor().clamp(0., 3.) as u8;
                 checked += 1;
-                [7 + tx * 60, 11 + ty * 50, 31 + tx * 9 + ty * 5, 255]
+                texel(tx, ty)
             } else {
                 BG
             };
@@ -502,4 +512,123 @@ fn bound_texs_missing_selector_binding_and_short_range_are_not_defaults() {
         assert!(d.publish(c, &mut mem(&mut data)).unwrap().is_none());
         d.close(c, &mut mem(&mut data)).unwrap();
     }
+}
+
+#[test]
+#[ignore = "requires actual GPU; native block-linear packed HDR sampled through bound Maxwell TEXS"]
+fn packed_hdr_bound_texs_pixels_padding_mutation_and_warm_resources() {
+    let (mut data, mut words, _) = fixture();
+    words.drain(2..4); // no Maxwell A compatibility selection on B197
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/texs-perspective.bin");
+    data[0x4600..0x4600 + bin.len()].copy_from_slice(bin);
+    let clip_w = [1., 2., 4.];
+    data[0x3000..0x3048].copy_from_slice(&vertex_bytes(clip_w));
+    // Synthetic 4x4 RGB unsigned packed float, alpha=one, no commercial data.
+    let tic = [
+        0x78d7ffa1, 0x10000, 0x00600000, 0x00070000, 0xe8800003, 0x80000003, 0x03000000, 0,
+    ];
+    let descriptors = descriptor_bytes(tic, TSC_NEAREST);
+    data[..32].fill(0);
+    data[0x20..0x40].copy_from_slice(&descriptors[..32]);
+    data[0x60..0x80].copy_from_slice(&descriptors[32..]);
+    data[0x50..0x54].copy_from_slice(&0x00200001u32.to_le_bytes());
+    data[0x1000..0x1200].fill(0xa5);
+    // Independent exact binary encodings for .25, .5, .75 and 2.0.
+    let f11 = [13u32 << 6, 14 << 6, (14 << 6) | 32, 16 << 6];
+    for y in 0..4 {
+        for x in 0..4 {
+            let packed = f11[x] | (f11[y] << 11) | ((14 << 5) << 22);
+            let at = 0x1000 + gob_address(x * 4, y, 16, 1);
+            data[at..at + 4].copy_from_slice(&packed.to_le_bytes());
+        }
+    }
+    let mut source_before = data[0x1000..0x1200].to_vec();
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x2144, 0x600),
+        (0x214c, 12),
+        (0x2490, 0x21),
+        (0x2608, 2),
+        (0x157c, 1),
+        (0x1564, 2),
+    ] {
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let r = submit(&mut d, c, b, &mut data, &words);
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    let expected = |x: u8, y: u8| {
+        [
+            [64, 128, 191, 255][x as usize],
+            [64, 128, 191, 255][y as usize],
+            128,
+            255,
+        ]
+    };
+    check_texels(&data, clip_w, true, expected);
+    assert_eq!(&data[0x1000..0x1200], source_before);
+    d.retire(r.token).unwrap();
+    let before = d.graphics_counters();
+    let mut tokens = Vec::with_capacity(32);
+    for _ in 0..32 {
+        let r = submit(&mut d, c, b, &mut data, &draw());
+        assert!(r.fault.is_none());
+        tokens.push(r.token);
+    }
+    let warm = d.graphics_counters();
+    for (after, before) in [
+        (warm.upload_bytes, before.upload_bytes),
+        (warm.texture_conversions, before.texture_conversions),
+        (warm.readback_operations, before.readback_operations),
+        (warm.synchronization_points, before.synchronization_points),
+        (warm.pipeline_allocations, before.pipeline_allocations),
+        (
+            warm.shader_module_allocations,
+            before.shader_module_allocations,
+        ),
+    ] {
+        assert_eq!(after, before);
+    }
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_texels(&data, clip_w, true, expected);
+    for t in tokens {
+        d.retire(t).unwrap();
+    }
+    // Mutate exactly one packed guest texel. Native texture values stay float
+    // until the RGBA8 target performs its independently checked quantization.
+    let at = 0x1000 + gob_address(4, 0, 16, 1);
+    let packed = f11[3] | (f11[0] << 11) | ((14 << 5) << 22);
+    d.write_backing(b, at as u64, &packed.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    source_before[at - 0x1000..at - 0x1000 + 4].copy_from_slice(&packed.to_le_bytes());
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none());
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_texels(&data, clip_w, true, |x, y| {
+        let mut rgba = expected(x, y);
+        if x == 1 && y == 0 {
+            rgba[0] = 255;
+        }
+        rgba
+    });
+    assert_eq!(&data[0x1000..0x1200], source_before);
+    assert_eq!(
+        d.graphics_counters().pipeline_allocations,
+        before.pipeline_allocations
+    );
+    assert_eq!(d.graphics_counters().shader_decodes, before.shader_decodes);
+    d.retire(r.token).unwrap();
+    eprintln!(
+        "Packed HDR: cold guest bytes {}, deswizzle {}, uploads {}; warm32 queues {}, readbacks {}, waits {}; final counters {:?}",
+        before.guest_texture_bytes,
+        before.deswizzle_bytes,
+        before.upload_bytes,
+        warm.submissions - before.submissions,
+        warm.readback_operations - before.readback_operations,
+        warm.synchronization_points - before.synchronization_points,
+        d.graphics_counters()
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
 }

@@ -4254,3 +4254,24 @@ The CPU model checks descriptor resolution before any selection write, rejection
 of explicit legacy format without state mutation, unbound-engine rejection and
 acquired TIC/TSC failure metadata. Strict package Clippy and workspace formatting
 checks passed; a workspace test run was not performed for this change.
+
+Packed sampled HDR: 470 CPU tests with the backend, 464 without, and 215 explicitly
+executed Vulkan llvmpipe GPU scenarios passed. All four perspective scenarios
+executed natively on Windows D3D12 and Vulkan; the HDR case also passed on
+OpenGL. The independent oracle uses exact packed encodings of .25, .5, .75 and
+2.0, homogeneous interpolation and literal RGBA8 expectations, including alpha
+one and HDR clamping. A texel mutation changes the expected samples without
+recompiling shaders; guest source padding remains intact. Cold texture acquisition
+reads 512 tiled bytes, deswizzles 64 logical bytes and uploads 64 texture bytes.
+Thirty-two repeated draws add 32 submissions and no uploads/conversions,
+readbacks, waits, shader modules or pipelines. Explicit publication remains
+separate from drawing.
+
+With first-draw diagnostics enabled, a deliberately unbound texture CB still
+faults with no draw or submission; both captured synthetic stage binaries match
+the independently assembled inputs byte-for-byte. An unwritable diagnostic path
+leaves the HDR rasterization/mutation test passing. A protected-source unit test
+proves diagnostic overlap cannot read GPU-older RAM or set the execution source's
+barrier flag. These are acquisition diagnostics, not proof of shader execution.
+Strict package Clippy and workspace formatting checks passed. Workspace tests
+were not run for this delivery.

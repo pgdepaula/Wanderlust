@@ -70,7 +70,7 @@ fn literal_modern_tic_tsc_fields_and_rejections() {
         (2, 1 << 16),
         (3, 1),
         (3, 1 << 6),
-        (4, 1 << 27),
+        (4, 1 << 16),
         (5, 1 << 16),
         (6, 1),
         (7, 1 << 8),
@@ -2040,4 +2040,42 @@ fn invalid_descriptor_reports_acquired_metadata_without_relaxing_validation() {
             .to_string();
         assert!(error.contains(&format!("{kind} index=0 words=")), "{error}");
     }
+}
+
+#[test]
+fn native_packed_float_tic_and_inert_single_mip_header_hints() {
+    // Synthetic 7x9 unsigned RGB float image, alpha swizzled to float one.
+    let base = [
+        0x78d7ffa1, 0x10000, 0x00600000, 0x00070008, 0xe8800006, 0x80000008, 0x03000000, 0,
+    ];
+    let image = TextureImage::decode(base).unwrap();
+    assert_eq!(image.format, Format::Rg11b10Float);
+    assert_eq!((image.width, image.height, image.mip_count), (7, 9, 1));
+    assert_eq!(image.format.block(), (1, 1, 4));
+    let clean = [base[0], base[1], base[2], 8, 0x00800006, base[5], 0, 0];
+    assert_eq!(image, TextureImage::decode(clean).unwrap());
+    for (word, bit) in [
+        (0, 7),
+        (0, 28),
+        (0, 31),
+        (3, 15),
+        (3, 19),
+        (4, 16),
+        (4, 22),
+        (6, 0),
+        (6, 27),
+    ] {
+        let mut bad = base;
+        bad[word] ^= 1 << bit;
+        assert!(TextureImage::decode(bad).is_err(), "{word}/{bit}");
+    }
+    for border in 1..7 {
+        let mut bad = base;
+        bad[4] = (bad[4] & 0x1fffffff) | (border << 29);
+        assert!(TextureImage::decode(bad).is_err());
+    }
+    let mut mip = base;
+    mip[3] |= 1 << 28;
+    mip[7] = 0x10;
+    assert!(TextureImage::decode(mip).is_err());
 }

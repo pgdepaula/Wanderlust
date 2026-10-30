@@ -2145,10 +2145,10 @@ impl TextureImage {
             u32::MAX,
             0xfffffe00,
             0x00e0ffff,
-            0xf0000038,
-            0x07c0ffff,
+            0xf0070038,
+            0xffc0ffff,
             0x8000ffff,
-            0,
+            0x07800000,
             0xff,
         ];
         for (n, (&word, &mask)) in words.iter().zip(&masks).enumerate() {
@@ -2159,14 +2159,27 @@ impl TextureImage {
                 )));
             }
         }
-        if words[0] & !0x7f != 0x58d24900 {
+        let packed_float = words[0] & 0x7f == 0x21;
+        let expected_channels = if packed_float { 0x78d7ff80 } else { 0x58d24900 };
+        if words[0] & !0x7f != expected_channels {
             return Err(invalid("unsupported TIC channel types or swizzle"));
+        }
+        // Sector promotion is a cache hint. Only no stored border / sampler
+        // border color profiles are admitted; supported samplers clamp to edge.
+        if !matches!(words[4] >> 29, 0 | 7) {
+            return Err(invalid("unsupported TIC border storage"));
+        }
+        // Quality/spread settings cannot select another level in a single-mip
+        // texture. Header/sampler anisotropy greater than one stays unsupported.
+        if words[3] >> 28 != 0 && (words[3] & 0x70000 != 0 || words[6] != 0) {
+            return Err(invalid("TIC quality hints with multiple mips unsupported"));
         }
         if words[2] >> 21 & 7 != 3 || words[4] >> 23 & 15 != 1 || words[5] >> 31 != 1 {
             return Err(invalid("requires normalized block-linear 2D TIC"));
         }
         let srgb = words[4] & (1 << 22) != 0;
         let format = match (words[0] & 0x7f, srgb) {
+            (0x21, false) => Format::Rg11b10Float,
             (0x08, false) => Format::Rgba8Unorm,
             (0x08, true) => Format::Rgba8Srgb,
             (0x24, false) => Format::Bc1Rgba,

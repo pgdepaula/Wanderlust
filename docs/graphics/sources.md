@@ -2597,3 +2597,13 @@ that the B097 compatibility-selection write cannot be required to execute native
 B197 descriptors; it is not a claim of arbitrary register reset values or legacy
 header support. B197's published class header still defines explicit selector
 writes; this backend admits only the native-format value one.
+
+Packed sampled HDR and TIC hints: NVIDIA `clb097tex.h`, pinned open-gpu-doc
+`9fdf5c4062007929d9f4e6cbad9c9771fe61b880`,
+`NVB097_TEXHEAD_BL_COMPONENTS_SIZES_BF10GF11RF11=0x21`, FLOAT channel type seven,
+RGB source selectors 2/3/4 and alpha float-one selector seven. The modern
+block-linear word layout defines LOD quality bits112..114, sector promotion
+bits156..155, border bits159..157 and fine/coarse spread functions bits216..215
+and218..217. Existing masks continue rejecting sparse/depth/array/multisample,
+nonzero maximum anisotropy, bias and reserved fields. The native host format
+preserves the defined unsigned packed RGB representation.

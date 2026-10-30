@@ -141,6 +141,7 @@ impl Renderer {
         let host_format = match desc.format {
             Format::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
             Format::Rgba8Srgb => wgpu::TextureFormat::Rgba8UnormSrgb,
+            Format::Rg11b10Float => wgpu::TextureFormat::Rg11b10Ufloat,
             Format::Bc1Rgba if native_bc => wgpu::TextureFormat::Bc1RgbaUnorm,
             Format::Bc1RgbaSrgb if native_bc => wgpu::TextureFormat::Bc1RgbaUnormSrgb,
             Format::Bc1Rgba | Format::Astc4x4 => wgpu::TextureFormat::Rgba8Unorm,
