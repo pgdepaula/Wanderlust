@@ -40,6 +40,10 @@ nvmap node and up to 16 channel identities over its lifetime.
 
 | Device | Request | Implemented restriction |
 | --- | --- | --- |
+| `/dev/nvhost-ctrl` | EventRegister `c004001f`, EventUnregister `c0040020` | 64 fd-local available event slots; registration never signals GPU completion |
+| | EventSignal `c004001c` | Cancels an available registration; does not increment a syncpoint |
+| | SyncptRead `c0080014` | Actual completed threshold of a live driver-owned channel; reserved ID zero reads zero |
+| | SyncptWait `c00c0016`, EventWait `c010001d`, EventWaitAsync `c010001e` | Already-expired fences only; future waits explicitly unsupported |
 | `/dev/nvmap` | Create `c0080101` | Nonzero size aligned to 4 KiB; unique handle |
 | | Param `c00c0109` | Created size; allocated alignment, system-memory heap and kind; BASE unsupported |
 | | Alloc `c0200104` | User-backed, cache flags 0/1, power-of-two allocation alignment ≥4096, page-aligned CPU storage, kind 0, heap mask 0 |
@@ -190,3 +194,30 @@ multiple times does not establish multiple game frames.
 `WL_NVDRV_TRACE=1` logs at most 1024 device-open/ioctl events, including request
 identities and results. Unknown device paths are redacted. Buffer contents,
 shader bytes and allocation contents are not logged.
+
+## Host controller completion subset
+
+The host controller uses the original little-endian libnx request layouts at
+[`feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973`](https://github.com/switchbrew/libnx/blob/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/ioctl/nvhost-ctrl.c).
+Event slots and encoded query identities follow the MIT-licensed
+[`NvHostCtrlDeviceFile`](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostCtrl/NvHostCtrlDeviceFile.cs)
+reference at revision `4930dced25c0d9ec33096b0f2601d262daa477bf`.
+
+A newly registered event is available and unsignalled, with fence ID zero.
+QueryEvent returns a real runtime readable event, not a fabricated completed
+fence. Registrations are fd-local; another controller descriptor cannot query
+them. Re-registering an available slot resets that available registration.
+EventSignal cancels a registration rather than completing GPU work.
+
+Completed thresholds come from live channel state, which advances only after
+actual host GPU completion and guest publication. Read and already-expired wait
+operations do not submit work, increment a syncpoint or publish memory again.
+The wait fast path returns the current completed value in the in/out word at
+byte 12, including for the asynchronous request. A future threshold returns
+NotSupported without changing its output or arming an event. Pending async waits,
+TryAgain responses, general Host1x counters and reads after channel destruction
+are outside this subset. No wrapped counter chronology is claimed.
+
+The runtime graphics integration test checks an initially zero threshold, a real
+indexed textured draw, completed value two, and both already-expired wait forms.
+It also checks that event registration alone leaves its kernel event unsignalled.

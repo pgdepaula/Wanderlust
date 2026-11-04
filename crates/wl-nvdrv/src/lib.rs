@@ -5,6 +5,7 @@ use wl_gpu::{driver::*, driver_backend::GpuDriver, memory::*};
 mod address_space;
 mod channel;
 mod control;
+mod host_control;
 mod mapping;
 mod nvmap;
 mod remap;
@@ -124,6 +125,7 @@ struct Channel {
 #[derive(Debug)]
 enum Node {
     ControlGpu,
+    HostControl(host_control::HostControl),
     Nvmap,
     Space(Space),
     Channel(Channel),
@@ -221,6 +223,7 @@ impl<P: Copy> Driver<P> {
         }
         let node = match path {
             "/dev/nvhost-ctrl-gpu" => Node::ControlGpu,
+            "/dev/nvhost-ctrl" => Node::HostControl(host_control::HostControl::default()),
             "/dev/nvmap" => {
                 if self.files.iter().any(|f| matches!(f.node, Node::Nvmap)) {
                     return Err(NvError::NotSupported.into());
@@ -265,6 +268,9 @@ impl<P: Copy> Driver<P> {
     /// fault while notifications are enabled. Diagnostic queries survive faults.
     pub fn query_event(&self, fd: u32, event: u32) -> Result<bool> {
         let f = self.file(fd)?;
+        if let Node::HostControl(control) = &self.files[f].node {
+            return control.query(event);
+        }
         let Node::Channel(channel) = &self.files[f].node else {
             return Err(NvError::NotSupported.into());
         };
@@ -310,6 +316,27 @@ impl<P: Copy> Driver<P> {
         }
         match &self.files[f].node {
             Node::ControlGpu => control::ioctl(r),
+            Node::HostControl(_) => {
+                // Thresholds advance only after publish + actual GPU completion
+                // in channel(). Snapshot scalar identities, never guest buffers.
+                let mut values = [None; 17];
+                values[0] = Some(0);
+                for file in &self.files {
+                    if let Node::Channel(c) = &file.node {
+                        values[c.syncpoint as usize] = Some(c.threshold);
+                    }
+                }
+                let Node::HostControl(control) = &mut self.files[f].node else {
+                    unreachable!()
+                };
+                control.ioctl(r.request, r.input, r.output, |id| {
+                    values
+                        .get(id as usize)
+                        .copied()
+                        .flatten()
+                        .ok_or(NvError::NotSupported.into())
+                })
+            }
             Node::Nvmap => self.nvmap(r, memory),
             Node::Space(_) => self.space(f, r),
             Node::Channel(_) => self.channel(f, r, memory),
@@ -924,7 +951,7 @@ impl<P: Copy> Driver<P> {
     pub fn close(&mut self, fd: u32, memory: &mut impl Memory<Pin = P>) -> Result<()> {
         let f = self.file(fd)?;
         match &self.files[f].node {
-            Node::ControlGpu => {}
+            Node::ControlGpu | Node::HostControl(_) => {}
             Node::Channel(state) => {
                 if let Some(channel) = state.id {
                     checked(self.gpu.close(channel, memory))?;

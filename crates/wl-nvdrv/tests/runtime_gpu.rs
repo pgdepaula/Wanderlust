@@ -559,6 +559,21 @@ fn configured_with_capture(
 #[ignore = "requires actual GPU execution, not only runtime transport"]
 fn runtime_service_executes_indexed_textured_draw_and_cpu_mutation() {
     let (mut h, nvmap, space, channel, command, image) = configured();
+    let controller = h.open("/dev/nvhost-ctrl");
+    h.ioctl(controller, 0xc004001f, &0u32.to_le_bytes(), None);
+    h.send(&Wire {
+        command: 4,
+        args: &words(&[controller, 0x10000000]),
+        ..Wire::default()
+    });
+    let handle = h.p.memory.load(h.tls() + 12, 4).unwrap() as u32;
+    let k = h.p.kernel.as_ref().unwrap();
+    let Some(Object::ReadableEvent(event)) = k.handles.get(handle) else {
+        panic!("controller did not return a real kernel event")
+    };
+    assert!(!k.events[event].signaled, "registration is not completion");
+    let read = h.ioctl(controller, 0xc0080014, &words(&[1, u32::MAX]), None);
+    assert_eq!(u32::from_le_bytes(read[4..8].try_into().unwrap()), 0);
     // Validation failures preserve both the output bytes and accepted channel.
     for (request, input, error) in [
         (
@@ -628,6 +643,17 @@ fn runtime_service_executes_indexed_textured_draw_and_cpu_mutation() {
     let syncpoint = u32::from_le_bytes(output[16..20].try_into().unwrap());
     assert_ne!(syncpoint, 0);
     assert_eq!(u32::from_le_bytes(output[20..24].try_into().unwrap()), 2);
+    let read = h.ioctl(controller, 0xc0080014, &words(&[syncpoint, u32::MAX]), None);
+    assert_eq!(u32::from_le_bytes(read[4..8].try_into().unwrap()), 2);
+    for request in [0xc010001d, 0xc010001e] {
+        let done = h.ioctl(
+            controller,
+            request,
+            &words(&[syncpoint, 2, u32::MAX, 63]),
+            None,
+        );
+        assert_eq!(u32::from_le_bytes(done[12..16].try_into().unwrap()), 2);
+    }
     check(
         h.p.memory.read_bytes(DATA + RT as u64, SIZE).unwrap(),
         &image,
@@ -696,6 +722,8 @@ fn runtime_service_executes_indexed_textured_draw_and_cpu_mutation() {
     h.close(nvmap);
     let pin = h.p.memory.pin_gpu_range(DATA, 0x18000).unwrap();
     h.p.memory.release_gpu_pin(pin).unwrap();
+    h.ioctl(controller, 0xc0040020, &0u32.to_le_bytes(), None);
+    h.close(controller);
 }
 
 #[test]
