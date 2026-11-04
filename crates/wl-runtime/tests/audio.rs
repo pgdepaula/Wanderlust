@@ -3,6 +3,8 @@ extern crate wl_runtime as wl_guest_runtime;
 mod audio;
 #[path = "../hosted/audio_dsp.rs"]
 pub mod host_audio_dsp;
+#[path = "../hosted/binder.rs"]
+pub mod host_binder;
 #[path = "../hosted/fs_cache.rs"]
 mod host_fs;
 #[path = "../hosted/opus.rs"]
@@ -2426,4 +2428,69 @@ fn unused_duplicate_voice_ids_do_not_receive_an_active_voices_counters() {
     assert_eq!(p.load(DATA + 0x6000 + 256, 8).unwrap(), 28);
     assert_eq!(p.load(DATA + 0x6000 + 264, 4).unwrap(), 2);
     assert_eq!(p.read_bytes(DATA + 0x6000 + 272, 16).unwrap(), vec![0; 16]);
+}
+
+#[test]
+fn binder_typed_extension_preserves_real_session_and_distinct_transaction_replies() {
+    use wl_runtime::{ipc, services::HostObject};
+    let (mut p, mut c) = process();
+    let k = p.kernel.as_mut().unwrap();
+    let session = k.sessions.len();
+    k.sessions.push(ipc::Session {
+        endpoint: ipc::Endpoint::Host(HostObject::HosBinderDriver),
+        domain: None,
+        closed: false,
+        references: 1,
+    });
+    let handle = k.handles.add(Object::Session(session)).unwrap();
+    let input = DATA + 0x1000;
+    let output = DATA + 0x2000;
+    for (code, tail, expected) in [
+        (
+            10u32,
+            vec![0u32, 1, 0],
+            vec![20u32, 16, 0, 36, 1280, 720, 0, 0, 0],
+        ),
+        (9, vec![2], vec![8, 16, 0, 24, 1, 0]),
+    ] {
+        let token = "android.gui.IGraphicBufferProducer";
+        let mut payload = vec![0u8; 8];
+        payload[..4].copy_from_slice(&0x100u32.to_le_bytes());
+        payload[4..8].copy_from_slice(&(token.len() as u32).to_le_bytes());
+        payload.extend(token.encode_utf16().chain([0]).flat_map(u16::to_le_bytes));
+        payload.resize(payload.len().next_multiple_of(4), 0);
+        payload.extend(tail.into_iter().flat_map(u32::to_le_bytes));
+        let mut parcel: Vec<_> = [payload.len() as u32, 16, 0, 16 + payload.len() as u32]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        parcel.extend(payload);
+        p.write_bytes(input, &parcel).unwrap();
+        p.write_bytes(output, &[0xa5; 128]).unwrap();
+        let mut b = [0u8; 256];
+        b[..4].copy_from_slice(&0x01110004u32.to_le_bytes());
+        b[4..8].copy_from_slice(&(12u32 | (2 << 10)).to_le_bytes());
+        b[16..20].copy_from_slice(&(parcel.len() as u32).to_le_bytes());
+        b[20..24].copy_from_slice(&(input as u32).to_le_bytes());
+        b[0x30..0x34].copy_from_slice(b"SFCI");
+        b[0x38..0x3c].copy_from_slice(&3u32.to_le_bytes());
+        b[0x40..0x44].copy_from_slice(&32u32.to_le_bytes());
+        b[0x44..0x48].copy_from_slice(&code.to_le_bytes());
+        b[0x58..0x5c].copy_from_slice(&(output as u32).to_le_bytes());
+        b[0x5c..0x60].copy_from_slice(&(128u32 << 16).to_le_bytes());
+        let address = tls(&p);
+        p.write_bytes(address, &b).unwrap();
+        call(&mut p, &mut c, handle);
+        let expected: Vec<_> = expected.into_iter().flat_map(u32::to_le_bytes).collect();
+        assert_eq!(p.read_bytes(output, expected.len()).unwrap(), expected);
+        assert_eq!(
+            p.read_bytes(output + expected.len() as u64, 128 - expected.len())
+                .unwrap(),
+            vec![0xa5; 128 - expected.len()]
+        );
+        assert_eq!(
+            p.kernel.as_ref().unwrap().sessions[session].endpoint,
+            ipc::Endpoint::Host(HostObject::HosBinderDriver)
+        );
+    }
 }

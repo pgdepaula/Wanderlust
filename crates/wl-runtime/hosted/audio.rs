@@ -737,6 +737,7 @@ struct Backend {
     next_thread_trace: Option<std::time::Instant>,
     opus: crate::host_opus::Service,
     fs: crate::host_fs::Service,
+    binder: crate::host_binder::Service,
     released_audio_pins: Vec<GpuPin>,
 }
 impl Default for Backend {
@@ -745,6 +746,7 @@ impl Default for Backend {
             state: State::default(),
             released_audio_pins: Vec::new(),
             opus: crate::host_opus::Service::default(),
+            binder: crate::host_binder::Service::default(),
             fs: if std::env::var("WL_VOLATILE_SAVES").as_deref() == Ok("1") {
                 crate::host_fs::Service::with_volatile_saves()
             } else {
@@ -910,6 +912,17 @@ impl AudioHost for Backend {
         args: &[u8],
     ) -> RuntimeResult<Done> {
         self.release_audio_pins(memory)?;
+        if target
+            == (HostObject::AudioRenderer {
+                index: crate::host_binder::INDEX,
+            })
+        {
+            let result = self.binder.request(memory, command, req, args);
+            if result.is_ok() {
+                self.binder.update_event(k);
+            }
+            return result;
+        }
         if let HostObject::AudioRenderer { index } = target
             && crate::host_fs::owns(index)
         {
@@ -1299,6 +1312,7 @@ pub fn service_hook(
     id: u16,
 ) -> RuntimeResult<Option<wl_guest_runtime::Stop>> {
     use wl_guest_runtime::{horizon::Object, ipc::Endpoint};
+    let binder_binding = crate::host_binder::bind(cpu, process, id);
     let fs_binding = crate::host_fs::bind(cpu, process, id);
     let binding = if let Some(k) = process.kernel.as_mut() {
         register_codec_port(k);
@@ -1329,6 +1343,7 @@ pub fn service_hook(
     };
     let result = wl_guest_runtime::service(cpu, process, id);
     crate::host_fs::restore(process, fs_binding);
+    crate::host_binder::restore(process, binder_binding);
     if let Some((session, original)) = binding
         && let Some(k) = process.kernel.as_mut()
         && let Some(s) = k.sessions.get_mut(session)
