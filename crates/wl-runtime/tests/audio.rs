@@ -2452,6 +2452,26 @@ fn binder_typed_extension_preserves_real_session_and_distinct_transaction_replie
             vec![20u32, 16, 0, 36, 1280, 720, 0, 0, 0],
         ),
         (9, vec![2], vec![8, 16, 0, 24, 1, 0]),
+        // Real SDK clients dereference the Fence object returned by dequeue,
+        // even for a fresh preallocated buffer. Exercise that exact wire shape
+        // through SVC and the temporary service endpoint, not only Service::request.
+        (
+            14,
+            vec![0, 1, 40, 0, 0x47424652, 37, 19, 37, 1, 0xb00, 42, 0, 0, 0],
+            vec![0, 16, 0, 16],
+        ),
+        (
+            3,
+            vec![1, 37, 19, 0, 0x300],
+            vec![56, 16, 0, 72, 0, 1, 36, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        ),
+        (
+            1,
+            vec![0],
+            vec![
+                56, 16, 0, 72, 1, 40, 0, 0x47424652, 37, 19, 37, 1, 0xb00, 42, 0, 0, 0, 0,
+            ],
+        ),
     ] {
         let token = "android.gui.IGraphicBufferProducer";
         let mut payload = vec![0u8; 8];
