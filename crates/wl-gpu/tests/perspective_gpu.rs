@@ -790,6 +790,15 @@ fn native_single_level_sampler_linear_clamp_and_srgb_gate() {
 // Independent coverage and affine varying oracle. No production shader or
 // resource conversion code computes the expected geometry or sample address.
 fn check_vertex_constants(data: &[u8], image: &[u8], translation: [f32; 2], u_scale: f32) {
+    check_vertex_reference(data, image, translation, u_scale, UV);
+}
+fn check_vertex_reference(
+    data: &[u8],
+    image: &[u8],
+    translation: [f32; 2],
+    u_scale: f32,
+    uv: [[f32; 2]; 3],
+) {
     let v = POS.map(|p| {
         [
             f64::from(p[0] + translation[0]),
@@ -814,10 +823,10 @@ fn check_vertex_constants(data: &[u8], image: &[u8], translation: [f32; 2], u_sc
             }
             let expected = if x < 47 && b.iter().all(|v| *v >= 0.) {
                 let u = (0..3)
-                    .map(|n| b[n] * f64::from(UV[n][0] * u_scale))
+                    .map(|n| b[n] * f64::from(uv[n][0] * u_scale))
                     .sum::<f64>()
                     * 37.;
-                let v = (0..3).map(|n| b[n] * f64::from(UV[n][1])).sum::<f64>() * 19.;
+                let v = (0..3).map(|n| b[n] * f64::from(uv[n][1])).sum::<f64>() * 19.;
                 if (u > 0. && u < 37. && (u - u.round()).abs() < 0.025)
                     || (v > 0. && v < 19. && (v - v.round()).abs() < 0.025)
                 {
@@ -950,5 +959,292 @@ fn guest_vertex_constants_mutation_stage_isolation_and_uniform_replacement() {
         warm.synchronization_points - cold.synchronization_points,
         changed.constant_guest_bytes - warm.constant_guest_bytes
     );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+
+#[test]
+#[ignore = "requires actual GPU; native XYZ, FTZ fused matrix and derived varying linkage"]
+fn xyz_vertex_fused_matrix_runtime_constants_and_sign_derived_uv() {
+    let (mut data, mut words, image) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let bin = include_bytes!("fixtures/maxwell/vertex-matrix-ftz.bin");
+    data[0x4700..0x4700 + bin.len()].copy_from_slice(bin);
+    // Row-major identity; the original vertex shader supplies all four outputs.
+    for row in 0..4 {
+        data[0xc0 + row * 20..0xc4 + row * 20].copy_from_slice(&1f32.to_le_bytes());
+    }
+    let end = words.split_off(words.len() - 8);
+    for (m, v) in [
+        (0x2044, 0x700),
+        (0x204c, 16),
+        (0x2380, 64),
+        (0x2388, 0x400c0),
+        (0x2410, 0x31),
+        (0x1164, 0x3a400040),
+    ] {
+        // attribute1 inactive: UV is shader-derived.
+        method(&mut words, m, v);
+    }
+    words.extend(end);
+    let report = submit(&mut d, c, b, &mut data, &words);
+    assert!(report.fault.is_none(), "{:?}", report.fault);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    let uv = [[0., 1.], [1., 1.], [0., 0.]];
+    check_vertex_reference(&data, &image, [0., 0.], 1., uv);
+    d.retire(report.token).unwrap();
+    let cold = d.graphics_counters();
+    assert!(cold.constant_guest_bytes >= 64);
+    let mut tokens = Vec::new();
+    for _ in 0..32 {
+        let r = submit(&mut d, c, b, &mut data, &draw());
+        assert!(r.fault.is_none(), "{:?}", r.fault);
+        tokens.push(r.token);
+    }
+    let warm = d.graphics_counters();
+    assert_eq!(warm.upload_bytes, cold.upload_bytes);
+    assert_eq!(warm.constant_guest_bytes, cold.constant_guest_bytes);
+    assert_eq!(warm.pipeline_allocations, cold.pipeline_allocations);
+    assert_eq!(warm.readback_operations, cold.readback_operations);
+    assert_eq!(warm.synchronization_points, cold.synchronization_points);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    for token in tokens {
+        d.retire(token).unwrap();
+    }
+    d.write_backing(b, 0xcc, &0.25f32.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    d.write_backing(b, 0xdc, &(-0.125f32).to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let bg: Vec<_> = (0..W * H).flat_map(|_| BG).collect();
+    d.write_backing(b, RT as u64, &bg, &mut mem(&mut data))
+        .unwrap();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    check_vertex_reference(&data, &image, [0.25, -0.125], 1., uv);
+    d.retire(r.token).unwrap();
+    assert_eq!(
+        d.graphics_counters().pipeline_allocations,
+        cold.pipeline_allocations
+    );
+    assert_eq!(
+        d.graphics_counters().constant_guest_bytes,
+        warm.constant_guest_bytes + 8
+    );
+    eprintln!(
+        "XYZ FTZ warm32: 64 vertex CB bytes packed; queues {}, readbacks {}, waits {}, uploads {}",
+        warm.submissions - cold.submissions,
+        warm.readback_operations - cold.readback_operations,
+        warm.synchronization_points - cold.synchronization_points,
+        warm.upload_bytes - cold.upload_bytes
+    );
+    d.close(c, &mut mem(&mut data)).unwrap();
+}
+
+// Golden bits from independent Python Fraction exact product/addition and
+// ties-to-even quantization (seed 0x46545a), with explicit FTZ/NaN rules.
+// Inputs a,b,c then fused, add, multiply, negate-a-add expected outputs.
+const FTZ_CASES: &[[u32; 7]] = &[
+    [
+        0x3f800001, 0x3f800001, 0xbf800002, 0x28800000, 0x40000001, 0x3f800002, 0x00000000,
+    ],
+    [
+        0x3f7fffff, 0x3f7fffff, 0xbf7ffffe, 0x27800000, 0x3fffffff, 0x3f7ffffe, 0x00000000,
+    ],
+    [
+        0x7f7fffff, 0x40000000, 0xff7fffff, 0x7f7fffff, 0x7f7fffff, 0x7f800000, 0xff7fffff,
+    ],
+    [
+        0xff7fffff, 0x40000000, 0x7f7fffff, 0xff7fffff, 0xff7fffff, 0xff800000, 0x7f7fffff,
+    ],
+    [
+        0x00800000, 0x3f000000, 0x00800000, 0x00c00000, 0x3f000000, 0x00000000, 0x3f000000,
+    ],
+    [
+        0x80800000, 0x3f000000, 0x80000000, 0x80000000, 0x3f000000, 0x80000000, 0x3f000000,
+    ],
+    [
+        0x00000001, 0x7f7fffff, 0x80000000, 0x00000000, 0x7f7fffff, 0x00000000, 0x7f7fffff,
+    ],
+    [
+        0x80000001, 0x3f800000, 0x80000000, 0x80000000, 0x3f800000, 0x80000000, 0x3f800000,
+    ],
+    [
+        0x00000000, 0xbf800000, 0x00000000, 0x00000000, 0xbf800000, 0x80000000, 0xbf800000,
+    ],
+    [
+        0x80000000, 0x3f800000, 0x80000000, 0x80000000, 0x3f800000, 0x80000000, 0x3f800000,
+    ],
+    [
+        0x7f800000, 0x00000000, 0x3f800000, 0x7fc00000, 0x7f800000, 0x7fc00000, 0xff800000,
+    ],
+    [
+        0x7f800000, 0x3f000000, 0xff800000, 0x7fc00000, 0x7f800000, 0x7f800000, 0xff800000,
+    ],
+    [
+        0x7fa00001, 0x3f800000, 0x3f800000, 0x7fc00000, 0x7fc00000, 0x7fc00000, 0x7fc00000,
+    ],
+    [
+        0x3f800000, 0x3f000000, 0x33000000, 0x3f000000, 0x3fc00000, 0x3f000000, 0xbf000000,
+    ],
+    [
+        0xbf800000, 0x3f000000, 0xb3000000, 0xbf000000, 0xbf000000, 0xbf000000, 0x3fc00000,
+    ],
+    [
+        0x3fffffff, 0x3fffffff, 0xc07ffffe, 0x28800000, 0x407fffff, 0x407ffffe, 0x00000000,
+    ],
+    [
+        0x7930830c, 0xd0831b90, 0x24429458, 0xff800000, 0x7930830c, 0xff800000, 0xf930830c,
+    ],
+    [
+        0x17cee171, 0x043810a3, 0x73d71c9c, 0x73d71c9c, 0x17cee171, 0x00000000, 0x97cee171,
+    ],
+    [
+        0x0ae5252f, 0xdc55adcb, 0x2f24e6e9, 0x2f24e56a, 0xdc55adcb, 0xa7bf4380, 0xdc55adcb,
+    ],
+    [
+        0x76d564e1, 0xdcee2c8c, 0xbb8f78d0, 0xff800000, 0x76d564e1, 0xff800000, 0xf6d564e1,
+    ],
+    [
+        0x2137f4a7, 0x9fa3bbad, 0xf60a6d60, 0xf60a6d60, 0x21237d31, 0x816b4f45, 0xa14c6c1d,
+    ],
+    [
+        0x64e13613, 0xb7ad0f5d, 0x330933dd, 0xdd183f0f, 0x64e13613, 0xdd183f0f, 0xe4e13613,
+    ],
+    [
+        0xe45a984a, 0xffd0dd6f, 0x48709bc9, 0x7fc00000, 0x7fc00000, 0x7fc00000, 0x7fc00000,
+    ],
+    [
+        0xd5f3f842, 0x5b0858ab, 0x22e702a5, 0xf181f063, 0x5b083a2c, 0xf181f063, 0x5b08772a,
+    ],
+    [
+        0xc7dc5f6d, 0xa81b6a26, 0x84de46df, 0x3085c927, 0xc7dc5f6d, 0x3085c927, 0x47dc5f6d,
+    ],
+    [
+        0x9f727e49, 0xd10bdd86, 0xd0a3c407, 0xd0a3c407, 0xd10bdd86, 0x31047c68, 0xd10bdd86,
+    ],
+    [
+        0x1cb58c75, 0xbcddc74c, 0xcfda5155, 0xcfda5155, 0xbcddc74c, 0x9a1d4797, 0xbcddc74c,
+    ],
+    [
+        0xab028e57, 0xac050e19, 0x886c499d, 0x1787b647, 0xac25b1af, 0x1787b647, 0xabc8d506,
+    ],
+    [
+        0xce600ff6, 0x78e2c6ec, 0xbaa84171, 0xff800000, 0x78e2c6ec, 0xff800000, 0x78e2c6ec,
+    ],
+    [
+        0x5fa81bb6, 0xf8c73293, 0x481270ed, 0xff800000, 0xf8c73293, 0xff800000, 0xf8c73293,
+    ],
+    [
+        0xc497dbc5, 0xada689e4, 0x563f7f94, 0x563f7f94, 0xc497dbc5, 0x32c5949b, 0x4497dbc5,
+    ],
+    [
+        0x6aca9d13, 0xc73840b3, 0xeba403fc, 0xf291d6ab, 0x6aca9d13, 0xf291d41b, 0xeaca9d13,
+    ],
+    [
+        0x5c2f42a0, 0x7de1ac7e, 0x220b7a69, 0x7f800000, 0x7de1ac7e, 0x7f800000, 0x7de1ac7e,
+    ],
+    [
+        0x670b46f5, 0xfcd71e5d, 0xd4a0125e, 0xff800000, 0xfcd71e5d, 0xff800000, 0xfcd71e5d,
+    ],
+    [
+        0x524aeb36, 0x49a13aa6, 0x4efd6e1a, 0x5c7f98d4, 0x524aeb87, 0x5c7f98d4, 0xd24aeae5,
+    ],
+    [
+        0x69435032, 0xa6647d98, 0x399fcb18, 0xd02e533f, 0x69435032, 0xd02e533f, 0xe9435032,
+    ],
+    [
+        0x2064bb47, 0x5339e510, 0xb10bb09b, 0x3423e93e, 0x5339e510, 0x34261800, 0x5339e510,
+    ],
+    [
+        0x1c1df4c3, 0x6c1896b8, 0x7326f740, 0x7326f740, 0x6c1896b8, 0x48bc4ca5, 0x6c1896b8,
+    ],
+    [
+        0x9e35b8c0, 0x6491c8fb, 0x1815b755, 0xc34ef89f, 0x6491c8fb, 0xc34ef89f, 0x6491c8fb,
+    ],
+    [
+        0x21038c3c, 0xd72c6534, 0x61afdef7, 0x61afdef7, 0xd72c6534, 0xb8b12c73, 0xd72c6534,
+    ],
+];
+#[test]
+#[ignore = "requires actual GPU; guest FTZ FMA/add/mul exact-bit comparisons through GPFIFO"]
+fn fused_ftz_arithmetic_bits_rounding_signed_zero_and_nonfinite() {
+    let (mut data, mut setup, _) = fixture();
+    let (mut d, c, _, b, _) = driver();
+    let original = include_bytes!("fixtures/maxwell/ftz-arithmetic.bin");
+    let end = setup.split_off(setup.len() - 8);
+    method(&mut setup, 0x2144, 0x800);
+    method(&mut setup, 0x214c, 16);
+    setup.extend(end);
+    let good = vec![[64, 128, 191, 255]; 37 * 19]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let mut first = true;
+    let draw_commands = draw();
+    let mut count = 0;
+    for mode in 0..6 {
+        for &[a, operand, cvalue, fma, add, multiply, neg_add] in FTZ_CASES {
+            if mode == 2 && operand & 0xfff != 0 {
+                continue;
+            }
+            let mut binary = original.to_vec();
+            let instruction = match mode {
+                0 => 0x59a0000000070000 | (6u64 << 39) | (5 << 20) | (4 << 8) | 4,
+                1 => 0x49a0000000070000 | (6u64 << 39) | (5 << 20) | (4 << 8) | 4,
+                2 => {
+                    0x32a0000000070000
+                        | (6u64 << 39)
+                        | (u64::from((operand >> 12) & 0x7ffff) << 20)
+                        | (u64::from(operand >> 31) << 56)
+                        | (4 << 8)
+                        | 4
+                }
+                3 => 0x5c58100000070000 | (5 << 20) | (4 << 8) | 4,
+                4 => 0x5c68100000070000 | (5 << 20) | (4 << 8) | 4,
+                _ => 0x5c59100000070000 | (5 << 20) | (4 << 8) | 4,
+            };
+            binary[128..136].copy_from_slice(&instruction.to_le_bytes());
+            d.write_backing(b, 0x4800, &binary, &mut mem(&mut data))
+                .unwrap();
+            let expected = match mode {
+                0..=2 => fma,
+                3 => add,
+                4 => multiply,
+                _ => neg_add,
+            };
+            let params: Vec<_> = [a, operand, cvalue, expected]
+                .into_iter()
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            d.write_backing(b, 0x50, &params, &mut mem(&mut data))
+                .unwrap();
+            let r = submit(
+                &mut d,
+                c,
+                b,
+                &mut data,
+                if first { &setup } else { &draw_commands },
+            );
+            assert!(r.fault.is_none(), "mode {mode} case {count}: {:?}", r.fault);
+            d.publish(c, &mut mem(&mut data)).unwrap();
+            check_vertex_constants(&data, &good, [0., 0.], 1.);
+            d.retire(r.token).unwrap();
+            first = false;
+            count += 1;
+        }
+    }
+    // Deliberately corrupt the expected word. The shader must now export red=0.
+    d.write_backing(b, 0x5c, &0xdeadbeefu32.to_le_bytes(), &mut mem(&mut data))
+        .unwrap();
+    let r = submit(&mut d, c, b, &mut data, &draw());
+    assert!(r.fault.is_none(), "{:?}", r.fault);
+    d.publish(c, &mut mem(&mut data)).unwrap();
+    let bad = vec![[0, 128, 191, 255]; 37 * 19]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    check_vertex_constants(&data, &bad, [0., 0.], 1.);
+    d.retire(r.token).unwrap();
+    eprintln!("FTZ exact-bit guest draws {count} + negative oracle control");
     d.close(c, &mut mem(&mut data)).unwrap();
 }

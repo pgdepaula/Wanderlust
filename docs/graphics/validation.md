@@ -4306,3 +4306,39 @@ Replacing the fragment uniform and switching vertex references to zero-filled
 words both preserve correct output; an unbound vertex CB faults before drawing.
 Stage-zero and pixel CB0 resolve separate guest addresses. Strict package Clippy
 and workspace formatting passed. Workspace tests were not executed for this unit.
+
+FTZ fused arithmetic and XYZ vertex profile: 476 CPU tests with the backend and
+470 without passed. The acquired private vertex program decodes fully and its
+WGSL validates; no acquired program is included in public fixtures. Independent
+assembly tests verify operand kinds, CB references, register budgets, SPH maps,
+missing waits, pending destinations, unsupported modifiers and declared inputs.
+Existing negative tests now positively assert FTZ bit44's distinct operation
+rather than rejecting that newly implemented form.
+
+Eight resource/interpolation scenarios ran on Vulkan llvmpipe and natively on
+Windows D3D12 and Vulkan. The XYZ matrix and arithmetic scenarios also ran on
+OpenGL. Arithmetic draws compare 212 results bitwise through guest GPFIFO, with
+independent exact-rational RN/FTZ golden values and a deliberately wrong expected
+word as a negative control. Cases include genuine fused-versus-split cancellation,
+overflow, subnormals, signed zeros, NaNs and infinities. The XYZ scene uses three
+independent ALD barriers, 16 CB words, all four clip outputs and sign-derived UVs;
+an independent coverage/texture oracle verifies the output and CB-only movement.
+Thirty-two warm matrix draws add 32 submissions with no uploads, readbacks, waits
+or pipeline changes; changing two translation words reads eight guest bytes.
+
+D3D12's unoptimized FXC failed repeated integer-FMA expansion, and the bounded
+shared-body version still hit forced loop unrolling. With `WGPU_DEBUG=0`, FXC
+compiled and all eight native scenarios passed; the tested matrix's cold native
+scenario took about 75 seconds including compilation. Validation remains enabled.
+Vulkan's same native suite passed independently. No unoptimized FXC or DXC success
+is claimed. The private arithmetic-kernel preparation additionally checked 281,408
+exact-rational FTZ triples on Vulkan/OpenGL, but that compute probe does not imply
+Maxwell compute-stage support. Workspace tests were not executed for this unit.
+
+The complete explicit Vulkan GPU regression run passed 219 scenarios. The older
+constant-arithmetic fault test now injects unsupported SAT bit50 rather than the
+newly supported FTZ bit44; it still verifies no appended draw and preservation of
+pending output. The complete 41-case ALU GPU suite also passed natively on both
+D3D12 (optimized FXC) and Vulkan. The compact XYZ lowering passed OpenGL directly.
+Strict package Clippy and workspace formatting passed after the conformance
+updates. These synthetic results remain distinct from original application frames.

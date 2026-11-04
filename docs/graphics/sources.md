@@ -2629,3 +2629,32 @@ VTG input/output maps; no FTZ, source modifiers or FMA are implied by this subse
 The pinned B197 `BIND_GROUP_CONSTANT_BUFFER` stage-group definition controls
 resource selection. Host allocation size is an implementation packing choice,
 not an emulated hardware constant-buffer limit.
+
+RN/FTZ arithmetic follows the pinned envytools GM107 tables: register/direct-CB
+FADD `0x5c58/0x4c58`, FMUL `0x5c68/0x4c68`, FFMA register/CB/F20
+`0x598/0x498/0x328` with the FTZ mode, and BF/FTZ FSET's explicit predicate
+and modifier fields. `ftz-arithmetic.asm` and `vertex-matrix-ftz.asm` are
+independent synthetic assembly inputs from the pinned unmodified envyas.
+NVIDIA PTX specifies signed-zero FTZ and RN fused semantics; single-precision
+NaN payloads are unspecified. PTX is arithmetic evidence, not a Maxwell opcode
+or pipeline scheduling specification.
+
+Berkeley SoftFloat Release 3e revision
+`a0c6494cdc11865811dec815d5c0049fba9d82a8`, `source/s_mulAddF32.c` and
+`source/s_roundPackToF32.c`, supplies the licensed finite fused algorithm. The
+WGSL port uses paired 32-bit integer limbs with explicit classification/FTZ.
+Its original license remains in the source and third-party distribution notice.
+
+NVIDIA SPHv1 documents VTG IMAP/OMAP and store-request ranges. Pinned UAM's
+`nv_shader_header.h` names common-word bit25 `vsh_unk_flag`; its compiler
+assignment is commented out. This does not establish a universal enable bit or
+additional executable behavior. Acceptance is constrained to the declared XYZ
+functional profile, and this uncertainty remains explicit. Pinned envytools
+control definitions establish stall/yield/barrier/wait/reuse fields; the bounded
+functional executor checks memory barriers without claiming a hardware cycle
+latency model.
+
+wgpu-types 26 `Dx12Compiler` and wgpu-hal's `dx12/shader_compilation.rs` distinguish
+FXC from DXC and show that DEBUG selects D3DCOMPILE_SKIP_OPTIMIZATION. This
+explains why compiler/debug configuration materially changes the executable
+matrix shader's native compilation behavior while leaving shader semantics fixed.

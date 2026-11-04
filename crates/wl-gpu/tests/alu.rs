@@ -40,11 +40,22 @@ fn independent_fadd_fmul_register_fields_and_raw_dataflow() {
 }
 #[test]
 fn floating_alu_rejects_modifiers_predicates_and_unready_registers() {
-    for bit in [16, 19, 39, 44, 45, 46, 47, 48, 49, 50] {
+    for bit in [16, 19, 39, 45, 46, 47, 48, 49, 50] {
         let mut b = BIN.to_vec();
         word(&mut b, 0x78, |w| w ^ (1 << bit));
         assert!(FragmentProgram::decode(&b).is_err(), "bit{bit}");
     }
+    // FTZ bit44 is now an independently supported RN form, not an invalid
+    // modifier. Other rounding/source/predicate combinations remain strict.
+    let mut ftz = BIN.to_vec();
+    word(&mut ftz, 0x78, |w| w | (1 << 44));
+    assert!(matches!(
+        FragmentProgram::decode(&ftz).unwrap().operations()[3],
+        Operation::FloatFtz {
+            operator: FloatOperator::Add,
+            ..
+        }
+    ));
     for operand in [8, 20] {
         let mut b = BIN.to_vec();
         word(&mut b, 0x78, |w| (w & !(255 << operand)) | (7 << operand));

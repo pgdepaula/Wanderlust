@@ -3031,3 +3031,36 @@ stays outside shader/pipeline identities. Canonical backing stamps avoid warm
 reads/uploads; changed shader code or a replaced shared uniform allocation forces
 required vertex words to be uploaded, including zeros. The direct host vertex
 harness rejects resource-bearing programs without guest state synchronization.
+
+The straight-line arithmetic subset includes RN FADD.FTZ and FMUL.FTZ with
+GPR/direct-CB right operands, left negation for FADD, and FFMA.FTZ with GPR,
+direct-CB or F20 immediate right operands and a GPR addend. BF FSET.FTZ supports
+ordered LT/GT with AND PT and optional left negation. Other predicates, rounding,
+SAT, CC, absolute-value and fused source modifiers remain unsupported.
+Signed subnormal inputs/results flush to signed zero. Integer significand
+arithmetic supplies one rounding for FFMA; split multiply/add never substitutes
+for fusion. NaNs use canonical quiet-NaN bits; hardware payload propagation is
+not promised. The finite core derives from BSD-3-Clause Berkeley SoftFloat;
+`crates/wl-gpu/THIRD_PARTY_NOTICES.md` contains the distribution notice.
+
+A bounded VTG XYZ input profile declares generic-zero XYZ and position XYZW /
+generic-zero XY exports. Up to three independent ALD barriers require selective
+waits before consumption or replacement; uninitialized reads and pending writes
+fault. Delay/yield/reuse hints do not implement a cycle-accurate execution model.
+This profile admits only ALD, AST, MOV32I and the specified FTZ arithmetic.
+Store-request range zero is admitted because output-attribute ALD readback is
+absent. Common-word bit25 is retained in program identity for the observed XYZ
+compiler profile: public SPHv1 reserves it, and UAM calls it an unknown vertex
+flag. No general semantics or support outside this constrained profile is claimed.
+
+XYZ programs lower to an immutable bounded table of decoded operations inside
+WGSL. One shared fused-arithmetic body prevents repeated expansion of a matrix's
+arithmetic helpers. Table words derive exclusively from validated shader code;
+mutable CB values remain uniform data. Input/output mappings and operation order
+remain explicit. This does not admit guest shader branches or compute dispatch.
+
+Renderer creation honors wgpu's standard instance flags and backend options.
+On D3D12, the old FXC compiler fails the tested integer matrix shader when
+`WGPU_DEBUG=1` forces skipped optimization; the validated configuration uses
+`WGPU_DEBUG=0` while retaining ordinary validation. `WGPU_DX12_COMPILER` selects
+an available compiler through wgpu. DXC requires its separately supplied runtime.

@@ -188,7 +188,7 @@ fn only_unmodified_rn_positive_direct_constant_forms_are_accepted() {
     for operator in [F::Add, F::Multiply] {
         // Bits39..50 are rounding/scales/FTZ/DNZ/ABS/NEG/CC/SAT, not offset payload.
         for bit in [
-            16, 17, 18, 19, 33, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 56,
+            16, 17, 18, 19, 33, 39, 40, 41, 42, 43, 45, 46, 47, 48, 49, 50, 56,
         ] {
             let mut code = initialized();
             let mut op = floatc(0, 1, 0, 0, operator);
@@ -196,6 +196,18 @@ fn only_unmodified_rn_positive_direct_constant_forms_are_accepted() {
             code.extend([op, (EXIT, ALU)]);
             error(&code, "unsupported instruction");
         }
+        // FTZ bit44 now has its own exact RN lowering; ordinary unsupported
+        // modifier combinations above still cannot be interpreted as offsets.
+        let mut code = initialized();
+        let mut ftz = floatc(0, 1, 0, 0, operator);
+        ftz.0 |= 1 << 44;
+        code.extend([ftz, (EXIT, ALU)]);
+        assert!(matches!(
+            FragmentProgram::decode(&program(BIN, &code))
+                .unwrap()
+                .operations()[4],
+            Operation::FloatFtz { .. }
+        ));
         let mut code = initialized();
         code.extend([floatc(255, 1, 0, 0, operator), (EXIT, ALU)]);
         error(&code, "RZ destination unsupported");

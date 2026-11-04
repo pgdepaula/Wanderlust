@@ -89,8 +89,38 @@ pub enum PermutationSelector {
     Immediate(u16),
     Register(u8),
 }
+/// Bit-preserving arithmetic source; constants index runtime stage bindings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatOperand {
+    Register(u8),
+    Constant(u8),
+    Immediate(u32),
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
+    /// RN with signed-zero FTZ, integer-lowered to prevent host contraction.
+    FloatFtz {
+        dst: u8,
+        left: u8,
+        right: FloatOperand,
+        operator: FloatOperator,
+        negate_left: bool,
+    },
+    /// One rounding of a*b+c, without SAT/CC/source modifiers.
+    FmaFtz {
+        dst: u8,
+        left: u8,
+        right: FloatOperand,
+        addend: u8,
+    },
+    /// BF LT/GT, AND PT, signed-zero FTZ before ordered comparison.
+    FloatSetFtz {
+        dst: u8,
+        left: u8,
+        right: u8,
+        comparison: FloatComparison,
+        negate_left: bool,
+    },
     /// Generic SM50 PRMT: select bytes or replicate their sign bits.
     PermuteBytes {
         dst: u8,
@@ -322,6 +352,8 @@ struct Program {
     texture_input: Option<u8>,
     bound_texture_offset: Option<u32>,
     perspective: bool,
+    vertex_input_mask: u32,
+    vertex_compiler_flag: bool,
 }
 impl Program {
     fn decode(input: &[u8], vertex: bool) -> Result<Self> {
@@ -329,13 +361,25 @@ impl Program {
             return Err(invalid("invalid Maxwell fragment length"));
         }
         let input_mode = u32::from_le_bytes(input[24..28].try_into().unwrap());
+        let vertex_xyz = vertex && input_mode == 7;
+        let compiler_flag = vertex_xyz && input[3] & 2 != 0;
         let interpolated = !vertex && input_mode == 15;
         let perspective = !vertex && input_mode == 10;
         let mut header = [0u8; 80];
         header[..4].copy_from_slice(&if vertex { 0x60461u32 } else { 0x61462u32 }.to_le_bytes());
         header[16..20].copy_from_slice(&0xff000u32.to_le_bytes());
         if vertex {
-            header[24] = 0x3f;
+            if vertex_xyz {
+                header[24] = 7;
+                header[3] |= if compiler_flag { 2 } else { 0 };
+                // VTG request ranges affect output ALD readback. Our AST-only
+                // exports never read output attributes; admit zero range too.
+                if input[16..20] == [0; 4] {
+                    header[16..20].fill(0);
+                }
+            } else {
+                header[24] = 0x3f;
+            }
             header[50..54].copy_from_slice(&0xf0000000u32.to_le_bytes());
             header[54] = 3;
         } else {
@@ -369,6 +413,8 @@ impl Program {
             texture_input: None,
             bound_texture_offset: None,
             perspective,
+            vertex_input_mask: if vertex { input_mode } else { 0 },
+            vertex_compiler_flag: compiler_flag,
         };
         let mut initialized = [false; 256];
         initialized[255] = true; // RZ
@@ -412,7 +458,19 @@ impl Program {
                     }
                     return Err(fail("invalid EXIT padding"));
                 }
-                if split_profile {
+                if vertex_xyz {
+                    // Straight-line functional subset. Delay/yield/reuse hints
+                    // are retained in binary identity but do not impose a host
+                    // cycle model. Variable ALD barriers are mandatory.
+                    if (schedule >> 8) & 7 != 7 || !matches!(write_barrier, 0..=2 | 7) {
+                        return Err(fail("unsupported vertex scoreboard"));
+                    }
+                    for r in 0..256 {
+                        if pending[r] && wait & (1 << pending_barrier[r]) != 0 {
+                            pending[r] = false;
+                        }
+                    }
+                } else if split_profile {
                     let index = bundle_index * 3 + slot;
                     if split_schedule.get(index) != Some(&schedule) {
                         return Err(fail("unsupported IPA/TEXS scheduling profile"));
@@ -618,7 +676,17 @@ impl Program {
                     }
                     continue;
                 }
-                let op = if vertex && word & !attribute_mask == 0xefd87f800007ff00 {
+                let ftz = decode_ftz(word, &mut out.constants)?;
+                let op = if let Some(op) = ftz {
+                    if write_barrier != 7
+                        || ftz_reads(op)
+                            .iter()
+                            .any(|r| !initialized[*r as usize] || pending[*r as usize])
+                    {
+                        return Err(fail("unready FTZ operand or unsupported schedule"));
+                    }
+                    op
+                } else if vertex && word & !attribute_mask == 0xefd87f800007ff00 {
                     let attribute = ((word >> 20) & 0x3ff) as u16;
                     let words = (((word >> 47) & 3) + 1) as u8;
                     if !matches!(attribute,0x80..=0x8c | 0x90..=0x94)
@@ -626,8 +694,19 @@ impl Program {
                         || attribute + u16::from(words) * 4 > 0x98
                         || (attribute < 0x90 && attribute + u16::from(words) * 4 > 0x90)
                         || u16::from(dst) + u16::from(words) > 255
-                        || write_barrier != 0
-                        || pending.iter().any(|p| *p)
+                        || if vertex_xyz {
+                            write_barrier > 2
+                                || pending
+                                    .iter()
+                                    .enumerate()
+                                    .any(|(r, p)| *p && pending_barrier[r] == write_barrier as u8)
+                                || (usize::from(dst)..usize::from(dst) + usize::from(words))
+                                    .any(|r| pending[r])
+                                || attribute < 0x80
+                                || attribute + u16::from(words) * 4 > 0x8c
+                        } else {
+                            write_barrier != 0 || pending.iter().any(|p| *p)
+                        }
                     {
                         return Err(fail("unsupported ALD group or scoreboard"));
                     }
@@ -1441,6 +1520,18 @@ impl Program {
                 } else {
                     return Err(fail("unsupported instruction/modifier/predicate"));
                 };
+                if vertex_xyz
+                    && !matches!(
+                        op,
+                        Operation::AttributeRead { .. }
+                            | Operation::Immediate { .. }
+                            | Operation::FloatFtz { .. }
+                            | Operation::FmaFtz { .. }
+                            | Operation::FloatSetFtz { .. }
+                    )
+                {
+                    return Err(fail("unsupported XYZ vertex instruction profile"));
+                }
                 if pending[dst as usize]
                     && !matches!(
                         op,
@@ -1637,6 +1728,16 @@ impl Program {
                         }
                     }
                 }
+                op @ (Operation::FloatFtz { dst, .. }
+                | Operation::FmaFtz { dst, .. }
+                | Operation::FloatSetFtz { dst, .. }) => {
+                    largest = largest.max(u16::from(dst));
+                    for r in ftz_reads(op) {
+                        if r != 255 {
+                            largest = largest.max(u16::from(r));
+                        }
+                    }
+                }
                 Operation::AttributeRead { dst, words, .. } => {
                     largest = largest.max(u16::from(dst) + u16::from(words) - 1)
                 }
@@ -1778,6 +1879,7 @@ impl Program {
             &self.operations,
             "struct Constants { words: array<vec4<u32>,16> };\n@group(0) @binding(0) var<uniform> cb: Constants;\n",
             false,
+            false,
         );
         if self.uses_texture() {
             s.push_str("@group(1) @binding(0) var image:texture_2d<f32>; @group(1) @binding(1) var image_sampler:sampler;\n");
@@ -1902,6 +2004,7 @@ impl Program {
                 Operation::MultiplyAdd16 { dst, left, middle, right, signed } => {
                     emit_multiply_add16(&mut s, dst, left, middle, right, signed);
                 }
+                op @ (Operation::FloatFtz {..} | Operation::FmaFtz {..} | Operation::FloatSetFtz {..}) => emit_ftz(&mut s, op, false),
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::ConditionalImmediate { dst, bits, invert } => {
                     emit_conditional_immediate(&mut s, dst, bits, invert);
@@ -2000,7 +2103,12 @@ impl VertexProgram {
         } else {
             "struct Vertex { @builtin(position) position:vec4<f32>, @location(0) @interpolate(linear) uv:vec2<f32> };\n@vertex fn vs_main(@location(0) a0:vec4<f32>)->Vertex {var r:array<u32,256>;var v:Vertex;\n"
         };
-        let mut s = stage_source(self.operations(), interface, !self.constants().is_empty());
+        let mut s = stage_source(
+            self.operations(),
+            interface,
+            !self.constants().is_empty(),
+            self.0.vertex_input_mask == 7,
+        );
         if self.operations().iter().any(|op| {
             matches!(
                 op,
@@ -2013,227 +2121,234 @@ impl VertexProgram {
         }) {
             s.push_str("var p0:bool;\n");
         }
-        for op in self.operations() {
-            match *op {
-                Operation::AttributeRead {
-                    dst,
-                    attribute,
-                    words,
-                } => {
-                    for c in 0..words {
-                        let (a, n) = if attribute < 0x90 {
-                            (0, (attribute - 0x80) / 4)
-                        } else {
-                            (1, (attribute - 0x90) / 4)
-                        };
-                        writeln!(
-                            s,
-                            "r[{}]=bitcast<u32>(a{a}[{}]);",
-                            u16::from(dst) + u16::from(c),
-                            n + u16::from(c)
-                        )
-                        .unwrap();
+        if self.0.vertex_input_mask == 7 {
+            emit_xyz_program(&mut s, self.operations());
+        } else {
+            for op in self.operations() {
+                match *op {
+                    Operation::AttributeRead {
+                        dst,
+                        attribute,
+                        words,
+                    } => {
+                        for c in 0..words {
+                            let (a, n) = if attribute < 0x90 {
+                                (0, (attribute - 0x80) / 4)
+                            } else {
+                                (1, (attribute - 0x90) / 4)
+                            };
+                            writeln!(
+                                s,
+                                "r[{}]=bitcast<u32>(a{a}[{}]);",
+                                u16::from(dst) + u16::from(c),
+                                n + u16::from(c)
+                            )
+                            .unwrap();
+                        }
                     }
-                }
-                Operation::AttributeWrite {
-                    src,
-                    attribute,
-                    words,
-                } => {
-                    for c in 0..words {
-                        let (name, n) = if attribute < 0x80 {
-                            ("position", (attribute - 0x70) / 4)
-                        } else {
-                            ("uv", (attribute - 0x80) / 4)
-                        };
-                        writeln!(
-                            s,
-                            "v.{name}[{}]=bitcast<f32>(r[{}]);",
-                            n + u16::from(c),
-                            u16::from(src) + u16::from(c)
-                        )
-                        .unwrap();
+                    Operation::AttributeWrite {
+                        src,
+                        attribute,
+                        words,
+                    } => {
+                        for c in 0..words {
+                            let (name, n) = if attribute < 0x80 {
+                                ("position", (attribute - 0x70) / 4)
+                            } else {
+                                ("uv", (attribute - 0x80) / 4)
+                            };
+                            writeln!(
+                                s,
+                                "v.{name}[{}]=bitcast<f32>(r[{}]);",
+                                n + u16::from(c),
+                                u16::from(src) + u16::from(c)
+                            )
+                            .unwrap();
+                        }
                     }
-                }
-                Operation::PredicateCompare {
-                    left,
-                    right,
-                    comparison,
-                } => emit_comparison(&mut s, left, right, comparison),
-                Operation::FloatPredicateCompare {
-                    left,
-                    right,
-                    comparison,
-                } => emit_float_comparison(&mut s, left, right, comparison),
-                Operation::Select {
-                    dst,
-                    left,
-                    right,
-                    invert,
-                } => {
-                    let condition = if invert { "!p0" } else { "p0" };
-                    writeln!(s, "r[{dst}]=select(r[{right}],r[{left}],{condition});").unwrap();
-                }
-                Operation::MultiplyRtz { dst, left, right } => {
-                    writeln!(s, "r[{dst}]=mul_ftz_rtz(r[{left}],r[{right}]);").unwrap();
-                }
-                Operation::Float {
-                    dst,
-                    left,
-                    right,
-                    operator,
-                } => {
-                    let symbol = match operator {
-                        FloatOperator::Add => "+",
-                        FloatOperator::Multiply => "*",
-                    };
-                    writeln!(s,"r[{dst}]=bitcast<u32>(bitcast<f32>(r[{left}]) {symbol} bitcast<f32>(r[{right}]));").unwrap();
-                }
-                Operation::FloatConstant {
-                    dst,
-                    src,
-                    input,
-                    operator,
-                } => {
-                    emit_float_constant(&mut s, dst, src, input, operator, true);
-                }
-                Operation::FloatImmediate {
-                    dst,
-                    src,
-                    bits,
-                    operator,
-                } => {
-                    emit_float_immediate(&mut s, dst, src, bits, operator);
-                }
-                Operation::Integer {
-                    dst,
-                    left,
-                    right,
-                    operator,
-                } => {
-                    emit_integer(&mut s, dst, left, right, operator);
-                }
-                Operation::LogicImmediate {
-                    dst,
-                    src,
-                    bits,
-                    operator,
-                    invert_src,
-                    invert_immediate,
-                } => {
-                    emit_logic_immediate(
-                        &mut s,
+                    Operation::PredicateCompare {
+                        left,
+                        right,
+                        comparison,
+                    } => emit_comparison(&mut s, left, right, comparison),
+                    Operation::FloatPredicateCompare {
+                        left,
+                        right,
+                        comparison,
+                    } => emit_float_comparison(&mut s, left, right, comparison),
+                    Operation::Select {
+                        dst,
+                        left,
+                        right,
+                        invert,
+                    } => {
+                        let condition = if invert { "!p0" } else { "p0" };
+                        writeln!(s, "r[{dst}]=select(r[{right}],r[{left}],{condition});").unwrap();
+                    }
+                    Operation::MultiplyRtz { dst, left, right } => {
+                        writeln!(s, "r[{dst}]=mul_ftz_rtz(r[{left}],r[{right}]);").unwrap();
+                    }
+                    Operation::Float {
+                        dst,
+                        left,
+                        right,
+                        operator,
+                    } => {
+                        let symbol = match operator {
+                            FloatOperator::Add => "+",
+                            FloatOperator::Multiply => "*",
+                        };
+                        writeln!(s,"r[{dst}]=bitcast<u32>(bitcast<f32>(r[{left}]) {symbol} bitcast<f32>(r[{right}]));").unwrap();
+                    }
+                    Operation::FloatConstant {
+                        dst,
+                        src,
+                        input,
+                        operator,
+                    } => {
+                        emit_float_constant(&mut s, dst, src, input, operator, true);
+                    }
+                    Operation::FloatImmediate {
+                        dst,
+                        src,
+                        bits,
+                        operator,
+                    } => {
+                        emit_float_immediate(&mut s, dst, src, bits, operator);
+                    }
+                    Operation::Integer {
+                        dst,
+                        left,
+                        right,
+                        operator,
+                    } => {
+                        emit_integer(&mut s, dst, left, right, operator);
+                    }
+                    Operation::LogicImmediate {
                         dst,
                         src,
                         bits,
                         operator,
                         invert_src,
                         invert_immediate,
-                    );
+                    } => {
+                        emit_logic_immediate(
+                            &mut s,
+                            dst,
+                            src,
+                            bits,
+                            operator,
+                            invert_src,
+                            invert_immediate,
+                        );
+                    }
+                    Operation::AddImmediate {
+                        dst,
+                        src,
+                        bits,
+                        negate_src,
+                    } => {
+                        emit_add_immediate(&mut s, dst, src, bits, negate_src);
+                    }
+                    Operation::BitfieldExtract {
+                        dst,
+                        src,
+                        offset,
+                        width,
+                        signed,
+                    } => {
+                        emit_bitfield(&mut s, dst, src, offset, width, signed);
+                    }
+                    Operation::TernaryLogic {
+                        dst,
+                        first,
+                        second,
+                        third,
+                        lut,
+                    } => {
+                        emit_ternary(&mut s, dst, first, second, third, lut);
+                    }
+                    Operation::CountBits { dst, src, invert } => {
+                        emit_count_bits(&mut s, dst, src, invert);
+                    }
+                    Operation::LeadingBit { dst, src, signed } => {
+                        emit_leading_bit(&mut s, dst, src, signed);
+                    }
+                    Operation::IntToFloat { dst, src, signed } => {
+                        emit_int_to_float(&mut s, dst, src, signed);
+                    }
+                    Operation::IntWiden {
+                        dst,
+                        src,
+                        bits,
+                        signed,
+                    } => {
+                        emit_int_widen(&mut s, dst, src, bits, signed);
+                    }
+                    Operation::PermuteBytes {
+                        dst,
+                        left,
+                        right,
+                        selector,
+                    } => {
+                        emit_byte_permutation(&mut s, dst, left, right, selector);
+                    }
+                    Operation::FloatSet {
+                        dst,
+                        left,
+                        right,
+                        comparison,
+                        float_result,
+                    } => {
+                        emit_float_set(&mut s, dst, left, right, comparison, float_result);
+                    }
+                    Operation::IntegerSet {
+                        dst,
+                        left,
+                        right,
+                        comparison,
+                        float_result,
+                    } => {
+                        emit_integer_set(&mut s, dst, left, right, comparison, float_result);
+                    }
+                    Operation::ScaledAdd {
+                        dst,
+                        left,
+                        right,
+                        shift,
+                    } => {
+                        emit_scaled_add(&mut s, dst, left, right, shift);
+                    }
+                    Operation::AddThree {
+                        dst,
+                        left,
+                        middle,
+                        right,
+                    } => {
+                        emit_add_three(&mut s, dst, left, middle, right);
+                    }
+                    Operation::MultiplyAdd16 {
+                        dst,
+                        left,
+                        middle,
+                        right,
+                        signed,
+                    } => {
+                        emit_multiply_add16(&mut s, dst, left, middle, right, signed);
+                    }
+                    op @ (Operation::FloatFtz { .. }
+                    | Operation::FmaFtz { .. }
+                    | Operation::FloatSetFtz { .. }) => emit_ftz(&mut s, op, true),
+                    Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
+                    Operation::ConditionalImmediate { dst, bits, invert } => {
+                        emit_conditional_immediate(&mut s, dst, bits, invert);
+                    }
+                    Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
+                    Operation::ConditionalMove { dst, src, invert } => {
+                        emit_conditional_move(&mut s, dst, src, invert);
+                    }
+                    _ => unreachable!("resource/fragment operation in strict vertex program"),
                 }
-                Operation::AddImmediate {
-                    dst,
-                    src,
-                    bits,
-                    negate_src,
-                } => {
-                    emit_add_immediate(&mut s, dst, src, bits, negate_src);
-                }
-                Operation::BitfieldExtract {
-                    dst,
-                    src,
-                    offset,
-                    width,
-                    signed,
-                } => {
-                    emit_bitfield(&mut s, dst, src, offset, width, signed);
-                }
-                Operation::TernaryLogic {
-                    dst,
-                    first,
-                    second,
-                    third,
-                    lut,
-                } => {
-                    emit_ternary(&mut s, dst, first, second, third, lut);
-                }
-                Operation::CountBits { dst, src, invert } => {
-                    emit_count_bits(&mut s, dst, src, invert);
-                }
-                Operation::LeadingBit { dst, src, signed } => {
-                    emit_leading_bit(&mut s, dst, src, signed);
-                }
-                Operation::IntToFloat { dst, src, signed } => {
-                    emit_int_to_float(&mut s, dst, src, signed);
-                }
-                Operation::IntWiden {
-                    dst,
-                    src,
-                    bits,
-                    signed,
-                } => {
-                    emit_int_widen(&mut s, dst, src, bits, signed);
-                }
-                Operation::PermuteBytes {
-                    dst,
-                    left,
-                    right,
-                    selector,
-                } => {
-                    emit_byte_permutation(&mut s, dst, left, right, selector);
-                }
-                Operation::FloatSet {
-                    dst,
-                    left,
-                    right,
-                    comparison,
-                    float_result,
-                } => {
-                    emit_float_set(&mut s, dst, left, right, comparison, float_result);
-                }
-                Operation::IntegerSet {
-                    dst,
-                    left,
-                    right,
-                    comparison,
-                    float_result,
-                } => {
-                    emit_integer_set(&mut s, dst, left, right, comparison, float_result);
-                }
-                Operation::ScaledAdd {
-                    dst,
-                    left,
-                    right,
-                    shift,
-                } => {
-                    emit_scaled_add(&mut s, dst, left, right, shift);
-                }
-                Operation::AddThree {
-                    dst,
-                    left,
-                    middle,
-                    right,
-                } => {
-                    emit_add_three(&mut s, dst, left, middle, right);
-                }
-                Operation::MultiplyAdd16 {
-                    dst,
-                    left,
-                    middle,
-                    right,
-                    signed,
-                } => {
-                    emit_multiply_add16(&mut s, dst, left, middle, right, signed);
-                }
-                Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
-                Operation::ConditionalImmediate { dst, bits, invert } => {
-                    emit_conditional_immediate(&mut s, dst, bits, invert);
-                }
-                Operation::Move { dst, src } => writeln!(s, "r[{dst}]=r[{src}];").unwrap(),
-                Operation::ConditionalMove { dst, src, invert } => {
-                    emit_conditional_move(&mut s, dst, src, invert);
-                }
-                _ => unreachable!("resource/fragment operation in strict vertex program"),
             }
         }
         if flip_y {
@@ -2252,7 +2367,12 @@ impl VertexProgram {
     }
 }
 
-fn stage_source(operations: &[Operation], header: &str, vertex_constants: bool) -> String {
+fn stage_source(
+    operations: &[Operation],
+    header: &str,
+    vertex_constants: bool,
+    xyz_loop: bool,
+) -> String {
     // Global helper must precede both entry points; vertex headers already open
     // the function body. Existing shader text stays identical without helpers.
     let helper = if operations
@@ -2280,7 +2400,19 @@ fn stage_source(operations: &[Operation], header: &str, vertex_constants: bool) 
     {
         source.push_str(include_str!("fmul_rtz.wgsl"));
     }
-    if vertex_constants {
+    if xyz_loop
+        || operations.iter().any(|op| {
+            matches!(
+                op,
+                Operation::FloatFtz { .. }
+                    | Operation::FmaFtz { .. }
+                    | Operation::FloatSetFtz { .. }
+            )
+        })
+    {
+        source.push_str(include_str!("fma_ftz.wgsl"));
+    }
+    if vertex_constants || xyz_loop {
         source.push_str("struct VertexConstants { words:array<vec4<u32>,32> };\n@group(0) @binding(0) var<uniform> vertex_cb:VertexConstants;\n");
     }
     source.push_str(header);
@@ -2733,4 +2865,317 @@ fn emit_conditional_move(s: &mut String, dst: u8, src: u8, invert: bool) {
     use std::fmt::Write;
     let condition = if invert { "!p0" } else { "p0" };
     writeln!(s, "if {condition} {{ r[{dst}]=r[{src}]; }}").unwrap();
+}
+
+fn ftz_reads(op: Operation) -> [u8; 3] {
+    let register = |v| {
+        if let FloatOperand::Register(r) = v {
+            r
+        } else {
+            255
+        }
+    };
+    match op {
+        Operation::FloatFtz { left, right, .. } => [left, register(right), 255],
+        Operation::FmaFtz {
+            left,
+            right,
+            addend,
+            ..
+        } => [left, register(right), addend],
+        Operation::FloatSetFtz { left, right, .. } => [left, right, 255],
+        _ => unreachable!(),
+    }
+}
+fn decode_ftz(word: u64, constants: &mut Vec<ConstantRef>) -> Result<Option<Operation>> {
+    let dst = word as u8;
+    let left = (word >> 8) as u8;
+    let regs = 255 | (255u64 << 8) | (255u64 << 20);
+    let cb = 255 | (255u64 << 8) | (0x1fffu64 << 20) | (31u64 << 34);
+    let imm = 255 | (255u64 << 8) | (0x7ffffu64 << 20) | (1u64 << 56);
+    let constant = |constants: &mut Vec<ConstantRef>| -> Result<FloatOperand> {
+        let reference = ConstantRef {
+            slot: ((word >> 34) & 31) as u8,
+            offset: (((word >> 20) & 0x1fff) as u32) * 4,
+        };
+        Ok(FloatOperand::Constant(
+            constant_input(constants, reference)
+                .ok_or_else(|| invalid("too many FTZ constants"))?,
+        ))
+    };
+    let immediate = || {
+        FloatOperand::Immediate(
+            (((word >> 20) & 0x7ffff) as u32) << 12 | (((word >> 56) & 1) as u32) << 31,
+        )
+    };
+    let rbase = word & !regs;
+    let cbase = word & !cb;
+    let (operator, right, negate_left) = if matches!(rbase & !(1u64 << 48), 0x5c58100000070000) {
+        (
+            FloatOperator::Add,
+            FloatOperand::Register((word >> 20) as u8),
+            word & (1 << 48) != 0,
+        )
+    } else if rbase == 0x5c68100000070000 {
+        (
+            FloatOperator::Multiply,
+            FloatOperand::Register((word >> 20) as u8),
+            false,
+        )
+    } else if matches!(cbase & !(1u64 << 48), 0x4c58100000070000) {
+        (
+            FloatOperator::Add,
+            constant(constants)?,
+            word & (1 << 48) != 0,
+        )
+    } else if cbase == 0x4c68100000070000 {
+        (FloatOperator::Multiply, constant(constants)?, false)
+    } else {
+        let addend = ((word >> 39) & 255) as u8;
+        let addend_mask = 255u64 << 39;
+        let right = if word & !(regs | addend_mask) == 0x59a0000000070000 {
+            Some(FloatOperand::Register((word >> 20) as u8))
+        } else if word & !(cb | addend_mask) == 0x49a0000000070000 {
+            Some(constant(constants)?)
+        } else if word & !(imm | addend_mask) == 0x32a0000000070000 {
+            Some(immediate())
+        } else {
+            None
+        };
+        if let Some(right) = right {
+            return Ok(Some(Operation::FmaFtz {
+                dst,
+                left,
+                right,
+                addend,
+            }));
+        }
+        let mask = regs | (1u64 << 43);
+        let comparison = match word & !mask {
+            0x5891038000070000 => FloatComparison::Less,
+            0x5894038000070000 => FloatComparison::Greater,
+            _ => return Ok(None),
+        };
+        return Ok(Some(Operation::FloatSetFtz {
+            dst,
+            left,
+            right: (word >> 20) as u8,
+            comparison,
+            negate_left: word & (1 << 43) != 0,
+        }));
+    };
+    Ok(Some(Operation::FloatFtz {
+        dst,
+        left,
+        right,
+        operator,
+        negate_left,
+    }))
+}
+fn emit_ftz(s: &mut String, op: Operation, vertex: bool) {
+    use std::fmt::Write;
+    let operand = |v| match v {
+        FloatOperand::Register(r) => format!("r[{r}]"),
+        FloatOperand::Immediate(bits) => format!("{bits}u"),
+        FloatOperand::Constant(n) => format!(
+            "{}.words[{}][{}]",
+            if vertex { "vertex_cb" } else { "cb" },
+            u16::from(n / 4) + if vertex { 16 } else { 0 },
+            n % 4
+        ),
+    };
+    match op {
+        Operation::FloatFtz {
+            dst,
+            left,
+            right,
+            operator,
+            negate_left,
+        } => {
+            let a = format!(
+                "(r[{left}] ^ {}u)",
+                if negate_left { 0x80000000u32 } else { 0 }
+            );
+            let b = operand(right);
+            let call = match operator {
+                FloatOperator::Add => format!("wl_fma_ftz({a},0x3f800000u,{b})"),
+                FloatOperator::Multiply => format!("wl_fma_ftz({a},{b},({a}^{b})&0x80000000u)"),
+            };
+            writeln!(s, "r[{dst}]={call};").unwrap();
+        }
+        Operation::FmaFtz {
+            dst,
+            left,
+            right,
+            addend,
+        } => writeln!(
+            s,
+            "r[{dst}]=wl_fma_ftz(r[{left}],{},r[{addend}]);",
+            operand(right)
+        )
+        .unwrap(),
+        Operation::FloatSetFtz {
+            dst,
+            left,
+            right,
+            comparison,
+            negate_left,
+        } => {
+            writeln!(
+                s,
+                "{{let a=wl_ftz_bits(r[{left}]^{}u);let b=wl_ftz_bits(r[{right}]);",
+                if negate_left { 0x80000000u32 } else { 0 }
+            )
+            .unwrap();
+            s.push_str("let nan=(a&0x7fffffffu)>0x7f800000u || (b&0x7fffffffu)>0x7f800000u;let equal=a==b || ((a|b)&0x7fffffffu)==0u;let ak=select(a|0x80000000u,~a,(a&0x80000000u)!=0u);let bk=select(b|0x80000000u,~b,(b&0x80000000u)!=0u);\n");
+            let relation = if comparison == FloatComparison::Less {
+                "<"
+            } else {
+                ">"
+            };
+            writeln!(
+                s,
+                "r[{dst}]=select(0u,0x3f800000u,!nan && !equal && ak {relation} bk);}}"
+            )
+            .unwrap();
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// Fixed decoded arithmetic micro-ops in a bounded host-shader loop. Sharing
+/// one exact FMA body avoids FXC's exponential inlining of a matrix's many
+/// calls. This table is immutable shader code, never mutable guest resource data.
+fn emit_xyz_program(s: &mut String, operations: &[Operation]) {
+    use std::fmt::Write;
+    let operand = |right| match right {
+        FloatOperand::Register(r) => (0, u32::from(r)),
+        FloatOperand::Constant(n) => (1, u32::from(n)),
+        FloatOperand::Immediate(bits) => (2, bits),
+    };
+    writeln!(s, "let xyz_code=array<vec4<u32>,{}>(", operations.len() * 2).unwrap();
+    for op in operations {
+        let (first, second) = match *op {
+            Operation::Immediate { dst, bits } => ([0, u32::from(dst), bits, 0], [0; 4]),
+            Operation::AttributeRead {
+                dst,
+                attribute,
+                words,
+            } => (
+                [
+                    1,
+                    u32::from(dst),
+                    u32::from((attribute - 0x80) / 4),
+                    u32::from(words),
+                ],
+                [0; 4],
+            ),
+            Operation::AttributeWrite {
+                src,
+                attribute,
+                words,
+            } => {
+                let output = if attribute < 0x80 {
+                    (attribute - 0x70) / 4
+                } else {
+                    4 + (attribute - 0x80) / 4
+                };
+                (
+                    [2, u32::from(src), u32::from(output), u32::from(words)],
+                    [0; 4],
+                )
+            }
+            Operation::FloatFtz {
+                dst,
+                left,
+                right,
+                operator,
+                negate_left,
+            } => {
+                let (kind, bits) = operand(right);
+                (
+                    [3, u32::from(dst), u32::from(left), u32::from(negate_left)],
+                    [
+                        kind,
+                        bits,
+                        255,
+                        if operator == FloatOperator::Add { 0 } else { 1 },
+                    ],
+                )
+            }
+            Operation::FmaFtz {
+                dst,
+                left,
+                right,
+                addend,
+            } => {
+                let (kind, bits) = operand(right);
+                (
+                    [3, u32::from(dst), u32::from(left), 0],
+                    [kind, bits, u32::from(addend), 2],
+                )
+            }
+            Operation::FloatSetFtz {
+                dst,
+                left,
+                right,
+                comparison,
+                negate_left,
+            } => (
+                [4, u32::from(dst), u32::from(left), u32::from(negate_left)],
+                [
+                    0,
+                    u32::from(right),
+                    0,
+                    u32::from(comparison == FloatComparison::Greater),
+                ],
+            ),
+            _ => unreachable!("validated XYZ instruction profile"),
+        };
+        for v in [first, second] {
+            writeln!(s, "vec4<u32>({}u,{}u,{}u,{}u),", v[0], v[1], v[2], v[3]).unwrap();
+        }
+    }
+    writeln!(
+        s,
+        ");for(var ip=0u;ip<{}u;ip=ip+1u) {{let ins=xyz_code[ip*2u];let arg=xyz_code[ip*2u+1u];",
+        operations.len()
+    )
+    .unwrap();
+    s.push_str(
+        r#"
+        switch ins.x {
+            case 0u: {r[ins.y]=ins.z;}
+            case 1u: {for(var c=0u;c<ins.w;c=c+1u) {r[ins.y+c]=bitcast<u32>(a0[ins.z+c]);}}
+            case 2u: {for(var c=0u;c<ins.w;c=c+1u) {
+                let output=ins.z+c;let value=bitcast<f32>(r[ins.y+c]);
+                if output<4u {v.position[output]=value;}else{v.uv[output-4u]=value;}
+            }}
+            case 3u: {
+                let a=r[ins.z]^(ins.w<<31u);
+                var b:u32;
+                switch arg.x {
+                    case 0u:{b=r[arg.y];}
+                    case 1u:{b=vertex_cb.words[16u+arg.y/4u][arg.y%4u];}
+                    default:{b=arg.y;}
+                }
+                var multiplier=b;var addend=r[arg.z];
+                if arg.w==0u {multiplier=0x3f800000u;addend=b;}
+                if arg.w==1u {addend=(a^b)&0x80000000u;}
+                r[ins.y]=wl_fma_ftz(a,multiplier,addend);
+            }
+            case 4u: {
+                let a=wl_ftz_bits(r[ins.z]^(ins.w<<31u));let b=wl_ftz_bits(r[arg.y]);
+                let nan=(a&0x7fffffffu)>0x7f800000u || (b&0x7fffffffu)>0x7f800000u;
+                let equal=a==b || ((a|b)&0x7fffffffu)==0u;
+                let ak=select(a|0x80000000u,~a,(a&0x80000000u)!=0u);
+                let bk=select(b|0x80000000u,~b,(b&0x80000000u)!=0u);
+                let condition=select(ak<bk,ak>bk,arg.w!=0u);
+                r[ins.y]=select(0u,0x3f800000u,!nan && !equal && condition);
+            }
+            default: {}
+        }
+    }
+"#,
+    );
 }

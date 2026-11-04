@@ -122,6 +122,8 @@ impl Renderer {
         };
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends,
+            flags: wgpu::InstanceFlags::from_env_or_default(),
+            backend_options: wgpu::BackendOptions::from_env_or_default(),
             ..Default::default()
         });
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {

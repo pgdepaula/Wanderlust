@@ -5840,11 +5840,11 @@ fn driver_float_constant_data_code_and_visibility() {
     assert!(accepted.pipeline_allocations > before_code.pipeline_allocations);
     assert!(!d.query(changed_draw.token).unwrap().guest_visible);
     check(&data, [128, 191, 64, 255], false);
-    // Unsupported FTZ fails without appending a draw or discarding the earlier accepted output.
+    // SAT remains unsupported; fault without appending a draw or losing pending output.
     d.write_backing(
         b,
         0x4660,
-        &(changed | (1 << 44)).to_le_bytes(),
+        &(changed | (1 << 50)).to_le_bytes(),
         &mut mem(&mut data),
     )
     .unwrap();
