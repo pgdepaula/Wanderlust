@@ -2338,6 +2338,64 @@ fn queued_adpcm_executes_through_cmif_splitters_filters_and_effects_with_real_co
     );
 }
 #[test]
+fn stopping_queued_adpcm_retires_pending_buffers_resets_samples_and_releases_source_pool() {
+    let (mut p, mut c) = process();
+    let r = queued_graph_renderer(&mut p, &mut c);
+    put_encoded_voice(&mut p);
+    let mut input = queued_graph_input();
+    // Forty independently encoded constant-positive ADPCM frames per buffer:
+    // the first 240-sample tick cannot consume either 560-sample descriptor.
+    let mut encoded = vec![0x11; 328];
+    for header in (0..encoded.len()).step_by(8) {
+        encoded[header] = 12;
+    }
+    p.write_bytes(DATA + 0x30000, &encoded).unwrap();
+    for i in 0..2 {
+        let at = 336 + 96 + i * 56;
+        input[at + 8..at + 16].copy_from_slice(&320u64.to_le_bytes());
+        input[at + 20..at + 24].copy_from_slice(&560u32.to_le_bytes());
+    }
+    let mut initial = input.clone();
+    initial[336 + 9] = 0;
+    initial[128..132].copy_from_slice(&1u32.to_le_bytes());
+    graph_update(&mut p, &initial, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    graph_update(&mut p, &input, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    wire(&mut p, 5, false, &[], &[]);
+    call(&mut p, &mut c, r);
+    p.kernel.as_mut().unwrap().time_ns = 5_000_000;
+    wl_runtime::audio::poll(&mut p.memory, p.kernel.as_mut().unwrap()).unwrap();
+    let mut stopped = input.clone();
+    stopped[336 + 8] = 0;
+    stopped[336 + 10] = 1;
+    for i in 0..4 {
+        stopped[336 + 96 + i * 56 + 26] = 1;
+        stopped[704 + i * 192 + 1] = 0;
+    }
+    stopped[704 + 192 + 32 + 72] = 2;
+    stopped[704 + 384 + 32 + 64] = 2;
+    stopped[704 + 384 + 32 + 66] = 0;
+    let mut continuing = stopped.clone();
+    continuing[336 + 10] = 0;
+    graph_update(&mut p, &continuing, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    assert_eq!(p.load(DATA + 0x6000 + 192, 8).unwrap(), 240);
+    assert_eq!(p.load(DATA + 0x6000 + 200, 4).unwrap(), 0);
+    graph_update(&mut p, &stopped, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    assert_eq!(p.load(DATA + 0x6000 + 192, 8).unwrap(), 0);
+    assert_eq!(p.load(DATA + 0x6000 + 200, 4).unwrap(), 2);
+    assert!(p.memory.ensure_gpu_unpinned(DATA + 0x30000, 0x4000).is_ok());
+    p.kernel.as_mut().unwrap().time_ns = 10_000_000;
+    wl_runtime::audio::poll(&mut p.memory, p.kernel.as_mut().unwrap()).unwrap();
+    // Repeated STOP cannot retire the same descriptors again or re-arm a tail.
+    graph_update(&mut p, &stopped, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    assert_eq!(p.load(DATA + 0x6000 + 192, 8).unwrap(), 0);
+    assert_eq!(p.load(DATA + 0x6000 + 200, 4).unwrap(), 2);
+}
+#[test]
 fn failed_new_source_registration_preserves_the_old_effect_graph_and_reply() {
     let (mut p, mut c) = process();
     let r = queued_graph_renderer(&mut p, &mut c);

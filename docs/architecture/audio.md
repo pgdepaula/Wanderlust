@@ -470,13 +470,34 @@ frame error, not an unchecked host memory access.
 
 This subset does not support queued PCM formats, resampling ratios other than one,
 other SRC qualities, loops, EOS handling, nonzero initial queue indices, queued
-stop/flush/depop transitions or audible device output. Such requests fail rather
+flush transitions, general queued voice release or audible device output. Such requests fail rather
 than returning invented playback progress. Decoder/SRC/filter semantics follow
 [AdpcmHelper](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Dsp/AdpcmHelper.cs),
 [ResamplerHelper](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Dsp/ResamplerHelper.cs),
 [BiquadFilterHelper](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Dsp/BiquadFilterHelper.cs)
 and the volume-ramp/splitter state types at MIT-licensed Ryujinx revision
 `4930dced25c0d9ec33096b0f2601d262daa477bf`.
+
+Queued mono ADPCM STOP retires valid wave descriptors without decoding their
+remaining samples, increments consumed-buffer counts once, clears sample/SRC
+position and releases source pools no longer referenced by the graph. Repeated
+STOP does not consume the descriptors again. Pause preserves its queue.
+The last quantized contribution of each voice is tracked separately for each
+destination channel, before summation with other voices. STOP and active-to-pause
+transitions transfer those values to persistent mix-channel depop tails. Tails
+are mixed before effects and downstream mix routing, independently of later voice
+volume or routing changes. Replacing a destination while it has a live tail fails
+validation rather than redirecting the old contribution.
+
+The implemented reference recurrence multiplies the absolute tail in signed
+16-bit sample units by `0.962189` at 48 kHz or `0.943695` at 32 kHz, rounds to
+nearest with ties to even and restores the sign. It follows
+[DepopForMixBuffersCommand](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Dsp/Command/DepopForMixBuffersCommand.cs)
+and `FloatingPointHelper` at the same pinned MIT revision. This reference model
+is not an independent measurement of Nintendo DSP firmware. A malformed late
+destination or nonfinite update leaves prior mix buffers and tail state intact.
+Tests use separately calculated signed sample sequences, destination sums and a
+CMIF stop while both ADPCM buffers still contain unplayed samples.
 
 Tests cover nibble order, signed scales, saturation, ties, every split position,
 partial contexts, four-slot wrap/reuse, starvation, malformed late buffers,

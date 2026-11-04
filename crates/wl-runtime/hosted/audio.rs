@@ -1476,9 +1476,20 @@ struct EffectGraph {
     sample_rate: u32,
     voices: std::collections::BTreeMap<u32, crate::host_audio_dsp::voice::MonoVoice>,
     routing: crate::host_audio_dsp::routing::Routing,
+    depop: crate::host_audio_dsp::depop::Depop,
 }
 impl EffectGraph {
     fn preflight(&self, memory: &Memory, samples: usize) -> RuntimeResult<()> {
+        for (mix, channel) in self.depop.destinations() {
+            if !self
+                .mixes
+                .get(mix)
+                .and_then(Option::as_ref)
+                .is_some_and(|m| channel < m.channels)
+            {
+                return Err(unsupported("voice depop destination changed"));
+            }
+        }
         for effect in self.effects.iter().flatten() {
             if let EffectProcessor::Auxiliary(exchange) = &effect.processor {
                 exchange.preflight(memory, effect.input.len(), samples)?;
@@ -1487,9 +1498,8 @@ impl EffectGraph {
         Ok(())
     }
     fn frame(&mut self, memory: &mut Memory, samples: usize) -> RuntimeResult<()> {
-        // No sample-producing voices are accepted by prepare_update yet. Mix
-        // buffers start clear each frame; real auxiliary return samples and
-        // persistent delay tails are processed and routed, never discarded early.
+        // Mix buffers start clear each frame. Voices, stopped-voice depop tails,
+        // auxiliary returns and persistent effects all precede downstream mixing.
         let mut buffers: Vec<Vec<Vec<f32>>> = self
             .mixes
             .iter()
@@ -1501,7 +1511,10 @@ impl EffectGraph {
         sequence.sort_by_key(|voice| (std::cmp::Reverse(voice.priority), voice.order, voice.id));
         for voice in sequence {
             let source = voice.render(memory, samples)?;
-            routing.route_mono(
+            if !voice.playing {
+                continue;
+            }
+            voice.last_mix_samples = routing.route_mono_tracked(
                 voice.splitter as usize,
                 self.sample_rate,
                 &source,
@@ -1509,6 +1522,8 @@ impl EffectGraph {
             )?;
         }
         routing.finish_frame();
+        let mut depop = self.depop.clone();
+        depop.apply(self.sample_rate, &mut buffers)?;
         let mut processors = self.effects.clone();
         let mut writes = Vec::new();
         for &mix_id in &self.order {
@@ -1589,6 +1604,7 @@ impl EffectGraph {
         self.effects = processors;
         self.voices = voices;
         self.routing = routing;
+        self.depop = depop;
         Ok(())
     }
 }
@@ -1733,6 +1749,11 @@ impl Renderer {
                     self.parameters.splitter_destinations as usize,
                 )?
             },
+            depop: self
+                .graph
+                .as_ref()
+                .map(|g| g.depop.clone())
+                .unwrap_or_default(),
         };
         if !splitter_bytes.is_empty() {
             result.routing = result.routing.update(splitter_bytes, count)?;
@@ -1983,11 +2004,11 @@ impl Renderer {
             let old = self.graph.as_ref().and_then(|g| g.voices.get(&id));
             let queued = word(wire, 60) > 0;
             if wire[10] == 1 {
-                if old.is_some_and(|v| v.has_queued_buffers()) {
-                    return Err(unsupported("queued voice stop/depop"));
-                }
                 if let Some(old) = old {
                     let mut state = old.clone();
+                    state.queue.stop()?;
+                    result.depop.add(&state.last_mix_samples)?;
+                    state.last_mix_samples.clear();
                     state.playing = false;
                     result.voices.insert(id, state);
                 }
@@ -2004,11 +2025,15 @@ impl Renderer {
             if self.parameters.revision_number() != 11 {
                 return Err(unsupported("queued voice revision"));
             }
-            let voice = crate::host_audio_dsp::voice::MonoVoice::prepare(
+            let mut voice = crate::host_audio_dsp::voice::MonoVoice::prepare(
                 old,
                 wire,
                 self.parameters.sample_rate,
             )?;
+            if !voice.playing && old.is_some_and(|v| v.playing) {
+                result.depop.add(&voice.last_mix_samples)?;
+                voice.last_mix_samples.clear();
+            }
             for (base, size) in voice.backing_ranges() {
                 let range = attached_audio_pool(pools, base, size)?;
                 if !result.pools.contains(&range) {
@@ -2039,9 +2064,11 @@ impl Renderer {
             result.voices.insert(id, voice);
         }
         if self.graph.as_ref().is_some_and(|g| {
-            g.voices
-                .iter()
-                .any(|(id, v)| !voice_ids.contains(id) && v.has_queued_buffers())
+            g.voices.iter().any(|(id, v)| {
+                !voice_ids.contains(id)
+                    && (v.has_queued_buffers()
+                        || v.last_mix_samples.iter().any(|(_, _, v)| *v != 0.))
+            })
         }) {
             return Err(unsupported("queued voice release/depop"));
         }

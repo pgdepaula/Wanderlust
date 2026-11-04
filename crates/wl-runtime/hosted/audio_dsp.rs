@@ -1264,6 +1264,21 @@ pub mod voice {
         pub consumed: u32,
     }
     impl AdpcmQueue {
+        /// Stopping retires valid descriptors without decoding their remaining
+        /// samples. This is distinct from pause and from natural EOS.
+        pub fn stop(&mut self) -> RuntimeResult<()> {
+            let count = self.buffers.iter().filter(|v| v.is_some()).count();
+            let consumed = self
+                .consumed
+                .checked_add(count as u32)
+                .ok_or("voice consumed counter overflow")?;
+            *self = Self {
+                index: (self.index + count) % 4,
+                consumed,
+                ..Self::default()
+            };
+            Ok(())
+        }
         /// This bounded first subset handles nonlooping/non-EOS mono buffers. The
         /// wire parser must reject other forms before calling this operation.
         pub fn push(&mut self, slot: usize, wave: Wave) -> RuntimeResult<()> {
@@ -1524,6 +1539,7 @@ pub mod voice {
         filters: [VoiceFilter; 2],
         filter_state: [Biquad; 2],
         pub queue: AdpcmQueue,
+        pub last_mix_samples: Vec<(usize, usize, f32)>,
     }
     impl MonoVoice {
         pub fn prepare(old: Option<&Self>, bytes: &[u8], rate: u32) -> RuntimeResult<Self> {
@@ -1579,6 +1595,7 @@ pub mod voice {
                 filters,
                 filter_state: [Biquad::default(); 2],
                 queue: AdpcmQueue::default(),
+                last_mix_samples: Vec::new(),
             });
             if voice.id != word(0) {
                 return Err("voice id changed without new state".into());
@@ -1762,6 +1779,124 @@ pub mod voice {
     }
 }
 
+pub mod depop {
+    //! Per-mix-channel stop tails. Constants and recurrence checked against
+    //! Ryujinx.Audio 4930dced DepopForMixBuffersCommand/FloatingPointHelper (MIT).
+    //! Mixer samples here use normalized units; the DSP recurrence rounds in
+    //! signed 16-bit sample units, with ties to even, before conversion back.
+    use std::collections::BTreeMap;
+    use wl_guest_runtime::RuntimeResult;
+    #[derive(Debug, Clone, Default)]
+    pub struct Depop {
+        values: BTreeMap<(usize, usize), f32>,
+    }
+    impl Depop {
+        pub fn add(&mut self, samples: &[(usize, usize, f32)]) -> RuntimeResult<()> {
+            let mut next = self.values.clone();
+            for &(mix, channel, value) in samples {
+                let sum = next.entry((mix, channel)).or_default();
+                *sum += value;
+                if !(*sum * 32768.).is_finite() {
+                    return Err("nonfinite voice depop sum".into());
+                }
+            }
+            next.retain(|_, value| *value != 0.);
+            self.values = next;
+            Ok(())
+        }
+        pub fn destinations(&self) -> impl Iterator<Item = (usize, usize)> + '_ {
+            self.values.keys().copied()
+        }
+        pub fn apply(&mut self, rate: u32, mixes: &mut [Vec<Vec<f32>>]) -> RuntimeResult<()> {
+            let decay = match rate {
+                48000 => 0.962189f32,
+                32000 => 0.943695f32,
+                _ => return Err("unsupported depop sample rate".into()),
+            };
+            // Validate all destinations first. Preparation may change mix layout;
+            // an old tail must never be silently redirected or dropped.
+            for &(mix, channel) in self.values.keys() {
+                let target = mixes
+                    .get(mix)
+                    .and_then(|v| v.get(channel))
+                    .ok_or("voice depop destination changed")?;
+                if target.len() > 1024 || target.iter().any(|v| !v.is_finite()) {
+                    return Err("invalid voice depop destination".into());
+                }
+            }
+            let mut staged = Vec::new();
+            for (&(mix, channel), value) in &self.values {
+                let sign = value.signum();
+                let mut tail = value.abs() * 32768.;
+                let mut data = mixes[mix][channel].clone();
+                for sample in &mut data {
+                    tail = (tail * decay).round_ties_even();
+                    *sample += sign * tail / 32768.;
+                    if !sample.is_finite() {
+                        return Err("nonfinite voice depop output".into());
+                    }
+                }
+                staged.push((mix, channel, data, sign * tail / 32768.));
+            }
+            for (mix, channel, data, tail) in staged {
+                mixes[mix][channel] = data;
+                *self.values.get_mut(&(mix, channel)).unwrap() = tail;
+            }
+            self.values.retain(|_, value| *value != 0.);
+            Ok(())
+        }
+    }
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn signed_tails_accumulate_and_continue_across_frames() {
+            let mut d = Depop::default();
+            d.add(&[
+                (0, 0, 100. / 32768.),
+                (0, 0, 100. / 32768.),
+                (0, 1, -200. / 32768.),
+            ])
+            .unwrap();
+            let mut a = vec![vec![vec![0.; 3], vec![0.; 3]]];
+            d.apply(48000, &mut a).unwrap();
+            // Independently evaluated recurrence for 200 sample units:
+            // RN(200*.962189)=192, then 185, then 178.
+            assert_eq!(a[0][0], vec![192. / 32768., 185. / 32768., 178. / 32768.]);
+            assert_eq!(
+                a[0][1],
+                vec![-192. / 32768., -185. / 32768., -178. / 32768.]
+            );
+            let mut b = vec![vec![vec![1.; 1], vec![0.; 1]]];
+            d.apply(48000, &mut b).unwrap();
+            assert_eq!(b[0][0], [1. + 171. / 32768.]);
+            assert_eq!(b[0][1], [-171. / 32768.]);
+        }
+        #[test]
+        fn invalid_late_destination_changes_neither_first_mix_nor_tail() {
+            let mut d = Depop::default();
+            d.add(&[(0, 0, 1.), (2, 0, 1.)]).unwrap();
+            let before = d.values.clone();
+            let mut mixes = vec![vec![vec![7.; 2]]];
+            assert!(d.apply(48000, &mut mixes).is_err());
+            assert_eq!(mixes[0][0], [7.; 2]);
+            assert_eq!(d.values, before);
+            assert!(d.add(&[(0, 0, f32::NAN)]).is_err());
+            assert_eq!(d.values, before);
+        }
+        #[test]
+        fn rate32k_uses_distinct_decay_and_silence_needs_no_destination() {
+            let mut d = Depop::default();
+            d.add(&[(99, 99, 0.)]).unwrap();
+            d.apply(32000, &mut []).unwrap();
+            d.add(&[(0, 0, 200. / 32768.)]).unwrap();
+            let mut m = vec![vec![vec![0.; 2]]];
+            d.apply(32000, &mut m).unwrap();
+            assert_eq!(m[0][0], [189. / 32768., 178. / 32768.]);
+        }
+    }
+}
+
 pub mod routing {
     //! Persistent bounded REV11 unfiltered splitter updates. Client fields follow
     //! libnx feebd026 and Ryujinx.Audio 4930dced SplitterState/SplitterDestinationData.
@@ -1889,6 +2024,17 @@ pub mod routing {
             source: &[f32],
             mixes: &mut [Vec<Vec<f32>>],
         ) -> RuntimeResult<()> {
+            self.route_mono_tracked(id, rate, source, mixes).map(|_| ())
+        }
+        /// Last contribution belongs to this voice, before summation with other
+        /// voices. It cannot be recovered from the final shared mix buffer.
+        pub fn route_mono_tracked(
+            &mut self,
+            id: usize,
+            rate: u32,
+            source: &[f32],
+            mixes: &mut [Vec<Vec<f32>>],
+        ) -> RuntimeResult<Vec<(usize, usize, f32)>> {
             let splitter = self
                 .splitters
                 .get(id)
@@ -1900,6 +2046,7 @@ pub mod routing {
             }
             let mut updates = Vec::new();
             let mut touched = Vec::new();
+            let mut last_samples = Vec::new();
             for &id in &splitter.destinations {
                 let destination = self.destinations[id]
                     .as_ref()
@@ -1918,11 +2065,13 @@ pub mod routing {
                 for (c, channel) in mix.iter().enumerate() {
                     let mut gain = destination.previous_volume[c];
                     let increment = (destination.volume[c] - gain) / source.len().max(1) as f32;
+                    let mut last_sample = 0.;
                     let values: Vec<_> = channel
                         .iter()
                         .zip(source)
                         .map(|(to, from)| {
-                            let mixed = *to + (from * 32768. * gain).round_ties_even() / 32768.;
+                            last_sample = (from * 32768. * gain).round_ties_even() / 32768.;
+                            let mixed = *to + last_sample;
                             gain += increment;
                             mixed
                         })
@@ -1931,6 +2080,7 @@ pub mod routing {
                         return Err("splitter nonfinite mixed output".into());
                     }
                     updates.push((destination.mix, c, values));
+                    last_samples.push((destination.mix, c, last_sample));
                 }
             }
             // Reject a repeated destination mix in this initial subset instead of staging
@@ -1949,7 +2099,7 @@ pub mod routing {
             for id in touched {
                 self.destinations[id].as_mut().unwrap().used_this_frame = true;
             }
-            Ok(())
+            Ok(last_samples)
         }
         pub fn finish_frame(&mut self) {
             for dest in self.destinations.iter_mut().flatten() {
@@ -1998,6 +2148,17 @@ pub mod routing {
             let mut mixes = vec![vec![vec![0.; 2]], vec![vec![1.; 2]]];
             r.route_mono(0, 48000, &[1., -1.], &mut mixes).unwrap();
             assert_eq!(mixes[0][0], [0.25, -0.25]);
+            assert_eq!(mixes[1][0], [2.25, -0.25]);
+        }
+        #[test]
+        fn tracked_stop_sample_excludes_previous_shared_mix_contents() {
+            let mut r = Routing::new(2, 3).unwrap().update(&fixture(), 2).unwrap();
+            let mut mixes = vec![vec![vec![8.; 2]], vec![vec![1.; 2]]];
+            let last = r
+                .route_mono_tracked(0, 48000, &[1., -1.], &mut mixes)
+                .unwrap();
+            assert_eq!(last, [(0, 0, -0.25), (1, 0, -1.25)]);
+            assert_eq!(mixes[0][0], [8.25, 7.75]);
             assert_eq!(mixes[1][0], [2.25, -0.25]);
         }
         #[test]
