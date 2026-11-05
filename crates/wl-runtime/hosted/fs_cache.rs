@@ -215,7 +215,7 @@ pub fn bind(cpu: &Cpu, process: &mut Process, svc: u16) -> Option<Binding> {
         && target == HostObject::SelfController
         && cmif + 16 <= end
         && u32_at(&b, cmif)? == u32::from_le_bytes(*b"SFCI")
-        && u32_at(&b, cmif + 8)? == 9;
+        && matches!(u32_at(&b, cmif + 8)?, 9 | 62 | 63);
     if !reader && !opening && !filesystem && !application && !applet_audio && !applet_self {
         return None;
     }

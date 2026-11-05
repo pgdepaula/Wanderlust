@@ -51,6 +51,12 @@ Start validates; it has no concurrently active interactive applet. The accessor'
 completion event is initially unsignaled and becomes ready only after validation.
 Requests for an event after completion obtain the completed state as well.
 
+`ISelfController` commands 62/63 set/get a process-owned idle-time detection
+extension (`u32`: None=0, Extended=1, ExtendedUnsafe=2). Unknown values and
+unexpected request descriptors fail before changing policy. Session and domain
+dispatch share the same state. This hosted profile has no automatic idle
+suspension; recording the policy does not implement a power-management timer.
+
 ## Evidence and validation
 
 Wire definitions are pinned to libnx

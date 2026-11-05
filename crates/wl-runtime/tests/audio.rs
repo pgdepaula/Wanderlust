@@ -2869,6 +2869,63 @@ fn nfp_native_port_converts_to_domain_and_creates_independent_interfaces() {
 }
 
 #[test]
+fn self_controller_idle_extension_is_process_owned_and_validated_in_sessions_and_domains() {
+    use wl_runtime::{ipc::Endpoint, services::HostObject};
+    let (mut p, mut c) = process();
+    let (handle, session) = applet_audio_session(&mut p);
+    let original = Endpoint::Host(HostObject::SelfController);
+    p.kernel.as_mut().unwrap().sessions[session].endpoint = original;
+    wire(&mut p, 63, false, &[], &[]);
+    call(&mut p, &mut c, handle);
+    assert_eq!(reply(&p, 0x20), 0);
+    for value in [2u32, 1, 0, 2] {
+        wire(&mut p, 62, false, &[], &value.to_le_bytes());
+        call(&mut p, &mut c, handle);
+        assert_eq!(reply(&p, 0x18), 0);
+        assert_eq!(
+            p.kernel.as_ref().unwrap().sessions[session].endpoint,
+            original
+        );
+        wire(&mut p, 63, false, &[], &[]);
+        call(&mut p, &mut c, handle);
+        assert_eq!(reply(&p, 0x20), value);
+    }
+    for (value, pid) in [(3u32, false), (u32::MAX, false), (1, true)] {
+        wire(&mut p, 62, pid, &[], &value.to_le_bytes());
+        c.x[0] = u64::from(handle);
+        assert!(audio::service_hook(&mut c, &mut p, 0x21).is_err());
+        assert_eq!(
+            p.kernel.as_ref().unwrap().sessions[session].endpoint,
+            original
+        );
+        wire(&mut p, 63, false, &[], &[]);
+        call(&mut p, &mut c, handle);
+        assert_eq!(reply(&p, 0x20), 2);
+    }
+    wire(&mut p, 0, false, &[], &[]);
+    let address = tls(&p);
+    p.store(address, 4, 5).unwrap();
+    call(&mut p, &mut c, handle);
+    let root = reply(&p, 0x20);
+    controller_domain_wire(&mut p, root, 62, &1u32.to_le_bytes(), &[], None);
+    call(&mut p, &mut c, handle);
+    controller_domain_wire(&mut p, root, 63, &[], &[], None);
+    call(&mut p, &mut c, handle);
+    assert_eq!(reply(&p, 0x30), 1);
+    let k = p.kernel.as_ref().unwrap();
+    assert_eq!(
+        k.host.domains[k.sessions[session].domain.unwrap()].objects,
+        [(root, HostObject::SelfController)]
+    );
+    let (mut other, mut cpu) = process();
+    let (other_handle, other_session) = applet_audio_session(&mut other);
+    other.kernel.as_mut().unwrap().sessions[other_session].endpoint = original;
+    wire(&mut other, 63, false, &[], &[]);
+    call(&mut other, &mut cpu, other_handle);
+    assert_eq!(reply(&other, 0x20), 0);
+}
+
+#[test]
 fn self_controller_launchable_event_has_real_handle_and_restores_scoped_identity() {
     use wl_runtime::{ipc::Endpoint, services::HostObject};
     let (mut p, mut c) = process();

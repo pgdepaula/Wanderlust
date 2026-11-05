@@ -46,6 +46,8 @@ pub struct Service {
     objects: BTreeMap<usize, Kind>,
     controllers: BTreeMap<usize, Controller>,
     launchable: Option<usize>,
+    // Process-owned policy only: the hosted profile does not suspend on idle.
+    idle_time_detection_extension: u32,
 }
 impl std::fmt::Debug for Service {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -60,6 +62,19 @@ pub struct Call<'a> {
     pub inputs: &'a [HostObject],
 }
 impl Service {
+    pub fn idle_time_detection_extension(&mut self, value: Option<u32>) -> RuntimeResult<Reply> {
+        if let Some(value) = value {
+            if value > 2 {
+                return Err("unsupported applet idle-time detection extension".into());
+            }
+            self.idle_time_detection_extension = value;
+            Ok(Reply::ok())
+        } else {
+            Ok(Reply::data(
+                &self.idle_time_detection_extension.to_le_bytes(),
+            ))
+        }
+    }
     fn add(&mut self, kind: Kind) -> RuntimeResult<Reply> {
         if self.objects.len() >= MAX_OBJECTS || self.next >= 8192 {
             return Err("native applet object capacity".into());

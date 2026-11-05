@@ -997,6 +997,17 @@ impl AudioHost for Backend {
         };
         let no_arguments = Shape::default();
         let reply = match (target, command) {
+            (HostObject::AudioRenderer { index }, 62 | 63)
+                if index == crate::host_fs::APPLET_SELF_CONTROLLER =>
+            {
+                // libnx feebd026: Set/GetIdleTimeDetectionExtension, u32 enum.
+                check(Shape {
+                    in_data: if command == 62 { 4 } else { 0 },
+                    ..no_arguments
+                })?;
+                self.applets
+                    .idle_time_detection_extension((command == 62).then(|| word(args, 0)))?
+            }
             (HostObject::AudioRenderer { index }, 9)
                 if index == crate::host_fs::APPLET_SELF_CONTROLLER =>
             {
