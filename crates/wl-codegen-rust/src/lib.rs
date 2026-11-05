@@ -1719,6 +1719,9 @@ fn emit_inner(
         out.push_str("pub mod host_binder {\n");
         out.push_str(include_str!("../../wl-runtime/hosted/binder.rs"));
         out.push_str("\n}\n");
+        out.push_str("pub mod host_prepo {\n");
+        out.push_str(include_str!("../../wl-runtime/hosted/prepo.rs"));
+        out.push_str("\n}\n");
         out.push_str("pub mod host_audio {\n");
         out.push_str(include_str!("../../wl-runtime/hosted/audio.rs"));
         out.push_str("\n}\n");

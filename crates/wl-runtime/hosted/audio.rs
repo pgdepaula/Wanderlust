@@ -738,6 +738,7 @@ struct Backend {
     opus: crate::host_opus::Service,
     fs: crate::host_fs::Service,
     binder: crate::host_binder::Service,
+    prepo: crate::host_prepo::Service,
     released_audio_pins: Vec<GpuPin>,
 }
 impl Default for Backend {
@@ -747,6 +748,7 @@ impl Default for Backend {
             released_audio_pins: Vec::new(),
             opus: crate::host_opus::Service::default(),
             binder: crate::host_binder::Service::default(),
+            prepo: crate::host_prepo::Service::default(),
             fs: if std::env::var("WL_VOLATILE_SAVES").as_deref() == Ok("1") {
                 crate::host_fs::Service::with_volatile_saves()
             } else {
@@ -912,6 +914,15 @@ impl AudioHost for Backend {
         args: &[u8],
     ) -> RuntimeResult<Done> {
         self.release_audio_pins(memory)?;
+        if target
+            == (HostObject::AudioRenderer {
+                index: crate::host_prepo::INDEX,
+            })
+        {
+            return self
+                .prepo
+                .request(memory, k.config.process_id, command, req, args);
+        }
         if target
             == (HostObject::AudioRenderer {
                 index: crate::host_binder::INDEX,
@@ -1259,6 +1270,9 @@ impl AudioHost for Backend {
                 self.fs.close(index);
                 return;
             }
+            if index == crate::host_prepo::INDEX {
+                return;
+            }
             if index >= crate::host_opus::MANAGER {
                 self.opus.close(index);
                 return;
@@ -1287,26 +1301,28 @@ const CODEC_SERVICE: [u8; 8] = *b"hwopus\0\0";
 /// Trusted native provider registration. Guest service-access checks still run
 /// in the existing SM implementation. No guest server handle is fabricated.
 fn register_codec_port(k: &mut Kernel) {
-    if k.services.iter().any(|s| s.name == CODEC_SERVICE) {
-        return;
+    for name in [CODEC_SERVICE, crate::host_prepo::NAME] {
+        if k.services.iter().any(|s| s.name == name) {
+            continue;
+        }
+        let port = k.ports.len();
+        k.ports.push(wl_guest_runtime::ipc::Port {
+            name,
+            max_sessions: 64,
+            sessions: 0,
+            is_light: false,
+            server_closed: false,
+            references: 1,
+        });
+        k.services.push(wl_guest_runtime::ipc::Service {
+            name,
+            owner: 0,
+            port,
+        });
     }
-    let port = k.ports.len();
-    k.ports.push(wl_guest_runtime::ipc::Port {
-        name: CODEC_SERVICE,
-        max_sessions: 64,
-        sessions: 0,
-        is_light: false,
-        server_closed: false,
-        references: 1,
-    });
-    k.services.push(wl_guest_runtime::ipc::Service {
-        name: CODEC_SERVICE,
-        owner: 0,
-        port,
-    });
 }
 
-/// Bind only the native-owned codec port to the existing hosted audio-server
+/// Bind only native-owned codec/report ports to the existing hosted server
 /// transport while one SVC executes. The opaque audio object index identifies
 /// its interface; no original request bytes, CPU instructions or results change.
 pub fn service_hook(
@@ -1324,12 +1340,21 @@ pub fn service_hook(
                 if let Some(session) = k.sessions.get(s)
                     && let Endpoint::Port(port) = session.endpoint
                     && k.services.iter().any(|service| {
-                        service.port == port && service.name == CODEC_SERVICE && service.owner == 0
+                        service.port == port
+                            && matches!(service.name, CODEC_SERVICE | crate::host_prepo::NAME)
+                            && service.owner == 0
                     })
                 {
                     let original = session.endpoint;
+                    let is_prepo = k.services.iter().any(|service| {
+                        service.port == port && service.name == crate::host_prepo::NAME
+                    });
                     k.sessions[s].endpoint = Endpoint::Host(HostObject::AudioRenderer {
-                        index: crate::host_opus::MANAGER,
+                        index: if is_prepo {
+                            crate::host_prepo::INDEX
+                        } else {
+                            crate::host_opus::MANAGER
+                        },
                     });
                     Some((s, original))
                 } else {

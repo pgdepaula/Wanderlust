@@ -9,6 +9,8 @@ pub mod host_binder;
 mod host_fs;
 #[path = "../hosted/opus.rs"]
 mod host_opus;
+#[path = "../hosted/prepo.rs"]
+pub mod host_prepo;
 use wl_runtime::{Cpu, Memory, Stop, horizon::*};
 
 const CODE: u64 = 0x8000000;
@@ -2570,5 +2572,145 @@ fn binder_typed_extension_preserves_real_session_and_distinct_transaction_replie
             p.kernel.as_ref().unwrap().sessions[session].endpoint,
             ipc::Endpoint::Host(HostObject::HosBinderDriver)
         );
+    }
+}
+
+#[test]
+fn prepo_port_uses_real_sm_access_checks_and_restores_failed_bindings() {
+    let (mut p, mut c) = process();
+    p.kernel.as_mut().unwrap().config.service_access = &[(false, "prepo:u")];
+    let handle = named_manager(&mut p, &mut c, &host_prepo::NAME);
+    let Object::Session(session) = p.kernel.as_ref().unwrap().handles.get(handle).unwrap() else {
+        panic!()
+    };
+    let endpoint = p.kernel.as_ref().unwrap().sessions[session].endpoint;
+    wire(&mut p, 10300, false, &[], &[]);
+    call(&mut p, &mut c, handle);
+    assert_eq!(reply(&p, 0x20), 0);
+    wire(&mut p, 99999, false, &[], &[]);
+    c.x[0] = u64::from(handle);
+    assert!(audio::service_hook(&mut c, &mut p, 0x21).is_err());
+    assert_eq!(
+        p.kernel.as_ref().unwrap().sessions[session].endpoint,
+        endpoint
+    );
+    wire(&mut p, 40101, false, &[], &[0]);
+    call(&mut p, &mut c, handle);
+    wire(&mut p, 40100, false, &[], &[]);
+    call(&mut p, &mut c, handle);
+    assert_eq!(reply(&p, 0x20), 0);
+    let (mut p, mut c) = process();
+    p.kernel.as_mut().unwrap().config.service_access = &[(false, "audren:u")];
+    p.write_bytes(DATA, b"sm:\0").unwrap();
+    svc(&mut p, &mut c, 0x1f, &[0, DATA]);
+    let sm = c.x[1] as u32;
+    wire(&mut p, 0, true, &[], &[0; 8]);
+    call(&mut p, &mut c, sm);
+    wire(&mut p, 1, false, &[], &host_prepo::NAME);
+    svc(&mut p, &mut c, 0x21, &[u64::from(sm)]);
+    assert_ne!(reply(&p, 0x18), 0);
+}
+
+#[test]
+fn prepo_report_storage_is_bounded_owned_and_failed_reads_are_atomic() {
+    use wl_runtime::ipc::Request;
+    let (mut p, _) = process();
+    p.write_bytes(DATA + 0x1000, b"room").unwrap();
+    p.write_bytes(DATA + 0x2000, &[0x81, 0xa1, b'k', 3])
+        .unwrap();
+    let mut req = Request::default();
+    req.pid = Some(81);
+    req.statics.push((DATA + 0x1000, 4));
+    req.sends.push((DATA + 0x2000, 4));
+    let mut service = host_prepo::Service::default();
+    for command in 10100..=10105 {
+        assert_eq!(
+            service
+                .request(&p.memory, 81, command, &req, &[1; 16])
+                .unwrap()
+                .code,
+            0
+        );
+    }
+    assert_eq!(service.reports().len(), 6);
+    assert_eq!(service.reports()[0].payload, [0x81, 0xa1, b'k', 3]);
+    p.write_bytes(DATA + 0x2000, &[7; 4]).unwrap();
+    assert_eq!(service.reports()[0].payload[0], 0x81);
+    req.sends[0].0 = 0;
+    assert!(
+        service
+            .request(&p.memory, 81, 10104, &req, &[0; 8])
+            .is_err()
+    );
+    assert_eq!(service.reports().len(), 6);
+    req.sends[0].0 = DATA + 0x2000;
+    req.pid = Some(82);
+    assert_eq!(
+        service
+            .request(&p.memory, 81, 10104, &req, &[])
+            .unwrap()
+            .code,
+        129 | (101 << 9)
+    );
+    req.pid = Some(81);
+    assert_ne!(
+        service
+            .request(&p.memory, 81, 10105, &req, &[0; 16])
+            .unwrap()
+            .code,
+        0
+    );
+    for size in [0, 16385, u64::MAX] {
+        req.sends[0].1 = size;
+        assert_ne!(
+            service
+                .request(&p.memory, 81, 10104, &req, &[])
+                .unwrap()
+                .code,
+            0
+        );
+    }
+    req.sends[0].1 = 4;
+    for _ in 0..100 {
+        assert_eq!(
+            service
+                .request(&p.memory, 81, 10104, &req, &[])
+                .unwrap()
+                .code,
+            0
+        );
+    }
+    assert_eq!(service.reports().len(), 64);
+    assert_eq!(service.reports().back().unwrap().payload, [7; 4]);
+    assert!(host_prepo::Service::default().reports().is_empty());
+}
+
+#[test]
+fn prepo_literal_hipc_report_injects_kernel_pid_and_rejects_zero_uid() {
+    let (mut p, mut c) = process();
+    p.kernel.as_mut().unwrap().config.service_access = &[(false, "prepo:u")];
+    let handle = named_manager(&mut p, &mut c, &host_prepo::NAME);
+    p.write_bytes(DATA + 0x1000, b"test").unwrap();
+    p.write_bytes(DATA + 0x2000, &[0x81, 0xa1, b'x', 1])
+        .unwrap();
+    for (command, uid, expected) in [(10104, 0, 0), (10105, 1, 0), (10105, 0, 129 | (1 << 9))] {
+        let mut b = [0u8; 256];
+        b[0..4].copy_from_slice(&(4u32 | (1 << 16) | (1 << 20)).to_le_bytes());
+        let words = if command == 10104 { 10u32 } else { 12u32 };
+        b[4..8].copy_from_slice(&(words | (1 << 31)).to_le_bytes());
+        b[8..12].copy_from_slice(&1u32.to_le_bytes());
+        b[12..20].copy_from_slice(&u64::MAX.to_le_bytes()); // kernel must replace spoofed PID
+        b[20..24].copy_from_slice(&(4u32 << 16).to_le_bytes());
+        b[24..28].copy_from_slice(&((DATA + 0x1000) as u32).to_le_bytes());
+        b[28..32].copy_from_slice(&4u32.to_le_bytes());
+        b[32..36].copy_from_slice(&((DATA + 0x2000) as u32).to_le_bytes());
+        b[48..52].copy_from_slice(b"SFCI");
+        b[56..60].copy_from_slice(&u32::to_le_bytes(command));
+        b[64] = uid;
+        let address = tls(&p);
+        p.write_bytes(address, &b).unwrap();
+        svc(&mut p, &mut c, 0x21, &[u64::from(handle)]);
+        assert_eq!(c.x[0], 0);
+        assert_eq!(reply(&p, 0x18), expected);
     }
 }
