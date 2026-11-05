@@ -943,11 +943,11 @@ pub fn wait_for_address(
         1 => {
             // DecrementAndWaitIfLessThan
             let cur = read_u32(memory, address).ok_or(result::INVALID_CURRENT_MEMORY)?;
-            let new_val = cur.wrapping_sub(1);
-            if !write_u32(memory, address, new_val) {
+            let eligible = (cur as i32) < (value as i32);
+            if eligible && !write_u32(memory, address, cur.wrapping_sub(1)) {
                 return Err(result::INVALID_CURRENT_MEMORY);
             }
-            (new_val as i32) < (value as i32)
+            eligible
         }
         2 => {
             // WaitIfEqual
@@ -964,7 +964,7 @@ pub fn wait_for_address(
         _ => return Err(result::INVALID_ENUM_VALUE),
     };
     if !should_wait {
-        return Ok(None);
+        return Err(result::INVALID_STATE);
     }
     if timeout == 0 {
         return Err(result::TIMED_OUT);

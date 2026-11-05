@@ -795,9 +795,9 @@ fn address_arbitration_wait_and_signal() {
         result::INVALID_ADDRESS
     );
 
-    // 2. WaitIfEqual (arb_type=2): when value doesn't match (e.g. expected 99, got 10), returns success immediately without blocking.
+    // 2. A mismatching WaitIfEqual returns INVALID_STATE without blocking.
     let (res, stop) = svc(&mut p, &mut c, 0x34, &[addr, 2, 99, u64::MAX]);
-    assert_eq!(res, 0);
+    assert_eq!(res, result::INVALID_STATE);
     assert_eq!(stop, None);
 
     // 3. Timeout == 0 when condition holds returns TIMED_OUT immediately.
@@ -831,4 +831,71 @@ fn address_arbitration_wait_and_signal() {
     let (res, stop) = svc(&mut p, &mut c, 0x36, &[]);
     assert_eq!(res, 0);
     assert_eq!(stop, None);
+}
+
+#[test]
+fn address_wait_condition_precedes_decrement_and_timeout() {
+    let (mut p, mut c) = process();
+    let address = CODE + 0x1000;
+    // Signed comparisons use the old value. Only an eligible decrement mutates
+    // storage, even when a zero deadline then returns TIMED_OUT.
+    for (initial, limit, expected, result) in [
+        (1u32, 1u32, 1u32, result::INVALID_STATE),
+        (2, 1, 2, result::INVALID_STATE),
+        (0, 1, u32::MAX, result::TIMED_OUT),
+        (u32::MAX, 0, u32::MAX - 1, result::TIMED_OUT),
+        (0x7fffffff, 0, 0x7fffffff, result::INVALID_STATE),
+        (0x80000000, 0x80000000, 0x80000000, result::INVALID_STATE),
+        (0x80000000, 0, 0x7fffffff, result::TIMED_OUT),
+    ] {
+        p.memory.store(address, 4, u64::from(initial)).unwrap();
+        assert_eq!(
+            svc(&mut p, &mut c, 0x34, &[address, 1, u64::from(limit), 0]),
+            (result, None)
+        );
+        assert_eq!(p.memory.load(address, 4).unwrap(), u64::from(expected));
+        assert_eq!(k(&mut p).threads[0].state, ThreadState::Runnable);
+        assert!(c.x[1..8].iter().all(|v| *v == 0));
+    }
+    // Failed predicates take priority over a zero timeout for all read modes.
+    p.memory.store(address, 8, 5).unwrap();
+    for (mode, value) in [(0, 5), (2, 4), (3, 0x100000005)] {
+        assert_eq!(
+            svc(&mut p, &mut c, 0x34, &[address, mode, value, 0]),
+            (result::INVALID_STATE, None)
+        );
+        assert_eq!(p.memory.load(address, 8).unwrap(), 5);
+    }
+    // Real blocking/wakeup uses the pre-decrement predicate, including signed
+    // minimum wrapping to positive maximum after eligibility was established.
+    let (waiter, _) = spawn(&mut p, &mut c, 44, 1);
+    for (initial, expected) in [(0u32, u32::MAX), (0x80000000, 0x7fffffff)] {
+        p.memory.store(address, 4, u64::from(initial)).unwrap();
+        switch(&mut p, &mut c, waiter);
+        assert_eq!(
+            svc(&mut p, &mut c, 0x34, &[address, 1, 1, u64::MAX]).1,
+            Some(Stop::Reschedule)
+        );
+        assert_eq!(k(&mut p).threads[waiter].state, ThreadState::Waiting);
+        assert_eq!(p.memory.load(address, 4).unwrap(), u64::from(expected));
+        switch(&mut p, &mut c, 0);
+        assert_eq!(
+            svc(&mut p, &mut c, 0x35, &[address, 0, 0, 1]),
+            (result::SUCCESS, Some(Stop::Reschedule))
+        );
+        switch(&mut p, &mut c, waiter);
+        assert_eq!(c.x[0], 0);
+        switch(&mut p, &mut c, 0);
+    }
+    // An ineligible decrement must not attempt a write to a readable code page.
+    assert_eq!(
+        svc(&mut p, &mut c, 0x34, &[CODE, 1, u64::from(u32::MAX), 0]),
+        (result::INVALID_STATE, None)
+    );
+    assert_eq!(p.memory.load(CODE, 4).unwrap(), 0);
+    assert_eq!(
+        svc(&mut p, &mut c, 0x34, &[CODE, 1, 1, 0]),
+        (result::INVALID_CURRENT_MEMORY, None)
+    );
+    assert_eq!(p.memory.load(CODE, 4).unwrap(), 0);
 }
