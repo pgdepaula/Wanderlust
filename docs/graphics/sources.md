@@ -437,6 +437,13 @@ arithmetic; WGSL offers no per-operation unfused-rounding control here.
 
 ## Perspective IPA and reciprocal
 
+The same SPH ImapSystemValuesB table independently declares PositionW at word
+five bit 31. Pixel programs may declare this input without consuming it,
+including programs with no generic inputs. Such an unused declaration preserves
+the decoded operations and generated WGSL. It does not enable PositionW reads:
+those still require the verified perspective input mode and instruction path.
+Other system-input declarations remain unsupported in this bounded interface.
+
 The pinned NVIDIA Shader-Program-Header specification at revision `9fdf5c4`
 (linked above) defines PS PositionW at word five bit 31 and two-bit generic input
 interpolation values Perspective=2 and ScreenLinear=3. Pinned MIT UAM/Mesa

@@ -28,7 +28,11 @@ fn bind(engine: &mut Maxwell3d, address: u32, size: u32) {
 fn guest_ldc_changes_pixels_without_shader_recompile() {
     let mut r = Renderer::new().expect("actual GPU requested");
     println!("adapter={:?}", r.capabilities);
-    let program = FragmentProgram::decode(include_bytes!("fixtures/maxwell/ldc.bin")).unwrap();
+    let original = include_bytes!("fixtures/maxwell/ldc.bin");
+    let mut declared = original.to_vec();
+    declared[23] |= 0x80; // Declared PositionW is unused by this assembled shader.
+    let program = FragmentProgram::decode(&declared).unwrap();
+    assert_eq!(program, FragmentProgram::decode(original).unwrap());
     let mut engine = Maxwell3d::default();
     bind(&mut engine, 0x10000, 32);
     let mut map = AddressMap::default();

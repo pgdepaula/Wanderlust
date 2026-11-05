@@ -392,6 +392,11 @@ impl Program {
             }
         }
         if !vertex {
+            // PS IMAP PositionW is an input declaration, independent of generic
+            // interpolation. Declaring it without reading it has no effect.
+            // Actual PositionW reads remain restricted to the verified
+            // perspective instruction/dataflow path below.
+            header[23] |= input[23] & 0x80;
             // NVIDIA SPH: MRT_ENABLE only selects per-target versus broadcast
             // exports. With our sole target-zero OMAP=0xf both are identical.
             header[1] |= input[1] & 0x40;

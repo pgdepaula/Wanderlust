@@ -1,5 +1,28 @@
 use wl_gpu::shader_program::{FragmentProgram, VertexProgram};
 #[test]
+fn unused_position_w_declaration_preserves_fragment_semantics() {
+    for original in [
+        include_bytes!("fixtures/maxwell/quarters.bin").as_slice(),
+        include_bytes!("fixtures/maxwell/ldc.bin").as_slice(),
+    ] {
+        let expected = FragmentProgram::decode(original).unwrap();
+        let mut binary = original.to_vec();
+        binary[23] |= 0x80; // SPH word five: ImapSystemValuesB.PositionW.
+        let actual = FragmentProgram::decode(&binary).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(actual.wgsl(), expected.wgsl());
+        for bit in 0..31 {
+            let mut unsupported = binary.clone();
+            unsupported[20 + bit / 8] ^= 1 << (bit % 8);
+            assert!(FragmentProgram::decode(&unsupported).is_err());
+        }
+        // A declaration must not enable an IPA instruction outside its verified
+        // generic-input mode, or silently replace a register-producing MOV.
+        binary[0x58..0x60].copy_from_slice(&0xe003ff87cff7ff00u64.to_le_bytes());
+        assert!(FragmentProgram::decode(&binary).is_err());
+    }
+}
+#[test]
 fn single_target_mrt_and_pixel_ignored_store_request_fields_preserve_semantics() {
     let original = include_bytes!("fixtures/maxwell/quarters.bin");
     let expected = FragmentProgram::decode(original).unwrap();
