@@ -10,6 +10,7 @@ use wl_guest_runtime::{
 pub const MANAGER: usize = 1 << 29;
 /// Scoped callback identity for AM audio controls, outside the FS index range.
 pub const APPLET_AUDIO_CONTROLLER: usize = 1 << 28;
+pub const APPLET_SELF_CONTROLLER: usize = 1 << 24;
 const READER: usize = MANAGER + 1;
 const EMPTY_FILESYSTEM: usize = MANAGER + 2;
 const APPLICATION: usize = MANAGER + 3;
@@ -132,6 +133,7 @@ pub fn bind(cpu: &Cpu, process: &mut Process, svc: u16) -> Option<Binding> {
             | HostObject::ApplicationFunctions
             | HostObject::AppletOe
             | HostObject::AudioController
+            | HostObject::SelfController
             | HostObject::ApplicationProxy,
         ) => true,
         Endpoint::Host(HostObject::AudioRenderer { index }) => owns(index),
@@ -208,19 +210,27 @@ pub fn bind(cpu: &Cpu, process: &mut Process, svc: u16) -> Option<Binding> {
         && cmif + 16 <= end
         && u32_at(&b, cmif)? == u32::from_le_bytes(*b"SFCI")
         && matches!(u32_at(&b, cmif + 8)?, 0..=2);
-    if !reader && !opening && !filesystem && !application && !applet_audio {
+    let applet_self = !control
+        && !closing
+        && target == HostObject::SelfController
+        && cmif + 16 <= end
+        && u32_at(&b, cmif)? == u32::from_le_bytes(*b"SFCI")
+        && u32_at(&b, cmif + 8)? == 9;
+    if !reader && !opening && !filesystem && !application && !applet_audio && !applet_self {
         return None;
     }
     let k = process.kernel.as_mut()?;
     // The opaque callback transport uses an audio tag, but these objects belong
     // to FS. Scope the existing ID allocator to FS for creation and domain close,
     // preventing collisions and avoiding a second domain/handle implementation.
-    if !application && !applet_audio {
+    if !application && !applet_audio && !applet_self {
         std::mem::swap(&mut k.host.fs_domain_ids, &mut k.host.audio_domain_ids);
     }
-    let location = if opening || filesystem || application || applet_audio {
+    let location = if opening || filesystem || application || applet_audio || applet_self {
         let target = HostObject::AudioRenderer {
-            index: if applet_audio {
+            index: if applet_self {
+                APPLET_SELF_CONTROLLER
+            } else if applet_audio {
                 APPLET_AUDIO_CONTROLLER
             } else if application {
                 APPLICATION
@@ -240,7 +250,7 @@ pub fn bind(cpu: &Cpu, process: &mut Process, svc: u16) -> Option<Binding> {
     };
     Some(Binding {
         location,
-        swap_ids: !application && !applet_audio,
+        swap_ids: !application && !applet_audio && !applet_self,
     })
 }
 pub fn restore(process: &mut Process, binding: Option<Binding>) {

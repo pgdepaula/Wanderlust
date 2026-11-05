@@ -740,6 +740,7 @@ struct Backend {
     binder: crate::host_binder::Service,
     prepo: crate::host_prepo::Service,
     nfp: crate::host_nfp::Service,
+    library_applet_launchable_event: Option<usize>,
     released_audio_pins: Vec<GpuPin>,
 }
 impl Default for Backend {
@@ -751,6 +752,7 @@ impl Default for Backend {
             binder: crate::host_binder::Service::default(),
             prepo: crate::host_prepo::Service::default(),
             nfp: crate::host_nfp::Service::default(),
+            library_applet_launchable_event: None,
             fs: if std::env::var("WL_VOLATILE_SAVES").as_deref() == Ok("1") {
                 crate::host_fs::Service::with_volatile_saves()
             } else {
@@ -976,6 +978,22 @@ impl AudioHost for Backend {
         };
         let no_arguments = Shape::default();
         let reply = match (target, command) {
+            (HostObject::AudioRenderer { index }, 9)
+                if index == crate::host_fs::APPLET_SELF_CONTROLLER =>
+            {
+                check(no_arguments)?;
+                // This profile has no running library applet. A real readable
+                // event exposes the free launch slot; no applet is started here.
+                let event = *self.library_applet_launchable_event.get_or_insert_with(|| {
+                    let e = k.events.len();
+                    k.events.push(threads::Event {
+                        signaled: true,
+                        ..threads::Event::default()
+                    });
+                    e
+                });
+                copy_event(k, event)
+            }
             // Applet audio balance is process-owned control state, distinct
             // from an output device's gain and from renderer voice volumes.
             (HostObject::AudioRenderer { index }, 0..=2)

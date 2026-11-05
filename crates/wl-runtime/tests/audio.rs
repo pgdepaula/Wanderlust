@@ -2865,3 +2865,55 @@ fn nfp_native_port_converts_to_domain_and_creates_independent_interfaces() {
     assert_eq!(reply(&p, 0x28), 0);
     assert_eq!(reply(&p, 0x30), 1);
 }
+
+#[test]
+fn self_controller_launchable_event_has_real_handle_and_restores_scoped_identity() {
+    use wl_runtime::{ipc::Endpoint, services::HostObject};
+    let (mut p, mut c) = process();
+    let (handle, session) = applet_audio_session(&mut p);
+    p.kernel.as_mut().unwrap().sessions[session].endpoint =
+        Endpoint::Host(HostObject::SelfController);
+    let original = p.kernel.as_ref().unwrap().sessions[session].endpoint;
+    wire(&mut p, 9, true, &[], &[]);
+    c.x[0] = u64::from(handle);
+    let before = p.kernel.as_ref().unwrap().events.len();
+    assert!(audio::service_hook(&mut c, &mut p, 0x21).is_err());
+    assert_eq!(p.kernel.as_ref().unwrap().events.len(), before);
+    assert_eq!(
+        p.kernel.as_ref().unwrap().sessions[session].endpoint,
+        original
+    );
+    let mut first = None;
+    for _ in 0..2 {
+        wire(&mut p, 9, false, &[], &[]);
+        call(&mut p, &mut c, handle);
+        let copied = reply(&p, 12);
+        let k = p.kernel.as_ref().unwrap();
+        let Some(Object::ReadableEvent(event)) = k.handles.get(copied) else {
+            panic!()
+        };
+        assert!(k.events[event].signaled);
+        if let Some(first) = first {
+            assert_eq!(event, first);
+        } else {
+            first = Some(event);
+        }
+        assert_eq!(k.sessions[session].endpoint, original);
+    }
+    wire(&mut p, 0, false, &[], &[]);
+    let address = tls(&p);
+    p.store(address, 4, 5).unwrap();
+    call(&mut p, &mut c, handle);
+    let root = reply(&p, 0x20);
+    fs_reader_wire(&mut p, Some(root), 9, false);
+    svc(&mut p, &mut c, 0x21, &[u64::from(handle)]);
+    assert_eq!(c.x[0], 0);
+    let k = p.kernel.as_ref().unwrap();
+    let copied = reply(&p, 12);
+    assert_eq!(k.handles.get(copied), first.map(Object::ReadableEvent));
+    let domain = k.sessions[session].domain.unwrap();
+    assert_eq!(
+        k.host.domains[domain].objects,
+        [(root, HostObject::SelfController)]
+    );
+}
