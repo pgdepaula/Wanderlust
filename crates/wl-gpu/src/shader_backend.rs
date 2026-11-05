@@ -462,6 +462,11 @@ pub(crate) fn read_program(
     }
     counters.guest_to_host_bytes += 80;
     let mut terminated = false;
+    // A conditional forward BRA can select code after the first EXIT. Keep
+    // those bytes in the acquired identity even when translation rejects BRA.
+    // GM107 BTARG is signed 24-bit byte displacement, relative to PC+8.
+    let mut targets = [false; 512];
+    let mut reachable = true;
     for _ in 0..128 {
         let address = source
             .0
@@ -481,10 +486,34 @@ pub(crate) fn read_program(
             counters.shader_binary_bytes += 32;
         }
         counters.guest_to_host_bytes += 32;
-        if bundle[8..]
-            .chunks_exact(8)
-            .any(|word| u64::from_le_bytes(word.try_into().unwrap()) == 0xe30000000007000f)
-        {
+        let code_start = binary.len() - 80 - 32;
+        for (lane, bytes) in bundle[8..].chunks_exact(8).enumerate() {
+            let pc = code_start + 8 + lane * 8;
+            if targets[pc / 8] {
+                targets[pc / 8] = false;
+                reachable = true;
+            }
+            if !reachable {
+                continue; // Do not interpret padding after an exited path.
+            }
+            let word = u64::from_le_bytes(bytes.try_into().unwrap());
+            if word & 0xfff0000000000020 == 0xe240000000000000 {
+                let displacement = (((word >> 20) & 0xffffff) as i32) << 8 >> 8;
+                let target = pc as i64 + 8 + i64::from(displacement);
+                if !(0..4096).contains(&target) || target % 8 != 0 || target % 32 == 0 {
+                    return Err(invalid(
+                        "shader BRA target outside bounded instruction slots",
+                    ));
+                }
+                if target > pc as i64 {
+                    targets[target as usize / 8] = true;
+                }
+            }
+            if word == 0xe30000000007000f {
+                reachable = false;
+            }
+        }
+        if !reachable && !targets.iter().any(|v| *v) {
             terminated = true;
             break;
         }
@@ -542,4 +571,74 @@ fn capture_shader_diagnostic(source: GpuAddress, binary: &[u8], vertex: bool, te
         fs::hard_link(&temporary, &final_path)
     })();
     let _ = fs::remove_file(temporary);
+}
+
+#[cfg(test)]
+mod fetch_tests {
+    use super::*;
+    fn fetch(words: &[u64]) -> Result<(Vec<u8>, crate::Counters)> {
+        let mut bytes = vec![0; 80];
+        for word in words {
+            bytes.extend_from_slice(&word.to_le_bytes());
+        }
+        let mut map = AddressMap::default();
+        map.map(GpuAddress(0x10000), GuestAddress(0), bytes.len() as u64)?;
+        let mut counters = crate::Counters::default();
+        let result = read_program(
+            GpuAddress(0x10000),
+            &map,
+            &SliceMemory {
+                base: GuestAddress(0),
+                bytes: &bytes,
+            },
+            &mut counters,
+            false,
+        )?;
+        Ok((result, counters))
+    }
+    const CONTROL: u64 = 0x001f9800fcc007e6;
+    const EXIT: u64 = 0xe30000000007000f;
+    const NOP: u64 = 0x50b0000000070f00;
+    #[test]
+    fn forward_branch_keeps_alternate_exit_and_its_code_in_shader_identity() {
+        // Independently assembled envytools f102b823: $p0 BRA 0x28; EXIT.
+        let words = [
+            CONTROL,
+            0xe24000000180000f,
+            EXIT,
+            NOP,
+            CONTROL,
+            EXIT,
+            NOP,
+            NOP,
+        ];
+        let (mut binary, counters) = fetch(&words).unwrap();
+        assert_eq!(binary.len(), 144);
+        assert_eq!(counters.shader_binary_bytes, 144);
+        assert_eq!(counters.guest_to_host_bytes, 144);
+        assert!(fetch(&words[..4]).is_err());
+        let mut unterminated = words;
+        unterminated[5] = NOP;
+        assert!(fetch(&unterminated).is_err());
+        // Acquisition does not claim that the straight-line decoder supports BRA.
+        binary[..80].copy_from_slice(&include_bytes!("../tests/fixtures/maxwell/red.bin")[..80]);
+        assert!(
+            FragmentProgram::decode(&binary)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported instruction")
+        );
+    }
+    #[test]
+    fn exited_padding_does_not_fetch_unmapped_tail_or_interpret_bra_trap() {
+        let (binary, counters) = fetch(&[CONTROL, EXIT, 0xe240007ffff7000f, NOP]).unwrap();
+        assert_eq!(binary.len(), 112);
+        assert_eq!(counters.shader_binary_bytes, 112);
+    }
+    #[test]
+    fn branch_targets_reject_control_slots_misalignment_and_out_of_budget() {
+        for encoded in [0x10u64, 1, 4096, 0xffffe0] {
+            assert!(fetch(&[CONTROL, 0xe24000000000000f | (encoded << 20), EXIT, NOP]).is_err());
+        }
+    }
 }

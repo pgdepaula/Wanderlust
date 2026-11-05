@@ -395,8 +395,15 @@ shader or implicit group is substituted. Decoded register usage must fit the
 selected count. Other enabled shader stages and unimplemented methods fault.
 
 `sync_selected_fragment` resolves base+offset through AddressMap/GuestMemory,
-reads the 80-byte SPH and scans complete scheduled 32-byte bundles to the first
-exact unconditional EXIT, within a 4 KiB code budget. The final bundle's padding
+reads the 80-byte SPH and scans complete scheduled 32-byte bundles within a
+4 KiB code budget. A direct GM107 BRA encountered on an acquired path records
+its signed 24-bit displacement relative to PC+8. Forward targets retain code
+beyond an earlier EXIT in the acquired span, continuing to an EXIT at or beyond
+the recorded forward destinations.
+Targets outside the budget, unaligned addresses and scheduling-control slots
+fail. Unreachable padding after EXIT does not extend the fetch. This acquisition
+rule does not enable branch translation: unsupported control flow still fails
+before pipeline installation. The final bundle's padding
 is validated. There is no fabricated B197 program-length register. Short, unmapped,
 overflowing, unsupported or unterminated programs fail with the harness unready.
 Code addresses, fetch spans and pool addresses remain GPU VAs, never host pointers.
