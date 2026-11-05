@@ -15,7 +15,7 @@ fn method(w: &mut Vec<u32>, m: u32, v: u32) {
 fn edge(a: [f64; 2], b: [f64; 2], p: [f64; 2]) -> f64 {
     (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
 }
-fn reference(pixels: &[u8], masked: bool) {
+fn reference(pixels: &[u8], masked: bool, coupled: bool) {
     let mut counts = [0; 4];
     for y in 0..29 {
         for x in 0..52 {
@@ -43,7 +43,7 @@ fn reference(pixels: &[u8], masked: bool) {
                 coverage |= 1 << n;
                 let c = COLOR[n].map(f64::from);
                 for k in 0..4 {
-                    let source = if k == 3 {
+                    let source = if k == 3 && !coupled {
                         c[k] * 255.
                     } else {
                         c[k] * 255. * c[3]
@@ -98,17 +98,17 @@ fn draw(
 #[test]
 #[ignore = "requires actual GPU; run explicitly"]
 fn b197_alpha_blend_mutable_constants_masks_and_pipeline_identity() {
-    blend_scene(false, false);
+    blend_scene(false, false, false);
 }
 #[test]
 #[ignore = "requires actual GPU; target-zero independent blend bank controls real pixels"]
 fn b197_per_target_blend_uses_selected_bank_and_preserves_masks() {
-    blend_scene(true, false);
+    blend_scene(true, false, false);
 }
 #[test]
 #[ignore = "requires actual GPU; equivalent global/per-target state shares pipeline"]
 fn b197_global_to_per_target_blend_selection_reuses_effective_pipeline() {
-    blend_scene(false, true);
+    blend_scene(false, true, false);
 }
 fn blend_method(words: &mut Vec<u32>, m: u32, value: u32, per_target: bool) {
     let selected = if per_target {
@@ -127,7 +127,7 @@ fn blend_method(words: &mut Vec<u32>, m: u32, value: u32, per_target: bool) {
     };
     method(words, selected, value);
 }
-fn blend_scene(per_target: bool, switch: bool) {
+fn blend_scene(per_target: bool, switch: bool, coupled: bool) {
     let mut data = vec![0u8; 0xe000];
     for (off, bin) in [
         (
@@ -180,6 +180,10 @@ fn blend_scene(per_target: bool, switch: bool) {
         (0x1358, 0x4303),
         (0x1214, 0x40030000),
     ] {
+        if coupled && m == 0x133c {
+            continue;
+        }
+        let v = if coupled && m == 0x1350 { 0x4302 } else { v };
         blend_method(&mut words, m, v, per_target);
     }
     let mut r = Renderer::new().unwrap();
@@ -195,7 +199,7 @@ fn blend_scene(per_target: bool, switch: bool) {
     if switch {
         method(&mut words, 0x12e4, 1);
     }
-    if per_target || switch {
+    if (per_target || switch) && !coupled {
         method(&mut words, 0x1e00, 1);
     }
     for (m, v) in [
@@ -207,6 +211,7 @@ fn blend_scene(per_target: bool, switch: bool) {
         (0x1358, 6),
         (0x1214, 0x40030003),
     ] {
+        let v = if coupled && m == 0x1350 { 5 } else { v };
         blend_method(&mut words, m, v, per_target || switch);
     }
     draw(&mut r, &mut c, &words, &map, &mut data, &mut changes);
@@ -226,7 +231,7 @@ fn blend_scene(per_target: bool, switch: bool) {
         )
         .unwrap()
         .unwrap();
-    reference(&frame.rgba, false);
+    reference(&frame.rgba, false, coupled);
     // Disable blending and write red/blue only. Green and alpha retain old output.
     let before = r.counters;
     let mut words = Vec::new();
@@ -252,7 +257,7 @@ fn blend_scene(per_target: bool, switch: bool) {
         )
         .unwrap()
         .unwrap();
-    reference(&frame.rgba, true);
+    reference(&frame.rgba, true, coupled);
     if switch {
         let before = r.counters;
         let mut incomplete = common::hardware::setup();
@@ -291,10 +296,16 @@ fn blend_scene(per_target: bool, switch: bool) {
             before.shader_module_allocations
         );
         assert_eq!(r.counters.readback_operations, before.readback_operations);
-        reference(&data[RT..RT + SIZE], true);
+        reference(&data[RT..RT + SIZE], true, coupled);
     }
     println!(
         "adapter={:?} counters={:?}",
         r.capabilities.adapter, r.counters
     );
+}
+
+#[test]
+#[ignore = "requires actual GPU"]
+fn b197_equivalent_alpha_branches_do_not_require_a_selector() {
+    blend_scene(true, false, true);
 }

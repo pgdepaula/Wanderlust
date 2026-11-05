@@ -503,7 +503,20 @@ impl RasterRegisters {
         let (separate, registers) = if self.blend_per_target {
             let bank = &self.target_blend[0];
             (
-                bank[0].ok_or_else(|| invalid("missing per-target alpha blend selection"))? != 0,
+                match bank[0] {
+                    Some(value) => value != 0,
+                    // Both legal selector values produce exactly the same
+                    // operation/factors. This proves irrelevance, not a reset
+                    // default or inheritance from the global blend bank.
+                    None if bank[1..4].iter().all(Option::is_some) && bank[1..4] == bank[4..7] => {
+                        false
+                    }
+                    None => {
+                        return Err(invalid(&format!(
+                            "missing per-target alpha blend selection; target0={bank:x?}"
+                        )));
+                    }
+                },
                 &bank[1..],
             )
         } else {
@@ -1235,6 +1248,38 @@ mod tests {
         r.apply(0x12e4, 1).unwrap();
         assert_eq!(r.resolve_blend().unwrap(), global);
         assert_eq!(RasterRegisters::default().target_blend, [[None; 7]; 8]);
+    }
+
+    #[test]
+    fn absent_target_alpha_selector_requires_proven_equal_complete_branches() {
+        let mut r = RasterRegisters::default();
+        r.apply(0x1360, 1).unwrap();
+        r.apply(0x12e4, 1).unwrap();
+        for (m, v) in [
+            (0x1e04, 1),
+            (0x1e08, 2),
+            (0x1e0c, 1),
+            (0x1e10, 1),
+            (0x1e14, 2),
+        ] {
+            r.apply(m, v).unwrap();
+        }
+        assert!(r.resolve_blend().is_err());
+        r.apply(0x1e18, 1).unwrap();
+        let equivalent = r.resolve_blend().unwrap();
+        for selector in [0, 1] {
+            let mut explicit = RasterRegisters {
+                blend_enabled: true,
+                blend_per_target: true,
+                target_blend: r.target_blend,
+                ..Default::default()
+            };
+            explicit.apply(0x1e00, selector).unwrap();
+            assert_eq!(explicit.resolve_blend().unwrap(), equivalent);
+        }
+        r.apply(0x1e18, 2).unwrap();
+        assert!(r.resolve_blend().is_err());
+        assert_eq!(r.target_blend[0][0], None);
     }
     #[test]
     fn independent_blend_rejects_holes_modifiers_and_unaligned_methods_atomically() {

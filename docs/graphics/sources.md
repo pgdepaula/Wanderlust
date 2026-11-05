@@ -2666,3 +2666,21 @@ for command-driven completion. MIT Ryujinx revision
 corroborates the distinction between increment-with-value MAX reservation and
 GPU-command MIN advancement. The bounded executor uses a stronger queue-prefix
 wait rather than claiming equivalent hardware pipeline timing.
+
+## Per-target alpha-selection equivalence
+
+NVIDIA B197 `SET_BLEND_PER_TARGET_SEPARATE_FOR_ALPHA` at `0x1e00 + 32*j`
+selects coupled versus separate alpha operations. The implementation does not
+infer an unwritten selector from the global blend bank. When all six explicitly
+written target color/alpha operation and coefficient words are pairwise equal,
+either selector value yields the same complete effective blend state. That
+specific case therefore does not require a selector write. Missing coefficients
+or differing branches remain errors. This is an equivalence proof over supplied
+register state, not a hardware reset-value assertion.
+
+The register definitions are pinned to NVIDIA
+[`clb197.h`, 9fdf5c40](https://github.com/NVIDIA/open-gpu-doc/blob/9fdf5c4062007929d9f4e6cbad9c9771fe61b880/classes/3d/clb197.h).
+A synthetic B197 fixture omits only the target-zero selector, supplies identical
+RGB/alpha source-alpha blending, and checks overlapping asymmetric triangles
+against scalar blend and coverage arithmetic. Explicit-selector regression cases
+retain their independent alpha behavior and pipeline-reuse assertions.
