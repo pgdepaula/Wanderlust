@@ -1335,3 +1335,50 @@ fn binder_auto_select_reply_skips_empty_b_descriptor_and_uses_c_buffer() {
     assert_eq!(p.read_bytes(output + 36, 28).unwrap(), [0xa5; 28]);
     assert_eq!(p.read_bytes(input, 108).unwrap(), parcel);
 }
+
+#[test]
+fn hid_shared_memory_has_a_valid_initial_sample_before_guest_mapping() {
+    let (mut p, mut c) = process(&[(false, "*")]);
+    let sm = connect(&mut p, &mut c);
+    tipc_register_client(&mut p, &mut c, sm);
+    let hid = service(&mut p, &mut c, sm, "hid");
+    request(&mut p, 0, true, &0x51u64.to_le_bytes());
+    assert_eq!(send(&mut p, &mut c, hid).0, result::SUCCESS);
+    assert_eq!(reply_result(&p), 0);
+    let resource = reply_handle(&p);
+    request(&mut p, 0, false, &[]);
+    assert_eq!(send(&mut p, &mut c, resource).0, result::SUCCESS);
+    assert_eq!(reply_result(&p), 0);
+    let shared = reply_handle(&p);
+    let address = 0x1800000000;
+    assert_eq!(
+        svc(
+            &mut p,
+            &mut c,
+            0x13,
+            &[u64::from(shared), address, 0x40000, 1]
+        )
+        .0,
+        result::SUCCESS
+    );
+    let q = |p: &Process, off| p.load(address + off, 8).unwrap();
+    // Literal offsets/counts from libnx HidNpadCommonStateAtomicStorage.
+    assert_eq!(p.load(address + 0x9a00, 4).unwrap(), 7);
+    assert_eq!(q(&p, 0x9a00 + 0x28 + 8), 17);
+    assert_eq!(q(&p, 0x9a00 + 0x28 + 16), 1);
+    assert_eq!(q(&p, 0x9a00 + 0x28 + 24), 1);
+    let sample = 0x9a00 + 0x28 + 32 + 48;
+    assert_eq!(q(&p, sample), 1);
+    assert_eq!(q(&p, sample + 8), 1);
+    assert_eq!(q(&p, sample + 16), 0, "no invented button press");
+    assert_eq!(q(&p, sample + 40), 1);
+    assert!(p.memory.store(address + sample + 16, 8, 1).is_err());
+    request(&mut p, 0, false, &[]);
+    assert_eq!(send(&mut p, &mut c, resource).0, result::SUCCESS);
+    assert_eq!(
+        p.kernel.as_ref().unwrap().host.input.sampling_number,
+        1,
+        "reopening must not reset or invent another sample"
+    );
+    assert_eq!(q(&p, sample), 1);
+}

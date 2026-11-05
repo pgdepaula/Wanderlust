@@ -124,7 +124,7 @@ fn hid_shared_memory_ring_buffer_write() {
     let lifo = base + LIFO_FULLKEY_OFFSET;
     let cap = u64::from_le_bytes(shm[lifo + 8..lifo + 16].try_into().unwrap());
     let tail = u64::from_le_bytes(shm[lifo + 16..lifo + 24].try_into().unwrap());
-    assert_eq!(cap, 16);
+    assert_eq!(cap, 17);
     assert_eq!(tail, 1);
 
     let entry = lifo + 0x20 + (tail as usize) * LIFO_ENTRY_SIZE;
@@ -225,4 +225,32 @@ fn sdl_headless_fallback() {
         assert_eq!(h.height, 720);
         let _ = h.poll_input();
     }
+}
+
+#[test]
+fn hid_ring_count_tracks_written_samples_and_preserves_all_seventeen_records() {
+    let mut shm = vec![0u8; 0x40000];
+    let lifo = 0x9a00 + 0x28;
+    let q = |b: &[u8], at: usize| u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
+    for n in 1..=35u64 {
+        // Counter discontinuities must not advertise unwritten zero records.
+        write_npad_state(&mut shm, 0, 1000 + n, n, (0, 0), (0, 0));
+        assert_eq!(q(&shm, lifo + 8), 17);
+        assert_eq!(q(&shm, lifo + 16), n % 17);
+        assert_eq!(q(&shm, lifo + 24), n.min(17));
+        let entry = lifo + 32 + (n % 17) as usize * 48;
+        assert_eq!(q(&shm, entry), 1000 + n);
+        assert_eq!(q(&shm, entry + 8), 1000 + n);
+        assert_eq!(q(&shm, entry + 16), n);
+    }
+    for n in 19..=35u64 {
+        let entry = lifo + 32 + (n % 17) as usize * 48;
+        assert_eq!(q(&shm, entry), 1000 + n);
+    }
+    let before = shm.clone();
+    write_npad_state(&mut shm, 10, 9999, 0, (0, 0), (0, 0));
+    assert_eq!(shm, before);
+    let mut short = vec![0xa5; 0x3ffff];
+    write_npad_state(&mut short, 0, 1, 0, (0, 0), (0, 0));
+    assert!(short.iter().all(|b| *b == 0xa5));
 }

@@ -171,7 +171,7 @@ pub const NPAD_ENTRY_SIZE: usize = 0x5000;
 pub const LIFO_FULLKEY_OFFSET: usize = 0x28;
 pub const LIFO_HANDHELD_OFFSET: usize = 0x378;
 pub const LIFO_JOYDUAL_OFFSET: usize = 0x6c8;
-pub const LIFO_CAPACITY: usize = 16;
+pub const LIFO_CAPACITY: usize = 17;
 pub const LIFO_ENTRY_SIZE: usize = 0x30;
 
 /// Writes an Npad controller sample into the Horizon HID shared memory buffer.
@@ -199,12 +199,17 @@ pub fn write_npad_state(
         LIFO_JOYDUAL_OFFSET,
     ] {
         let lifo = base + lifo_offset;
-        let tail = (sampling_number % LIFO_CAPACITY as u64) as usize;
+        // The ring contains 17 atomic storage records. Tail/count describe
+        // actual writes, independently of a sampling counter jump or rollover.
+        let previous_tail = u64::from_le_bytes(shm[lifo + 16..lifo + 24].try_into().unwrap());
+        let previous_count = u64::from_le_bytes(shm[lifo + 24..lifo + 32].try_into().unwrap());
+        let tail = ((previous_tail % LIFO_CAPACITY as u64 + 1) % LIFO_CAPACITY as u64) as usize;
+        let count = previous_count.saturating_add(1).min(LIFO_CAPACITY as u64);
 
         // RingLifo header: vtable (8), buffer_count (8), tail (8), count (8)
         shm[lifo + 8..lifo + 16].copy_from_slice(&(LIFO_CAPACITY as u64).to_le_bytes());
         shm[lifo + 16..lifo + 24].copy_from_slice(&(tail as u64).to_le_bytes());
-        shm[lifo + 24..lifo + 32].copy_from_slice(&(LIFO_CAPACITY as u64).to_le_bytes());
+        shm[lifo + 24..lifo + 32].copy_from_slice(&count.to_le_bytes());
 
         // Entry at lifo + 0x20 + tail * 0x30
         let entry = lifo + 0x20 + tail * LIFO_ENTRY_SIZE;

@@ -1706,7 +1706,11 @@ fn get_or_create_hid_shared_memory(k: &mut Kernel) -> Result<u32, u32> {
     let idx = match k.host.hid_shared_memory {
         Some(idx) => idx,
         None => {
-            let bytes = vec![0u8; 0x40000];
+            let mut bytes = vec![0u8; 0x40000];
+            // Publish the configured initial controller sample before the guest
+            // can map this object. Native-GPU launchers need not own a separate
+            // scheduler SDL host to receive a valid first HID packet.
+            k.host.input.update(&mut bytes);
             k.shared_memories.push(horizon::SharedMemory {
                 size: 0x40000,
                 permission: 1, // Read-only for guest
