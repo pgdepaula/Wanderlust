@@ -435,6 +435,34 @@ pinned envyas and disassembled with unmodified envydis. The portable host f32
 lowering is a bounded implementation, not evidence of exact Maxwell exceptional
 arithmetic; WGSL offers no per-operation unfused-rounding control here.
 
+## Position-only XY vertex programs
+
+The pinned NVIDIA SPH IMAP/OMAP definitions independently describe generic input
+components and position output components. The bounded XY interface declares
+generic-zero X/Y (`word6=3`), position XYZW (`word13=0xf000`) and no user outputs.
+It retains the existing VTG compiler-marker handling and ignored AST-only
+store-request range handling. ALD cannot fetch undeclared Z/W, AST must export all
+four position components, and a fragment consuming UV is rejected before pipeline
+creation. This does not fabricate user varyings for a position-only program.
+
+The pinned GM107 `0x5180` FFMA table places its register multiplier in bits39:46
+and its constant addend in the existing C34/O14 fields. FTZ RN and optional
+multiplier negate at bit48 are lowered through the same integer exact fused
+arithmetic helper used by the other FTZ forms. SAT, CC, addend negate and other
+rounding modes remain rejected for this opcode. The compact immutable vertex
+micro-op table represents the constant addend explicitly; mutable guest values
+remain in the bound constant resource. ALD barriers still track every loaded
+register and must be waited before arithmetic or export.
+
+The independently authored `vertex-xy.asm`, assembled with the pinned envyas,
+loads XY, applies two constant-backed fused affine transforms and exports
+position with explicit Z=0 and W=1. Its 176-byte synthetic fixture SHA-256 is
+`81bfa58ce68493c9399ae322c9dab447f7d91bc52bb93280561c70a758584c72`.
+The driver/GPFIFO GPU test poisons the unfetched Z/W input bytes with NaNs and
+checks asymmetric triangle coverage using independent double-precision edge
+equations. Changing only guest vertex constants changes coverage while retaining
+the shader modules and pipeline.
+
 ## Saturated constant exports
 
 The pinned envytools GM107 table at revision `f102b82381f3f11cee113d16374c87091db039d9`

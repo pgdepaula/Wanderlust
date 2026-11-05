@@ -120,6 +120,19 @@ impl Renderer {
             .resource_fragment
             .as_ref()
             .ok_or_else(|| invalid("no fragment for vertex linkage"))?;
+        if !program.exports_uv()
+            && fragment.program.operations().iter().any(|op| {
+                matches!(
+                    op,
+                    crate::shader_program::Operation::Interpolate { .. }
+                        | crate::shader_program::Operation::Perspective { .. }
+                        | crate::shader_program::Operation::PerspectivePass { .. }
+                )
+            })
+        {
+            self.vertex = None;
+            return Err(invalid("fragment requires UV absent from vertex OMAP"));
+        }
         if stride == 0
             || stride % 4 != 0
             || stride

@@ -114,6 +114,14 @@ pub enum Operation {
         right: FloatOperand,
         addend: u8,
     },
+    /// RN FTZ register product plus constant-memory addend.
+    FmaConstantAddend {
+        dst: u8,
+        left: u8,
+        right: u8,
+        input: u8,
+        negate_right: bool,
+    },
     /// BF LT/GT, AND PT, signed-zero FTZ before ordered comparison.
     FloatSetFtz {
         dst: u8,
@@ -362,7 +370,8 @@ impl Program {
             return Err(invalid("invalid Maxwell fragment length"));
         }
         let input_mode = u32::from_le_bytes(input[24..28].try_into().unwrap());
-        let vertex_xyz = vertex && input_mode == 7;
+        let vertex_xy = vertex && input_mode == 3;
+        let vertex_xyz = vertex && matches!(input_mode, 3 | 7);
         let compiler_flag = vertex_xyz && input[3] & 2 != 0;
         let interpolated = !vertex && input_mode == 15;
         let perspective = !vertex && input_mode == 10;
@@ -371,7 +380,7 @@ impl Program {
         header[16..20].copy_from_slice(&0xff000u32.to_le_bytes());
         if vertex {
             if vertex_xyz {
-                header[24] = 7;
+                header[24] = input_mode as u8;
                 header[3] |= if compiler_flag { 2 } else { 0 };
                 // VTG request ranges affect output ALD readback. Our AST-only
                 // exports never read output attributes; admit zero range too.
@@ -382,7 +391,7 @@ impl Program {
                 header[24] = 0x3f;
             }
             header[50..54].copy_from_slice(&0xf0000000u32.to_le_bytes());
-            header[54] = 3;
+            header[54] = if vertex_xy { 0 } else { 3 };
         } else {
             header[72..76].copy_from_slice(&15u32.to_le_bytes());
             if interpolated {
@@ -523,7 +532,7 @@ impl Program {
                 if word == 0xe30000000007000f {
                     if write_barrier != 7
                         || if vertex {
-                            exports != 0x3f
+                            exports != if vertex_xy { 0xf } else { 0x3f }
                         } else {
                             (0..4).any(|r| !initialized[r] || pending[r])
                         }
@@ -544,6 +553,7 @@ impl Program {
                         _ => return Err(fail("unsupported AST output")),
                     };
                     if attribute % 4 != 0
+                        || vertex_xy && output + u16::from(words) > 4
                         || output + u16::from(words) > 6
                         || (output < 4 && output + u16::from(words) > 4)
                         || write_barrier != 7
@@ -719,7 +729,8 @@ impl Program {
                                 || (usize::from(dst)..usize::from(dst) + usize::from(words))
                                     .any(|r| pending[r])
                                 || attribute < 0x80
-                                || attribute + u16::from(words) * 4 > 0x8c
+                                || attribute + u16::from(words) * 4
+                                    > if vertex_xy { 0x88 } else { 0x8c }
                         } else {
                             write_barrier != 0 || pending.iter().any(|p| *p)
                         }
@@ -1367,7 +1378,9 @@ impl Program {
                             _ => IntegerOperator::MaxSigned,
                         },
                     }
-                } else if !vertex && word & !0x0000007dfff000ff == 0x4c98078000070000 {
+                } else if (!vertex || vertex_xyz)
+                    && word & !0x0000007dfff000ff == 0x4c98078000070000
+                {
                     // C34/O14 encodes word offsets, unlike LDC's byte field.
                     // Exclude offset bit33 until signed/unsigned interpretations
                     // agree; only the common nonnegative 0..0x7ffc range is used.
@@ -1543,7 +1556,9 @@ impl Program {
                             | Operation::Immediate { .. }
                             | Operation::FloatFtz { .. }
                             | Operation::FmaFtz { .. }
+                            | Operation::FmaConstantAddend { .. }
                             | Operation::FloatSetFtz { .. }
+                            | Operation::Constant { .. }
                     )
                 {
                     return Err(fail("unsupported XYZ vertex instruction profile"));
@@ -1746,6 +1761,7 @@ impl Program {
                 }
                 op @ (Operation::FloatFtz { dst, .. }
                 | Operation::FmaFtz { dst, .. }
+                | Operation::FmaConstantAddend { dst, .. }
                 | Operation::FloatSetFtz { dst, .. }) => {
                     largest = largest.max(u16::from(dst));
                     for r in ftz_reads(op) {
@@ -2020,7 +2036,7 @@ impl Program {
                 Operation::MultiplyAdd16 { dst, left, middle, right, signed } => {
                     emit_multiply_add16(&mut s, dst, left, middle, right, signed);
                 }
-                op @ (Operation::FloatFtz {..} | Operation::FmaFtz {..} | Operation::FloatSetFtz {..}) => emit_ftz(&mut s, op, false),
+                op @ (Operation::FloatFtz {..} | Operation::FmaFtz {..} | Operation::FmaConstantAddend {..} | Operation::FloatSetFtz {..}) => emit_ftz(&mut s, op, false),
                 Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                 Operation::ConditionalImmediate { dst, bits, invert } => {
                     emit_conditional_immediate(&mut s, dst, bits, invert);
@@ -2104,6 +2120,9 @@ impl VertexProgram {
             |op| matches!(op, Operation::AttributeRead { attribute, .. } if *attribute >= 0x90),
         )
     }
+    pub fn exports_uv(&self) -> bool {
+        self.0.vertex_input_mask != 3
+    }
     pub fn wgsl(&self) -> String {
         self.wgsl_for_raster(false, false, crate::raster::DepthClipRange::ZeroToOne)
     }
@@ -2123,7 +2142,7 @@ impl VertexProgram {
             self.operations(),
             interface,
             !self.constants().is_empty(),
-            self.0.vertex_input_mask == 7,
+            matches!(self.0.vertex_input_mask, 3 | 7),
         );
         if self.operations().iter().any(|op| {
             matches!(
@@ -2137,7 +2156,7 @@ impl VertexProgram {
         }) {
             s.push_str("var p0:bool;\n");
         }
-        if self.0.vertex_input_mask == 7 {
+        if matches!(self.0.vertex_input_mask, 3 | 7) {
             emit_xyz_program(&mut s, self.operations());
         } else {
             for op in self.operations() {
@@ -2354,6 +2373,7 @@ impl VertexProgram {
                     }
                     op @ (Operation::FloatFtz { .. }
                     | Operation::FmaFtz { .. }
+                    | Operation::FmaConstantAddend { .. }
                     | Operation::FloatSetFtz { .. }) => emit_ftz(&mut s, op, true),
                     Operation::Immediate { dst, bits } => writeln!(s, "r[{dst}]={bits}u;").unwrap(),
                     Operation::ConditionalImmediate { dst, bits, invert } => {
@@ -2422,6 +2442,7 @@ fn stage_source(
                 op,
                 Operation::FloatFtz { .. }
                     | Operation::FmaFtz { .. }
+                    | Operation::FmaConstantAddend { .. }
                     | Operation::FloatSetFtz { .. }
             )
         })
@@ -2899,6 +2920,7 @@ fn ftz_reads(op: Operation) -> [u8; 3] {
             addend,
             ..
         } => [left, register(right), addend],
+        Operation::FmaConstantAddend { left, right, .. } => [left, right, 255],
         Operation::FloatSetFtz { left, right, .. } => [left, right, 255],
         _ => unreachable!(),
     }
@@ -2924,6 +2946,19 @@ fn decode_ftz(word: u64, constants: &mut Vec<ConstantRef>) -> Result<Option<Oper
             (((word >> 20) & 0x7ffff) as u32) << 12 | (((word >> 56) & 1) as u32) << 31,
         )
     };
+    let constant_addend_mask = cb | (255u64 << 39) | (1u64 << 48);
+    if word & !constant_addend_mask == 0x51a0000000070000 {
+        let FloatOperand::Constant(input) = constant(constants)? else {
+            unreachable!()
+        };
+        return Ok(Some(Operation::FmaConstantAddend {
+            dst,
+            left,
+            right: (word >> 39) as u8,
+            input,
+            negate_right: word & (1u64 << 48) != 0,
+        }));
+    }
     // SAT is independently encoded at bit 50 for FADD; keep it unsupported
     // for multiplication and fused operations.
     let saturate = word & (1u64 << 50) != 0;
@@ -3040,6 +3075,21 @@ fn emit_ftz(s: &mut String, op: Operation, vertex: bool) {
             operand(right)
         )
         .unwrap(),
+        Operation::FmaConstantAddend {
+            dst,
+            left,
+            right,
+            input,
+            negate_right,
+        } => {
+            writeln!(
+                s,
+                "r[{dst}]=wl_fma_ftz(r[{left}],r[{right}]^{}u,{});",
+                if negate_right { 0x80000000u32 } else { 0 },
+                operand(FloatOperand::Constant(input))
+            )
+            .unwrap();
+        }
         Operation::FloatSetFtz {
             dst,
             left,
@@ -3083,6 +3133,9 @@ fn emit_xyz_program(s: &mut String, operations: &[Operation]) {
     for op in operations {
         let (first, second) = match *op {
             Operation::Immediate { dst, bits } => ([0, u32::from(dst), bits, 0], [0; 4]),
+            Operation::Constant { dst, input } => {
+                ([5, u32::from(dst), u32::from(input), 0], [0; 4])
+            }
             Operation::AttributeRead {
                 dst,
                 attribute,
@@ -3147,6 +3200,21 @@ fn emit_xyz_program(s: &mut String, operations: &[Operation]) {
                     [kind, bits, u32::from(addend), 2],
                 )
             }
+            Operation::FmaConstantAddend {
+                dst,
+                left,
+                right,
+                input,
+                negate_right,
+            } => (
+                [3, u32::from(dst), u32::from(left), 0],
+                [
+                    0,
+                    u32::from(right),
+                    u32::from(input),
+                    if negate_right { 4 } else { 3 },
+                ],
+            ),
             Operation::FloatSetFtz {
                 dst,
                 left,
@@ -3178,11 +3246,22 @@ fn emit_xyz_program(s: &mut String, operations: &[Operation]) {
         r#"
         switch ins.x {
             case 0u: {r[ins.y]=ins.z;}
-            case 1u: {for(var c=0u;c<ins.w;c=c+1u) {r[ins.y+c]=bitcast<u32>(a0[ins.z+c]);}}
-            case 2u: {for(var c=0u;c<ins.w;c=c+1u) {
-                let output=ins.z+c;let value=bitcast<f32>(r[ins.y+c]);
-                if output<4u {v.position[output]=value;}else{v.uv[output-4u]=value;}
-            }}
+            case 1u: {
+                r[ins.y]=bitcast<u32>(a0[ins.z]);
+                if ins.w>1u {r[ins.y+1u]=bitcast<u32>(a0[ins.z+1u]);}
+                if ins.w>2u {r[ins.y+2u]=bitcast<u32>(a0[ins.z+2u]);}
+                if ins.w>3u {r[ins.y+3u]=bitcast<u32>(a0[ins.z+3u]);}
+            }
+            case 2u: {
+                // Static output lanes avoid requiring HLSL to unroll dynamic
+                // attribute groups inside the arithmetic interpreter loop.
+                if ins.z==0u {v.position.x=bitcast<f32>(r[ins.y]);}
+                if ins.z<=1u && ins.z+ins.w>1u {v.position.y=bitcast<f32>(r[ins.y+1u-ins.z]);}
+                if ins.z<=2u && ins.z+ins.w>2u {v.position.z=bitcast<f32>(r[ins.y+2u-ins.z]);}
+                if ins.z<=3u && ins.z+ins.w>3u {v.position.w=bitcast<f32>(r[ins.y+3u-ins.z]);}
+                if ins.z==4u {v.uv.x=bitcast<f32>(r[ins.y]);}
+                if ins.z<=5u && ins.z+ins.w>5u {v.uv.y=bitcast<f32>(r[ins.y+5u-ins.z]);}
+            }
             case 3u: {
                 let a=r[ins.z]^(ins.w<<31u);
                 var b:u32;
@@ -3194,6 +3273,8 @@ fn emit_xyz_program(s: &mut String, operations: &[Operation]) {
                 var multiplier=b;var addend=r[arg.z];
                 if arg.w==0u {multiplier=0x3f800000u;addend=b;}
                 if arg.w==1u {addend=(a^b)&0x80000000u;}
+                if arg.w>=3u {addend=vertex_cb.words[16u+arg.z/4u][arg.z%4u];}
+                if arg.w==4u {multiplier=multiplier^0x80000000u;}
                 r[ins.y]=wl_fma_ftz(a,multiplier,addend);
                 if (ins.w&2u)!=0u {
                     let bits=r[ins.y];
@@ -3209,6 +3290,7 @@ fn emit_xyz_program(s: &mut String, operations: &[Operation]) {
                 let condition=select(ak<bk,ak>bk,arg.w!=0u);
                 r[ins.y]=select(0u,0x3f800000u,!nan && !equal && condition);
             }
+            case 5u: {r[ins.y]=vertex_cb.words[16u+ins.z/4u][ins.z%4u];}
             default: {}
         }
     }
