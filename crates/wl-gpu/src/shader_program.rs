@@ -105,6 +105,7 @@ pub enum Operation {
         right: FloatOperand,
         operator: FloatOperator,
         negate_left: bool,
+        saturate: bool,
     },
     /// One rounding of a*b+c, without SAT/CC/source modifiers.
     FmaFtz {
@@ -486,7 +487,16 @@ impl Program {
                         }
                     }
                 } else {
-                    if !matches!(schedule & 31, 6 | 13)
+                    // Independent constant exports need no register latency
+                    // between each other. Admit their assembler's short/yield
+                    // controls, without broadening variable-latency barriers.
+                    let independent_constant = word & !0x0000007dfff0ffff == 0x4c98078000070000
+                        || (word & !0x0000007dfff000ff == 0x4c5d10000007ff00);
+                    let short_constant = independent_constant && schedule == 0x7f1;
+                    let final_constant = independent_constant && schedule == 0x7f0;
+                    let exit_schedule = word == 0xe30000000007000f && schedule == 0x7ff;
+                    let alternate = short_constant || final_constant || exit_schedule;
+                    if (!matches!(schedule & 31, 6 | 13) && !alternate)
                         || (schedule >> 8) & 7 != 7
                         || schedule >> 17 != 0
                         || !matches!(wait, 0 | 1)
@@ -499,12 +509,13 @@ impl Program {
                     }
                     // Predicate-producing SETP has its own conservative fixed latency.
                     // Do not generalize the new stall encoding to other instructions.
-                    if schedule & 31
-                        != if matches!(word >> 52, 0x5b6 | 0x5bb) {
-                            13
-                        } else {
-                            6
-                        }
+                    if !alternate
+                        && schedule & 31
+                            != if matches!(word >> 52, 0x5b6 | 0x5bb) {
+                                13
+                            } else {
+                                6
+                            }
                     {
                         return Err(fail("unsupported instruction fixed-latency schedule"));
                     }
@@ -2913,15 +2924,18 @@ fn decode_ftz(word: u64, constants: &mut Vec<ConstantRef>) -> Result<Option<Oper
             (((word >> 20) & 0x7ffff) as u32) << 12 | (((word >> 56) & 1) as u32) << 31,
         )
     };
-    let rbase = word & !regs;
-    let cbase = word & !cb;
+    // SAT is independently encoded at bit 50 for FADD; keep it unsupported
+    // for multiplication and fused operations.
+    let saturate = word & (1u64 << 50) != 0;
+    let rbase = word & !(regs | (1u64 << 50));
+    let cbase = word & !(cb | (1u64 << 50));
     let (operator, right, negate_left) = if matches!(rbase & !(1u64 << 48), 0x5c58100000070000) {
         (
             FloatOperator::Add,
             FloatOperand::Register((word >> 20) as u8),
             word & (1 << 48) != 0,
         )
-    } else if rbase == 0x5c68100000070000 {
+    } else if !saturate && rbase == 0x5c68100000070000 {
         (
             FloatOperator::Multiply,
             FloatOperand::Register((word >> 20) as u8),
@@ -2933,7 +2947,7 @@ fn decode_ftz(word: u64, constants: &mut Vec<ConstantRef>) -> Result<Option<Oper
             constant(constants)?,
             word & (1 << 48) != 0,
         )
-    } else if cbase == 0x4c68100000070000 {
+    } else if !saturate && cbase == 0x4c68100000070000 {
         (FloatOperator::Multiply, constant(constants)?, false)
     } else {
         let addend = ((word >> 39) & 255) as u8;
@@ -2975,6 +2989,7 @@ fn decode_ftz(word: u64, constants: &mut Vec<ConstantRef>) -> Result<Option<Oper
         right,
         operator,
         negate_left,
+        saturate,
     }))
 }
 fn emit_ftz(s: &mut String, op: Operation, vertex: bool) {
@@ -2996,6 +3011,7 @@ fn emit_ftz(s: &mut String, op: Operation, vertex: bool) {
             right,
             operator,
             negate_left,
+            saturate,
         } => {
             let a = format!(
                 "(r[{left}] ^ {}u)",
@@ -3007,6 +3023,11 @@ fn emit_ftz(s: &mut String, op: Operation, vertex: bool) {
                 FloatOperator::Multiply => format!("wl_fma_ftz({a},{b},({a}^{b})&0x80000000u)"),
             };
             writeln!(s, "r[{dst}]={call};").unwrap();
+            if saturate {
+                // Integer classification makes NaN -> +0 deterministic and
+                // avoids backend-dependent floating min/max NaN handling.
+                writeln!(s, "{{let bits=r[{dst}];let magnitude=bits&0x7fffffffu;r[{dst}]=select(min(bits,0x3f800000u),0u,(bits&0x80000000u)!=0u || magnitude>0x7f800000u);}}").unwrap();
+            }
         }
         Operation::FmaFtz {
             dst,
@@ -3096,10 +3117,16 @@ fn emit_xyz_program(s: &mut String, operations: &[Operation]) {
                 right,
                 operator,
                 negate_left,
+                saturate,
             } => {
                 let (kind, bits) = operand(right);
                 (
-                    [3, u32::from(dst), u32::from(left), u32::from(negate_left)],
+                    [
+                        3,
+                        u32::from(dst),
+                        u32::from(left),
+                        u32::from(negate_left) | (u32::from(saturate) << 1),
+                    ],
                     [
                         kind,
                         bits,
@@ -3168,6 +3195,10 @@ fn emit_xyz_program(s: &mut String, operations: &[Operation]) {
                 if arg.w==0u {multiplier=0x3f800000u;addend=b;}
                 if arg.w==1u {addend=(a^b)&0x80000000u;}
                 r[ins.y]=wl_fma_ftz(a,multiplier,addend);
+                if (ins.w&2u)!=0u {
+                    let bits=r[ins.y];
+                    r[ins.y]=select(min(bits,0x3f800000u),0u,(bits&0x80000000u)!=0u || (bits&0x7fffffffu)>0x7f800000u);
+                }
             }
             case 4u: {
                 let a=wl_ftz_bits(r[ins.z]^(ins.w<<31u));let b=wl_ftz_bits(r[arg.y]);

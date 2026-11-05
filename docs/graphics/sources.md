@@ -435,6 +435,34 @@ pinned envyas and disassembled with unmodified envydis. The portable host f32
 lowering is a bounded implementation, not evidence of exact Maxwell exceptional
 arithmetic; WGSL offers no per-operation unfused-rounding control here.
 
+## Saturated constant exports
+
+The pinned envytools GM107 table at revision `f102b82381f3f11cee113d16374c87091db039d9`
+defines FADD FTZ at bit 44, SAT at bit 50 and source-one negate at bit 48.
+The register and constant RN FTZ forms retain these modifiers as decoded
+operations. SAT classifies the integer result bits after the existing exact
+FTZ arithmetic: negative results and NaNs become positive zero; positive results
+are bounded by the bit representation of one. This follows NVIDIA's
+[CUDA 8 PTX floating-point ADD semantics](https://docs.nvidia.com/cuda/archive/8.0/parallel-thread-execution/),
+including NaN-to-positive-zero saturation. This is not a claim that all PTX
+instructions or FADD modifier combinations are implemented.
+
+Only independent constant MOV exports and saturated FTZ FADD with negated RZ
+additionally admit the verified no-barrier short/yield controls `0x7f1` and
+`0x7f0`; EXIT additionally admits `0x7ff`. Register-consuming short arithmetic,
+new read/write barriers, reuse controls and conditional execution remain
+unsupported by this extension. Ordinary verified instruction controls retain
+their previous checks.
+
+`tests/fixtures/maxwell/saturated-constant.asm` is independently authored and
+assembled by the pinned envytools (`envyas -m gm107 -i`); its 64 code bytes follow
+the established synthetic PS header with unused PositionW declared. The
+144-byte fixture SHA-256 is
+`ace078a7c9df67395405e590c89087f16d5b1997b796164f75884e07acdcdaec`.
+The GPU test binds mutable guest constants and checks literal RGBA8 expectations
+for ordinary fractional colors, values outside [0,1], infinities, NaNs and
+subnormals. No retail shader bytes are part of the fixtures.
+
 ## Perspective IPA and reciprocal
 
 The same SPH ImapSystemValuesB table independently declares PositionW at word
