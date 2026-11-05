@@ -1611,12 +1611,8 @@ impl EffectGraph {
             if !voice.playing {
                 continue;
             }
-            voice.last_mix_samples = routing.route_mono_tracked(
-                voice.splitter as usize,
-                self.sample_rate,
-                &source,
-                &mut buffers,
-            )?;
+            voice.last_mix_samples =
+                voice.route(self.sample_rate, &source, &mut buffers, &mut routing)?;
         }
         routing.finish_frame();
         let mut depop = self.depop.clone();
@@ -2085,6 +2081,17 @@ impl Renderer {
             }));
         }
         let mut voice_ids = std::collections::BTreeSet::new();
+        let mut resource_ids = std::collections::BTreeSet::new();
+        for resource in parts[4].chunks_exact(0x70) {
+            if resource[100] > 1
+                || (resource[100] == 1
+                    && (word(resource, 0) as usize >= self.parameters.voices as usize * 6
+                        || !resource_ids.insert(word(resource, 0))))
+            {
+                return Err(unsupported("voice channel resource identity/use"));
+            }
+        }
+        let mut direct_resources = std::collections::BTreeSet::new();
         let voice_stride = if self.parameters.revision_number() >= 15 {
             0x188
         } else {
@@ -2127,6 +2134,19 @@ impl Renderer {
                 wire,
                 self.parameters.sample_rate,
             )?;
+            if word(wire, 88) != 0x7fffffff {
+                let id = word(wire, 320);
+                if !direct_resources.insert(id) {
+                    return Err(unsupported("shared direct voice channel resource"));
+                }
+                let resource = parts[4]
+                    .chunks_exact(0x70)
+                    .find(|r| r[100] == 1 && word(r, 0) == id)
+                    .ok_or_else(|| unsupported("missing direct voice channel resource"))?;
+                voice.configure_direct(wire, resource)?;
+            } else if voice.direct_mix.is_some() {
+                return Err(unsupported("active direct voice changed to splitter"));
+            }
             if !voice.playing && old.is_some_and(|v| v.playing) {
                 result.depop.add(&voice.last_mix_samples)?;
                 voice.last_mix_samples.clear();
@@ -2152,11 +2172,11 @@ impl Renderer {
                 })
                 .collect();
             let mut routing = result.routing.clone();
-            routing.route_mono(
-                voice.splitter as usize,
+            preview.route(
                 self.parameters.sample_rate,
                 &source,
                 &mut scratch,
+                &mut routing,
             )?;
             result.voices.insert(id, voice);
         }

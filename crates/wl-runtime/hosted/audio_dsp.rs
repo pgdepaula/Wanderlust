@@ -1527,11 +1527,19 @@ pub mod voice {
         pub denominator: [i16; 2],
     }
     #[derive(Clone, Debug)]
+    pub struct DirectMix {
+        pub mix: usize,
+        pub resource: u32,
+        volume: [f32; 24],
+        previous_volume: [f32; 24],
+    }
+    #[derive(Clone, Debug)]
     pub struct MonoVoice {
         pub id: u32,
         pub priority: u32,
         pub order: u32,
         pub splitter: u32,
+        pub direct_mix: Option<DirectMix>,
         pub playing: bool,
         pub gain: f32,
         previous_gain: f32,
@@ -1566,8 +1574,8 @@ pub mod voice {
                 || word(64) >= 4
                 || wide(72) == 0
                 || wide(80) != 32
-                || word(88) != 0x7fffffff
-                || word(92) == 0x7fffffff
+                || (word(88) != 0x7fffffff && word(92) != u32::MAX)
+                || (word(88) == 0x7fffffff && word(92) >= 0x7fffffff)
                 || bytes[344..351].iter().any(|v| *v != 0)
             {
                 return Err("unsupported queued mono ADPCM voice mode".into());
@@ -1588,6 +1596,7 @@ pub mod voice {
                 priority: 0,
                 order: 0,
                 splitter: 0,
+                direct_mix: None,
                 playing: false,
                 gain,
                 previous_gain: gain,
@@ -1649,6 +1658,85 @@ pub mod voice {
                 }
             }
             Ok(voice)
+        }
+        /// libnx AudioRendererChannelInfoIn: id, 24 f32 gains, is_used.
+        /// Resource identity is resolved explicitly; no final-mix fallback.
+        pub fn configure_direct(&mut self, wire: &[u8], resource: &[u8]) -> RuntimeResult<()> {
+            if wire.len() != 0x170 || resource.len() != 0x70 {
+                return Err("direct voice resource wire length".into());
+            }
+            let word = |b: &[u8], at: usize| u32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+            let mix = word(wire, 88);
+            let id = word(wire, 320);
+            let volume: [f32; 24] =
+                std::array::from_fn(|i| f32::from_bits(word(resource, 4 + i * 4)));
+            if mix == 0x7fffffff
+                || word(wire, 92) != u32::MAX
+                || word(resource, 0) != id
+                || resource[100] != 1
+                || volume.iter().any(|v| !v.is_finite() || v.abs() > 64.)
+            {
+                return Err("invalid direct voice channel resource".into());
+            }
+            let previous_volume = match &self.direct_mix {
+                Some(old) if old.mix == mix as usize && old.resource == id => old.previous_volume,
+                Some(_) => return Err("unsupported active direct voice route replacement".into()),
+                None => volume, // New voice resets PreviousMix to current Mix.
+            };
+            self.direct_mix = Some(DirectMix {
+                mix: mix as usize,
+                resource: id,
+                volume,
+                previous_volume,
+            });
+            Ok(())
+        }
+        pub fn route(
+            &mut self,
+            rate: u32,
+            source: &[f32],
+            mixes: &mut [Vec<Vec<f32>>],
+            routing: &mut super::routing::Routing,
+        ) -> RuntimeResult<Vec<(usize, usize, f32)>> {
+            let Some(direct) = &mut self.direct_mix else {
+                return routing.route_mono_tracked(self.splitter as usize, rate, source, mixes);
+            };
+            let mix = mixes
+                .get(direct.mix)
+                .filter(|m| !m.is_empty() && m.len() <= 24)
+                .ok_or("inactive direct voice target")?;
+            if source.is_empty()
+                || source.len() > 1024
+                || source.iter().any(|v| !v.is_finite())
+                || mix.iter().any(|c| c.len() != source.len())
+            {
+                return Err("direct voice frame geometry".into());
+            }
+            let mut updates = Vec::with_capacity(mix.len());
+            let mut last = Vec::with_capacity(mix.len());
+            for (c, channel) in mix.iter().enumerate() {
+                let mut gain = direct.previous_volume[c];
+                let increment = (direct.volume[c] - gain) / source.len() as f32;
+                let mut sample = 0.;
+                let values: Vec<_> = channel
+                    .iter()
+                    .zip(source)
+                    .map(|(to, from)| {
+                        sample = (from * 32768. * gain).round_ties_even() / 32768.;
+                        let mixed = *to + sample;
+                        gain += increment;
+                        mixed
+                    })
+                    .collect();
+                if values.iter().any(|v| !v.is_finite()) {
+                    return Err("nonfinite direct voice output".into());
+                }
+                updates.push(values);
+                last.push((direct.mix, c, sample));
+            }
+            mixes[direct.mix] = updates;
+            direct.previous_volume = direct.volume;
+            Ok(last)
         }
         pub fn render(
             &mut self,
@@ -1716,6 +1804,44 @@ pub mod voice {
             b[116..120].copy_from_slice(&14u32.to_le_bytes());
             b[122] = 0;
             b
+        }
+        #[test]
+        fn direct_channel_gains_ramp_and_failed_routes_preserve_prior_state() {
+            let mut wire = input();
+            wire[88..92].copy_from_slice(&1u32.to_le_bytes());
+            wire[92..96].copy_from_slice(&u32::MAX.to_le_bytes());
+            wire[320..324].copy_from_slice(&3u32.to_le_bytes());
+            let mut resource = [0u8; 112];
+            resource[..4].copy_from_slice(&3u32.to_le_bytes());
+            resource[4..8].copy_from_slice(&1f32.to_le_bytes());
+            resource[8..12].copy_from_slice(&(-0.5f32).to_le_bytes());
+            resource[100] = 1;
+            let mut voice = MonoVoice::prepare(None, &wire, 48000).unwrap();
+            voice.configure_direct(&wire, &resource).unwrap();
+            let mut routing = super::super::routing::Routing::new(0, 0).unwrap();
+            let mut mixes = vec![vec![], vec![vec![0.; 4]; 2]];
+            let source = [4. / 32768.; 4];
+            let last = voice
+                .route(48000, &source, &mut mixes, &mut routing)
+                .unwrap();
+            assert_eq!(mixes[1][0], [4. / 32768.; 4]);
+            assert_eq!(mixes[1][1], [-2. / 32768.; 4]);
+            assert_eq!(last, [(1, 0, 4. / 32768.), (1, 1, -2. / 32768.)]);
+            resource[4..12].fill(0);
+            voice.configure_direct(&wire, &resource).unwrap();
+            assert!(voice.route(48000, &source, &mut [], &mut routing).is_err());
+            mixes[1] = vec![vec![0.; 4]; 2];
+            voice
+                .route(48000, &source, &mut mixes, &mut routing)
+                .unwrap();
+            assert_eq!(mixes[1][0], [4., 3., 2., 1.].map(|v| v / 32768.));
+            assert_eq!(mixes[1][1], [-2., -2., -1., 0.].map(|v| v / 32768.));
+            for (at, value) in [(0, 4u32), (4, f32::NAN.to_bits()), (100, 0)] {
+                let mut invalid = resource;
+                invalid[at..at + 4].copy_from_slice(&value.to_le_bytes());
+                assert!(voice.configure_direct(&wire, &invalid).is_err());
+            }
+            assert_eq!(voice.direct_mix.as_ref().unwrap().volume, [0.; 24]);
         }
         #[test]
         fn wire_preparation_and_real_sample_path_keep_counts_when_paused() {

@@ -2278,6 +2278,60 @@ fn put_encoded_voice(p: &mut Process) {
     }
 }
 #[test]
+fn queued_adpcm_direct_mix_uses_explicit_channel_resource_and_reports_actual_consumption() {
+    let (mut p, mut c) = process();
+    let r = queued_graph_renderer(&mut p, &mut c);
+    put_encoded_voice(&mut p);
+    let mut input = queued_graph_input();
+    let mut resource = [0u8; 112];
+    resource[4..8].copy_from_slice(&1f32.to_le_bytes());
+    resource[100] = 1;
+    input.splice(336..336, resource);
+    input[16..20].copy_from_slice(&112u32.to_le_bytes());
+    input[448 + 88..448 + 92].copy_from_slice(&2u32.to_le_bytes());
+    input[448 + 92..448 + 96].copy_from_slice(&u32::MAX.to_le_bytes());
+    let len = input.len() as u32;
+    input[60..64].copy_from_slice(&len.to_le_bytes());
+    let mut initial = input.clone();
+    initial[448 + 9] = 0;
+    initial[112 + 16..112 + 20].copy_from_slice(&1u32.to_le_bytes());
+    graph_update(&mut p, &initial, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    for (at, bits) in [
+        (336 + 100, 0u32),
+        (336 + 4, f32::NAN.to_bits()),
+        (448 + 320, 1),
+    ] {
+        let mut invalid = input.clone();
+        invalid[at..at + 4].copy_from_slice(&bits.to_le_bytes());
+        graph_update(&mut p, &invalid, DATA + 0x8000);
+        c.x[0] = u64::from(r);
+        assert!(audio::service_hook(&mut c, &mut p, 0x21).is_err());
+    }
+    graph_update(&mut p, &input, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    wire(&mut p, 5, false, &[], &[]);
+    call(&mut p, &mut c, r);
+    p.kernel.as_mut().unwrap().time_ns = 5_000_000;
+    wl_runtime::audio::poll(&mut p.memory, p.kernel.as_mut().unwrap()).unwrap();
+    for k in 10..24 {
+        assert_eq!(p.load(DATA + 0x24080 + k * 4, 4).unwrap(), 8191);
+    }
+    input[448 + 8] = 0;
+    for i in 0..4 {
+        input[448 + 96 + i * 56 + 26] = 1;
+        input[816 + i * 192 + 1] = 0;
+    }
+    input[816 + 192 + 32 + 72] = 2;
+    input[816 + 384 + 32 + 64] = 2;
+    input[816 + 384 + 32 + 66] = 0;
+    graph_update(&mut p, &input, DATA + 0x8000);
+    call(&mut p, &mut c, r);
+    assert_eq!(p.load(DATA + 0x6000 + 192, 8).unwrap(), 28);
+    assert_eq!(p.load(DATA + 0x6000 + 200, 4).unwrap(), 2);
+}
+
+#[test]
 fn queued_adpcm_executes_through_cmif_splitters_filters_and_effects_with_real_counts() {
     let (mut p, mut c) = process();
     let r = queued_graph_renderer(&mut p, &mut c);

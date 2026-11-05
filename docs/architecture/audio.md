@@ -435,7 +435,16 @@ injection. No retail audio samples are included.
 
 REV11 direct-mix graphs additionally accept mono Nintendo DSP-ADPCM voices at
 the renderer rate, pitch 1 and default SRC quality, routed through unfiltered
-splitters. Four nonlooping, non-EOS wave slots retain checked guest addresses,
+splitters or one explicit direct mix. Direct routing resolves the voice's channel
+resource ID against active 112-byte `AudioRendererChannelInfoIn` records, validates
+the destination and 24 finite channel gains, and preserves gain ramps across
+ticks. A new voice starts with previous gains equal to its current gains; later
+changes ramp over one frame with nearest-even PCM quantization. Direct routing
+tracks each voice's final channel contributions for the existing depop path.
+Shared direct channel resources and active route replacement are unsupported;
+invalid resources fail before graph installation or playback progress changes.
+Unused channel-resource slots need not contain unique IDs. Four nonlooping,
+non-EOS wave slots retain checked guest addresses,
 start/end sample positions and optional six-byte little-endian ADPCM contexts.
 Predictor coefficients are read from the checked 32-byte guest range. Processing
 acquires only the encoded frames needed for the current tick, rather than
@@ -477,6 +486,10 @@ than returning invented playback progress. Decoder/SRC/filter semantics follow
 [BiquadFilterHelper](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Audio/Renderer/Dsp/BiquadFilterHelper.cs)
 and the volume-ramp/splitter state types at MIT-licensed Ryujinx revision
 `4930dced25c0d9ec33096b0f2601d262daa477bf`.
+Direct-mix wire layout follows libnx's `AudioRendererChannelInfoIn` and
+`AudioRendererVoiceInfoIn`; gain history and ramp behavior are corroborated by
+that revision's `VoiceChannelResource`, `VoiceState.ResetResources`,
+`CommandGenerator.GenerateVoiceMix` and `MixRampCommand`.
 
 Queued mono ADPCM STOP retires valid wave descriptors without decoding their
 remaining samples, increments consumed-buffer counts once, clears sample/SRC
