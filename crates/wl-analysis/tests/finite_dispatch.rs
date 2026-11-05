@@ -207,6 +207,51 @@ fn advisory_scan_enumerates_low_word_slice_without_proving_a_full_index_bound() 
 }
 
 #[test]
+fn advisory_guard_survives_local_constant_initialization_without_a_visible_backedge() {
+    // Independently encoded MOV W0,#0 before the existing synthetic guarded
+    // table. A local scan cannot see loop backedges beyond the BR window.
+    // Recursive discovery keeps the actual constant-path precision.
+    let words: Vec<_> = std::iter::once(0x52800000u32)
+        .chain(LOW_WORD_SLICE)
+        .collect();
+    let bytes: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let image = Image::raw(bytes.clone(), GuestAddr(0x10000)).unwrap();
+    let strict = discover(&image, GuestAddr(0x10000), &[]).unwrap();
+    assert!(!strict.blocks.iter().any(|b| b.start.0 == 0x1003c));
+    let scan = wl_analysis::flow::scan_indirect_candidates(&image).unwrap();
+    for pc in [0x10024, 0x1002c, 0x10034, 0x1003c] {
+        assert!(scan.candidates.contains(&GuestAddr(pc)), "{pc:#x}");
+    }
+    assert_eq!(image.mappings[0].bytes, bytes);
+    // A copied index made before the guard has the same local-initializer
+    // uncertainty, even when both register values are initially constants.
+    let copied: Vec<_> = std::iter::once(0x52800000u32).chain(COPIED_INDEX).collect();
+    let copied_image = Image::raw(
+        copied.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        GuestAddr(0x10000),
+    )
+    .unwrap();
+    let copied_scan = wl_analysis::flow::scan_indirect_candidates(&copied_image).unwrap();
+    for pc in [0x10030, 0x10038, 0x10040] {
+        assert!(copied_scan.candidates.contains(&GuestAddr(pc)));
+    }
+    // Knowing a nonzero high half must never become a full-width table proof.
+    let mut high = words;
+    high[0] = 0xd2c00020; // MOV X0,#1,LSL#32.
+    let image = Image::raw(
+        high.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        GuestAddr(0x10000),
+    )
+    .unwrap();
+    let scan = wl_analysis::flow::scan_indirect_candidates(&image).unwrap();
+    assert_eq!(scan.complete_local_tables, 0);
+    assert_eq!(scan.unresolved_sites, [GuestAddr(0x10020)]);
+    for pc in [0x10024, 0x1002c, 0x10034, 0x1003c] {
+        assert!(scan.candidates.contains(&GuestAddr(pc)));
+    }
+}
+
+#[test]
 fn advisory_slice_still_requires_a_bound_and_mapped_table_entries() {
     for replacement in [0xd503201f, 0x7100001f] {
         let mut words = LOW_WORD_SLICE;

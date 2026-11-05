@@ -822,7 +822,11 @@ fn transfer_inner(image: &Image, state: &mut State, op: &Op, advisory: bool) {
 
 /// Refines discovery state on a conditional edge. False excludes a proven
 /// impossible unsigned comparison; it never removes the decoded guest branch.
+#[cfg(test)]
 fn refine(state: &mut State, condition: u8, taken: bool) -> bool {
+    refine_for_mode(state, condition, taken, false)
+}
+fn refine_for_mode(state: &mut State, condition: u8, taken: bool, advisory: bool) -> bool {
     let Some(Compare {
         reg,
         imm,
@@ -846,7 +850,10 @@ fn refine(state: &mut State, condition: u8, taken: bool) -> bool {
             return true;
         }
     }
-    if let Some(Val::Const(value)) = state.regs.get(&reg) {
+    // A per-site advisory window may include a loop's initializer but omit its
+    // later backedge. Enumerate the guarded domain rather than only the first
+    // iteration. Recursive discovery still refines the actual constant path.
+    if let Some(Val::Const(value)) = state.regs.get(&reg).filter(|_| !advisory) {
         let lhs = mask(*value, width);
         let rhs = mask(imm, width);
         let actual = match condition {
@@ -880,6 +887,7 @@ fn refine(state: &mut State, condition: u8, taken: bool) -> bool {
             let max = match state.regs.get(&alias) {
                 None => max,
                 Some(Val::Bounded { max: prior, .. }) => max.min(*prior),
+                Some(Val::Const(_)) if advisory => max,
                 _ => continue,
             };
             state.regs.insert(
@@ -1045,12 +1053,12 @@ fn propagate_inner(
                     out.flags = None;
                 }
                 Edge::Taken(c) => {
-                    if !refine(&mut out, c, true) {
+                    if !refine_for_mode(&mut out, c, true, advisory) {
                         continue;
                     }
                 }
                 Edge::Fallthrough(c) => {
-                    if !refine(&mut out, c, false) {
+                    if !refine_for_mode(&mut out, c, false, advisory) {
                         continue;
                     }
                 }
