@@ -89,10 +89,7 @@ pub fn scan_indirect_candidates(image: &Image) -> wl_common::Result<DispatchScan
                 if i != n
                     && matches!(
                         instruction.op,
-                        Op::Branch { link: false, .. }
-                            | Op::Indirect { .. }
-                            | Op::Trap { .. }
-                            | Op::Svc { .. }
+                        Op::Indirect { link: false, .. } | Op::Trap { .. } | Op::Svc { .. }
                     )
                 {
                     break;
@@ -102,6 +99,10 @@ pub fn scan_indirect_candidates(image: &Image) -> wl_common::Result<DispatchScan
             }
             instructions.reverse();
             let start = GuestAddr(mapping.base.0 + first as u64 * 4);
+            // Keep direct branches inside the bounded CFG: a table address
+            // may dominate the site along a conditional edge that skips an
+            // earlier unconditional exit. BLR follows the same AAPCS64
+            // caller-clobber/callee-preservation rules as BL below.
             let decoded = instructions
                 .into_iter()
                 .map(|i| (i.pc, super::Site::Instruction(i)))

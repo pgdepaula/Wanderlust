@@ -188,6 +188,49 @@ const LOW_WORD_SLICE: [u32; 20] = [
 ];
 
 #[test]
+fn hoisted_table_addresses_follow_cfg_edges_and_call_preservation() {
+    // Hoist the existing synthetic table ADR above CBZ W1,dispatch; B default.
+    // The table is 84 bytes from the first ADR. The direct branch exits this
+    // window, while the conditional edge reaches the dispatch with X9 intact.
+    let mut words: Vec<u32> = [0x100002a9, 0x34000041, 0x14000011]
+        .into_iter()
+        .chain(LOW_WORD_SLICE)
+        .collect();
+    words[5] = 0x2a0003e8; // MOV W8,W0: the guarded index is zero-extended.
+    words[6] = 0xd503201f; // Remove the original table ADR at dispatch.
+    let scan = |words: &[u32]| {
+        let image = Image::raw(
+            words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+            GuestAddr(0x10000),
+        )
+        .unwrap();
+        wl_analysis::flow::scan_indirect_candidates(&image).unwrap()
+    };
+    let found = scan(&words);
+    assert_eq!(found.complete_local_tables, 1);
+    for pc in [0x1002c, 0x10034, 0x1003c, 0x10044] {
+        assert!(found.candidates.contains(&GuestAddr(pc)));
+    }
+    // An initializer on a bypassed block cannot supply the table register.
+    let mut bypassed = words.clone();
+    bypassed[0] = 0x14000003;
+    bypassed[1] = 0x10000289;
+    assert!(scan(&bypassed).candidates.is_empty());
+    // BLR X2 clobbers caller-saved X9, but preserves callee-saved X23.
+    let mut called = words;
+    called[1] = 0xd63f0040;
+    called[2] = 0x14000001;
+    assert!(scan(&called).candidates.is_empty());
+    called[0] = (called[0] & !31) | 23;
+    called[8] = (called[8] & !(31 << 5)) | (23 << 5);
+    let preserved = scan(&called);
+    assert_eq!(preserved.complete_local_tables, 1);
+    for pc in [0x1002c, 0x10034, 0x1003c, 0x10044] {
+        assert!(preserved.candidates.contains(&GuestAddr(pc)));
+    }
+}
+
+#[test]
 fn advisory_scan_enumerates_low_word_slice_without_proving_a_full_index_bound() {
     let bytes: Vec<_> = LOW_WORD_SLICE
         .iter()
