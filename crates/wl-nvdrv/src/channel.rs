@@ -16,13 +16,18 @@ pub(super) fn timeslice_us(input: &[u8]) -> Result<u32> {
 }
 
 /// Bit eight reserves increments performed by guest commands. A zero reserve
-/// is valid and creates no increment. Nonzero reserves require independently
-/// implemented command-driven syncpoints, not a counter advanced by metadata.
-pub(super) fn driver_increments(flags: u32, value: u32) -> Result<u32> {
-    if flags & !0x106 != 0 || flags & 4 == 0 || (flags & 0x100 != 0 && value != 0) {
+/// is valid and creates no increment. Nonzero reserves advance MAX only;
+/// independently executed B197 increments advance the completed MIN value.
+pub(super) fn driver_increments(flags: u32, _value: u32) -> Result<u32> {
+    if flags & !0x106 != 0 || flags & 4 == 0 {
         return Err(NvError::NotSupported.into());
     }
     Ok(if flags & 2 != 0 { 2 } else { 0 })
+}
+pub(super) fn reserved_increments(flags: u32, value: u32) -> Result<u32> {
+    driver_increments(flags, value)?
+        .checked_add(if flags & 0x100 != 0 { value } else { 0 })
+        .ok_or(NvError::NotSupported.into())
 }
 
 pub(super) fn capacity(request: u32, input: &[u8]) -> Result<u32> {
@@ -82,8 +87,14 @@ mod tests {
             }
         }
         for value in [1u32, 2, 65536, u32::MAX] {
-            assert!(driver_increments(0x104, value).is_err());
-            assert!(driver_increments(0x106, value).is_err());
+            assert_eq!(driver_increments(0x104, value).unwrap(), 0);
+            assert_eq!(reserved_increments(0x104, value).unwrap(), value);
+            assert_eq!(driver_increments(0x106, value).unwrap(), 2);
+            if value <= u32::MAX - 2 {
+                assert_eq!(reserved_increments(0x106, value).unwrap(), value + 2);
+            } else {
+                assert!(reserved_increments(0x106, value).is_err());
+            }
         }
     }
     fn input() -> [u8; 32] {

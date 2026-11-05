@@ -1686,7 +1686,7 @@ fn emit_inner(
             )
             .unwrap();
             if native_gpu {
-                "launch_horizon_with_nvidia(&PROGRAM, m, &IMAGE, Some(Box::new(match native_gpu::NativeHost::new() { Ok(host) => host, Err(error) => { eprintln!(\"NVIDIA backend creation: {error}\"); std::process::exit(3); } })))".to_string()
+                "launch_horizon_with_nvidia(&PROGRAM, m, &IMAGE, Some(Box::new(match host_display::new_host() { Ok(host) => host, Err(error) => { eprintln!(\"NVIDIA backend creation: {error}\"); std::process::exit(3); } })))".to_string()
             } else {
                 "launch_horizon(&PROGRAM, m, &IMAGE)".to_string()
             }
@@ -1700,6 +1700,11 @@ fn emit_inner(
         // Leading inner documentation applies to this module, not the main crate.
         out.push_str(build::native_adapter_source());
         out.push_str("\n}\n");
+        if options.horizon.is_some() {
+            out.push_str("pub mod host_display {\n");
+            out.push_str(include_str!("../../wl-nvdrv/src/display_adapter.rs"));
+            out.push_str("\n}\n");
+        }
     }
     let host_setup = if options.horizon.is_some() {
         out.push_str("pub mod host_fs {\n");

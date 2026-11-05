@@ -1,5 +1,6 @@
 //! Bounded Switch IGraphicBufferProducer wire service. Single VI layer, preallocated
 //! RGBA buffers. Queue acceptance is separate from consumer release/presentation.
+use std::cell::Cell;
 use std::collections::VecDeque;
 use wl_guest_runtime::{
     Cpu, Memory, Process, RuntimeResult,
@@ -15,6 +16,35 @@ const BAD_VALUE: i32 = -22;
 const INVALID_OPERATION: i32 = -38;
 const NO_INIT: i32 = -19;
 const WOULD_BLOCK: i32 = -11;
+/// Scoped compositor hooks. The acquire callback must copy from checked,
+/// GPU-visible backing and prove acquire fences before returning an image.
+#[derive(Clone, Copy)]
+pub struct Consumer {
+    pub acquire: fn(
+        &mut Memory,
+        &QueuedBuffer,
+    ) -> RuntimeResult<Option<wl_guest_runtime::display::Framebuffer>>,
+    pub present: fn(&wl_guest_runtime::display::Framebuffer) -> RuntimeResult<()>,
+}
+thread_local! { static CONSUMER: Cell<Option<Consumer>> = const { Cell::new(None) }; }
+pub fn install_consumer(consumer: Consumer) -> RuntimeResult<()> {
+    CONSUMER.with(|slot| {
+        if slot.get().is_some() {
+            return Err("native-window consumer already installed on this host thread".into());
+        }
+        slot.set(Some(consumer));
+        Ok(())
+    })
+}
+#[derive(Debug, Clone, Copy)]
+pub struct NativeSurface {
+    pub nvmap_id: u32,
+    pub offset: u64,
+    pub size: usize,
+    pub pitch: u32,
+    pub layout: u32,
+    pub block_height_log2: u8,
+}
 #[derive(Debug, Clone)]
 pub struct GraphicBuffer {
     pub bytes: Vec<u8>,
@@ -25,6 +55,46 @@ pub struct GraphicBuffer {
     pub usage: u32,
 }
 impl GraphicBuffer {
+    /// NvGraphicBuffer/NvSurface layout from libnx feebd026 graphic_buffer.h.
+    /// Supports one uncompressed progressive RGBA8 plane, not opaque pointers.
+    pub fn native_surface(&self) -> RuntimeResult<NativeSurface> {
+        let b = self.bytes.get(40..).ok_or("short native buffer")?;
+        let w = |n| u32_at(b, n).ok_or("short native surface");
+        let q = |n| -> RuntimeResult<u64> { Ok(u64::from(w(n)?) | (u64::from(w(n + 4)?) << 32)) };
+        if b.len() != 324
+            || w(0)? != u32::MAX
+            || w(4)? == 0
+            || w(12)? != 0xdaffcaff
+            || w(28)? != self.format
+            || w(36)? != self.stride
+            || w(44)? != 1
+            || w(52)? != self.width
+            || w(56)? != self.height
+            || self.format != 1
+            || q(60)? != 0x0100532120
+            || !matches!(w(68)?, 1 | 3)
+            || w(84)? != if w(68)? == 3 { 0xfe } else { 0 }
+            || w(88)? > 5
+            || w(92)? != 0
+            || w(96)? != 0
+            || !matches!(q(100)?, 0 | 0x8000000000000000)
+            || b[116..316].iter().any(|v| *v != 0)
+        {
+            return Err("unsupported native RGBA scanout surface".into());
+        }
+        let size = usize::try_from(q(108)?).map_err(|_| "native surface size overflow")?;
+        if size == 0 || size > 64 * 1024 * 1024 || u64::from(w(40)?) < size as u64 {
+            return Err("native surface allocation size".into());
+        }
+        Ok(NativeSurface {
+            nvmap_id: w(4)?,
+            offset: u64::from(w(80)?),
+            size,
+            pitch: w(72)?,
+            layout: w(68)?,
+            block_height_log2: w(88)? as u8,
+        })
+    }
     fn decode(bytes: &[u8]) -> Result<Self, i32> {
         let get = |n| u32_at(bytes, n).ok_or(BAD_VALUE);
         if bytes.len() < 40
@@ -335,7 +405,9 @@ impl Service {
                 if u32_at(b, 48).is_none_or(|v| v > 4) {
                     return Err(INVALID_OPERATION);
                 }
-                if u32_at(b, 32).is_none_or(|v| v & !7 != 0) || u32_at(b, 36) != Some(0) {
+                if u32_at(b, 32).is_none_or(|v| v & !7 != 0)
+                    || !matches!(u32_at(b, 36), Some(0 | 8))
+                {
                     return Err(INVALID_OPERATION);
                 }
                 let buffer = self.buffers[n].as_ref().ok_or(BAD_VALUE)?.clone();
@@ -410,6 +482,46 @@ impl Service {
     }
     pub fn pending(&self) -> Option<&QueuedBuffer> {
         self.queued.front()
+    }
+    pub fn consume_ready(
+        &mut self,
+        memory: &mut Memory,
+        k: &mut wl_guest_runtime::horizon::Kernel,
+    ) -> RuntimeResult<()> {
+        let Some(consumer) = CONSUMER.with(Cell::get) else {
+            return Ok(());
+        };
+        let Some(queued) = self.queued.front() else {
+            return Ok(());
+        };
+        let Some(frame) = (consumer.acquire)(memory, queued)? else {
+            return Ok(());
+        };
+        let size = frame
+            .width
+            .checked_mul(frame.height)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or("VI image size overflow")?;
+        if frame.width != queued.buffer.width
+            || frame.height != queued.buffer.height
+            || frame.stride != frame.width
+            || frame.format != wl_guest_runtime::display::PixelFormat::Rgba8888
+            || frame.pixels.len() != size as usize
+        {
+            return Err("invalid acquired VI image".into());
+        }
+        k.host
+            .display
+            .frame_count
+            .checked_add(1)
+            .ok_or("VI frame count exhausted")?;
+        let sequence = queued.sequence;
+        k.host
+            .display
+            .queue_buffer(frame.width, frame.height, frame.stride, 1, frame.pixels);
+        self.release_consumed(sequence)?;
+        self.update_event(k);
+        (consumer.present)(k.host.display.current_frame.as_ref().unwrap())
     }
     /// Trusted consumer acknowledgement after its acquire fences and actual
     /// consumption complete. This method does not wait or prove GPU completion;

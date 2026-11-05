@@ -2158,3 +2158,29 @@ fn single_level_native_sampler_fields_and_srgb_gate_are_image_aware() {
         );
     }
 }
+
+#[test]
+fn b197_syncpoint_decodes_index_cleanup_and_completion_condition_without_shadow_capture() {
+    let mut engine = Maxwell3d::default();
+    engine.apply(write(0, 0xb197)).unwrap();
+    assert_eq!(
+        engine.apply(write(0x1144, 0)).unwrap(),
+        MethodEffect::HostCacheMaintenance
+    );
+    assert!(engine.apply(write(0x1144, 1)).is_err());
+    for value in [0u32, 1, 0xfff, 0x10000, 0x100001, 0x110fff] {
+        assert_eq!(
+            engine.apply(write(0x2c8, value)).unwrap(),
+            MethodEffect::IncrementSyncpoint {
+                index: (value & 0xfff) as u16,
+                clean_l2: value & 0x10000 != 0,
+                rop_writes_done: value & 0x100000 != 0,
+            }
+        );
+        assert_eq!(engine.shadow_value(0x2c8), None);
+    }
+    for bit in [12, 13, 14, 15, 17, 18, 19, 21, 31] {
+        assert!(engine.apply(write(0x2c8, 1u32 << bit)).is_err());
+    }
+    assert!(engine.apply(write(0x2c9, 1)).is_err());
+}

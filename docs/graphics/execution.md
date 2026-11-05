@@ -2072,12 +2072,16 @@ channel policy and preserves its in/out payload. Serialized execution has no
 competing runlist; this does not provide hardware preemption. Priority updates
 select the corresponding policy before a later explicit timeslice override.
 
-Kickoff accepts `HW_FORMAT | IncrementWithValue` when the reserved guest
-increment count is zero. It executes and publishes through the same checked
-submission path and returns the existing completed threshold, without inventing
-an increment. Nonzero guest-command increment reservations remain unsupported:
-they require command-driven syncpoint execution. The separately supported
-driver-generated fence increment still advances by two after real completion.
+Kickoff accepts `HW_FORMAT | IncrementWithValue` with checked reservation
+arithmetic. Reservation advances the returned MAX threshold, not completed MIN.
+B197 `INCREMENT_SYNC_POINT` (`0x02c8`) decodes index bits 11:0, CLEAN_L2 bit16
+and condition bit20. Both supported conditions conservatively wait for the
+actual host queue prefix; CLEAN_L2 additionally publishes pending guest output.
+Only a successful wait advances the selected executed counter. This stronger
+serialization does not claim hardware PBDMA/ROP timing or general syncpoints.
+`FLUSH_PENDING_WRITES` (`0x1144`) accepts the no-global-store value zero and
+executes existing host cache maintenance. Shader global-store mode remains
+unsupported. Increment actions are not captured as shadow register state.
 
 If a submission publishes a valid rendered prefix and then reports an accepted
 command fault, the diagnostic capture path retains that published image before

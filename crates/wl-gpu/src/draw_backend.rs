@@ -123,6 +123,7 @@ impl Renderer {
                     if matches!(
                         effect,
                         MethodEffect::Draw { .. }
+                            | MethodEffect::IncrementSyncpoint { .. }
                             | MethodEffect::DrawIndices { .. }
                             | MethodEffect::Clear { .. }
                             | MethodEffect::ConstantWrite { .. }
@@ -402,6 +403,36 @@ impl Renderer {
         synchronous: bool,
     ) -> Result<Option<Frame>> {
         match effect {
+            MethodEffect::IncrementSyncpoint {
+                index,
+                clean_l2,
+                rop_writes_done: _,
+            } => {
+                let slot = usize::from(index);
+                let next = self
+                    .completed_syncpoints
+                    .get(slot)
+                    .copied()
+                    .ok_or_else(|| invalid("syncpoint index exceeds B197 field"))?
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("unsupported syncpoint counter wrap"))?;
+                // Whole-queue completion is stronger than either documented
+                // STREAM_OUT_WRITES_DONE or ROP_WRITES_DONE condition. No guest
+                // counter changes merely because work was accepted by the queue.
+                self.guest_effect(engine, MethodEffect::WaitIdle, map, memory, changes, false)?;
+                if clean_l2 {
+                    self.guest_effect(
+                        engine,
+                        MethodEffect::HostCacheMaintenance,
+                        map,
+                        memory,
+                        changes,
+                        false,
+                    )?;
+                }
+                self.completed_syncpoints[slot] = next;
+                Ok(None)
+            }
             MethodEffect::TextureDataInvalidatedWaitIdle => {
                 self.guest_effect(engine, MethodEffect::WaitIdle, map, memory, changes, false)?;
                 self.invalidate_texture_data();

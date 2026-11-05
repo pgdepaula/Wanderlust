@@ -2658,3 +2658,11 @@ wgpu-types 26 `Dx12Compiler` and wgpu-hal's `dx12/shader_compilation.rs` disting
 FXC from DXC and show that DEBUG selects D3DCOMPILE_SKIP_OPTIMIZATION. This
 explains why compiler/debug configuration materially changes the executable
 matrix shader's native compilation behavior while leaving shader semantics fixed.
+
+NVIDIA B197 revision `9fdf5c4062007929d9f4e6cbad9c9771fe61b880`,
+`INCREMENT_SYNC_POINT` and `FLUSH_PENDING_WRITES`, supplies the exact fields
+for command-driven completion. MIT Ryujinx revision
+`4930dced25c0d9ec33096b0f2601d262daa477bf`, `NvHostChannelDeviceFile.cs`,
+corroborates the distinction between increment-with-value MAX reservation and
+GPU-command MIN advancement. The bounded executor uses a stronger queue-prefix
+wait rather than claiming equivalent hardware pipeline timing.

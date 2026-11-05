@@ -194,3 +194,91 @@ fn malformed_parcels_addresses_and_incompatible_buffers_fail_without_state_chang
     }
     assert_eq!(h.dequeue(), fresh_fence_reply(0));
 }
+
+#[test]
+fn native_surface_metadata_has_explicit_offsets_and_rejects_compression_and_planes() {
+    let mut bytes = vec![0u8; 364];
+    for (at, value) in [
+        (0, 0x47424652u32),
+        (4, 7),
+        (8, 9),
+        (12, 16),
+        (16, 1),
+        (20, 0xb00),
+        (24, 42),
+        (36, 81),
+        (40, u32::MAX),
+        (44, 7),
+        (52, 0xdaffcaff),
+        (56, 42),
+        (64, 0xb00),
+        (68, 1),
+        (72, 1),
+        (76, 16),
+        (80, 1024),
+        (84, 1),
+        (92, 7),
+        (96, 9),
+        (100, 0x00532120),
+        (104, 1),
+        (108, 3),
+        (112, 64),
+        (116, 7),
+        (120, 0x2000),
+        (124, 0xfe),
+        (128, 1),
+        (144, 0x80000000),
+        (148, 1024),
+    ] {
+        bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    let valid = binder::GraphicBuffer {
+        bytes,
+        width: 7,
+        height: 9,
+        stride: 16,
+        format: 1,
+        usage: 0xb00,
+    };
+    let surface = valid.native_surface().unwrap();
+    assert_eq!(
+        (
+            surface.nvmap_id,
+            surface.offset,
+            surface.size,
+            surface.pitch,
+            surface.layout,
+            surface.block_height_log2
+        ),
+        (7, 0x2000, 1024, 64, 3, 1)
+    );
+    for (at, value) in [
+        (44, 0u32),
+        (52, 0),
+        (84, 2),
+        (92, 8),
+        (100, 0),
+        (108, 2),
+        (124, 1),
+        (128, 6),
+        (132, 1),
+        (136, 1),
+        (140, 1),
+        (156, 1),
+        (148, 64 * 1024 * 1024 + 1),
+    ] {
+        let mut bad = valid.clone();
+        bad.bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+        assert!(bad.native_surface().is_err(), "field at {at:#x}");
+    }
+    let mut opaque = valid.clone();
+    opaque.bytes[356..364].copy_from_slice(&0xdeadbeef12345678u64.to_le_bytes());
+    assert_eq!(
+        opaque.native_surface().unwrap().nvmap_id,
+        7,
+        "bookkeeping word is not a pointer to dereference"
+    );
+    let mut short = valid;
+    short.bytes.pop();
+    assert!(short.native_surface().is_err());
+}

@@ -919,6 +919,7 @@ impl AudioHost for Backend {
         {
             let result = self.binder.request(memory, command, req, args);
             if result.is_ok() {
+                self.binder.consume_ready(memory, k)?;
                 self.binder.update_event(k);
             }
             return result;

@@ -73,6 +73,7 @@ pub struct Renderer {
     pub(crate) device: wgpu::Device,
     pub(crate) queue: wgpu::Queue,
     pub(crate) completion: crate::completion::CompletionWatchdog,
+    pub(crate) completed_syncpoints: [u32; 4096],
     pub(crate) last_submission: Option<wgpu::SubmissionIndex>,
     /// Latest channel-ordered semaphore publication, moved without a pixel copy
     /// into the driver's existing diagnostic publication boundary.
@@ -200,6 +201,7 @@ impl Renderer {
             semaphore_frame: None,
             timestamp_origin: std::time::Instant::now(),
             completion: Default::default(),
+            completed_syncpoints: [0; 4096],
             default_pipeline: pipeline.clone(),
             pipeline,
             indexed_shader: shader,

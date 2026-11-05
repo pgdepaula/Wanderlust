@@ -42,7 +42,7 @@ nvmap node and up to 16 channel identities over its lifetime.
 | --- | --- | --- |
 | `/dev/nvhost-ctrl` | EventRegister `c004001f`, EventUnregister `c0040020` | 64 fd-local available event slots; registration never signals GPU completion |
 | | EventSignal `c004001c` | Cancels an available registration; does not increment a syncpoint |
-| | SyncptRead `c0080014` | Actual completed threshold of a live driver-owned channel; reserved ID zero reads zero |
+| | SyncptRead `c0080014` | Actual completed threshold of a live driver-owned channel; ID zero reads the executed GPU counter |
 | | SyncptWait `c00c0016`, EventWait `c010001d`, EventWaitAsync `c010001e` | Already-expired fences only; future waits explicitly unsupported |
 | `/dev/nvmap` | Create `c0080101` | Nonzero size aligned to 4 KiB; unique handle |
 | | Param `c00c0109` | Created size; allocated alignment, system-memory heap and kind; BASE unsupported |
@@ -57,7 +57,7 @@ nvmap node and up to 16 channel identities over its lifetime.
 | `/dev/nvhost-gpu` | SetNvmapFd `40044801` | Live nvmap descriptor, one binding |
 | | AllocGpfifo `40084805` | 1–2048 entries, flags 0 |
 | | AllocObjCtx `c0104809` | B197, flags 0 |
-| | KickoffPb `c018481b` | Ioctl2, hardware-format entries, flags 4 or 6 |
+| | KickoffPb `c018481b` | Ioctl2, hardware-format entries, flags 4/6, optionally increment-with-value bit 8 |
 
 This subset follows the ISC-licensed libnx revision
 [`feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973`](https://github.com/switchbrew/libnx/tree/feebd026ca0f5dcc2119f46ad8e0d16ad3dd4973/nx/source/nvidia/ioctl),
@@ -68,10 +68,10 @@ service-emulator implementation is vendored.
 The fence-increment interpretation is corroborated by the MIT-licensed archived
 Ryujinx revision
 [`44862dce3ef307b12366376ada3fa0db693bfaf9`, NvHostChannelDeviceFile](https://git.axenov.dev/Museum/ryujinx/src/commit/44862dce3ef307b12366376ada3fa0db693bfaf9/src/Ryujinx.HLE/HOS/Services/Nv/NvDrvServices/NvHostChannel/NvHostChannelDeviceFile.cs).
-Bit 1 requests two increments; bit 2 selects hardware entries. Only these
-combinations are supported. Wait, increment-with-value, suppression of WFI,
-AllocGpfifoEx2, control-device events, arbitrary syncpoint operations and the
-general Host1x scheduler are unsupported.
+Bit 1 requests two increments; bit 2 selects hardware entries. Increment-with-value bit 8 reserves the requested count in the returned MAX
+threshold; it does not complete GPU work. B197 commands must advance the executed
+MIN separately. Wait flags, suppression of WFI, AllocGpfifoEx2, arbitrary
+syncpoint operations and the general Host1x scheduler remain unsupported.
 
 ## Ownership, ordering and failures
 
@@ -89,9 +89,11 @@ CPU writes are allowed only between these exclusive calls. This mode avoids
 pretending that generated CPU stores already maintain a fine-grained GPU journal.
 
 Only after successful completion/publication does bit 1 advance the channel's
-owned threshold by two. A non-incrementing request returns its existing threshold;
-it does not manufacture a new fence. Output flags are cleared. These bounded
-process-local identities have no kernel event/wait implementation.
+driver-completed count by two. The returned reservation threshold and executed
+completion threshold are distinct. B197 `INCREMENT_SYNC_POINT` advances its
+selected counter after a real host queue-prefix wait. Counter arithmetic is
+checked; wraparound is unsupported. Output flags are cleared. Available control
+events remain unsignalled registrations; future event waits remain unsupported.
 
 A consumed prefix can have real GPU side effects before a later method faults.
 That prefix is completed and published, then the request fails fatally; the
@@ -221,3 +223,32 @@ are outside this subset. No wrapped counter chronology is claimed.
 The runtime graphics integration test checks an initially zero threshold, a real
 indexed textured draw, completed value two, and both already-expired wait forms.
 It also checks that event registration alone leaves its kernel event unsignalled.
+
+## Native VI consumer
+
+Generated native-GPU executables share one thread-confined NVIDIA host with the
+hosted Binder consumer through `Rc<RefCell<NativeHost>>`. No second driver,
+renderer, allocation registry or unsafe cross-thread ownership is introduced.
+The consumer checks up to four actual acquire fences, resolves the native
+NvGraphicBuffer's nvmap ID and allocation offset, and rejects pending unpublished
+GPU output. Future fences retain producer ownership for a later retry.
+
+The bounded surface profile is single-plane RGBA8, pitch-linear or Tegra
+block-linear with block-height log2 0..5. Stride padding is removed only when
+constructing the owned display image. Full/default crop, no rotation and identity
+inverse-display transformation are supported. Compression, arbitrary scaling,
+additional formats/planes and timed scanout are unsupported. Native metadata
+is decoded as little-endian fields, never dereferenced as host pointers.
+
+A successful acquisition copies canonical pixels into an owned framebuffer,
+then releases the oldest queue sequence and presents that same image through
+SDL when enabled. Guest memory and allocation ownership must remain live until
+acquisition. This is an actual BufferQueue consumer, but not hardware vblank,
+VI composition or a guarantee that pixels depict a recognizable game scene.
+The SDL title counts consumed VI buffers separately from diagnostic GPU targets.
+
+The native surface wire layout follows libnx `graphic_buffer.h` and `types.h`
+at the revision above, corroborated by MIT Ryujinx revision
+`4930dced25c0d9ec33096b0f2601d262daa477bf`, `NvGraphicBufferSurface.cs`.
+The observed opaque high allocation flag is retained without claiming compressed
+surface support. Nonzero compression fields remain rejected.

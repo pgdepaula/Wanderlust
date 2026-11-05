@@ -119,6 +119,40 @@ impl GpuDriver {
     pub fn initial_capture_counters(&self) -> Option<crate::initial_capture::CaptureCounters> {
         self.initial_capture.as_ref().map(|s| s.counters())
     }
+    /// Optional bounded evidence for a request rejected by the device adapter
+    /// before GPU acceptance. Never executes commands, consumes a sequence or
+    /// publishes pending output. Such snapshots are not an execution trace.
+    pub fn capture_unaccepted_request(
+        &mut self,
+        channel: ChannelId,
+        entries: &[u8],
+        memory: &impl GuestMemory,
+    ) {
+        if self.renderer.target_pending || self.initial_capture.is_none() {
+            return;
+        }
+        let Ok(n) = self.context(channel) else { return };
+        let space = self.channels[n].space;
+        let Ok(epoch) = self.memory.mapping_epoch(space) else {
+            return;
+        };
+        let Ok(map) = self.memory.address_map(space) else {
+            return;
+        };
+        let sequence = self.channels[n].sequence | (1u64 << 63);
+        self.initial_capture.as_mut().unwrap().record(
+            crate::initial_capture::SnapshotIdentity {
+                process: std::process::id(),
+                channel: channel.0,
+                space: space.0,
+                sequence,
+                mapping_epoch: epoch,
+            },
+            entries,
+            map,
+            memory,
+        );
+    }
     pub fn graphics_counters(&self) -> crate::Counters {
         self.renderer.counters
     }
@@ -127,6 +161,27 @@ impl GpuDriver {
     }
     pub fn has_pending_output(&self) -> bool {
         self.renderer.target_pending
+    }
+    /// Counts executed B197 increments whose required host GPU prefix completed.
+    /// This alone is not guest RAM publication or a complete Host1x scheduler.
+    pub fn completed_syncpoint_value(&self, index: u32) -> Result<u32> {
+        self.renderer
+            .completed_syncpoints
+            .get(index as usize)
+            .copied()
+            .ok_or_else(|| invalid("syncpoint index exceeds B197 field"))
+    }
+    /// Checked canonical CPU span for a synchronous display consumer. This is
+    /// neither a GPU VA nor a retained borrow. Callers must keep mapping/backing
+    /// ownership stable through their subsequent scoped guest-memory read.
+    pub fn visible_backing_address(
+        &self,
+        backing: BackingId,
+        offset: u64,
+        size: usize,
+    ) -> Result<GuestAddress> {
+        self.idle_mappings()?;
+        self.memory.backing_range(backing, offset, size)
     }
     fn idle_mappings(&self) -> Result<()> {
         if self.renderer.target_pending {

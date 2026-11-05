@@ -217,7 +217,51 @@ pub struct NativeHost {
     capture: Option<Capture>,
     trace_remaining: u32,
     published_targets: u64,
+    vi_buffers: u64,
     status_path: Option<std::path::PathBuf>,
+}
+/// The runtime's GPU trait is deliberately host-thread confined (not Send).
+/// Share its one driver with the VI consumer without duplicating registrations,
+/// channels or renderer state. Weak consumer ownership cannot keep it alive.
+#[derive(Clone, Debug)]
+pub struct SharedHost(pub std::rc::Rc<std::cell::RefCell<NativeHost>>);
+impl SharedHost {
+    fn with<T>(
+        &self,
+        f: impl FnOnce(&mut NativeHost) -> service::HostResult<T>,
+    ) -> service::HostResult<T> {
+        let mut host = self
+            .0
+            .try_borrow_mut()
+            .map_err(|_| service::HostError::Fatal("reentrant GPU/VI access".into()))?;
+        f(&mut host)
+    }
+}
+impl service::Host for SharedHost {
+    fn initialize(&mut self, t: service::TransferBuffer) -> service::HostResult<()> {
+        self.with(|h| service::Host::initialize(h, t))
+    }
+    fn set_client_pid(&mut self, a: u64, p: u64) -> service::HostResult<()> {
+        self.with(|h| service::Host::set_client_pid(h, a, p))
+    }
+    fn open(&mut self, p: &str) -> service::HostResult<u32> {
+        self.with(|h| service::Host::open(h, p))
+    }
+    fn close(&mut self, fd: u32, m: &mut Memory) -> service::HostResult<()> {
+        self.with(|h| service::Host::close(h, fd, m))
+    }
+    fn ioctl(&mut self, r: service::Ioctl<'_>, m: &mut Memory) -> service::HostResult<()> {
+        self.with(|h| service::Host::ioctl(h, r, m))
+    }
+    fn query_event(&mut self, fd: u32, e: u32) -> service::HostResult<bool> {
+        self.with(|h| service::Host::query_event(h, fd, e))
+    }
+    fn update_progress(&mut self, i: u64, e: f64) {
+        // Diagnostics are optional; never recurse into an in-flight GPU call.
+        if let Ok(mut h) = self.0.try_borrow_mut() {
+            service::Host::update_progress(&mut *h, i, e);
+        }
+    }
 }
 impl std::fmt::Debug for NativeHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -228,6 +272,63 @@ impl std::fmt::Debug for NativeHost {
     }
 }
 impl NativeHost {
+    pub fn display_fence_complete(&self, id: u32, value: u32) -> service::HostResult<bool> {
+        self.driver.display_fence_complete(id, value).map_err(error)
+    }
+    pub fn visible_display_address(
+        &self,
+        id: u32,
+        offset: u64,
+        size: usize,
+    ) -> service::HostResult<GuestAddress> {
+        self.driver
+            .visible_display_address(id, offset, size)
+            .map_err(error)
+    }
+    pub fn present_vi_buffer(
+        &mut self,
+        frame: &wl_guest_runtime::display::Framebuffer,
+    ) -> service::HostResult<()> {
+        if frame.format != wl_guest_runtime::display::PixelFormat::Rgba8888
+            || frame.stride != frame.width
+        {
+            return Err(service::HostError::Fatal(
+                "non-packed VI presentation".into(),
+            ));
+        }
+        let next = self
+            .vi_buffers
+            .checked_add(1)
+            .ok_or_else(|| service::HostError::Fatal("VI consumption counter exhausted".into()))?;
+        if std::env::var("WL_NO_SDL").as_deref() == Ok("1")
+            && std::env::var("WL_GPU_DEBUG_WINDOW").as_deref() != Ok("1")
+        {
+            self.vi_buffers = next;
+            return Ok(());
+        }
+        if self.debug_window.is_none() {
+            self.debug_window = Some(
+                wl_guest_runtime::sdl::SdlHost::open(
+                    "TOTK - Wanderlust | SDL2 | guest VI buffer",
+                    frame.width.min(1280),
+                    frame.height.min(720),
+                )
+                .ok_or_else(|| {
+                    service::HostError::Fatal("VI SDL2 presentation unavailable".into())
+                })?,
+            );
+        }
+        let window = self.debug_window.as_mut().unwrap();
+        window.poll_input();
+        if !window.present_raw_rgba(&frame.pixels, frame.width, frame.height) {
+            return Err(service::HostError::Fatal(
+                "VI SDL2 presentation failed".into(),
+            ));
+        }
+        self.vi_buffers = next;
+        self.last_frame = None;
+        Ok(())
+    }
     pub fn new() -> wl_gpu::Result<Self> {
         let driver = driver::Driver::new()?;
         eprintln!("NVIDIA adapter {:?}", driver.capabilities().adapter);
@@ -267,6 +368,7 @@ impl NativeHost {
             hold_window: std::env::var("WL_GPU_DEBUG_HOLD").as_deref() == Ok("1"),
             capture,
             published_targets: 0,
+            vi_buffers: 0,
             status_path: std::env::var_os("WL_GPU_STATUS_FILE").map(std::path::PathBuf::from),
             trace_remaining: if std::env::var("WL_NVDRV_TRACE").as_deref() == Ok("1") {
                 1024
@@ -298,7 +400,9 @@ impl NativeHost {
                         ))
                     })?;
             }
-            if let Some(window) = &mut self.debug_window {
+            if let Some(window) = &mut self.debug_window
+                && self.vi_buffers == 0
+            {
                 window.poll_input();
                 if !window.present_raw_rgba(&frame.rgba, frame.width, frame.height) {
                     return Err(service::HostError::Fatal(
@@ -315,7 +419,7 @@ impl Drop for NativeHost {
     fn drop(&mut self) {
         // Explicit interactive inspection after the guest exits. This loop
         // does not count as guest execution, new GPU draws or GPU completion.
-        if !self.hold_window {
+        if !self.hold_window || self.vi_buffers != 0 {
             return;
         }
         if let (Some(window), Some(frame)) = (&mut self.debug_window, &self.last_frame) {
@@ -387,7 +491,10 @@ impl service::Host for NativeHost {
                 c.shader_decodes + c.vertex_shader_decodes
             ),
             format!("Published GPU color targets: {}", self.published_targets),
-            "Original VI frames: not verified".into(),
+            format!(
+                "Guest VI buffers consumed: {} | native vblank timing not emulated",
+                self.vi_buffers
+            ),
             if self.published_targets == 0 {
                 "Waiting for a published guest GPU image.".into()
             } else {
@@ -405,9 +512,12 @@ impl service::Host for NativeHost {
             }
         }
         if let Some(window) = &mut self.debug_window {
-            window.set_title(&format!("TOTK - Wanderlust | SDL2 | {:?} | {mips:.2} MIPS | Maxwell draws: {} | targets: {}", adapter.backend, c.draw_commands, self.published_targets));
+            window.set_title(&format!("TOTK - Wanderlust | SDL2 | {:?} | {mips:.2} MIPS | Maxwell draws: {} | VI buffers: {} | targets: {}", adapter.backend, c.draw_commands,self.vi_buffers, self.published_targets));
             window.poll_input();
-            if let Some(frame) = &self.last_frame {
+            if self.vi_buffers != 0 {
+                // Keep the actual VI consumer image; diagnostic intermediates
+                // must never overwrite a guest-selected display buffer.
+            } else if let Some(frame) = &self.last_frame {
                 window.present_raw_rgba(&frame.rgba, frame.width, frame.height);
             } else {
                 window.present_frame(&wl_guest_runtime::display::DisplayServer::default());

@@ -4,7 +4,14 @@ extern crate wl_runtime as wl_guest_runtime;
 #[path = "../../wl-gpu/tests/common/mod.rs"]
 mod common;
 #[path = "../src/runtime_adapter.rs"]
-mod native;
+pub mod native_gpu;
+use native_gpu as native;
+#[path = "../../wl-gpu/tests/common/gob.rs"]
+mod display_gob_oracle;
+#[path = "../../wl-runtime/hosted/binder.rs"]
+pub mod host_binder;
+#[path = "../src/display_adapter.rs"]
+pub mod host_display;
 use common::{maxwell::*, *};
 use wl_gpu::maxwell::{TextureImage, TextureSampler};
 use wl_guest_runtime::{Cpu, Memory, Process, horizon::*, ipc, nvidia, services::HostObject};
@@ -266,7 +273,7 @@ type Metrics =
     std::rc::Rc<std::cell::RefCell<(wl_gpu::Counters, wl_gpu::driver_backend::DriverCounters)>>;
 #[derive(Debug)]
 struct ObservedHost {
-    inner: native::NativeHost,
+    inner: native::SharedHost,
     metrics: Metrics,
 }
 impl nvidia::Host for ObservedHost {
@@ -287,7 +294,8 @@ impl nvidia::Host for ObservedHost {
     }
     fn ioctl(&mut self, r: nvidia::Ioctl<'_>, m: &mut Memory) -> nvidia::HostResult<()> {
         let result = self.inner.ioctl(r, m);
-        *self.metrics.borrow_mut() = (self.inner.graphics_counters(), self.inner.driver_counters());
+        let host = self.inner.0.borrow();
+        *self.metrics.borrow_mut() = (host.graphics_counters(), host.driver_counters());
         result
     }
 }
@@ -302,6 +310,9 @@ impl Harness {
         Self::with_capture(data, None)
     }
     fn with_capture(data: Vec<u8>, capture: Option<&std::path::Path>) -> Self {
+        Self::with_options(data, capture, false)
+    }
+    fn with_options(data: Vec<u8>, capture: Option<&std::path::Path>, display: bool) -> Self {
         let mut m = Memory::default();
         for (base, size, st, r, w, x) in [
             (CODE, 4096, state::CODE, true, false, true),
@@ -346,9 +357,15 @@ impl Harness {
         .unwrap();
         let k = p.kernel.as_mut().unwrap();
         let metrics = Metrics::default();
-        let mut native = native::NativeHost::new().unwrap();
+        let native = if display {
+            host_display::new_host().unwrap()
+        } else {
+            native::SharedHost(std::rc::Rc::new(std::cell::RefCell::new(
+                native::NativeHost::new().unwrap(),
+            )))
+        };
         if let Some(root) = capture {
-            native.capture_for_test(root).unwrap();
+            native.0.borrow_mut().capture_for_test(root).unwrap();
         }
         k.nvidia
             .install(Box::new(ObservedHost {
@@ -494,9 +511,15 @@ fn configured() -> (Harness, u32, u32, u32, Vec<u32>, Vec<u8>) {
 fn configured_with_capture(
     capture: Option<&std::path::Path>,
 ) -> (Harness, u32, u32, u32, Vec<u32>, Vec<u8>) {
+    configured_options(capture, false)
+}
+fn configured_options(
+    capture: Option<&std::path::Path>,
+    display: bool,
+) -> (Harness, u32, u32, u32, Vec<u32>, Vec<u8>) {
     let (mut data, command, image) = fixture();
     put(&mut data, 0x10000, &command);
-    let mut h = Harness::with_capture(data, capture);
+    let mut h = Harness::with_options(data, capture, display);
     let nvmap = h.open("/dev/nvmap");
     let space = h.open("/dev/nvhost-as-gpu");
     let channel = h.open("/dev/nvhost-gpu");
@@ -609,11 +632,11 @@ fn runtime_service_executes_indexed_textured_draw_and_cpu_mutation() {
     }
     let ranges = RANGES;
     let entry_bytes = entry(0xb0000, command.len());
-    // Unsupported guest-command increments are rejected before consuming even
-    // an otherwise valid mapped draw. They must not fabricate a threshold.
-    for value in [1, u32::MAX] {
+    // Reservation plus two driver increments must not overflow the timeline.
+    // Reject before consuming even an otherwise valid mapped draw.
+    for value in [u32::MAX - 1, u32::MAX] {
         h.p.memory
-            .write_bytes(META + 0x1000, &words(&[0, 0, 1, 0x104, 0, value]))
+            .write_bytes(META + 0x1000, &words(&[0, 0, 1, 0x106, 0, value]))
             .unwrap();
         h.p.memory.write_bytes(META + 0x6000, &entry_bytes).unwrap();
         h.p.memory.write_bytes(META + 0x3000, &[0xcc; 24]).unwrap();
@@ -1191,4 +1214,255 @@ fn runtime_service_remaps_resident_virtual_target_and_keeps_shader_cache() {
     let mut free = aliases.to_le_bytes().to_vec();
     free.extend(words(&[129, 65536]));
     h.ioctl(space, 0xc0104103, &free, None);
+}
+
+#[test]
+#[ignore = "requires real guest GPU execution; WL_NO_SDL=1 selects headless VI observation"]
+fn queued_vi_surface_waits_for_real_fence_then_reads_its_nvmap_backing() {
+    fn binder_call(h: &mut Harness, s: &mut host_binder::Service, code: u32, tail: &[u8]) {
+        let token = "android.gui.IGraphicBufferProducer";
+        let mut payload = words(&[0x100, token.len() as u32]);
+        payload.extend(token.encode_utf16().chain([0]).flat_map(u16::to_le_bytes));
+        payload.resize(payload.len().next_multiple_of(4), 0);
+        payload.extend_from_slice(tail);
+        let mut parcel = words(&[payload.len() as u32, 16, 0, 16 + payload.len() as u32]);
+        parcel.extend(payload);
+        h.p.memory.write_bytes(META + 0x8000, &parcel).unwrap();
+        let mut request = ipc::Request::default();
+        request.sends = vec![(META + 0x8000, parcel.len() as u64)];
+        request.recvs = vec![(META + 0xa000, 4096)];
+        s.request(&mut h.p.memory, 3, &request, &words(&[32, code, 0]))
+            .unwrap();
+    }
+    let (mut h, _, _, channel, command, image) = configured_options(None, true);
+    let entries = entry(0xb0000, command.len());
+    let first = h.ioctl(
+        channel,
+        0xc018481b,
+        &words(&[0, 0, 1, 6, 0, 0]),
+        Some(&entries),
+    );
+    let syncpoint = u32::from_le_bytes(first[16..20].try_into().unwrap());
+    assert_eq!(u32::from_le_bytes(first[20..24].try_into().unwrap()), 2);
+    let mut service = host_binder::Service::default();
+    binder_call(&mut h, &mut service, 10, &words(&[0, 1, 0]));
+    // Independent native GraphicBuffer/NvSurface field offsets (libnx header).
+    let mut gb = vec![0; 364];
+    for (at, value) in [
+        (0, 0x47424652),
+        (4, 47),
+        (8, 29),
+        (12, 52),
+        (16, 1),
+        (20, 0xb00),
+        (24, 42),
+        (36, 81),
+        (40, u32::MAX),
+        (44, 1),
+        (52, 0xdaffcaff),
+        (56, 42),
+        (64, 0xb00),
+        (68, 1),
+        (72, 1),
+        (76, 52),
+        (80, SIZE as u32),
+        (84, 1),
+        (92, 47),
+        (96, 29),
+        (100, 0x00532120),
+        (104, 1),
+        (108, 1),
+        (112, 208),
+        (116, 1),
+        (120, RT as u32),
+        (148, SIZE as u32),
+    ] {
+        gb[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    let mut prealloc = words(&[0, 1, gb.len() as u32, 0]);
+    prealloc.extend_from_slice(&gb);
+    binder_call(&mut h, &mut service, 14, &prealloc);
+    binder_call(&mut h, &mut service, 3, &words(&[1, 47, 29, 0, 0x300]));
+    let mut input = vec![0; 84];
+    for (at, value) in [
+        (8, 1u32),
+        (20, 47),
+        (24, 29),
+        (36, 8),
+        (44, 1),
+        (48, 1),
+        (52, syncpoint),
+        (56, 3),
+    ] {
+        input[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    let mut queue = words(&[0, 84, 0]);
+    queue.extend(input);
+    binder_call(&mut h, &mut service, 7, &queue);
+    assert!(service.pending().is_some());
+    {
+        let p = &mut h.p;
+        service
+            .consume_ready(&mut p.memory, p.kernel.as_mut().unwrap())
+            .unwrap();
+    }
+    assert_eq!(h.p.kernel.as_ref().unwrap().host.display.frame_count, 0);
+    assert!(
+        service.pending().is_some(),
+        "future fence must retain ownership"
+    );
+    // A second real submission crosses threshold three; no simulated increment.
+    let color = [207, 41, 83, 255];
+    h.p.memory
+        .write_bytes(DATA + 0x1000, &color.repeat(6144 / 4))
+        .unwrap();
+    h.ioctl(
+        channel,
+        0xc018481b,
+        &words(&[0, 0, 1, 6, 0, 0]),
+        Some(&entries),
+    );
+    let before = *h.metrics.borrow();
+    {
+        let p = &mut h.p;
+        service
+            .consume_ready(&mut p.memory, p.kernel.as_mut().unwrap())
+            .unwrap();
+    }
+    let display = &h.p.kernel.as_ref().unwrap().host.display;
+    assert_eq!(display.frame_count, 1);
+    assert!(service.pending().is_none());
+    let frame = display.current_frame.as_ref().unwrap();
+    assert_eq!((frame.width, frame.height, frame.stride), (47, 29, 47));
+    let mut padded = Vec::new();
+    for row in frame.pixels.chunks_exact(47 * 4) {
+        padded.extend_from_slice(row);
+        padded.extend(BG.repeat(5));
+    }
+    check(&padded, &image, Some(color), BG);
+    assert_eq!(
+        h.metrics.borrow().0,
+        before.0,
+        "VI acquisition cannot replay or resubmit GPU draws"
+    );
+    assert_eq!(h.metrics.borrow().1.accepted, before.1.accepted);
+    // Rebind the SAME nvmap allocation as a genuine B197 block-linear target.
+    // Its native stride is GOB-aligned (48 pixels), while logical width is 47.
+    let tiled_size = display_gob_oracle::size(47, 29, 1);
+    assert_eq!(tiled_size, 6144);
+    h.p.memory
+        .write_bytes(DATA + RT as u64, &BG.repeat(tiled_size / 4))
+        .unwrap();
+    let mut tiled = Vec::new();
+    for (m, v) in [(0x808, 47), (0x814, 0x10), (0x81c, (tiled_size / 4) as u32)] {
+        method(&mut tiled, m, v);
+    }
+    tiled.extend([0x20010586, 4, 0x200105f7, 0, 0x200105f8, 3, 0x20010585, 0]);
+    h.p.memory
+        .write_bytes(DATA + 0x10000, &words(&tiled))
+        .unwrap();
+    let result = h.ioctl(
+        channel,
+        0xc018481b,
+        &words(&[0, 0, 1, 6, 0, 0]),
+        Some(&entry(0xb0000, tiled.len())),
+    );
+    assert_eq!(u32::from_le_bytes(result[20..24].try_into().unwrap()), 6);
+    for (at, value) in [
+        (12, 48u32),
+        (76, 48),
+        (80, 6144),
+        (108, 3),
+        (112, 192),
+        (124, 0xfe),
+        (128, 1),
+        (148, 6144),
+    ] {
+        gb[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    let mut prealloc = words(&[0, 1, gb.len() as u32, 0]);
+    prealloc.extend_from_slice(&gb);
+    binder_call(&mut h, &mut service, 14, &prealloc);
+    binder_call(&mut h, &mut service, 3, &words(&[1, 47, 29, 0, 0x300]));
+    let mut tiled_queue = queue.clone();
+    tiled_queue[12 + 56..12 + 60].copy_from_slice(&6u32.to_le_bytes());
+    binder_call(&mut h, &mut service, 7, &tiled_queue);
+    let p = &mut h.p;
+    service
+        .consume_ready(&mut p.memory, p.kernel.as_mut().unwrap())
+        .unwrap();
+    let display = &h.p.kernel.as_ref().unwrap().host.display;
+    assert_eq!(display.frame_count, 2);
+    let frame = display.current_frame.as_ref().unwrap();
+    let mut padded = Vec::new();
+    for row in frame.pixels.chunks_exact(47 * 4) {
+        padded.extend_from_slice(row);
+        padded.extend(BG.repeat(5));
+    }
+    check(&padded, &image, Some(color), BG);
+    let guest = h.p.memory.read_bytes(DATA + RT as u64, tiled_size).unwrap();
+    let mut visible = vec![false; tiled_size];
+    for y in 0..29 {
+        for x in 0..47 * 4 {
+            let address = display_gob_oracle::address(x, y, 47, 1);
+            assert_eq!(guest[address], frame.pixels[y * 47 * 4 + x]);
+            visible[address] = true;
+        }
+    }
+    for (i, byte) in guest.iter().enumerate() {
+        if !visible[i] {
+            assert_eq!(*byte, BG[i % 4]);
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires real GPU completion of a B197 increment; reservation alone must stay incomplete"]
+fn reserved_syncpoint_advances_only_after_executed_b197_rop_completion() {
+    let (mut h, _, _, channel, mut command, image) = configured();
+    let controller = h.open("/dev/nvhost-ctrl");
+    let nop = words(&[0x20010002, 0]);
+    h.p.memory.write_bytes(DATA + 0x10000, &nop).unwrap();
+    let reserved = h.ioctl(
+        channel,
+        0xc018481b,
+        &words(&[0, 0, 1, 0x104, 0, 1]),
+        Some(&entry(0xb0000, 2)),
+    );
+    let syncpoint = u32::from_le_bytes(reserved[16..20].try_into().unwrap());
+    assert_eq!(u32::from_le_bytes(reserved[20..24].try_into().unwrap()), 1);
+    let min = h.ioctl(controller, 0xc0080014, &words(&[syncpoint, 0]), None);
+    assert_eq!(
+        u32::from_le_bytes(min[4..8].try_into().unwrap()),
+        0,
+        "reservation is MAX, not completed MIN"
+    );
+    assert_eq!(h.metrics.borrow().0.submissions, 0);
+    method(&mut command, 0x2c8, 0x100000 | syncpoint);
+    h.p.memory
+        .write_bytes(DATA + 0x10000, &words(&command))
+        .unwrap();
+    let result = h.ioctl(
+        channel,
+        0xc018481b,
+        &words(&[0, 0, 1, 0x104, 0, 0]),
+        Some(&entry(0xb0000, command.len())),
+    );
+    assert_eq!(u32::from_le_bytes(result[20..24].try_into().unwrap()), 1);
+    let min = h.ioctl(controller, 0xc0080014, &words(&[syncpoint, 0]), None);
+    assert_eq!(u32::from_le_bytes(min[4..8].try_into().unwrap()), 1);
+    let waited = h.ioctl(
+        controller,
+        0xc010001e,
+        &words(&[syncpoint, 1, u32::MAX, 0]),
+        None,
+    );
+    assert_eq!(u32::from_le_bytes(waited[12..16].try_into().unwrap()), 1);
+    assert_eq!(h.metrics.borrow().0.draw_commands, 1);
+    check(
+        h.p.memory.read_bytes(DATA + RT as u64, SIZE).unwrap(),
+        &image,
+        None,
+        BG,
+    );
 }

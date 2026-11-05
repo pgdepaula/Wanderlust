@@ -4342,3 +4342,32 @@ pending output. The complete 41-case ALU GPU suite also passed natively on both
 D3D12 (optimized FXC) and Vulkan. The compact XYZ lowering passed OpenGL directly.
 Strict package Clippy and workspace formatting passed after the conformance
 updates. These synthetic results remain distinct from original application frames.
+
+
+## Native VI acquisition and command-driven completion
+
+The four-package CPU run (`wl-gpu`, `wl-nvdrv`, `wl-runtime`,
+`wl-codegen-rust`) passed 767 tests, with 236 explicitly ignored device/build
+scenarios. The GPU package without default features passed 471 tests. Formatting
+and strict all-target Clippy passed for those four packages.
+
+Nine `wl-nvdrv/tests/runtime_gpu.rs` scenarios executed separately on each of
+WSL Vulkan, WSL OpenGL, native Windows D3D12 and native Windows Vulkan: 36 actual
+GPU passes, no skips in those explicit runs. These are synthetic driver/service
+workloads, not original-game visual-output validation.
+
+The VI case queues a future acquire fence and verifies no consumption until a
+subsequent real GPU draw completes it. It then checks both pitch and block-linear
+native surfaces, non-square geometry, logical width versus padded stride, exact
+canonical guest bytes and padding through the independent scalar GOB oracle.
+Consumption itself does not resubmit GPU work. The syncpoint case reserves MAX
+through a NOP submission and proves completed MIN remains zero; an actual B197
+ROP-condition increment after an indexed textured draw advances MIN to one.
+Expired wait succeeds only then. Checked-overflow requests preserve poisoned
+output metadata and never execute a draw.
+
+The hosted Binder tests additionally reject malformed native plane metadata,
+unsupported compression/layout and invalid dimensions. Full native vblank,
+general future-fence event arming, rotation/composition and game-scale latency
+remain outside the tested profile. No allocation-free display claim is made:
+consumer framebuffer ownership and stride packing require CPU copies.

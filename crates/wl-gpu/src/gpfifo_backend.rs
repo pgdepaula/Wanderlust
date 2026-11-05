@@ -73,6 +73,7 @@ impl Renderer {
                             if matches!(
                                 effect,
                                 MethodEffect::Draw { .. }
+                                    | MethodEffect::IncrementSyncpoint { .. }
                                     | MethodEffect::DrawIndices { .. }
                                     | MethodEffect::Clear { .. }
                                     | MethodEffect::ConstantWrite { .. }

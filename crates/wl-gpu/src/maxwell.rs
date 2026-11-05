@@ -309,6 +309,13 @@ impl std::error::Error for MethodError {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MethodEffect {
     State,
+    /// B197 index and documented completion condition. The backend must observe
+    /// the relevant GPU prefix before exposing this increment to nvhost.
+    IncrementSyncpoint {
+        index: u16,
+        clean_l2: bool,
+        rop_writes_done: bool,
+    },
     TextureHeadersInvalidated(Option<u32>),
     SamplersInvalidated(Option<u32>),
     Draw {
@@ -1061,6 +1068,25 @@ impl Maxwell3d {
                     method,
                 })
             };
+        }
+        if method == 0x1144 {
+            // NVB197_FLUSH_PENDING_WRITES.SM_DOES_GLOBAL_STORE=FALSE. The
+            // conservative host barrier also exposes pending attachment writes;
+            // TRUE requires supported shader global stores and remains explicit.
+            if value != 0 {
+                return Err(bad());
+            }
+            return Ok(MethodEffect::HostCacheMaintenance);
+        }
+        if method == 0x02c8 {
+            if value & !0x00110fff != 0 {
+                return Err(bad());
+            }
+            return Ok(MethodEffect::IncrementSyncpoint {
+                index: (value & 0xfff) as u16,
+                clean_l2: value & 0x10000 != 0,
+                rop_writes_done: value & 0x100000 != 0,
+            });
         }
         if self
             .macros

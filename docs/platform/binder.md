@@ -38,16 +38,23 @@ Slots transition from free to dequeued to queued. Queue acceptance does not
 release the slot, publish GPU memory, increment a presented-frame count or prove
 GPU completion. An explicit trusted consumer can inspect the oldest owned queue
 record and acknowledge its sequence after actual consumption and required fence
-handling. Release must be ordered. No producer IPC transaction can invoke it.
+handling. Release must be ordered. A producer IPC transaction can trigger the installed
+trusted consumer, but cannot bypass its fence/backing validation.
 The native availability event reflects free preallocated slot availability, not
 a GPU completion fence.
 
-This implementation does not yet connect that consumer boundary to VI scanout,
-resolve the opaque Nintendo surface metadata to canonical nvmap backing, or
-implement general BufferQueue allocation, producer APIs, scaling and transform
-execution. Enqueuing an image is not evidence that an original game frame was
-presented. The GPU driver's completion and framebuffer publication boundaries
-remain separate.
+Native-GPU executables install a consumer connected to the same NVIDIA driver.
+After a successful producer transaction it examines the oldest queued buffer,
+checks real completion thresholds and copies the canonical native surface into
+an owned display image before release. A future fence leaves the slot queued;
+a later transaction retries it. Frame counts advance only after acquisition.
+Pitch-linear and Tegra block-linear RGBA8 native surfaces are supported with
+checked nvmap ID/offset/size resolution and padding removal.
+
+General BufferQueue allocation, timed vblank, arbitrary crop/scaling/rotation,
+compressed surfaces and multi-plane formats remain unsupported. Queue acceptance
+alone is not presentation. Host GPU completion and guest RAM publication remain
+separate boundaries; unpublished GPU output cannot be read as a display image.
 
 ## Evidence and validation
 

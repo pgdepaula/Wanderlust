@@ -1,6 +1,6 @@
 extern crate wl_runtime as wl_guest_runtime;
 #[path = "../src/runtime_adapter.rs"]
-mod native;
+pub mod native;
 use wl_gpu::memory::GuestAddress;
 use wl_guest_runtime::{
     Memory,

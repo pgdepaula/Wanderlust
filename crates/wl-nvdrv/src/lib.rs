@@ -115,6 +115,7 @@ struct Channel {
     object: bool,
     syncpoint: u32,
     threshold: u32,
+    driver_completed: u32,
     entries: u32,
     priority: u32,
     timeslice_us: u32,
@@ -193,6 +194,38 @@ impl<P: Copy> Driver<P> {
     pub fn has_pending_output(&self) -> bool {
         self.gpu.has_pending_output()
     }
+    /// Visibility of the driver-owned completion timeline. Unknown/closed
+    /// channels are rejected; registration never creates a completed fence.
+    pub fn display_fence_complete(&self, id: u32, value: u32) -> Result<bool> {
+        self.healthy()?;
+        let current = self
+            .files
+            .iter()
+            .find_map(|f| match &f.node {
+                Node::Channel(c) if c.syncpoint == id => Some(c.driver_completed),
+                _ => None,
+            })
+            .ok_or(NvError::NotSupported)?;
+        let commands = checked(self.gpu.completed_syncpoint_value(id))?;
+        Ok(current.checked_add(commands).ok_or(NvError::NotSupported)? >= value)
+    }
+    /// Resolve a native GraphicBuffer nvmap ID to canonical registered backing.
+    /// The supported GetId identity is the allocation handle, never a CPU/GPU VA.
+    /// No pending attachment may be observed through stale guest RAM.
+    pub fn visible_display_address(
+        &self,
+        id: u32,
+        offset: u64,
+        size: usize,
+    ) -> Result<GuestAddress> {
+        self.healthy()?;
+        let allocation = &self.allocations[self.allocation(id)?];
+        let storage = allocation.storage.ok_or(NvError::InvalidState)?;
+        checked(
+            self.gpu
+                .visible_backing_address(storage.backing, offset, size),
+        )
+    }
     /// Latest explicitly published color output. This is a diagnostic image,
     /// not a guest VI queue or a replacement for display-buffer ownership.
     pub fn take_frame(&mut self) -> Option<wl_gpu::backend::Frame> {
@@ -248,6 +281,7 @@ impl<P: Copy> Driver<P> {
                     object: false,
                     syncpoint: id,
                     threshold: 0,
+                    driver_completed: 0,
                     entries: 0,
                     priority: 0x64,
                     timeslice_us: 2600,
@@ -320,10 +354,15 @@ impl<P: Copy> Driver<P> {
                 // Thresholds advance only after publish + actual GPU completion
                 // in channel(). Snapshot scalar identities, never guest buffers.
                 let mut values = [None; 17];
-                values[0] = Some(0);
+                values[0] = Some(checked(self.gpu.completed_syncpoint_value(0))?);
                 for file in &self.files {
                     if let Node::Channel(c) = &file.node {
-                        values[c.syncpoint as usize] = Some(c.threshold);
+                        let commands = checked(self.gpu.completed_syncpoint_value(c.syncpoint))?;
+                        values[c.syncpoint as usize] = Some(
+                            c.driver_completed
+                                .checked_add(commands)
+                                .ok_or(NvError::NotSupported)?,
+                        );
                     }
                 }
                 let Node::HostControl(control) = &mut self.files[f].node else {
@@ -881,13 +920,25 @@ impl<P: Copy> Driver<P> {
                 // a syncpoint. The non-incrementing form returns the existing
                 // threshold and is not a new completion guarantee.
                 let flags = word(r.input, 12);
-                let increments = channel::driver_increments(flags, word(r.input, 20))?;
+                let increments = match channel::driver_increments(flags, word(r.input, 20)) {
+                    Ok(n) => n,
+                    Err(error) => {
+                        self.gpu
+                            .capture_unaccepted_request(channel, r.extra_input, memory);
+                        return Err(error);
+                    }
+                };
+                let reserved = channel::reserved_increments(flags, word(r.input, 20))?;
+                let completed = state
+                    .driver_completed
+                    .checked_add(increments)
+                    .ok_or(NvError::NotSupported)?;
                 if word(r.input, 8) > state.entries {
                     return Err(NvError::InvalidSize.into());
                 }
                 let threshold = state
                     .threshold
-                    .checked_add(increments)
+                    .checked_add(reserved)
                     .ok_or(NvError::NotSupported)?;
                 let mut header = [0u8; 24];
                 header.copy_from_slice(r.input);
@@ -939,6 +990,7 @@ impl<P: Copy> Driver<P> {
                     return Err(Error::Fatal(message));
                 }
                 state.threshold = threshold;
+                state.driver_completed = completed;
                 r.output.copy_from_slice(r.input);
                 out32(r.output, 12, 0);
                 out32(r.output, 16, state.syncpoint);
