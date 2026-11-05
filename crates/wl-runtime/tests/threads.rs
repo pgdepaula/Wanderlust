@@ -899,3 +899,102 @@ fn address_wait_condition_precedes_decrement_and_timeout() {
     );
     assert_eq!(p.memory.load(CODE, 4).unwrap(), 0);
 }
+
+#[test]
+fn address_signal_conditional_mismatch_never_wakes_waiters() {
+    for mode in [1, 2] {
+        let (mut p, mut c) = process();
+        let (waiter, _) = spawn(&mut p, &mut c, 44, 1);
+        let address = CODE + 0x1000;
+        p.memory.store(address, 4, 4).unwrap();
+        switch(&mut p, &mut c, waiter);
+        assert_eq!(
+            svc(&mut p, &mut c, 0x34, &[address, 2, 4, u64::MAX]).1,
+            Some(Stop::Reschedule)
+        );
+        switch(&mut p, &mut c, 0);
+        let wakeups = k(&mut p).stats.wakeups;
+        assert_eq!(
+            svc(&mut p, &mut c, 0x35, &[address, mode, 5, u64::MAX]),
+            (result::INVALID_STATE, None)
+        );
+        assert_eq!(p.memory.load(address, 4).unwrap(), 4);
+        assert_eq!(k(&mut p).threads[waiter].state, ThreadState::Waiting);
+        assert_eq!(k(&mut p).stats.wakeups, wakeups);
+    }
+}
+
+#[test]
+fn address_signal_waiter_count_selects_increment_decrement_or_unchanged() {
+    for (waiters, count, expected) in [
+        (0usize, -1i32, 6u32),
+        (0, 0, 6),
+        (0, 1, 6),
+        (1, -1, 4),
+        (1, 0, 4),
+        (1, 1, 4),
+        (1, 2, 4),
+        (2, -1, 4),
+        (2, 1, 5),
+        (2, 2, 4),
+        (3, 1, 5),
+        (3, 2, 5),
+    ] {
+        let (mut p, mut c) = process();
+        let address = CODE + 0x1000;
+        p.memory.store(address, 4, 5).unwrap();
+        let mut threads = Vec::new();
+        for _ in 0..waiters {
+            let (waiter, _) = spawn(&mut p, &mut c, 44, 1);
+            threads.push(waiter);
+            switch(&mut p, &mut c, waiter);
+            assert_eq!(
+                svc(&mut p, &mut c, 0x34, &[address, 2, 5, u64::MAX]).1,
+                Some(Stop::Reschedule)
+            );
+            switch(&mut p, &mut c, 0);
+        }
+        let take = if count <= 0 {
+            waiters
+        } else {
+            waiters.min(count as usize)
+        };
+        let stop = if take == 0 {
+            None
+        } else {
+            Some(Stop::Reschedule)
+        };
+        assert_eq!(
+            svc(&mut p, &mut c, 0x35, &[address, 2, 5, count as u32 as u64]),
+            (result::SUCCESS, stop)
+        );
+        assert_eq!(p.memory.load(address, 4).unwrap(), u64::from(expected));
+        for (n, t) in threads.into_iter().enumerate() {
+            assert_eq!(
+                k(&mut p).threads[t].state,
+                if n < take {
+                    ThreadState::Runnable
+                } else {
+                    ThreadState::Waiting
+                }
+            );
+        }
+    }
+    // More waiters than the requested count leaves the word unchanged, so
+    // this path requires only readable storage, not an unnecessary write.
+    let (mut p, mut c) = process();
+    for _ in 0..2 {
+        let (waiter, _) = spawn(&mut p, &mut c, 44, 1);
+        switch(&mut p, &mut c, waiter);
+        assert_eq!(
+            svc(&mut p, &mut c, 0x34, &[CODE, 2, 0, u64::MAX]).1,
+            Some(Stop::Reschedule)
+        );
+        switch(&mut p, &mut c, 0);
+    }
+    assert_eq!(
+        svc(&mut p, &mut c, 0x35, &[CODE, 2, 0, 1]),
+        (result::SUCCESS, Some(Stop::Reschedule))
+    );
+    assert_eq!(p.memory.load(CODE, 4).unwrap(), 0);
+}

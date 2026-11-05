@@ -1025,11 +1025,11 @@ pub fn signal_to_address(
                 Some(v) => v,
                 None => return result::INVALID_CURRENT_MEMORY,
             };
-            if cur as i32 == value {
-                let new_val = cur.wrapping_add(1);
-                if !write_u32(memory, address, new_val) {
-                    return result::INVALID_CURRENT_MEMORY;
-                }
+            if cur as i32 != value {
+                return result::INVALID_STATE;
+            }
+            if !write_u32(memory, address, cur.wrapping_add(1)) {
+                return result::INVALID_CURRENT_MEMORY;
             }
         }
         2 => {
@@ -1038,15 +1038,18 @@ pub fn signal_to_address(
                 Some(v) => v,
                 None => return result::INVALID_CURRENT_MEMORY,
             };
-            if cur as i32 == value {
-                let new_val = if num_waiters == 0 || count <= 0 || num_waiters <= count as usize {
-                    (value as u32).wrapping_sub(1)
-                } else {
-                    (value as u32).wrapping_sub(2)
-                };
-                if !write_u32(memory, address, new_val) {
-                    return result::INVALID_CURRENT_MEMORY;
-                }
+            if cur as i32 != value {
+                return result::INVALID_STATE;
+            }
+            let new_val = if num_waiters == 0 {
+                cur.wrapping_add(1)
+            } else if count <= 0 || num_waiters <= count as usize {
+                cur.wrapping_sub(1)
+            } else {
+                cur
+            };
+            if new_val != cur && !write_u32(memory, address, new_val) {
+                return result::INVALID_CURRENT_MEMORY;
             }
         }
         _ => return result::INVALID_ENUM_VALUE,

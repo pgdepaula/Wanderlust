@@ -21,3 +21,14 @@ reference; no GPL implementation was imported.
 read-only storage, actual blocking/wakeup, unchanged words on rejected waits and
 ABI output-register clearing. The runtime remains a serialized cooperative
 scheduler rather than a hardware multicore kernel.
+
+Conditional `SignalToAddress` operations reject a mismatching word with
+`InvalidState` before waking any waiter. Increment-if-equal wraps the 32-bit word
+only after a successful match. Modify-by-waiter-count increments when no waiter
+exists, decrements when all waiters fit within the requested count (or all are
+requested), and leaves the word unchanged when more waiters remain. An unchanged
+word requires no write permission. Woken threads retain priority/FIFO ordering.
+The same pinned `SignalAndIncrementIfEqual` and
+`SignalAndModifyByWaitingCountIfEqual` reference establishes this truth table.
+Tests include actual blocked threads, mismatch failure atomicity, count zero and
+negative counts, partial wakeup and readable-only unchanged storage.
