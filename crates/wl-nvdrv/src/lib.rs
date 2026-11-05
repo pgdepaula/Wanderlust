@@ -69,7 +69,9 @@ pub struct Ioctl<'a> {
     pub extra_output: &'a mut [u8],
 }
 const MAX_FILES: usize = 32;
-const MAX_ALLOCS: usize = 1024;
+// Each allocated nvmap object may own a graphics backing. Keep the service
+// metadata budget aligned with the existing bounded GPU backing table.
+const MAX_ALLOCS: usize = wl_gpu::driver::MAX_OBJECTS;
 #[derive(Debug)]
 struct Allocation<P> {
     handle: u32,

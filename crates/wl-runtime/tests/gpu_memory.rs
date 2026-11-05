@@ -242,7 +242,7 @@ fn incompatible_adjacent_gpu_storage_fails_before_restructuring_memory() {
 #[test]
 fn capacity_failure_and_stale_reused_slot_do_not_drop_live_registrations() {
     let capacity = wl_runtime::gpu_memory::MAX_GPU_PINS;
-    assert_eq!(capacity, 1024);
+    assert_eq!(capacity, 8192);
     let mut memory = Memory::default();
     normal(&mut memory, BASE, (capacity + 1) * 4096);
     let mut pins = Vec::new();

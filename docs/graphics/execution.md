@@ -2624,6 +2624,13 @@ and run as ordered backend effects, including when emitted by MME. Shader code,
 constant words or texture bytes are reacquired on next use. Existing compatible
 GPU resources remain reusable; these invalidations do not imply completion.
 
+Runtime lifetime registration admits 8192 disjoint page-aligned pins shared by
+graphics and audio. Nvmap allocation metadata admits 4096 handles, matching the
+existing graphics backing-table budget. These are bounded host limits, not
+hardware maxima. Overlap, stale-token, mapping protection and atomic capacity
+failure checks remain active; increasing metadata capacity never pins a range
+without validating its backing. Final release recovers the corresponding slot.
+
 Nvmap GetId and FromId preserve the identity of an existing process-local
 allocation. Import requires allocated user storage and increments a checked
 reference count on the same handle; it does not pin memory or register backing
