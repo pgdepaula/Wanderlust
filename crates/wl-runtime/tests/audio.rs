@@ -7,6 +7,8 @@ pub mod host_audio_dsp;
 pub mod host_binder;
 #[path = "../hosted/fs_cache.rs"]
 mod host_fs;
+#[path = "../hosted/nfp.rs"]
+pub mod host_nfp;
 #[path = "../hosted/opus.rs"]
 mod host_opus;
 #[path = "../hosted/prepo.rs"]
@@ -2713,4 +2715,153 @@ fn prepo_literal_hipc_report_injects_kernel_pid_and_rejects_zero_uid() {
         assert_eq!(c.x[0], 0);
         assert_eq!(reply(&p, 0x18), expected);
     }
+}
+
+#[test]
+fn nfp_no_reader_state_and_event_lifetimes_are_real_and_isolated() {
+    use wl_runtime::{ipc::Request, services::HostObject};
+    let (mut p, _) = process();
+    let k = p.kernel.as_mut().unwrap();
+    let mut nfp = host_nfp::Service::default();
+    let mut req = Request::default();
+    let response = nfp
+        .request(&p.memory, k, host_nfp::MANAGER, 0, &req, &[])
+        .unwrap();
+    let HostObject::AudioRenderer { index } = response.objects[0] else {
+        panic!()
+    };
+    assert_eq!(
+        nfp.request(&p.memory, k, index, 19, &req, &[])
+            .unwrap()
+            .data,
+        [0; 4]
+    );
+    let mut versions = [0; 64];
+    versions[..8].copy_from_slice(&0x00000001000a0003u64.to_le_bytes());
+    versions[32..40].copy_from_slice(&0x0000000300040003u64.to_le_bytes());
+    p.memory.write_bytes(DATA + 0x1000, &versions).unwrap();
+    req.pid = Some(81);
+    req.sends.push((DATA + 0x1000, 64));
+    let mut args = [0; 16];
+    args[..8].copy_from_slice(&81u64.to_le_bytes());
+    let mut invalid = args;
+    invalid[0] = 82;
+    assert!(nfp.request(&p.memory, k, index, 0, &req, &invalid).is_err());
+    assert_eq!(
+        nfp.request(&p.memory, k, index, 0, &req, &args)
+            .unwrap()
+            .code,
+        0
+    );
+    req = Request::default();
+    assert_eq!(
+        nfp.request(&p.memory, k, index, 19, &req, &[])
+            .unwrap()
+            .data,
+        1u32.to_le_bytes()
+    );
+    let event = nfp
+        .request(&p.memory, k, index, 23, &req, &[])
+        .unwrap()
+        .copies[0];
+    let Object::ReadableEvent(e) = k.handles.get(event).unwrap() else {
+        panic!()
+    };
+    assert!(!k.events[e].signaled);
+    let event2 = nfp
+        .request(&p.memory, k, index, 23, &req, &[])
+        .unwrap()
+        .copies[0];
+    assert_eq!(k.handles.get(event2), Some(Object::ReadableEvent(e)));
+    p.memory.write_bytes(DATA + 0x2000, &[0xa5; 16]).unwrap();
+    req.recvs.push((DATA + 0x2000, 16));
+    assert_eq!(
+        nfp.request(&p.memory, k, index, 2, &req, &[]).unwrap().code,
+        0x8073
+    );
+    assert_eq!(p.memory.read_bytes(DATA + 0x2000, 16).unwrap(), [0xa5; 16]);
+    req.recvs[0] = (0, 16);
+    assert!(nfp.request(&p.memory, k, index, 2, &req, &[]).is_err());
+    req = Request::default();
+    assert_eq!(
+        nfp.request(&p.memory, k, index, 1, &req, &[]).unwrap().code,
+        0
+    );
+    assert_eq!(
+        nfp.request(&p.memory, k, index, 19, &req, &[])
+            .unwrap()
+            .data,
+        [0; 4]
+    );
+    nfp.close(index);
+    assert!(nfp.request(&p.memory, k, index, 19, &req, &[]).is_err());
+    let response = nfp
+        .request(&p.memory, k, host_nfp::MANAGER, 0, &req, &[])
+        .unwrap();
+    assert_ne!(response.objects[0], HostObject::AudioRenderer { index });
+    assert_eq!(k.handles.get(event), Some(Object::ReadableEvent(e)));
+}
+
+#[test]
+fn nfp_native_port_converts_to_domain_and_creates_independent_interfaces() {
+    let (mut p, mut c) = process();
+    p.kernel.as_mut().unwrap().config.service_access = &[(false, "nfp:user")];
+    let handle = named_manager(&mut p, &mut c, &host_nfp::NAME);
+    wire(&mut p, 0, false, &[], &[]);
+    let address = tls(&p);
+    p.store(address, 4, 5).unwrap();
+    call(&mut p, &mut c, handle);
+    let root = reply(&p, 0x20);
+    for _ in 0..2 {
+        wire(&mut p, 0, false, &[], &[]);
+        let mut b = [0; 256];
+        p.memory.read_into(address, &mut b).unwrap();
+        b.copy_within(16..240, 32);
+        b[16..32].fill(0);
+        b[16] = 1;
+        b[18..20].copy_from_slice(&16u16.to_le_bytes());
+        b[20..24].copy_from_slice(&root.to_le_bytes());
+        let words = u32::from_le_bytes(b[4..8].try_into().unwrap()) + 4;
+        b[4..8].copy_from_slice(&words.to_le_bytes());
+        p.write_bytes(address, &b).unwrap();
+        svc(&mut p, &mut c, 0x21, &[u64::from(handle)]);
+        assert_eq!(reply(&p, 0x28), 0);
+    }
+    let k = p.kernel.as_ref().unwrap();
+    let Object::Session(s) = k.handles.get(handle).unwrap() else {
+        panic!()
+    };
+    let domain = k.sessions[s].domain.unwrap();
+    let objects = &k.host.domains[domain].objects;
+    assert_eq!(objects.len(), 3);
+    assert_ne!(objects[1].1, objects[2].1);
+    assert!(matches!(
+        k.sessions[s].endpoint,
+        wl_runtime::ipc::Endpoint::Port(_)
+    ));
+    let interface_id = objects[1].0;
+    let mut versions = [0u8; 64];
+    versions[..8].copy_from_slice(&0x00000001000a0003u64.to_le_bytes());
+    versions[32..40].copy_from_slice(&0x0000000300040003u64.to_le_bytes());
+    p.write_bytes(DATA + 0x1000, &versions).unwrap();
+    let mut b = [0u8; 256];
+    b[..4].copy_from_slice(&(4u32 | (1 << 20)).to_le_bytes());
+    b[4..8].copy_from_slice(&(12u32 | (1 << 31)).to_le_bytes());
+    b[8..12].copy_from_slice(&1u32.to_le_bytes());
+    b[12..20].copy_from_slice(&u64::MAX.to_le_bytes());
+    b[20..24].copy_from_slice(&64u32.to_le_bytes());
+    b[24..28].copy_from_slice(&((DATA + 0x1000) as u32).to_le_bytes());
+    b[32] = 1;
+    b[34..36].copy_from_slice(&32u16.to_le_bytes());
+    b[36..40].copy_from_slice(&interface_id.to_le_bytes());
+    b[48..52].copy_from_slice(b"SFCI");
+    b[64..72].copy_from_slice(&81u64.to_le_bytes());
+    p.write_bytes(address, &b).unwrap();
+    svc(&mut p, &mut c, 0x21, &[u64::from(handle)]);
+    assert_eq!(c.x[0], 0);
+    assert_eq!(reply(&p, 0x28), 0);
+    fs_reader_wire(&mut p, Some(interface_id), 19, false);
+    svc(&mut p, &mut c, 0x21, &[u64::from(handle)]);
+    assert_eq!(reply(&p, 0x28), 0);
+    assert_eq!(reply(&p, 0x30), 1);
 }

@@ -739,6 +739,7 @@ struct Backend {
     fs: crate::host_fs::Service,
     binder: crate::host_binder::Service,
     prepo: crate::host_prepo::Service,
+    nfp: crate::host_nfp::Service,
     released_audio_pins: Vec<GpuPin>,
 }
 impl Default for Backend {
@@ -749,6 +750,7 @@ impl Default for Backend {
             opus: crate::host_opus::Service::default(),
             binder: crate::host_binder::Service::default(),
             prepo: crate::host_prepo::Service::default(),
+            nfp: crate::host_nfp::Service::default(),
             fs: if std::env::var("WL_VOLATILE_SAVES").as_deref() == Ok("1") {
                 crate::host_fs::Service::with_volatile_saves()
             } else {
@@ -914,6 +916,11 @@ impl AudioHost for Backend {
         args: &[u8],
     ) -> RuntimeResult<Done> {
         self.release_audio_pins(memory)?;
+        if let HostObject::AudioRenderer { index } = target
+            && crate::host_nfp::owns(index)
+        {
+            return self.nfp.request(memory, k, index, command, req, args);
+        }
         if target
             == (HostObject::AudioRenderer {
                 index: crate::host_prepo::INDEX,
@@ -1266,6 +1273,10 @@ impl AudioHost for Backend {
     }
     fn close(&mut self, _kernel: &mut Kernel, object: HostObject) {
         if let HostObject::AudioRenderer { index } = object {
+            if crate::host_nfp::owns(index) {
+                self.nfp.close(index);
+                return;
+            }
             if crate::host_fs::owns(index) {
                 self.fs.close(index);
                 return;
@@ -1301,7 +1312,11 @@ const CODEC_SERVICE: [u8; 8] = *b"hwopus\0\0";
 /// Trusted native provider registration. Guest service-access checks still run
 /// in the existing SM implementation. No guest server handle is fabricated.
 fn register_codec_port(k: &mut Kernel) {
-    for name in [CODEC_SERVICE, crate::host_prepo::NAME] {
+    for name in [
+        CODEC_SERVICE,
+        crate::host_prepo::NAME,
+        crate::host_nfp::NAME,
+    ] {
         if k.services.iter().any(|s| s.name == name) {
             continue;
         }
@@ -1341,7 +1356,10 @@ pub fn service_hook(
                     && let Endpoint::Port(port) = session.endpoint
                     && k.services.iter().any(|service| {
                         service.port == port
-                            && matches!(service.name, CODEC_SERVICE | crate::host_prepo::NAME)
+                            && matches!(
+                                service.name,
+                                CODEC_SERVICE | crate::host_prepo::NAME | crate::host_nfp::NAME
+                            )
                             && service.owner == 0
                     })
                 {
@@ -1349,9 +1367,14 @@ pub fn service_hook(
                     let is_prepo = k.services.iter().any(|service| {
                         service.port == port && service.name == crate::host_prepo::NAME
                     });
+                    let is_nfp = k.services.iter().any(|service| {
+                        service.port == port && service.name == crate::host_nfp::NAME
+                    });
                     k.sessions[s].endpoint = Endpoint::Host(HostObject::AudioRenderer {
                         index: if is_prepo {
                             crate::host_prepo::INDEX
+                        } else if is_nfp {
+                            crate::host_nfp::MANAGER
                         } else {
                             crate::host_opus::MANAGER
                         },
