@@ -515,6 +515,7 @@ pub type FragmentSource = ProgramSource;
 /// with one by native vertex fetch; guest storage is never expanded on the CPU.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PositionFormat {
+    Float32x2,
     Float32x3,
     Float32x4,
     Float16x4,
@@ -522,6 +523,7 @@ pub enum PositionFormat {
 impl PositionFormat {
     pub fn byte_size(self) -> u16 {
         match self {
+            Self::Float32x2 => 8,
             Self::Float16x4 => 8,
             Self::Float32x3 => 12,
             Self::Float32x4 => 16,
@@ -1745,7 +1747,7 @@ impl Maxwell3d {
             0x1160 | 0x1164 => {
                 let fields = value & !(0x3fffu32 << 7);
                 let valid = if method == 0x1160 {
-                    matches!(fields, 0x38200000 | 0x38400000 | 0x38600000)
+                    matches!(fields, 0x38200000 | 0x38400000 | 0x38600000 | 0x38800000)
                 } else {
                     fields == 0x38800000 || value == 0x3a400040
                 };
@@ -2042,6 +2044,7 @@ impl Maxwell3d {
         let position_format = match (a0 >> 21) & 0x3f {
             2 => PositionFormat::Float32x3,
             3 => PositionFormat::Float16x4,
+            4 => PositionFormat::Float32x2,
             _ => PositionFormat::Float32x4,
         };
         let uv_active = a1 & 0x40 == 0;

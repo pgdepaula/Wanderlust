@@ -192,6 +192,7 @@ impl Renderer {
             wgpu::VertexAttribute {
                 format: match position_format {
                     PositionFormat::Float16x4 => wgpu::VertexFormat::Float16x4,
+                    PositionFormat::Float32x2 => wgpu::VertexFormat::Float32x2,
                     PositionFormat::Float32x3 => wgpu::VertexFormat::Float32x3,
                     PositionFormat::Float32x4 => wgpu::VertexFormat::Float32x4,
                 },

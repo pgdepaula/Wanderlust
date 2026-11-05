@@ -428,3 +428,24 @@ fn driver_float3_float4_switch_reuses_data_and_shaders_but_not_pipeline() {
     eprintln!("FLOAT3 transition counters {:?}", f.d.graphics_counters());
     f.d.close(f.c, &mut mem(&mut f.data)).unwrap();
 }
+
+#[test]
+#[ignore = "requires a real GPU adapter"]
+fn driver_float2_position_supplies_zero_z_and_one_w() {
+    let mut f = Fixture::new();
+    f.reset();
+    f.vertices(0x3000, 20, [0, 12], POS);
+    // Poison the bytes following XY. They must not become fetched Z/W.
+    for n in 0..3 {
+        f.data[0x3000 + n * 20 + 8..0x3000 + n * 20 + 12]
+            .copy_from_slice(&f32::NAN.to_bits().to_le_bytes());
+    }
+    let mut words = f.setup.clone();
+    layout(&mut words, 20, [0, 12], false, 0x70000);
+    method(&mut words, 0x1160, 0x38800000);
+    draw(&mut words);
+    let report = f.submit(&words);
+    assert!(report.fault.is_none(), "{:?}", report.fault);
+    f.publish();
+    check(&f.data, POS, 1.);
+}
