@@ -1289,7 +1289,7 @@ fn queued_vi_surface_waits_for_real_fence_then_reads_its_nvmap_backing() {
         (20, 47),
         (24, 29),
         (36, 8),
-        (44, 1),
+        (44, 3),
         (48, 1),
         (52, syncpoint),
         (56, 3),
@@ -1307,6 +1307,32 @@ fn queued_vi_surface_waits_for_real_fence_then_reads_its_nvmap_backing() {
             .unwrap();
     }
     assert_eq!(h.p.kernel.as_ref().unwrap().host.display.frame_count, 0);
+    assert_eq!(service.next_deadline_ns(), Some(50_000_000));
+    h.p.kernel.as_mut().unwrap().time_ns = 49_999_999;
+    {
+        let p = &mut h.p;
+        service
+            .consume_ready(&mut p.memory, p.kernel.as_mut().unwrap())
+            .unwrap();
+    }
+    assert_eq!(h.p.kernel.as_ref().unwrap().host.display.frame_count, 0);
+    h.p.kernel.as_mut().unwrap().time_ns = 50_000_000;
+    {
+        let p = &mut h.p;
+        service
+            .consume_ready(&mut p.memory, p.kernel.as_mut().unwrap())
+            .unwrap();
+    }
+    assert_eq!(
+        h.p.kernel.as_ref().unwrap().host.display.frame_count,
+        0,
+        "elapsed display deadline does not complete a GPU fence"
+    );
+    assert_eq!(
+        service.next_deadline_ns(),
+        None,
+        "unready GPU fence must not busy-spin on an expired deadline"
+    );
     assert!(
         service.pending().is_some(),
         "future fence must retain ownership"
@@ -1387,6 +1413,23 @@ fn queued_vi_surface_waits_for_real_fence_then_reads_its_nvmap_backing() {
     let mut tiled_queue = queue.clone();
     tiled_queue[12 + 56..12 + 60].copy_from_slice(&6u32.to_le_bytes());
     binder_call(&mut h, &mut service, 7, &tiled_queue);
+    {
+        let p = &mut h.p;
+        service
+            .consume_ready(&mut p.memory, p.kernel.as_mut().unwrap())
+            .unwrap();
+    }
+    assert_eq!(h.p.kernel.as_ref().unwrap().host.display.frame_count, 1);
+    assert_eq!(service.next_deadline_ns(), Some(100_000_000));
+    h.p.kernel.as_mut().unwrap().time_ns = 99_999_999;
+    {
+        let p = &mut h.p;
+        service
+            .consume_ready(&mut p.memory, p.kernel.as_mut().unwrap())
+            .unwrap();
+    }
+    assert_eq!(h.p.kernel.as_ref().unwrap().host.display.frame_count, 1);
+    h.p.kernel.as_mut().unwrap().time_ns = 100_000_000;
     let p = &mut h.p;
     service
         .consume_ready(&mut p.memory, p.kernel.as_mut().unwrap())

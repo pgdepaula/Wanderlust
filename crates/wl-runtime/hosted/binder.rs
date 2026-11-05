@@ -153,6 +153,9 @@ pub struct Service {
     free_fences: [[u8; 36]; SLOTS],
     queued: VecDeque<QueuedBuffer>,
     sequence: u64,
+    last_present_tick: Option<u64>,
+    latch: Option<(u64, u64)>,
+    timer_armed: bool,
 }
 impl Default for Service {
     fn default() -> Self {
@@ -167,6 +170,9 @@ impl Default for Service {
             free_fences: [[0; 36]; SLOTS],
             queued: VecDeque::new(),
             sequence: 0,
+            last_present_tick: None,
+            latch: None,
+            timer_armed: false,
         }
     }
 }
@@ -402,7 +408,13 @@ impl Service {
                 if n >= self.count || self.slots[n] != Slot::Dequeued || b.len() != 84 {
                     return Err(BAD_VALUE);
                 }
-                if u32_at(b, 48).is_none_or(|v| v > 4) {
+                // BqBufferInput.swapInterval at byte 44. This virtual display
+                // supports 0..4, not an asserted hardware-wide maximum.
+                if u32_at(b, 8).is_none_or(|v| v > 1)
+                    || u32_at(b, 8) == Some(0) && b[..8].iter().any(|v| *v != 0)
+                    || u32_at(b, 44).is_none_or(|v| v > 4)
+                    || u32_at(b, 48).is_none_or(|v| v > 4)
+                {
                     return Err(INVALID_OPERATION);
                 }
                 if u32_at(b, 32).is_none_or(|v| v & !7 != 0)
@@ -443,6 +455,9 @@ impl Service {
                 self.connected = false;
                 self.buffers = std::array::from_fn(|_| None);
                 self.free_fences = [[0; 36]; SLOTS];
+                self.last_present_tick = None;
+                self.latch = None;
+                self.timer_armed = false;
             }
             Change::Count(n) => self.count = n,
             Change::Slot(n, state, fence) => {
@@ -494,6 +509,32 @@ impl Service {
         let Some(queued) = self.queued.front() else {
             return Ok(());
         };
+        let interval = u32_at(&queued.input, 44).ok_or("short swap interval")?;
+        if interval != 0 {
+            if self.latch.is_none() {
+                let current = (u128::from(k.time_ns) * 60 / 1_000_000_000) as u64;
+                let tick = self
+                    .last_present_tick
+                    .map_or_else(
+                        || current.checked_add(u64::from(interval)),
+                        |last| {
+                            last.checked_add(u64::from(interval))
+                                .and_then(|tick| current.checked_add(1).map(|next| tick.max(next)))
+                        },
+                    )
+                    .ok_or("VI virtual display tick overflow")?;
+                let deadline = u64::try_from((u128::from(tick) * 1_000_000_000).div_ceil(60))
+                    .map_err(|_| "VI virtual display deadline overflow")?;
+                self.latch = Some((tick, deadline));
+                self.timer_armed = true;
+            }
+            if k.time_ns < self.latch.unwrap().1 {
+                return Ok(());
+            }
+            // A due but unresolved GPU fence cannot cause a zero-time idle spin.
+            // Polling retries it after actual work/completion; no fake wakeup.
+            self.timer_armed = false;
+        }
         let Some(frame) = (consumer.acquire)(memory, queued)? else {
             return Ok(());
         };
@@ -516,12 +557,21 @@ impl Service {
             .checked_add(1)
             .ok_or("VI frame count exhausted")?;
         let sequence = queued.sequence;
+        let tick = self.latch.map_or_else(
+            || (u128::from(k.time_ns) * 60).div_ceil(1_000_000_000) as u64,
+            |(tick, _)| tick,
+        );
         k.host
             .display
             .queue_buffer(frame.width, frame.height, frame.stride, 1, frame.pixels);
         self.release_consumed(sequence)?;
+        self.last_present_tick = Some(tick);
         self.update_event(k);
         (consumer.present)(k.host.display.current_frame.as_ref().unwrap())
+    }
+    /// Virtual 60 Hz display deadline, not a GPU fence or native vblank.
+    pub fn next_deadline_ns(&self) -> Option<u64> {
+        self.latch.filter(|_| self.timer_armed).map(|(_, ns)| ns)
     }
     /// Trusted consumer acknowledgement after its acquire fences and actual
     /// consumption complete. This method does not wait or prove GPU completion;
@@ -533,6 +583,8 @@ impl Service {
         }
         let q = self.queued.pop_front().unwrap();
         self.slots[q.slot as usize] = Slot::Free;
+        self.latch = None;
+        self.timer_armed = false;
         Ok(())
     }
     pub fn request(

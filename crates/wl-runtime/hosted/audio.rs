@@ -1245,6 +1245,7 @@ impl AudioHost for Backend {
         self.release_audio_pins(memory)?;
         register_codec_port(k);
         self.trace_threads(k);
+        self.binder.consume_ready(memory, k)?;
         for renderer in self.state.renderers.values_mut() {
             if renderer.advance(memory, k.time_ns)? {
                 threads::signal_event(k, renderer.event);
@@ -1277,6 +1278,7 @@ impl AudioHost for Backend {
             .renderers
             .values()
             .filter_map(|r| r.next_tick_ns)
+            .chain(self.binder.next_deadline_ns())
             .min()
     }
 }

@@ -282,3 +282,25 @@ fn native_surface_metadata_has_explicit_offsets_and_rejects_compression_and_plan
     short.bytes.pop();
     assert!(short.native_surface().is_err());
 }
+
+#[test]
+fn unsupported_presentation_timing_preserves_dequeued_slot() {
+    let mut h = Harness::new();
+    h.connect();
+    h.preallocate(0);
+    h.dequeue();
+    for (interval, timestamp, auto) in
+        [(5u32, 0u64, 1u32), (u32::MAX, 0, 1), (1, 123, 0), (1, 0, 2)]
+    {
+        let mut input = vec![0u8; 84];
+        input[..8].copy_from_slice(&timestamp.to_le_bytes());
+        input[8..12].copy_from_slice(&auto.to_le_bytes());
+        input[44..48].copy_from_slice(&interval.to_le_bytes());
+        let mut queue = words(&[0]);
+        queue.extend(flattened(&input));
+        assert_eq!(h.call(7, &queue), words(&[37, 19, 0, 0, (-38i32) as u32]));
+        assert!(h.service.pending().is_none());
+        assert_eq!(h.service.next_deadline_ns(), None);
+        assert_eq!(h.call(1, &words(&[0]))[..4], 1u32.to_le_bytes());
+    }
+}

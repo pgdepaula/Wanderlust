@@ -71,3 +71,46 @@ metadata, slot bounds, output-write failure atomicity, retained fences, ordered
 consumer release and malformed buffer descriptors. The runtime audio integration
 suite also submits authentic HIPC transactions through SVC, checks the original
 session endpoint is restored and verifies different reply extents.
+
+
+## Virtual display pacing
+
+`BqBufferInput.swapInterval` at byte 44 controls consumption by the configured
+60 Hz virtual display. The bounded profile accepts intervals 0..4; this limit
+is an implementation restriction, not a claimed NVIDIA maximum. Zero permits
+immediate acquisition. Positive intervals retain queue ownership until their
+integer refresh deadline. Deadlines use rational `tick * 1e9 / 60` rounded up,
+without accumulating a rounded frame-period error. A late submission targets a
+future refresh rather than replaying missed refreshes in a burst.
+
+The hosted callback poll integrates this deadline with the existing scheduler's
+timer interface. It does not sleep in a producer request, busy-wait on host time,
+submit another GPU command or invent fence completion. At a due deadline an
+unresolved GPU fence leaves the buffer queued and disarms that expired timer;
+subsequent actual work/polls can retry without a zero-time idle loop. Consumption
+still requires canonical visible memory and independently satisfied acquire
+fences. Disconnect resets the presentation timeline.
+
+This profile supports automatic timestamps and the zero/as-soon-as-possible
+explicit timestamp only. Nonzero explicit timestamps and intervals outside the
+bounded range reject queueing without losing the dequeued slot. It is not native
+vblank, full VI composition or a hardware-equivalent Nintendo frame scheduler.
+The wire location and forwarding follow pinned libnx `buffer_producer.h` and
+`display/native_window.c` (`nwindowQueueBuffer`).
+
+The real GPU consumer test uses interval three: no pixels are acquired before
+50,000,000 virtual nanoseconds, and reaching that time cannot complete a future
+GPU fence. A later GPU draw completes that fence. A second block-linear surface
+stays queued at 99,999,999 ns and is consumed at 100,000,000 ns, with independently
+checked pixels and padding. CPU tests verify invalid timing metadata preserves
+slot ownership and output status.
+
+
+This pacing profile passed seven Binder CPU tests and the hosted audio/service
+regressions (87 CPU passes in the combined run; two optional build tests were
+ignored). The NVIDIA runtime fixture passed nine actual GPU cases each on WSL
+OpenGL, WSL Vulkan, native Windows D3D12 and native Windows Vulkan, including
+both presentation deadlines and independently specified guest framebuffer pixels.
+Four non-device NVIDIA adapter tests also passed. Formatting and strict
+all-target Clippy passed for the runtime and NVIDIA packages. These synthetic
+service tests do not establish a recognizable original-game scene.
