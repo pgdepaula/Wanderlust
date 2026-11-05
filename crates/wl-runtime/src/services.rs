@@ -552,6 +552,7 @@ pub(crate) fn request(
         return Ok(Outcome::Close);
     }
     let domain = k.sessions[s].domain;
+    let mut input_objects = Vec::new();
     let (target, cmif) = match domain {
         Some(d) if !control => {
             // Domain in header: type, input object count, data size, object ID.
@@ -570,9 +571,19 @@ pub(crate) fn request(
                         return Ok(Outcome::Close);
                     }
                     if in_objects != 0 {
-                        return Err(format!(
-                            "unsupported Horizon IPC: input objects sent to {target:?}"
-                        ));
+                        if !matches!(target, HostObject::AudioRenderer { .. }) || in_objects > 8 {
+                            return Err(format!(
+                                "unsupported Horizon IPC: input objects sent to {target:?}"
+                            ));
+                        }
+                        for object in body[size..size + 4 * usize::from(in_objects)].chunks_exact(4)
+                        {
+                            let id = u32::from_le_bytes(object.try_into().unwrap());
+                            let Some(object) = k.host.domains[d].get(id) else {
+                                return Ok(Outcome::Close);
+                            };
+                            input_objects.push(object);
+                        }
                     }
                     (target, raw_start + 0x10..raw_start + 0x10 + size)
                 }
@@ -714,7 +725,8 @@ pub(crate) fn request(
             | HostObject::AudioDevice,
             _,
         ) => {
-            let reply = crate::audio::request(memory, k, target, command, req, args)?;
+            let reply =
+                crate::audio::request(memory, k, target, command, req, args, &input_objects)?;
             Done {
                 code: reply.code,
                 data: reply.data,

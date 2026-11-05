@@ -2,6 +2,20 @@
 //! the AOT runtime archive, so service-only changes retain CPU unit cache identity.
 use crate::{Memory, RuntimeResult, horizon::Kernel, ipc::Request, services::HostObject};
 use std::sync::OnceLock;
+thread_local! {
+    static INPUT_OBJECTS: std::cell::RefCell<Vec<HostObject>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+/// Checked domain input objects for the current scoped hosted request. These
+/// are identities resolved by the kernel, never client-supplied host pointers.
+pub fn input_objects() -> Vec<HostObject> {
+    INPUT_OBJECTS.with(|objects| objects.borrow().clone())
+}
+struct InputScope(Vec<HostObject>);
+impl Drop for InputScope {
+    fn drop(&mut self) {
+        INPUT_OBJECTS.with(|objects| *objects.borrow_mut() = std::mem::take(&mut self.0));
+    }
+}
 #[derive(Debug, Default)]
 pub struct Reply {
     pub code: u32,
@@ -69,11 +83,13 @@ pub(crate) fn request(
     command: u32,
     request: &Request,
     args: &[u8],
+    inputs: &[HostObject],
 ) -> RuntimeResult<Reply> {
     let mut host = kernel
         .audio
         .take()
         .ok_or("audio host absent or reentered")?;
+    let _scope = InputScope(INPUT_OBJECTS.with(|objects| objects.replace(inputs.to_vec())));
     let result = host.request(memory, kernel, object, command, request, args);
     kernel.audio = Some(host);
     result

@@ -1725,6 +1725,9 @@ fn emit_inner(
         out.push_str("pub mod host_nfp {\n");
         out.push_str(include_str!("../../wl-runtime/hosted/nfp.rs"));
         out.push_str("\n}\n");
+        out.push_str("pub mod host_applet {\n");
+        out.push_str(include_str!("../../wl-runtime/hosted/applet.rs"));
+        out.push_str("\n}\n");
         out.push_str("pub mod host_audio {\n");
         out.push_str(include_str!("../../wl-runtime/hosted/audio.rs"));
         out.push_str("\n}\n");

@@ -1,6 +1,8 @@
 extern crate wl_runtime as wl_guest_runtime;
 #[path = "../hosted/audio.rs"]
 mod audio;
+#[path = "../hosted/applet.rs"]
+pub mod host_applet;
 #[path = "../hosted/audio_dsp.rs"]
 pub mod host_audio_dsp;
 #[path = "../hosted/binder.rs"]
@@ -2916,4 +2918,356 @@ fn self_controller_launchable_event_has_real_handle_and_restores_scoped_identity
         k.host.domains[domain].objects,
         [(root, HostObject::SelfController)]
     );
+}
+
+fn controller_domain_wire(
+    p: &mut Process,
+    id: u32,
+    command: u32,
+    args: &[u8],
+    inputs: &[u32],
+    buffer: Option<(bool, u64, u32)>,
+) {
+    let mut b = [0u8; 256];
+    let mut header = 4u32;
+    let mut at = 8usize;
+    if let Some((write, address, size)) = buffer {
+        header |= 1 << if write { 20 } else { 24 };
+        b[8..12].copy_from_slice(&size.to_le_bytes());
+        b[12..16].copy_from_slice(&(address as u32).to_le_bytes());
+        b[16..20].copy_from_slice(&(((address >> 32) as u32) << 28).to_le_bytes());
+        at += 12;
+    }
+    b[..4].copy_from_slice(&header.to_le_bytes());
+    let raw = at.next_multiple_of(16);
+    let cmif = raw + 16;
+    b[raw] = 1;
+    b[raw + 1] = inputs.len() as u8;
+    b[raw + 2..raw + 4].copy_from_slice(&((16 + args.len()) as u16).to_le_bytes());
+    b[raw + 4..raw + 8].copy_from_slice(&id.to_le_bytes());
+    b[cmif..cmif + 4].copy_from_slice(b"SFCI");
+    b[cmif + 8..cmif + 12].copy_from_slice(&command.to_le_bytes());
+    b[cmif + 16..cmif + 16 + args.len()].copy_from_slice(args);
+    let mut end = cmif + 16 + args.len();
+    for input in inputs {
+        b[end..end + 4].copy_from_slice(&input.to_le_bytes());
+        end += 4;
+    }
+    b[4..8].copy_from_slice(&(((end.next_multiple_of(4) - at) / 4) as u32).to_le_bytes());
+    let address = tls(p);
+    p.write_bytes(address, &b).unwrap();
+}
+fn controller_domain_call(p: &mut Process, c: &mut Cpu, handle: u32) {
+    svc(p, c, 0x21, &[u64::from(handle)]);
+    assert_eq!(c.x[0], 0);
+    assert_eq!(reply(p, 0x28), 0);
+}
+fn controller_manager(p: &mut Process, c: &mut Cpu) -> (u32, u32) {
+    let (handle, s) = applet_audio_session(p);
+    p.kernel.as_mut().unwrap().sessions[s].endpoint =
+        wl_runtime::ipc::Endpoint::Host(wl_runtime::services::HostObject::LibraryAppletCreator);
+    wire(p, 0, false, &[], &[]);
+    let address = tls(p);
+    p.store(address, 4, 5).unwrap();
+    call(p, c, handle);
+    (handle, reply(p, 0x20))
+}
+fn controller_storage(
+    p: &mut Process,
+    c: &mut Cpu,
+    handle: u32,
+    creator: u32,
+    data: &[u8],
+) -> (u32, u32) {
+    controller_domain_wire(
+        p,
+        creator,
+        10,
+        &(data.len() as u64).to_le_bytes(),
+        &[],
+        None,
+    );
+    controller_domain_call(p, c, handle);
+    let storage = reply(p, 0x30);
+    controller_domain_wire(p, storage, 0, &[], &[], None);
+    controller_domain_call(p, c, handle);
+    let accessor = reply(p, 0x30);
+    p.write_bytes(DATA + 0x2000, data).unwrap();
+    controller_domain_wire(
+        p,
+        accessor,
+        10,
+        &0u64.to_le_bytes(),
+        &[],
+        Some((true, DATA + 0x2000, data.len() as u32)),
+    );
+    controller_domain_call(p, c, handle);
+    (storage, accessor)
+}
+fn controller_close(p: &mut Process, c: &mut Cpu, handle: u32, id: u32) {
+    controller_domain_wire(p, id, 0, &[], &[], None);
+    let address = tls(p);
+    p.store(address + 16, 1, 2).unwrap();
+    p.store(address + 18, 2, 0).unwrap();
+    svc(p, c, 0x21, &[u64::from(handle)]);
+    assert_eq!(c.x[0], 0);
+}
+fn controller_arguments() -> [Vec<u8>; 3] {
+    let mut common = vec![0u8; 32];
+    common[..4].copy_from_slice(&1u32.to_le_bytes());
+    common[4..8].copy_from_slice(&32u32.to_le_bytes());
+    common[8..12].copy_from_slice(&8u32.to_le_bytes());
+    let mut private = vec![0; 20];
+    private[..4].copy_from_slice(&20u32.to_le_bytes());
+    private[4..8].copy_from_slice(&1072u32.to_le_bytes());
+    private[12..16].copy_from_slice(&1u32.to_le_bytes());
+    let mut support = vec![0; 1072];
+    support[1] = 1;
+    support[2] = 1;
+    support[3] = 1;
+    support[4] = 1;
+    support[5] = 1;
+    [common, private, support]
+}
+fn connected_controller(p: &mut Process) {
+    // Independent literal FullKey ring state: Player1, tail1/count1, connected.
+    let mut bytes = vec![0u8; 0x40000];
+    let base = 0x9a00;
+    bytes[base..base + 4].copy_from_slice(&1u32.to_le_bytes());
+    for (offset, value) in [(0x30, 17u64), (0x38, 1), (0x40, 1), (0xa0, 1)] {
+        bytes[base + offset..base + offset + 8].copy_from_slice(&value.to_le_bytes());
+    }
+    let k = p.kernel.as_mut().unwrap();
+    let id = k.shared_memories.len();
+    k.shared_memories.push(wl_runtime::horizon::SharedMemory {
+        size: 0x40000,
+        permission: 1,
+        bytes,
+    });
+    k.host.hid_shared_memory = Some(id);
+}
+#[test]
+fn controller_support_domain_storage_event_and_result_form_one_real_ipc_flow() {
+    let (mut p, mut c) = process();
+    connected_controller(&mut p);
+    let (handle, creator) = controller_manager(&mut p, &mut c);
+    controller_domain_wire(
+        &mut p,
+        creator,
+        0,
+        &[12u32.to_le_bytes(), 0u32.to_le_bytes()].concat(),
+        &[],
+        None,
+    );
+    controller_domain_call(&mut p, &mut c, handle);
+    let controller = reply(&p, 0x30);
+    controller_domain_wire(&mut p, controller, 0, &[], &[], None);
+    controller_domain_call(&mut p, &mut c, handle);
+    let copied = reply(&p, 12);
+    let Object::ReadableEvent(event) = p.kernel.as_ref().unwrap().handles.get(copied).unwrap()
+    else {
+        panic!()
+    };
+    assert!(!p.kernel.as_ref().unwrap().events[event].signaled);
+    // Wrong object type must fail without leaking scoped input identities.
+    controller_domain_wire(&mut p, controller, 100, &[], &[controller], None);
+    c.x[0] = u64::from(handle);
+    assert!(audio::service_hook(&mut c, &mut p, 0x21).is_err());
+    assert!(wl_runtime::audio::input_objects().is_empty());
+    for data in controller_arguments() {
+        let (storage, accessor) = controller_storage(&mut p, &mut c, handle, creator, &data);
+        controller_domain_wire(&mut p, controller, 100, &[], &[storage], None);
+        controller_domain_call(&mut p, &mut c, handle);
+        controller_close(&mut p, &mut c, handle, accessor);
+        controller_close(&mut p, &mut c, handle, storage);
+    }
+    controller_domain_wire(&mut p, controller, 10, &[], &[], None);
+    controller_domain_call(&mut p, &mut c, handle);
+    assert!(p.kernel.as_ref().unwrap().events[event].signaled);
+    controller_domain_wire(&mut p, controller, 30, &[], &[], None);
+    controller_domain_call(&mut p, &mut c, handle);
+    controller_domain_wire(&mut p, controller, 101, &[], &[], None);
+    controller_domain_call(&mut p, &mut c, handle);
+    let output = reply(&p, 0x30);
+    controller_domain_wire(&mut p, output, 0, &[], &[], None);
+    controller_domain_call(&mut p, &mut c, handle);
+    let accessor = reply(&p, 0x30);
+    controller_domain_wire(&mut p, accessor, 0, &[], &[], None);
+    controller_domain_call(&mut p, &mut c, handle);
+    assert_eq!(p.load(tls(&p) + 0x30, 8).unwrap(), 12);
+    p.write_bytes(DATA + 0x3000, &[0xa5; 20]).unwrap();
+    controller_domain_wire(
+        &mut p,
+        accessor,
+        11,
+        &0u64.to_le_bytes(),
+        &[],
+        Some((false, DATA + 0x3000, 12)),
+    );
+    controller_domain_call(&mut p, &mut c, handle);
+    assert_eq!(
+        p.read_bytes(DATA + 0x3000, 20).unwrap(),
+        [
+            1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5, 0xa5
+        ]
+    );
+    controller_domain_wire(&mut p, controller, 101, &[], &[], None);
+    c.x[0] = u64::from(handle);
+    assert!(audio::service_hook(&mut c, &mut p, 0x21).is_err());
+    assert!(wl_runtime::audio::input_objects().is_empty());
+}
+
+#[test]
+fn controller_support_rejects_invalid_profiles_without_signaling_completion() {
+    for invalid in 0..6 {
+        let (mut p, mut c) = process();
+        if invalid != 0 {
+            connected_controller(&mut p);
+        }
+        let (handle, creator) = controller_manager(&mut p, &mut c);
+        controller_domain_wire(
+            &mut p,
+            creator,
+            0,
+            &[12u32.to_le_bytes(), 0u32.to_le_bytes()].concat(),
+            &[],
+            None,
+        );
+        controller_domain_call(&mut p, &mut c, handle);
+        let controller = reply(&p, 0x30);
+        controller_domain_wire(&mut p, controller, 0, &[], &[], None);
+        controller_domain_call(&mut p, &mut c, handle);
+        let Object::ReadableEvent(event) = p
+            .kernel
+            .as_ref()
+            .unwrap()
+            .handles
+            .get(reply(&p, 12))
+            .unwrap()
+        else {
+            panic!()
+        };
+        let mut args = controller_arguments();
+        match invalid {
+            1 => args[0][8] = 99,
+            2 => args[1][10] = 2,
+            3 => args[1][12] = 0,
+            4 => args[2][0] = 2,
+            5 => args[2][2] = 0,
+            _ => {}
+        }
+        for data in args {
+            let (storage, _) = controller_storage(&mut p, &mut c, handle, creator, &data);
+            controller_domain_wire(&mut p, controller, 100, &[], &[storage], None);
+            controller_domain_call(&mut p, &mut c, handle);
+        }
+        controller_domain_wire(&mut p, controller, 10, &[], &[], None);
+        c.x[0] = u64::from(handle);
+        assert!(
+            audio::service_hook(&mut c, &mut p, 0x21).is_err(),
+            "case {invalid}"
+        );
+        assert!(!p.kernel.as_ref().unwrap().events[event].signaled);
+        assert!(wl_runtime::audio::input_objects().is_empty());
+    }
+}
+#[test]
+fn controller_storage_failed_guest_reads_and_extent_checks_preserve_contents() {
+    let (mut p, mut c) = process();
+    let (handle, creator) = controller_manager(&mut p, &mut c);
+    let (_, accessor) =
+        controller_storage(&mut p, &mut c, handle, creator, &[1, 2, 3, 4, 5, 6, 7, 8]);
+    for (offset, address, size) in [
+        (0, 0, 4),
+        (7, DATA + 0x2000, 2),
+        (u64::MAX, DATA + 0x2000, 1),
+    ] {
+        controller_domain_wire(
+            &mut p,
+            accessor,
+            10,
+            &offset.to_le_bytes(),
+            &[],
+            Some((true, address, size)),
+        );
+        c.x[0] = u64::from(handle);
+        assert!(audio::service_hook(&mut c, &mut p, 0x21).is_err());
+    }
+    controller_domain_wire(
+        &mut p,
+        accessor,
+        11,
+        &0u64.to_le_bytes(),
+        &[],
+        Some((false, DATA + 0x3000, 8)),
+    );
+    controller_domain_call(&mut p, &mut c, handle);
+    assert_eq!(
+        p.read_bytes(DATA + 0x3000, 8).unwrap(),
+        [1, 2, 3, 4, 5, 6, 7, 8]
+    );
+    // Object identities from the wrong type are rejected; scope is not retained.
+    controller_domain_wire(
+        &mut p,
+        accessor,
+        10,
+        &0u64.to_le_bytes(),
+        &[creator],
+        Some((true, DATA + 0x2000, 1)),
+    );
+    c.x[0] = u64::from(handle);
+    assert!(audio::service_hook(&mut c, &mut p, 0x21).is_err());
+    assert!(wl_runtime::audio::input_objects().is_empty());
+}
+
+#[test]
+fn controller_creator_domain_close_does_not_replace_remaining_storage_identity() {
+    let (mut p, mut c) = process();
+    let (handle, creator) = controller_manager(&mut p, &mut c);
+    let (storage, accessor) = controller_storage(&mut p, &mut c, handle, creator, &[3; 8]);
+    let k = p.kernel.as_ref().unwrap();
+    let Object::Session(s) = k.handles.get(handle).unwrap() else {
+        panic!()
+    };
+    let d = k.sessions[s].domain.unwrap();
+    let identities = k.host.domains[d]
+        .objects
+        .iter()
+        .copied()
+        .filter(|(id, _)| *id != creator)
+        .collect::<Vec<_>>();
+    controller_close(&mut p, &mut c, handle, creator);
+    assert_eq!(
+        p.kernel.as_ref().unwrap().host.domains[d].objects,
+        identities
+    );
+    controller_domain_wire(&mut p, accessor, 0, &[], &[], None);
+    controller_domain_call(&mut p, &mut c, handle);
+    assert_eq!(p.load(tls(&p) + 0x30, 8).unwrap(), 8);
+    controller_close(&mut p, &mut c, handle, storage);
+    controller_domain_wire(&mut p, accessor, 0, &[], &[], None);
+    controller_domain_call(&mut p, &mut c, handle);
+    assert_eq!(p.load(tls(&p) + 0x30, 8).unwrap(), 8);
+}
+#[test]
+fn controller_absent_input_object_closes_the_session_without_storage_mutation() {
+    let (mut p, mut c) = process();
+    let (handle, creator) = controller_manager(&mut p, &mut c);
+    controller_domain_wire(
+        &mut p,
+        creator,
+        0,
+        &[12u32.to_le_bytes(), 0u32.to_le_bytes()].concat(),
+        &[],
+        None,
+    );
+    controller_domain_call(&mut p, &mut c, handle);
+    let controller = reply(&p, 0x30);
+    controller_domain_wire(&mut p, controller, 100, &[], &[u32::MAX], None);
+    svc(&mut p, &mut c, 0x21, &[u64::from(handle)]);
+    assert_eq!(
+        c.x[0],
+        u64::from(wl_runtime::horizon::result::SESSION_CLOSED)
+    );
+    assert!(wl_runtime::audio::input_objects().is_empty());
 }

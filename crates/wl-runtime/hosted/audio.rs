@@ -740,7 +740,7 @@ struct Backend {
     binder: crate::host_binder::Service,
     prepo: crate::host_prepo::Service,
     nfp: crate::host_nfp::Service,
-    library_applet_launchable_event: Option<usize>,
+    applets: crate::host_applet::Service,
     released_audio_pins: Vec<GpuPin>,
 }
 impl Default for Backend {
@@ -752,7 +752,7 @@ impl Default for Backend {
             binder: crate::host_binder::Service::default(),
             prepo: crate::host_prepo::Service::default(),
             nfp: crate::host_nfp::Service::default(),
-            library_applet_launchable_event: None,
+            applets: crate::host_applet::Service::default(),
             fs: if std::env::var("WL_VOLATILE_SAVES").as_deref() == Ok("1") {
                 crate::host_fs::Service::with_volatile_saves()
             } else {
@@ -918,6 +918,25 @@ impl AudioHost for Backend {
         args: &[u8],
     ) -> RuntimeResult<Done> {
         self.release_audio_pins(memory)?;
+        let inputs = wl_guest_runtime::audio::input_objects();
+        if let HostObject::AudioRenderer { index } = target
+            && crate::host_applet::owns(index)
+        {
+            return self.applets.request(
+                memory,
+                k,
+                index,
+                req,
+                args,
+                crate::host_applet::Call {
+                    command,
+                    inputs: &inputs,
+                },
+            );
+        }
+        if !inputs.is_empty() {
+            return Err("input objects are unsupported by this hosted interface".into());
+        }
         if let HostObject::AudioRenderer { index } = target
             && crate::host_nfp::owns(index)
         {
@@ -984,15 +1003,7 @@ impl AudioHost for Backend {
                 check(no_arguments)?;
                 // This profile has no running library applet. A real readable
                 // event exposes the free launch slot; no applet is started here.
-                let event = *self.library_applet_launchable_event.get_or_insert_with(|| {
-                    let e = k.events.len();
-                    k.events.push(threads::Event {
-                        signaled: true,
-                        ..threads::Event::default()
-                    });
-                    e
-                });
-                copy_event(k, event)
+                self.applets.launchable(k)
             }
             // Applet audio balance is process-owned control state, distinct
             // from an output device's gain and from renderer voice volumes.
@@ -1291,6 +1302,10 @@ impl AudioHost for Backend {
     }
     fn close(&mut self, _kernel: &mut Kernel, object: HostObject) {
         if let HostObject::AudioRenderer { index } = object {
+            if crate::host_applet::owns(index) {
+                self.applets.close(index);
+                return;
+            }
             if crate::host_nfp::owns(index) {
                 self.nfp.close(index);
                 return;
@@ -1364,6 +1379,7 @@ pub fn service_hook(
     id: u16,
 ) -> RuntimeResult<Option<wl_guest_runtime::Stop>> {
     use wl_guest_runtime::{horizon::Object, ipc::Endpoint};
+    let applet_binding = crate::host_applet::bind(cpu, process, id);
     let binder_binding = crate::host_binder::bind(cpu, process, id);
     let fs_binding = crate::host_fs::bind(cpu, process, id);
     let binding = if let Some(k) = process.kernel.as_mut() {
@@ -1413,6 +1429,7 @@ pub fn service_hook(
     let result = wl_guest_runtime::service(cpu, process, id);
     crate::host_fs::restore(process, fs_binding);
     crate::host_binder::restore(process, binder_binding);
+    crate::host_applet::restore(process, applet_binding);
     if let Some((session, original)) = binding
         && let Some(k) = process.kernel.as_mut()
         && let Some(s) = k.sessions.get_mut(session)
