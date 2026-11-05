@@ -168,7 +168,7 @@ fn unsupported_attribute_modifiers_and_direct_writes_preserve_valid_state() {
         (0x1160, 0x38400840), // Inactive source.
         (0x1160, 0x20400800), // UINT rather than FLOAT.
         (0x1160, 0xb8400800), // R/B swap.
-        (0x1160, 0x38800800), // Position FLOAT2, unsupported.
+        (0x1160, 0xb8800800), // FLOAT2 with unsupported R/B swap.
         (0x1160, 0x38a00800), // Position half-float3, unsupported.
         (0x1160, 0x38400820), // Reserved bit5.
         (0x1164, 0x38400200), // UV FLOAT3, unsupported.
