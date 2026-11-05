@@ -366,3 +366,21 @@ fn zero_noninstanced_frequency_retains_the_exact_guest_layout() {
     assert!(set(&mut e, 0x1880, 1).is_err());
     assert_eq!(e.vertex_array().unwrap(), before);
 }
+
+#[test]
+fn zero_vertex_id_base_preserves_fetch_and_rejects_unimplemented_adjustments() {
+    let mut engine = tight_float3();
+    let original = engine.vertex_array().unwrap();
+    assert!(set(&mut engine, 0x1118, 0).is_ok());
+    assert_eq!(engine.vertex_array().unwrap(), original);
+    for value in [1, u32::MAX, 0x80000000] {
+        assert_eq!(
+            set(&mut engine, 0x1118, value),
+            Err(MethodError::UnsupportedValue {
+                method: 0x1118,
+                value
+            })
+        );
+        assert_eq!(engine.vertex_array().unwrap(), original);
+    }
+}

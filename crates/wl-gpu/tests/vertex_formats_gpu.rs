@@ -443,6 +443,7 @@ fn driver_float2_position_supplies_zero_z_and_one_w() {
     let mut words = f.setup.clone();
     layout(&mut words, 20, [0, 12], false, 0x70000);
     method(&mut words, 0x1160, 0x38800000);
+    method(&mut words, 0x1118, 0);
     draw(&mut words);
     let report = f.submit(&words);
     assert!(report.fault.is_none(), "{:?}", report.fault);

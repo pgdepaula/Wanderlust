@@ -591,6 +591,7 @@ pub struct Maxwell3d {
     instrumentation_data: Option<u32>,
     bindless_texture_constant_slot: Option<u8>,
     vertex_id_uses_array_start: Option<bool>,
+    vertex_id_base: Option<u32>,
     provoking_last: Option<bool>,
     api_call_limit: Option<u16>,
     attribute_defaults: Option<u8>,
@@ -1743,6 +1744,15 @@ impl Maxwell3d {
                     return Err(bad());
                 }
                 self.vertex_instance[slot] = Some(value);
+            }
+            0x1118 => {
+                // NVB197_SET_VERTEX_ID_BASE.V is 32 bits. The supported fetch
+                // profile has no shader-visible VertexID adjustment; only its
+                // identity base is implemented. This is not a vertex-buffer offset.
+                if value != 0 {
+                    return Err(bad());
+                }
+                self.vertex_id_base = Some(value);
             }
             0x1160 | 0x1164 => {
                 let fields = value & !(0x3fffu32 << 7);
