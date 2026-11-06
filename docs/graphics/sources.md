@@ -158,6 +158,18 @@ Naga remains a host IR/compiler component, never a Maxwell machine-code decoder.
 
 ## Independently assembled constant-fragment experiment
 
+Fragment discard follows GM107's `KIL` opcode and predicate fields in the pinned
+envytools ISA table, with NVIDIA SPH CommonWord0.KillsPixels (bit 15) required.
+The bounded subset accepts P0, !P0, PT and !PT, with initialized P0 and ordinary
+stall-six/no-barrier controls. It lowers to WGSL `discard`, preserving uncovered
+attachment pixels instead of exporting a transparent replacement. Vertex KIL,
+other predicates and disabled SPH permission fail explicitly. The synthetic
+`tests/fixtures/maxwell/kill.asm` is assembled with that same envytools revision;
+its 80-byte header uses the established PS screen-linear input profile and enables
+KillsPixels. `kill.bin` is 176 bytes, SHA256
+`b82efd1973058dc5a65758fec17ccb8ea46090f1be945517fc0479e2946cb12b`.
+Independent pixel tests check both complementary half-surface discard masks.
+
 The tiny fragment translator follows the
 [envytools gm107 ISA table](https://github.com/envytools/envytools/blob/f102b82381f3f11cee113d16374c87091db039d9/envydis/gm107.c)
 at revision `f102b82381f3f11cee113d16374c87091db039d9` (MIT), independently

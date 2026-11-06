@@ -98,6 +98,10 @@ pub enum FloatOperand {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
+    /// Fragment KIL, condition P0/!P0/PT/!PT; no register destination.
+    Discard {
+        condition: u8,
+    },
     /// RN with signed-zero FTZ, integer-lowered to prevent host contraction.
     FloatFtz {
         dst: u8,
@@ -370,6 +374,7 @@ impl Program {
             return Err(invalid("invalid Maxwell fragment length"));
         }
         let input_mode = u32::from_le_bytes(input[24..28].try_into().unwrap());
+        let kills_pixels = !vertex && input[1] & 0x80 != 0;
         let vertex_xy = vertex && input_mode == 3;
         let vertex_xyz = vertex && matches!(input_mode, 3 | 7);
         let compiler_flag = vertex_xyz && input[3] & 2 != 0;
@@ -410,6 +415,9 @@ impl Program {
             // NVIDIA SPH: MRT_ENABLE only selects per-target versus broadcast
             // exports. With our sole target-zero OMAP=0xf both are identical.
             header[1] |= input[1] & 0x40;
+            // NVIDIA CommonWord0.KillsPixels enables KIL; actual instructions
+            // below lower to discard so host depth rejection respects kills.
+            header[1] |= input[1] & 0x80;
             // StoreReqStart/End are explicitly ignored for pixel shaders, unlike
             // VTG ALD.O. Keep max-output-vertex/reserved fields strict.
             let requests = u32::from_le_bytes(input[16..20].try_into().unwrap());
@@ -574,6 +582,20 @@ impl Program {
                     continue;
                 }
                 let compare_mask = (15u64 << 48) | (255u64 << 8) | (255u64 << 20);
+                if !vertex && word & !(15u64 << 16) == 0xe33000000000000f {
+                    let condition = ((word >> 16) & 15) as u8;
+                    if !kills_pixels
+                        || write_barrier != 7
+                        || !matches!(condition, 0 | 7 | 8 | 15)
+                        || (matches!(condition, 0 | 8) && !predicate_initialized)
+                    {
+                        return Err(fail(
+                            "KIL requires enabled SPH and ready supported predicate",
+                        ));
+                    }
+                    out.operations.push(Operation::Discard { condition });
+                    continue;
+                }
                 if word & !compare_mask == 0x5b60038000070007 {
                     let comparison = match ((word >> 49) & 7, (word >> 48) & 1) {
                         (1, 0) => IntegerComparison::Less,
@@ -1792,6 +1814,7 @@ impl Program {
                 } => {
                     largest = largest.max(u16::from(dst)).max(u16::from(multiplier));
                 }
+                Operation::Discard { .. } => {}
                 Operation::PredicateCompare { left, right, .. }
                 | Operation::FloatPredicateCompare { left, right, .. } => {
                     for r in [left, right] {
@@ -1931,6 +1954,10 @@ impl Program {
         }
         for op in &self.operations {
             match *op {
+                Operation::Discard { condition } => {
+                    let predicate = match condition { 0 => "p0", 7 => "true", 8 => "!p0", 15 => "false", _ => unreachable!() };
+                    writeln!(s, "if ({predicate}) {{ discard; }}").unwrap();
+                }
                 Operation::AttributeRead { .. } | Operation::AttributeWrite { .. } => {
                     unreachable!("vertex operation in fragment")
                 }
