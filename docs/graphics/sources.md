@@ -2784,3 +2784,20 @@ alpha values. It checks every GPU output pixel, a guest mutation, preserved
 source padding, and 32 unchanged resource synchronizations per version. The
 conversion counter measures bytes produced by format expansion and row packing;
 these conversions allocate and copy host memory.
+
+## BEGIN logical instance cursor
+
+Pinned NVIDIA B197 `BEGIN` (`0x1618`) defines topology in bits 15:0 and
+`INSTANCE_ID` in bits 27:26: FIRST (`0`), SUBSEQUENT (`1`) and UNCHANGED (`2`).
+The triangle-list normal-BEGIN/normal-END subset resets, advances or retains a
+channel-local logical instance cursor. END retains it. Inline nonindexed
+`DRAW_VERTEX_ARRAY_BEGIN_END_INSTANCE_FIRST` (`0x1214`) resets it. Nested BEGIN,
+inline draws inside an open BEGIN, reserved instance mode, split-mode and
+primitive-ID variants are rejected before changing this state. The bounded
+implementation requires an explicit FIRST and rejects counter overflow.
+
+The independent MIT [DrawManager](https://github.com/alula/Ryujinx/blob/4930dced25c0d9ec33096b0f2601d262daa477bf/src/Ryujinx.Graphics.Gpu/Engine/Threed/DrawManager.cs)
+corroborates increment/reset/retain ordering. Cursor state is distinct from the
+base-instance register. Exposing this state does not add instance-rate vertex
+arrays or new shader built-in instruction support; unsupported shader accesses
+remain rejected by the existing decoder.

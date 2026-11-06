@@ -17,11 +17,19 @@ pub(crate) struct IndexRegisters {
     first: Option<u32>,
     base: Option<i32>,
     instance: Option<u32>,
+    instance_id: Option<u32>,
     restart: Option<u32>,
     array_restart: Option<bool>,
     pub active: bool,
 }
 impl IndexRegisters {
+    pub(crate) fn draw_instance(&self) -> Result<u32> {
+        self.instance_id
+            .ok_or_else(|| invalid("draw instance requires explicit FIRST"))
+    }
+    pub(crate) fn reset_instance(&mut self) {
+        self.instance_id = Some(0);
+    }
     pub(crate) fn nonindexed_restart_ready(&self) -> bool {
         self.array_restart != Some(true) || self.restart == Some(0)
     }
@@ -60,9 +68,19 @@ impl IndexRegisters {
                 self.restart = Some(value);
             }
             0x1618 => {
-                if value != 4 || self.active {
+                if value & !0x0c000000 != 4 || self.active {
                     return Err(bad());
                 }
+                let instance = match value >> 26 & 3 {
+                    0 => 0,
+                    1 => self
+                        .instance_id
+                        .and_then(|v| v.checked_add(1))
+                        .ok_or_else(bad)?,
+                    2 => self.instance_id.ok_or_else(bad)?,
+                    _ => return Err(bad()),
+                };
+                self.instance_id = Some(instance);
                 self.active = true;
             }
             0x1614 => {
@@ -123,5 +141,26 @@ impl IndexRegisters {
             width: width as u8,
             base,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn instance_cursor_overflow_and_reserved_mode_do_not_start_a_draw() {
+        let mut state = IndexRegisters {
+            instance_id: Some(u32::MAX),
+            ..Default::default()
+        };
+        assert!(state.apply(0x1618, 0x04000004).is_err());
+        assert!(!state.active);
+        assert_eq!(state.draw_instance().unwrap(), u32::MAX);
+        assert!(state.apply(0x1618, 0x0c000004).is_err());
+        assert!(!state.active);
+        assert_eq!(state.draw_instance().unwrap(), u32::MAX);
+        assert!(state.apply(0x1618, 4).is_ok());
+        assert!(state.active);
+        assert_eq!(state.draw_instance().unwrap(), 0);
     }
 }

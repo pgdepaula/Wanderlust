@@ -135,6 +135,16 @@ fn b197_indexed_quad_offsets_base_mutation_and_remap() {
     check(&frame.rgba, false);
     assert_eq!(r.counters.index_upload_bytes, before.index_upload_bytes);
     assert_eq!(r.counters.pipeline_allocations, before.pipeline_allocations);
+    // Literal BEGIN modes across submissions. This shader has no instance-ID
+    // input and both attributes are vertex-rate, so the covered image is equal.
+    for begin in [0x04000004, 0x08000004] {
+        again[1] = begin;
+        let frame = run(&mut r, &again, &mut data, &mut changes);
+        check(&frame.rgba, false);
+        assert_eq!(r.counters.index_upload_bytes, before.index_upload_bytes);
+        assert_eq!(r.counters.pipeline_allocations, before.pipeline_allocations);
+    }
+    again[1] = 4;
     // Remove the second triangle through guest indices; reset destination explicitly.
     for (n, i) in [0u16, 1, 2].iter().enumerate() {
         data[0x6008 + n * 2..0x600a + n * 2].copy_from_slice(&i.to_le_bytes());

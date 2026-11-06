@@ -146,3 +146,38 @@ fn byte_index_format_uses_byte_offsets_and_exact_inclusive_bounds() {
     assert!(set(&mut e, 0x17d4, u32::MAX));
     assert!(e.index_buffer(0, 6).is_err());
 }
+
+#[test]
+fn begin_instance_first_subsequent_unchanged_are_ordered_and_channel_local() {
+    let mut e = configured();
+    assert!(e.draw_instance().is_err());
+    assert!(!set(&mut e, 0x1618, 0x04000004));
+    assert!(!set(&mut e, 0x1618, 0x08000004));
+    assert!(e.draw_instance().is_err());
+    for (value, expected) in [
+        (4, 0),
+        (0x04000004, 1),
+        (0x08000004, 1),
+        (0x04000004, 2),
+        (4, 0),
+    ] {
+        assert!(set(&mut e, 0x1618, value));
+        assert_eq!(e.draw_instance().unwrap(), expected);
+        assert!(!set(&mut e, 0x1618, 0x04000004)); // Failed nested BEGIN does not advance.
+        assert_eq!(e.draw_instance().unwrap(), expected);
+        assert!(!set(&mut e, 0x1214, 0x40030000));
+        assert_eq!(e.draw_instance().unwrap(), expected);
+        assert!(set(&mut e, 0x1614, 0));
+        assert_eq!(e.draw_instance().unwrap(), expected); // END retains the cursor.
+    }
+    for value in [0x0c000004, 0x01000004, 0x20000004, 0x04000005] {
+        assert!(!set(&mut e, 0x1618, value));
+        assert_eq!(e.draw_instance().unwrap(), 0);
+    }
+    assert!(set(&mut e, 0x1618, 0x04000004));
+    assert!(set(&mut e, 0x1614, 0));
+    assert_eq!(e.draw_instance().unwrap(), 1);
+    assert!(set(&mut e, 0x1214, 0x40030000));
+    assert_eq!(e.draw_instance().unwrap(), 0);
+    assert!(configured().draw_instance().is_err());
+}

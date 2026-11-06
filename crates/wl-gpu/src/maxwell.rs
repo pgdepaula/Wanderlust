@@ -1912,6 +1912,10 @@ impl Maxwell3d {
                 if !self.indices.nonindexed_restart_ready() {
                     return Err(MethodError::IncompletePrimitiveRestart);
                 }
+                if self.indices.active {
+                    return Err(bad());
+                }
+                self.indices.reset_instance();
                 return Ok(MethodEffect::Draw { first, count });
             }
             0x19d0 => {
@@ -1969,6 +1973,11 @@ impl Maxwell3d {
     }
     pub fn index_buffer(&self, first: u32, count: u32) -> Result<crate::index::IndexBuffer> {
         self.indices.resolve(first, count)
+    }
+    /// Logical BEGIN instance cursor, independent of the base-instance register.
+    /// A FIRST command must establish it before SUBSEQUENT or UNCHANGED.
+    pub fn draw_instance(&self) -> Result<u32> {
+        self.indices.draw_instance()
     }
     /// Retained B197 format selector; zero explicitly disables the target.
     /// A configured inactive format does not authorize another color output.
