@@ -2759,3 +2759,28 @@ A synthetic B197 fixture omits only the target-zero selector, supplies identical
 RGB/alpha source-alpha blending, and checks overlapping asymmetric triangles
 against scalar blend and coverage arithmetic. Explicit-selector regression cases
 retain their independent alpha behavior and pipeline-reuse assertions.
+
+## Pitched single-channel sampled images
+
+NVIDIA `clb197tex.h`, revision `9fdf5c4062007929d9f4e6cbad9c9771fe61b880`,
+defines `TEXHEAD_PITCH_HEADER_VERSION_SELECT_PITCH = 2`, address bits 47:5,
+`PITCH_BITS20TO5` at bits 111:96, pixel width/height minus one, and
+`TEXTURE_TYPE_TWO_D_NO_MIPMAP = 7`. The supported GPU address space remains
+40-bit. Pitched R8/RGBA8 images require a single mip and a checked 32-byte
+stride covering each logical row. Source acquisition includes row padding;
+upload conversion excludes that padding.
+
+The same header defines component-size R8 (`0x1d`) and the independent channel
+selectors. The R8 UNORM profile accepts the exact selector tuple
+`ONE_FLOAT, ONE_FLOAT, ONE_FLOAT, R`, uploading RGBA8 white with red as alpha.
+This is a bounded channel mapping, not general TIC swizzle support. The
+single-mip normalized sampler profile additionally accepts U/V WRAP (`0`) and
+CLAMP_TO_EDGE (`2`); depth comparisons, other address modes and anisotropy
+remain unsupported. A type-seven image is a two-dimensional image without
+mipmaps, not a two-dimensional array.
+
+The synthetic 7-by-5 R8 test uses 32-byte source rows and independently specified
+alpha values. It checks every GPU output pixel, a guest mutation, preserved
+source padding, and 32 unchanged resource synchronizations per version. The
+conversion counter measures bytes produced by format expansion and row packing;
+these conversions allocate and copy host memory.

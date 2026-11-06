@@ -139,6 +139,7 @@ impl Renderer {
             && desc.width % 4 == 0
             && desc.height % 4 == 0;
         let host_format = match desc.format {
+            Format::R8Unorm => wgpu::TextureFormat::Rgba8Unorm,
             Format::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
             Format::Rgba8Srgb => wgpu::TextureFormat::Rgba8UnormSrgb,
             Format::Rg11b10Float => wgpu::TextureFormat::Rg11b10Ufloat,
@@ -149,6 +150,7 @@ impl Renderer {
             _ => return Err(invalid("compressed format sampling not implemented")),
         };
         let fallback = desc.format.block().0 > 1 && !host_format.is_compressed();
+        let expanded = desc.format == Format::R8Unorm;
         if desc.width > self.capabilities.device_limits.max_texture_dimension_2d
             || desc.height > self.capabilities.device_limits.max_texture_dimension_2d
         {
@@ -162,7 +164,7 @@ impl Renderer {
             Some(t) => Cow::Borrowed(t.levels.as_slice()),
             None => Cow::Owned(desc.levels()?),
         };
-        if fallback {
+        if fallback || expanded {
             let mut total = 0u64;
             for m in levels.iter() {
                 total = total
@@ -221,7 +223,26 @@ impl Renderer {
                 } else {
                     Cow::Borrowed(raw)
                 };
-                let data = if fallback {
+                let data = if expanded {
+                    let pitch = match desc.layout {
+                        TextureLayout::Pitch { bytes_per_row } => bytes_per_row as usize,
+                        _ => m.width as usize,
+                    };
+                    let size = Format::Rgba8Unorm.layout(m.width, m.height, 1)?.size as usize;
+                    let mut rgba = Vec::with_capacity(size);
+                    for row in 0..m.height as usize {
+                        for &red in &data[row * pitch..row * pitch + m.width as usize] {
+                            rgba.extend_from_slice(&match desc.channels {
+                                TextureChannels::Rgba => [red, 0, 0, 255],
+                                TextureChannels::RedAsAlpha => [255, 255, 255, red],
+                            });
+                        }
+                    }
+                    self.counters.texture_conversions += 1;
+                    self.counters.texture_format_conversion_bytes += rgba.len() as u64;
+                    self.counters.temporary_allocations += 1;
+                    Cow::Owned(rgba)
+                } else if fallback {
                     let start = Instant::now();
                     let rgba =
                         crate::compression::decode_rgba8(desc.format, m.width, m.height, &data)?;
@@ -229,6 +250,17 @@ impl Renderer {
                     self.counters.decompress_bytes += rgba.len() as u64;
                     self.counters.temporary_allocations += 1;
                     Cow::Owned(rgba)
+                } else if let TextureLayout::Pitch { bytes_per_row } = desc.layout {
+                    let row = desc.format.layout(m.width, m.height, 1)?.row_bytes as usize;
+                    let mut linear = Vec::with_capacity(row * m.height as usize);
+                    for y in 0..m.height as usize {
+                        let start = y * bytes_per_row as usize;
+                        linear.extend_from_slice(&data[start..start + row]);
+                    }
+                    self.counters.texture_conversions += 1;
+                    self.counters.texture_format_conversion_bytes += linear.len() as u64;
+                    self.counters.temporary_allocations += 1;
+                    Cow::Owned(linear)
                 } else {
                     data
                 };
@@ -261,11 +293,17 @@ impl Renderer {
                 Filter::Linear => wgpu::FilterMode::Linear,
             };
             let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
-                label: Some("guest clamp sampler"),
+                label: Some("guest normalized sampler"),
                 mag_filter: filter,
                 min_filter: filter,
-                address_mode_u: wgpu::AddressMode::ClampToEdge,
-                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_u: match desc.wrap[0] {
+                    Wrap::Clamp => wgpu::AddressMode::ClampToEdge,
+                    Wrap::Repeat => wgpu::AddressMode::Repeat,
+                },
+                address_mode_v: match desc.wrap[1] {
+                    Wrap::Clamp => wgpu::AddressMode::ClampToEdge,
+                    Wrap::Repeat => wgpu::AddressMode::Repeat,
+                },
                 ..Default::default()
             });
             let bindings = (0..desc.mip_count)
@@ -309,7 +347,7 @@ impl Renderer {
         let resident = self.textures.get_mut(&id).expect("texture allocated");
         for (mip, data) in uploads {
             let level = resident.levels[mip as usize];
-            let layout = if fallback {
+            let layout = if fallback || expanded {
                 Format::Rgba8Unorm
             } else {
                 desc.format

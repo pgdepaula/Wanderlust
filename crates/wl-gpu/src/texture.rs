@@ -8,6 +8,10 @@ pub struct TextureId(pub u64);
 pub enum TextureLayout {
     /// Tightly packed rows and successive mips, without a pitch field.
     Linear,
+    /// One uncompressed mip with an explicit guest byte stride.
+    Pitch {
+        bytes_per_row: u32,
+    },
     BlockLinear {
         block_height_log2: u8,
     },
@@ -17,6 +21,19 @@ pub enum Filter {
     Nearest,
     Linear,
 }
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum TextureChannels {
+    #[default]
+    Rgba,
+    /// TIC source selectors (ONE_FLOAT, ONE_FLOAT, ONE_FLOAT, R).
+    RedAsAlpha,
+}
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Wrap {
+    #[default]
+    Clamp,
+    Repeat,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextureDesc {
     pub address: GpuAddress,
@@ -25,8 +42,10 @@ pub struct TextureDesc {
     pub mip_count: u32,
     pub format: Format,
     pub layout: TextureLayout,
-    /// Clamp-to-edge in both axes; mip selection is explicit in the draw command.
+    /// Spatial filtering; mip selection is explicit in the draw command.
     pub filter: Filter,
+    pub channels: TextureChannels,
+    pub wrap: [Wrap; 2],
 }
 #[derive(Debug, Clone, Copy)]
 pub struct MipLayout {
@@ -38,7 +57,7 @@ pub struct MipLayout {
 }
 impl TextureDesc {
     /// One layer, depth one. Matches tegra_swizzle's sequential mip packing.
-    /// Layer alignment/3D and pitch-linear hardware descriptors are not represented.
+    /// Layer alignment and 3D descriptors are not represented.
     pub fn levels(&self) -> Result<Vec<MipLayout>> {
         let mut levels = Vec::with_capacity(self.mip_count.min(32) as usize);
         self.visit_levels(|level| levels.push(level))?;
@@ -55,12 +74,26 @@ impl TextureDesc {
         {
             return Err(invalid("invalid 2D texture dimensions or mip count"));
         }
+        if self.channels == TextureChannels::RedAsAlpha && self.format != Format::R8Unorm {
+            return Err(invalid("red-as-alpha requires R8 UNORM storage"));
+        }
+        if let TextureLayout::Pitch { bytes_per_row } = self.layout {
+            let row = self.format.layout(self.width, self.height, 1)?.row_bytes;
+            if self.mip_count != 1
+                || self.format.block().0 != 1
+                || bytes_per_row < row
+                || bytes_per_row == 0
+                || bytes_per_row % 32 != 0
+            {
+                return Err(invalid("invalid pitched 2D texture extent/stride"));
+            }
+        }
         let mut offset = 0_usize;
         for mip in 0..self.mip_count {
             let width = (self.width >> mip).max(1);
             let height = (self.height >> mip).max(1);
             let tiled = match self.layout {
-                TextureLayout::Linear => None,
+                TextureLayout::Linear | TextureLayout::Pitch { .. } => None,
                 TextureLayout::BlockLinear { block_height_log2 } => {
                     if block_height_log2 > 5 {
                         return Err(invalid("invalid block height"));
@@ -74,6 +107,9 @@ impl TextureDesc {
             };
             let source_size = if let Some(tiled) = tiled {
                 tiled.tiled_size
+            } else if let TextureLayout::Pitch { bytes_per_row } = self.layout {
+                usize::try_from(u64::from(bytes_per_row) * u64::from(height))
+                    .map_err(|_| invalid("pitched texture size overflow"))?
             } else {
                 usize::try_from(self.format.layout(width, height, 1)?.size)
                     .map_err(|_| invalid("texture host size overflow"))?

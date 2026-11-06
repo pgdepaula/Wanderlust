@@ -84,7 +84,7 @@ fn literal_modern_tic_tsc_fields_and_rejections() {
     }
     for (word, value) in [
         (0, 0x58d2497f),
-        (2, 0x00400000),
+        (2, 0x00200000), // Color-key pitch remains unsupported.
         (3, 0x38),
         (4, 0x01000024),
         (5, 0x12),

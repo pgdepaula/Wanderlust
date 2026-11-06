@@ -77,6 +77,7 @@ pub struct Counters {
     pub upload_calls: u64,
     pub buffer_reuploads: u64,
     pub texture_conversions: u64,
+    pub texture_format_conversion_bytes: u64,
     pub cache_hits: u64,
     pub cache_misses: u64,
     pub submissions: u64,

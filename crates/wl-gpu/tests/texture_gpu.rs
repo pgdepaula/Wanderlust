@@ -196,6 +196,8 @@ fn guest_tegra_mips_alias_updates_and_sampler_execute() {
         format: Format::Rgba8Unorm,
         layout: TextureLayout::Linear,
         filter: Filter::Linear,
+        channels: TextureChannels::Rgba,
+        wrap: [Wrap::Clamp; 2],
     };
     map.map(bilinear.address, GuestAddress(0x90000), 16)
         .unwrap();

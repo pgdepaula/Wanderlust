@@ -2198,16 +2198,18 @@ pub struct TextureImage {
     pub mip_count: u32,
     pub format: Format,
     pub layout: TextureLayout,
+    pub channels: TextureChannels,
 }
 impl TextureImage {
     pub fn decode(words: [u32; 8]) -> Result<Self> {
+        let pitched = words[2] >> 21 & 7 == 2;
         // These masks select implemented fields, not merely reserved bits. Fields
         // such as depth, sparse modes and multisampling are rejected explicitly.
         let masks = [
             u32::MAX,
-            0xfffffe00,
+            if pitched { 0xffffffe0 } else { 0xfffffe00 },
             0x00e0ffff,
-            0xf0070038,
+            if pitched { 0xf007ffff } else { 0xf0070038 },
             0xffc0ffff,
             0x8000ffff,
             0x07800000,
@@ -2222,7 +2224,14 @@ impl TextureImage {
             }
         }
         let packed_float = words[0] & 0x7f == 0x21;
-        let expected_channels = if packed_float { 0x78d7ff80 } else { 0x58d24900 };
+        let red_alpha = words[0] & 0x7f == 0x1d;
+        let expected_channels = if packed_float {
+            0x78d7ff80
+        } else if red_alpha {
+            0x2ffa4900
+        } else {
+            0x58d24900
+        };
         if words[0] & !0x7f != expected_channels {
             return Err(invalid("unsupported TIC channel types or swizzle"));
         }
@@ -2236,11 +2245,13 @@ impl TextureImage {
         if words[3] >> 28 != 0 && (words[3] & 0x70000 != 0 || words[6] != 0) {
             return Err(invalid("TIC quality hints with multiple mips unsupported"));
         }
-        if words[2] >> 21 & 7 != 3 || words[4] >> 23 & 15 != 1 || words[5] >> 31 != 1 {
-            return Err(invalid("requires normalized block-linear 2D TIC"));
+        let kind = words[4] >> 23 & 15;
+        if (!pitched && words[2] >> 21 & 7 != 3) || !matches!(kind, 1 | 7) || words[5] >> 31 != 1 {
+            return Err(invalid("requires normalized pitch/block-linear 2D TIC"));
         }
         let srgb = words[4] & (1 << 22) != 0;
         let format = match (words[0] & 0x7f, srgb) {
+            (0x1d, false) => Format::R8Unorm,
             (0x21, false) => Format::Rg11b10Float,
             (0x08, false) => Format::Rgba8Unorm,
             (0x08, true) => Format::Rgba8Srgb,
@@ -2251,6 +2262,17 @@ impl TextureImage {
             _ => return Err(invalid("unsupported TIC format")),
         };
         let max_mip = words[3] >> 28;
+        if (pitched || kind == 7) && max_mip != 0 {
+            return Err(invalid("pitch/no-mipmap TIC requires one level"));
+        }
+        if pitched
+            && !matches!(
+                format,
+                Format::R8Unorm | Format::Rgba8Unorm | Format::Rgba8Srgb
+            )
+        {
+            return Err(invalid("pitched TIC source format unsupported"));
+        }
         if words[7] & 15 != 0 || words[7] >> 4 & 15 != max_mip {
             return Err(invalid("TIC mip subviews unsupported"));
         }
@@ -2260,13 +2282,25 @@ impl TextureImage {
             height: (words[5] & 0xffff) + 1,
             mip_count: max_mip + 1,
             format,
-            layout: TextureLayout::BlockLinear {
-                block_height_log2: ((words[3] >> 3) & 7) as u8,
+            layout: if pitched {
+                TextureLayout::Pitch {
+                    bytes_per_row: (words[3] & 0xffff) << 5,
+                }
+            } else {
+                TextureLayout::BlockLinear {
+                    block_height_log2: ((words[3] >> 3) & 7) as u8,
+                }
+            },
+            channels: if red_alpha {
+                TextureChannels::RedAsAlpha
+            } else {
+                TextureChannels::Rgba
             },
         };
         image
             .with_sampler(TextureSampler {
                 filter: Filter::Nearest,
+                wrap: [Wrap::Clamp; 2],
             })
             .validate()?;
         Ok(image)
@@ -2280,18 +2314,24 @@ impl TextureImage {
             format: self.format,
             layout: self.layout,
             filter: sampler.filter,
+            channels: self.channels,
+            wrap: sampler.wrap,
         }
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextureSampler {
     pub filter: Filter,
+    pub wrap: [Wrap; 2],
 }
 impl TextureSampler {
-    /// One normalized 2D mip, clamp-to-edge, non-comparison and anisotropy one.
+    /// One normalized 2D mip, clamp/repeat, non-comparison and anisotropy one.
     /// Font-filter sizes/cube seams/border colors cannot affect this subset.
     fn decode_single_mip(words: [u32; 8]) -> Result<Self> {
-        if words[0] & !0x000fe000 != 0x92
+        let axes = [words[0] & 7, words[0] >> 3 & 7];
+        if words[0] & !(0x000fe000 | 0x1ff) != 0
+            || axes.iter().any(|v| !matches!(v, 0 | 2))
+            || words[0] >> 6 & 7 != 2
             || (words[0] >> 14) & 7 > 1
             || (words[0] >> 17) & 7 > 1
             || words[1] & !0x3f7 != 0
@@ -2313,7 +2353,10 @@ impl TextureSampler {
             2 => Filter::Linear,
             _ => return Err(invalid("unsupported single-mip TSC spatial filter")),
         };
-        Ok(Self { filter })
+        Ok(Self {
+            filter,
+            wrap: axes.map(|v| if v == 0 { Wrap::Repeat } else { Wrap::Clamp }),
+        })
     }
 
     pub fn decode(words: [u32; 8]) -> Result<Self> {
@@ -2336,7 +2379,10 @@ impl TextureSampler {
             2 => Filter::Linear,
             _ => return Err(invalid("unsupported TSC filter")),
         };
-        Ok(Self { filter })
+        Ok(Self {
+            filter,
+            wrap: [Wrap::Clamp; 2],
+        })
     }
 }
 

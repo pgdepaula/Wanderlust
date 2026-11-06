@@ -23,6 +23,8 @@ pub fn desc(width: u32, height: u32, mip_count: u32) -> TextureDesc {
             block_height_log2: 1,
         },
         filter: Filter::Nearest,
+        channels: TextureChannels::Rgba,
+        wrap: [Wrap::Clamp; 2],
     }
 }
 pub fn rgba_mip(width: u32, height: u32, mip: u32) -> Vec<u8> {
